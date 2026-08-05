@@ -153,12 +153,18 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
           blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 的历史生命周期无法判定（indeterminate），已阻止模板提交。请先在数据管理中检查并恢复 V2 历史。`);
           continue;
         }
-        if (lifecycleEntry.status === 'active') {
-          // 派生 key 在历史中仍活跃但当前协调基线不含该表：异常状态，绝不覆盖活数据。
-          blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 在历史生命周期中仍为 active，但当前聊天基线不含该表，无法协调。请重新读取当前表格后重试。`);
-          continue;
-        }
-        // never_seen：历史上从未见过，正常 introduction。
+        // status === 'active' 但基线不含该表：这里刻意不 fail-closed。
+        //
+        // 「是否仍活跃」的权威来源只有 replay 后的 active state，不是 lifecycle 派生结论；
+        // lifecycle 是历史 timeline 归并，遇到无 full-checkpoint 基底（replacement_anchor /
+        // temporary baseline）等场景仍可能与同一时点的基线不一致。在协调层按这个非权威结论
+        // 拒绝，会把「模板重新包含一张历史痕迹表」变成用户无法自救的死局：重新读取表格不会
+        // 改变任何历史事实，错误必然复现。
+        //
+        // 因此这里按 introduction 继续，真正的覆盖风险由提交层用权威事实判定：
+        // storage-frame-v2-persist.ts 的 activeHas → active_introduction_conflict（活数据保护），
+        // introductionHistoryEvidence_ACU → reveal / indeterminate（历史存在则唤醒而非覆盖）。
+        // never_seen 同样落到 introduction。
       }
       const occupiedByIntroducedKey = candidateData[introducedKey] as Sheet_ACU | undefined;
       if (occupiedByIntroducedKey) {

@@ -7156,6 +7156,15 @@ $CONTENT
                 changed = true;
             if (purgeManualRefillProgressV2_ACU(checkpoint.manualRefillProgress, sheetKeys))
                 changed = true;
+            // Task 5：checkpoint.data 已无任何 sheet_ 键时，该 checkpoint 失去全部表内容，
+            // 保留只会让 replay 以空根继续（并诱发“写目标早于回放根”类伪拓扑）。直接移除，
+            // 让 frame 退回“无锚点 + logEntries”形态，由后续写入按初始 checkpoint 重建。
+            // 例外：checkpoint 仍携带 manualRefillProgress 时保留——那是进度的合法载体，
+            // 删除会丢失重填进度（既有测试「从 V2 manualRefillProgress 中移除目标 sheet」依赖此行为）。
+            if (!hasSheetKeyInRecord_ACU(checkpoint.data) && checkpoint.manualRefillProgress === undefined) {
+                delete frame.checkpoint;
+                changed = true;
+            }
         }
         if (purgeEventSheetKeysV2_ACU(frame.event, sheetKeys))
             changed = true;
@@ -7219,6 +7228,12 @@ $CONTENT
             frame.logEntries = nextEntries;
             if (changed)
                 normalizeManualRefillFrameHeadRevisionV2_ACU(frame, previousHeadRevision, previousEntryRevisions);
+            // Task 5：logEntries 清空后 headRevision 失去语义（它指向日志头），必须一并清掉，
+            // 否则空 frame 仍带 headRevision 会被 hasUnanchoredReplayArtifacts 类判定误认为 artifact。
+            if (frame.logEntries.length === 0 && frame.headRevision !== undefined && frame.headRevision !== null) {
+                frame.headRevision = null;
+                changed = true;
+            }
         }
         return changed;
     }
@@ -38843,15 +38858,38 @@ $CONTENT
             .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
         const statusBySheetKey = {};
         let sawIndeterminateFrame = false;
-        for (const ref of frameRefs) {
+        // 起算点必须与 replay 对齐：回放以最后一个 full checkpoint 为基底，更早帧的
+        // per-sheet checkpoint 一律不再应用。若这里仍从全历史累积 active，早已被后续 full
+        // 快照淘汰的表会永久停留在 active，与同一时点的 replay 基线互相矛盾，使模板协调层
+        // 拿到「lifecycle=active 但基线不含该表」的不可自救状态。
+        const baseFrameIndex = findLastFullCheckpointFrameIndex_ACU(frameRefs);
+        if (baseFrameIndex > 0) {
+            // full 快照对 active 集合权威，对 hidden 集合不权威：hide 的数据按设计只存在于
+            // hide checkpoint，不进 full checkpoint.data。基底之前因此只回收 hide 证据
+            // （含 restoreSourceData，compaction 迁移隐藏表依赖它），其余历史痕迹一律丢弃。
+            collectHiddenLifecycleEntriesBeforeBase_ACU(frameRefs, baseFrameIndex, statusBySheetKey);
+        }
+        for (let frameIndex = Math.max(0, baseFrameIndex); frameIndex < frameRefs.length; frameIndex += 1) {
+            const ref = frameRefs[frameIndex];
             const frame = ref.frame;
             if (!frame || typeof frame !== 'object' || Array.isArray(frame)) {
                 sawIndeterminateFrame = true;
                 continue;
             }
-            // 全量 checkpoint：包含该 sheetKey 即视为当前可见（除非被后续 hide 覆盖）。
-            const checkpointData = frame.checkpoint?.data;
+            // 全量 checkpoint = 该时点完整数据库快照：它列出的表为 active；它未列出的 active 表
+            // 已被该快照淘汰，必须撤销结论（hidden 保留可恢复数据，indeterminate 保留 fail-closed）。
+            const frameCheckpoint = frame.checkpoint;
+            const checkpointData = frameCheckpoint?.data;
             if (checkpointData && typeof checkpointData === 'object' && !Array.isArray(checkpointData)) {
+                if (frameCheckpoint.kind === 'full') {
+                    for (const [sheetKey, entry] of Object.entries(statusBySheetKey)) {
+                        if (entry.status !== 'active')
+                            continue;
+                        if (Object.prototype.hasOwnProperty.call(checkpointData, sheetKey))
+                            continue;
+                        delete statusBySheetKey[sheetKey];
+                    }
+                }
                 for (const sheetKey of Object.keys(checkpointData)) {
                     if (!sheetKey.startsWith('sheet_'))
                         continue;
@@ -38942,6 +38980,74 @@ $CONTENT
         neverSeenSheetKeys.sort();
         return { statusBySheetKey, activeSheetKeys, hiddenSheetKeys, indeterminateSheetKeys, neverSeenSheetKeys };
     }
+    /** replay 的回放基底：最后一个 full checkpoint 所在帧在 frameRefs 中的下标（无则 -1）。 */
+    function findLastFullCheckpointFrameIndex_ACU(frameRefs) {
+        for (let index = frameRefs.length - 1; index >= 0; index -= 1) {
+            if (frameRefs[index].frame?.checkpoint?.kind === 'full')
+                return index;
+        }
+        return -1;
+    }
+    /**
+     * 只回收回放基底之前的 hide 证据。hide 的表按设计不出现在 full checkpoint.data 中，
+     * 其数据唯一存放处就是 hide checkpoint；compaction 迁移隐藏表（chat-service）与
+     * reveal 恢复都依赖这份 restoreSourceData，所以它不能随基底之前的历史一起被丢弃。
+     * 其余 timeline（introduction / rebase / reveal）的可见性结论已被基底 full 快照取代。
+     */
+    function collectHiddenLifecycleEntriesBeforeBase_ACU(frameRefs, baseFrameIndex, statusBySheetKey) {
+        for (let index = 0; index < baseFrameIndex; index += 1) {
+            const ref = frameRefs[index];
+            const frame = ref.frame;
+            if (!frame || typeof frame !== 'object' || Array.isArray(frame))
+                continue;
+            let validatedCheckpoints;
+            try {
+                validatedCheckpoints = getValidatedSheetCheckpoints_ACU(frame, ref.messageIndex);
+            }
+            catch {
+                // 基底之前的帧在 replay 中本就不参与回放；结构不可判定时不产出 hide 证据，
+                // 由 compaction / reveal 各自的 fail-closed 路径继续兜底。
+                continue;
+            }
+            for (const checkpoint of getValidatedTimelineCheckpointsForFrame_ACU(validatedCheckpoints)) {
+                const { sheetKey } = checkpoint;
+                if (!sheetKey.startsWith('sheet_'))
+                    continue;
+                const timeline = checkpoint.timeline;
+                if (timeline.kind !== 'sheet_hide') {
+                    delete statusBySheetKey[sheetKey];
+                    continue;
+                }
+                if (timeline.afterSeq === undefined || !Number.isInteger(timeline.afterSeq) || timeline.afterSeq < 0)
+                    continue;
+                const entry = {
+                    status: 'hidden',
+                    lastTimelineKind: 'sheet_hide',
+                    lastTimelineMessageIndex: ref.messageIndex,
+                    lastTimelineAfterSeq: timeline.afterSeq,
+                };
+                if (checkpoint.data && typeof checkpoint.data === 'object' && !Array.isArray(checkpoint.data)) {
+                    entry.restoreSourceData = deepClone_ACU$4(checkpoint.data);
+                }
+                statusBySheetKey[sheetKey] = entry;
+            }
+        }
+    }
+    /**
+     * 判定 frameRefs 中是否存在「无锚点 replay artifacts」——服务于「回放能否开始」。
+     *
+     * **语义差异警告**：本函数与 persist 层的 `frameHasSuffixReplayArtifact_ACU`
+     * （storage-frame-v2-persist.ts，chat-service 追平 preflight 也复用它）判定标准
+     * **刻意不同**，不要把两者「统一」：
+     *
+     * - 本函数问的是「这些帧里有没有任何需要回放的证据」。此处把 intrinsic 证据
+     *   （随根写入、无 timeline 的 per-sheet checkpoint；headRevision）也算作
+     *   artifact 是**正确**的：调用方在没有 full checkpoint 时据此决定是否允许用
+     *   模板临时基线回放，漏判会让本该恢复的历史被直接丢弃。
+     * - `frameHasSuffixReplayArtifact_ACU` 问的是「这个 frame 有没有不属于它自身
+     *   checkpoint 的后续增量」，用于判断某个 root 能否安全降级/前移，因此必须排除
+     *   intrinsic，否则正常的 header-only root 会被误判为携带后缀 artifact。
+     */
     function hasUnanchoredReplayArtifacts_ACU(frameRefs) {
         return frameRefs.some(({ frame }) => {
             const persistedFrame = frame;
@@ -41764,6 +41870,48 @@ $CONTENT
         const tagData = readIsolatedTagData_ACU(chat[index], isolationKey);
         return { message: chat[index], index, checkpoint: tagData.storageFrame.checkpoint };
     }
+    /**
+     * 统一「bounded 与 unbounded」两种视角的写目标回放根准入检查。
+     *
+     * 背景：persist 层在 `persistTableMutationLogV2Core_ACU`（1908）与 sheet checkpoint
+     * 路径（2702）对「写目标早于最新 full checkpoint」fail-fast，但该检查发生在 AI 调用
+     * 之后——AI 已消耗 token 才在写入阶段暴露。本函数把同一判定前移到编排层：任何写目标
+     * 早于回放根（最新 full checkpoint）的 bucket，在发起 AI 请求前就必须被阻止。
+     *
+     * 视角说明：
+     * - bounded（目标楼层及之前是否存在 anchor）：`hasAnyV2Checkpoint_ACU(chat, key, maxMessageIndex)`
+     *   只能回答「有没有」，无法区分「目标自身就是根」与「目标早于根」——对目标=根放行、
+     *   对目标<根阻止，必须看 unbounded 的 `findLatestFullCheckpoint_ACU` 才能区分。
+     * - unbounded：`findLatestFullCheckpoint_ACU` 给出全局最新 full checkpoint 楼层。
+     *
+     * 例外：provisional bridge run（manual catch-up 追平场景，写目标可合法早于原 full 根，
+     * 见 persist 层 2293-2295 的 bridge 写入准入）——`manualCatchUpRunId` 匹配 active bridge
+     * 时放行，避免把 bridge 的合法前移写误判为拓扑越界。
+     *
+     * @returns 可放行时返回 `{ allow: true }`；否则返回 `{ allow: false, reason, targetMessageIndex, latestFullCheckpointIndex }`
+     */
+    function assertWriteTargetNotBeforeReplayRoot_ACU(options) {
+        const { chat, isolationKey, targetMessageIndex, manualCatchUpRunId } = options;
+        if (!Array.isArray(chat) || chat.length === 0)
+            return { allow: true };
+        if (!Number.isInteger(targetMessageIndex) || targetMessageIndex < 0)
+            return { allow: true };
+        const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
+        if (!latestFullCheckpoint)
+            return { allow: true };
+        if (targetMessageIndex >= latestFullCheckpoint.index)
+            return { allow: true };
+        // provisional bridge 例外：active bridge 且 runId 匹配 → 放行
+        if (manualCatchUpRunId && readActiveProvisionalBridge_ACU(chat, isolationKey)?.runId === manualCatchUpRunId) {
+            return { allow: true };
+        }
+        return {
+            allow: false,
+            reason: `写目标早于 V2 回放根且无有效 provisional bridge：targetMessageIndex=${targetMessageIndex}, latestFullCheckpointIndex=${latestFullCheckpoint.index}。`,
+            targetMessageIndex,
+            latestFullCheckpointIndex: latestFullCheckpoint.index,
+        };
+    }
     function getLogEntriesAfterLatestCheckpoint_ACU(chat, isolationKey) {
         const latestCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
         const latestCheckpointIndex = latestCheckpoint?.index ?? -1;
@@ -41898,6 +42046,138 @@ $CONTENT
     function isObjectRecord_ACU$2(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
+    /**
+     * 判定单个 Sheet 是否为 header-only（最多表头行，不含数据行）。
+     * 与 chat-service 的 isSafeHeaderOnlyResetCheckpoint_ACU 等价判定保持一致，
+     * 但这里以 isObjectRecord_ACU 先做结构保护，避免畸形结构被误判为 header-only。
+     */
+    function sheetIsHeaderOnly_ACU(sheet) {
+        if (!isObjectRecord_ACU$2(sheet))
+            return false;
+        const content = sheet.content;
+        if (!Array.isArray(content))
+            return false;
+        return content.length <= 1;
+    }
+    /**
+     * 判定 frame 是否携带「真实后缀 replay artifact」。
+     *
+     * 「真实后缀」= 不属于该 frame 自身 checkpoint 的 replay 证据：
+     * - per-sheet checkpoint 带 timeline → 后续补挂的收敛锚点/rebase
+     * - per-sheet checkpoint / headRevision 但该 frame 无自有 full checkpoint → 悬空 artifact
+     * - intrinsic（随自有 full checkpoint 一起写入、无 timeline 的 per-sheet；
+     *   自有 full checkpoint 下的 headRevision）→ 不算
+     *
+     * 本函数是 persist 层 template_only_root 判定（条件 6/7）与 chat-service 追平
+     * preflight（hasV2ReplayArtifact_ACU）的**唯一**判定来源。两层各自实现会漂移出
+     * 「persist 认为可降级、preflight 认为 blocked」的夹缝，故此处导出共用。
+     */
+    function frameHasSuffixReplayArtifact_ACU(frame) {
+        if ((frame.logEntries || []).length > 0)
+            return true;
+        if (frame.manualRefillProgress !== undefined)
+            return true;
+        const hasOwnFullCheckpoint = frame.checkpoint?.kind === 'full';
+        for (const checkpoint of Object.values(frame.perSheetCheckpoints || {})) {
+            if (!hasOwnFullCheckpoint)
+                return true; // 无根却有单表锚点 = 悬空 artifact
+            if (checkpoint?.timeline !== undefined)
+                return true; // 补挂 = 真实后缀
+        }
+        const hr = frame.headRevision;
+        const hasHeadRevision = hr !== undefined && hr !== null && (typeof hr !== 'string' || hr.length > 0);
+        if (hasHeadRevision && !hasOwnFullCheckpoint)
+            return true;
+        return false;
+    }
+    /**
+     * template_only_root 七项判定：
+     * 1. 全聊天该 isolationKey 下 full checkpoint 数量恰为 1
+     * 2. checkpoint.reason ∈ {'init', 'migration'}
+     * 3. validateCanonicalCheckpoint_ACU(checkpoint).valid === true
+     * 4. header-only：checkpoint.data 中每个 sheet_* 的 content.length <= 1
+     * 5. 该 frame logEntries.length === 0
+     * 6. 该 frame 的所有 perSheetCheckpoints 均为 intrinsic（无 timeline 且 data.content.length <= 1）
+     * 7. 该 checkpoint 之后不存在任何携带真实后缀 artifact 的 frame
+     */
+    function classifyAsTemplateOnlyRoot_ACU(chat, isolationKey, checkpoint, frame) {
+        const details = [];
+        // 条件 1：唯一 full checkpoint
+        const fullIndices = collectV2FullCheckpointIndices_ACU(chat, isolationKey);
+        if (fullIndices.length !== 1) {
+            details.push(`full_checkpoint_count=${fullIndices.length}`);
+            return null;
+        }
+        if (fullIndices[0] !== checkpoint.index) {
+            details.push(`latest_full_checkpoint_index=${fullIndices[0]} !== ${checkpoint.index}`);
+            return null;
+        }
+        // 条件 2：reason ∈ {init, migration}
+        if (!['init', 'migration'].includes(checkpoint.checkpoint.reason)) {
+            details.push(`reason=${checkpoint.checkpoint.reason}`);
+            return null;
+        }
+        // 条件 3：canonical 校验
+        if (!validateCanonicalCheckpoint_ACU(checkpoint.checkpoint).valid) {
+            details.push('canonical_invalid');
+            return null;
+        }
+        // 条件 4：checkpoint.data header-only
+        const data = checkpoint.checkpoint.data;
+        if (!isObjectRecord_ACU$2(data)) {
+            details.push('checkpoint_data_not_object');
+            return null;
+        }
+        const sheetKeys = Object.keys(data).filter(key => key.startsWith('sheet_'));
+        if (sheetKeys.length === 0) {
+            details.push('no_sheet_keys');
+            return null;
+        }
+        if (sheetKeys.some(key => !sheetIsHeaderOnly_ACU(data[key]))) {
+            details.push('checkpoint_has_data_rows');
+            return null;
+        }
+        // 条件 5：logEntries 为空
+        if (!Array.isArray(frame.logEntries) || frame.logEntries.length > 0) {
+            details.push('log_entries_non_empty');
+            return null;
+        }
+        // 条件 6：perSheetCheckpoints 全部 intrinsic
+        const perSheet = frame.perSheetCheckpoints || {};
+        if (!isObjectRecord_ACU$2(perSheet)) {
+            details.push('per_sheet_checkpoints_malformed');
+            return null;
+        }
+        for (const sheetKey of Object.keys(perSheet)) {
+            const sheetCheckpoint = perSheet[sheetKey];
+            if (!isObjectRecord_ACU$2(sheetCheckpoint)) {
+                details.push(`per_sheet_${sheetKey}_malformed`);
+                return null;
+            }
+            if (sheetCheckpoint.timeline !== undefined) {
+                details.push(`per_sheet_${sheetKey}_has_timeline`);
+                return null;
+            }
+            if (!sheetIsHeaderOnly_ACU(sheetCheckpoint.data)) {
+                details.push(`per_sheet_${sheetKey}_has_data_rows`);
+                return null;
+            }
+        }
+        // 条件 7：该 checkpoint 之后不存在任何携带真实后缀 artifact 的 frame
+        for (let index = checkpoint.index + 1; index < chat.length; index += 1) {
+            const message = chat[index];
+            if (!message || message.is_user)
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (!isV2TagData_ACU(tagData))
+                continue;
+            if (frameHasSuffixReplayArtifact_ACU(tagData.storageFrame)) {
+                details.push(`suffix_artifact_after_root=${index}`);
+                return null;
+            }
+        }
+        return { kind: 'template_only_root', checkpoint, details };
+    }
     function classifyTemplateCommitStorageState_ACU(chat, isolationKey) {
         const legacyDetails = [];
         const v2FrameWithoutCheckpointDetails = [];
@@ -41931,8 +42211,18 @@ $CONTENT
         }
         if (legacyDetails.length > 0)
             return { kind: 'legacy_persisted_data', details: legacyDetails };
-        if (latestCheckpoint)
+        if (latestCheckpoint) {
+            // 只保留“最新”的 full checkpoint 作为候选：若存在多个，classifyAsTemplateOnlyRoot_ACU
+            // 会在条件 1（唯一性）拒绝，从而维持 existing_full_checkpoint 语义。
+            const isolatedContainer = readIsolatedDataContainer_ACU(latestCheckpoint.message);
+            const frame = isolatedContainer?.[isolationKey]?.storageFrame;
+            if (isObjectRecord_ACU$2(frame)) {
+                const templateOnlyRoot = classifyAsTemplateOnlyRoot_ACU(chat, isolationKey, latestCheckpoint, frame);
+                if (templateOnlyRoot)
+                    return templateOnlyRoot;
+            }
             return { kind: 'existing_full_checkpoint', checkpoint: latestCheckpoint };
+        }
         if (v2FrameWithoutCheckpointDetails.length > 0) {
             return { kind: 'orphan_v2_artifacts', details: [...v2FrameWithoutCheckpointDetails, ...orphanDetails] };
         }
@@ -41949,6 +42239,157 @@ $CONTENT
                 purgeSheetKeysFromMessage_ACU(message, deletedSheetKeys);
         }
         return classifyTemplateCommitStorageState_ACU(simulatedChat, isolationKey);
+    }
+    /**
+     * 将「template_only_root」降级为 scope-only 状态。
+     *
+     * 背景：旧版 V2 可视化编辑器在 pristine 会话中无条件写 full checkpoint（header-only），
+     * 在聊天末尾立起回放根，导致后续追平撞上「write target precedes the latest full checkpoint」
+     * fail-fast（F2）。Task 1 只防新增，本函数修复既存：把这种可证明安全的 header-only init/migration
+     * 根从聊天中移除，恢复为无 checkpoint 的 scope-only 拓扑。
+     *
+     * 安全性保障：
+     * - 仅当 classifyTemplateCommitStorageState_ACU 判定为 template_only_root（7 项条件全满足）才执行
+     * - 降级前后做 replay 指纹比对（fail-closed）：降级后每张表的 content 必须与原 checkpoint header-only
+     *   content 等价，不等价则拒绝、零写入
+     * - 原 frame 完整备份到 recoveryBackup（recoveryKind: 'demoted_template_only_root'）
+     * - saveChatToHostStrict_ACU 失败则完整还原内存并返回失败
+     */
+    async function demoteTemplateOnlyRootToScopeOnly_ACU(options = {}) {
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        try {
+            return await runTableWriteTransaction_ACU({
+                source: 'system_cleanup',
+                reason: 'demoteTemplateOnlyRootToScopeOnly',
+                isolationKey,
+                writeSet: [{ kind: 'all' }],
+                maintenanceMode: 'exclusive',
+            }, async () => {
+                const chat = getChatArray_ACU();
+                if (!Array.isArray(chat) || chat.length === 0) {
+                    return { ok: false, reason: '聊天记录为空，无法执行 template_only_root 降级。' };
+                }
+                const storageState = classifyTemplateCommitStorageState_ACU(chat, isolationKey);
+                if (storageState.kind !== 'template_only_root') {
+                    return {
+                        ok: false,
+                        reason: storageState.kind === 'existing_full_checkpoint'
+                            ? '检测到含真实数据或后缀 artifact 的 full checkpoint，拒绝降级，零写入。'
+                            : `当前状态不是 template_only_root（实际：${storageState.kind}），拒绝降级，零写入。`,
+                    };
+                }
+                const { message: rootMessage, index: rootIndex, checkpoint: rootCheckpoint } = storageState.checkpoint;
+                const isolatedContainer = readIsolatedDataContainer_ACU(rootMessage) || {};
+                const tagData = isolatedContainer[isolationKey];
+                if (!isV2TagData_ACU(tagData) || !isObjectRecord_ACU$2(tagData.storageFrame)) {
+                    return { ok: false, reason: 'template_only_root 帧结构异常，拒绝降级，零写入。' };
+                }
+                const sourceFrame = tagData.storageFrame;
+                const backupFrame = deepClone_ACU$1(sourceFrame);
+                // 构造候选聊天：移除该 frame 的 checkpoint / perSheetCheckpoints / headRevision。
+                const candidateChat = deepClone_ACU$1(chat);
+                const candidateContainer = readIsolatedDataContainer_ACU(candidateChat[rootIndex]) || {};
+                // 写 recoveryBackup 必须放在「整条移除」判空之前：正常路径 frame 降级为
+                // {version:2, logEntries:[]} 标准空帧（tagData 保留，backup 随 tagData 落盘）；
+                // 仅畸形空壳（连 logEntries 都没有）才在下方整条移除 tagData，此时 backup 无处
+                // 安放，fail-closed 拒绝降级。先写 backup 消除对判空顺序的依赖。
+                const backupTagData = candidateContainer[isolationKey];
+                if (!backupTagData || typeof backupTagData !== 'object' || !isObjectRecord_ACU$2(backupTagData.storageFrame)) {
+                    return { ok: false, reason: 'template_only_root 降级候选 tagData 缺失，拒绝写入，零写入。' };
+                }
+                backupTagData.recoveryBackup = {
+                    version: 1,
+                    createdAt: Date.now(),
+                    recoveryKind: 'demoted_template_only_root',
+                    sourceMessageIndex: rootIndex,
+                    storageFrame: backupFrame,
+                };
+                const candidateTagData = candidateContainer[isolationKey];
+                if (!isV2TagData_ACU(candidateTagData) || !isObjectRecord_ACU$2(candidateTagData.storageFrame)) {
+                    return { ok: false, reason: 'template_only_root 候选帧结构异常，拒绝降级，零写入。' };
+                }
+                const candidateFrame = candidateTagData.storageFrame;
+                delete candidateFrame.checkpoint;
+                delete candidateFrame.perSheetCheckpoints;
+                delete candidateFrame.headRevision;
+                const candidateRemainingKeys = Object.keys(candidateFrame);
+                const candidateIsEmptyFrame = candidateRemainingKeys.length === 0
+                    || (candidateRemainingKeys.length === 1 && candidateRemainingKeys[0] === 'version');
+                if (candidateIsEmptyFrame) {
+                    delete candidateContainer[isolationKey];
+                    if (Object.keys(candidateContainer).length === 0)
+                        delete candidateChat[rootIndex].TavernDB_ACU_IsolatedData;
+                    else
+                        candidateChat[rootIndex].TavernDB_ACU_IsolatedData = candidateContainer;
+                }
+                else {
+                    candidateChat[rootIndex].TavernDB_ACU_IsolatedData = candidateContainer;
+                }
+                // 降级后候选回放结果。
+                // 正常降级形态的候选帧是干净空帧（{version:2, logEntries:[]}）：
+                // hasUnanchoredReplayArtifacts_ACU 判定为 false，replay 引擎在
+                // storage-frame-v2-replay.ts 直接返回 null（连 temporary baseline 分支都到不了）。
+                // 此时回退到 resolveHeaderOnlyTemplateSnapshot_ACU —— 降级后聊天无 full
+                // checkpoint，模板临时基线（scope/全局模板派生）正是其唯一结构来源，
+                // 与计划「候选回放退化为模板临时基线」的口径一致。
+                // 异常候选（replay 实际产出兼容修复）仍 fail-closed，不回退。
+                let replayAfter;
+                try {
+                    replayAfter = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+                        updateRuntimeState: false,
+                        compatibilityMode: 'disabled',
+                    });
+                }
+                catch (error) {
+                    return { ok: false, reason: `template_only_root 降级后候选 replay 校验失败：${error?.message || String(error)}` };
+                }
+                if (!replayAfter) {
+                    const templateBaseline = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
+                    if (!templateBaseline) {
+                        return { ok: false, reason: 'template_only_root 降级后候选 replay 无法校验，且当前模板基线不可得，拒绝降级，零写入。' };
+                    }
+                    replayAfter = { data: templateBaseline, baseKind: 'temporary_template_baseline' };
+                }
+                if (replayAfter.requiresCheckpointConvergence || replayAfter.compatibilityRepairs?.length) {
+                    return { ok: false, reason: 'template_only_root 降级后候选 replay 仍依赖兼容修复，拒绝降级，零写入。' };
+                }
+                // 指纹比对（fail-closed）：候选回放的每张表 content 必须与原 checkpoint 的
+                // header-only content 等价。降级后无 full checkpoint，回放退化为模板临时基线
+                // （resolveHeaderOnlyTemplateSnapshot_ACU 由 guide 派生），因此不能拿“降级前
+                // replay vs 降级后 replay”直接比（两者来源不同）；正确口径是候选回放的 content
+                // 逐表与原 checkpoint 的 header-only content 等价。
+                const afterFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(replayAfter.data));
+                const headerOnlyProjection = deepClone_ACU$1(rootCheckpoint.data);
+                for (const sheetKey of Object.keys(headerOnlyProjection)) {
+                    if (!sheetKey.startsWith('sheet_'))
+                        continue;
+                    const sheet = headerOnlyProjection[sheetKey];
+                    sheet.content = [deepClone_ACU$1(sheet.content?.[0])];
+                }
+                const expectedFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(headerOnlyProjection));
+                if (afterFingerprint !== expectedFingerprint) {
+                    return { ok: false, reason: 'template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。' };
+                }
+                // 真实写回：直接应用候选的最终容器形态，避免在真实对象上重复判空造成双写不一致。
+                // 正常路径（frame 降级为 {version:2, logEntries:[]} 标准空帧）保留 tagData，
+                // recoveryBackup 随 tagData 一起落盘；仅畸形空壳才整条移除 tagData。
+                const candidateFinalContainer = candidateChat[rootIndex].TavernDB_ACU_IsolatedData;
+                if (candidateFinalContainer === undefined)
+                    delete rootMessage.TavernDB_ACU_IsolatedData;
+                else
+                    rootMessage.TavernDB_ACU_IsolatedData = candidateFinalContainer;
+                writeMessageIdentity_ACU(rootMessage, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+                logDebug_ACU(`[V2 Persist] template_only_root 降级完成: requestId=${options.requestId || 'unknown'}, rootIndex=${rootIndex}, reason=${rootCheckpoint.reason}, fingerprint=${afterFingerprint}。`);
+                await saveChatToHostStrict_ACU();
+                return { ok: true, demoted: true };
+            });
+        }
+        catch (error) {
+            return { ok: false, reason: error?.message || String(error) };
+        }
     }
     function isPlainObjectRecord_ACU(value) {
         if (!isObjectRecord_ACU$2(value))
@@ -48008,12 +48449,18 @@ $CONTENT
                         blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 的历史生命周期无法判定（indeterminate），已阻止模板提交。请先在数据管理中检查并恢复 V2 历史。`);
                         continue;
                     }
-                    if (lifecycleEntry.status === 'active') {
-                        // 派生 key 在历史中仍活跃但当前协调基线不含该表：异常状态，绝不覆盖活数据。
-                        blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 在历史生命周期中仍为 active，但当前聊天基线不含该表，无法协调。请重新读取当前表格后重试。`);
-                        continue;
-                    }
-                    // never_seen：历史上从未见过，正常 introduction。
+                    // status === 'active' 但基线不含该表：这里刻意不 fail-closed。
+                    //
+                    // 「是否仍活跃」的权威来源只有 replay 后的 active state，不是 lifecycle 派生结论；
+                    // lifecycle 是历史 timeline 归并，遇到无 full-checkpoint 基底（replacement_anchor /
+                    // temporary baseline）等场景仍可能与同一时点的基线不一致。在协调层按这个非权威结论
+                    // 拒绝，会把「模板重新包含一张历史痕迹表」变成用户无法自救的死局：重新读取表格不会
+                    // 改变任何历史事实，错误必然复现。
+                    //
+                    // 因此这里按 introduction 继续，真正的覆盖风险由提交层用权威事实判定：
+                    // storage-frame-v2-persist.ts 的 activeHas → active_introduction_conflict（活数据保护），
+                    // introductionHistoryEvidence_ACU → reveal / indeterminate（历史存在则唤醒而非覆盖）。
+                    // never_seen 同样落到 introduction。
                 }
                 const occupiedByIntroducedKey = candidateData[introducedKey];
                 if (occupiedByIntroducedKey) {
@@ -72710,11 +73157,26 @@ $CONTENT
         }
         return true;
     }
+    /**
+     * 判定 frame 是否携带「不属于自身 checkpoint」的 replay artifact。
+     *
+     * 判定标准直接复用 persist 层的 frameHasSuffixReplayArtifact_ACU，不在本文件另写
+     * 一份：两层若各自实现，会漂移出「persist 认为该 root 可降级、本 preflight 认为
+     * blocked」的夹缝，正是本次要修的 F7 同类问题。
+     *
+     * 与旧实现的差异：旧版把「随根写入、无 timeline 的 per-sheet checkpoint」和
+     * 「自有 full checkpoint 下的 headRevision」也算作 artifact。这会让一个仅含
+     * header-only init root 的正常 frame 被误判为「携带后缀 artifact」而 blocked
+     * （1518），即使它没有任何后续增量。新语义只认真实后缀。
+     *
+     * 对 1526 / 1551 两个调用点结论不变：那两处只检查非 root 帧，而 1503 已保证
+     * 全聊天仅存在一个 full checkpoint，故这些帧必然无自有 full checkpoint，其
+     * per-sheet checkpoint 与 headRevision 仍被判为真实后缀。
+     */
     function hasV2ReplayArtifact_ACU$1(frame) {
-        return (frame?.logEntries || []).length > 0
-            || Object.keys(frame?.perSheetCheckpoints || {}).length > 0
-            || frame?.manualRefillProgress !== undefined
-            || (frame?.headRevision !== undefined && frame.headRevision !== null);
+        if (!frame || typeof frame !== 'object')
+            return false;
+        return frameHasSuffixReplayArtifact_ACU(frame);
     }
     /**
      * 兼容旧版“全范围删除后仍把 reset checkpoint 留在较晚楼层”的聊天。
@@ -72734,36 +73196,47 @@ $CONTENT
             maintenanceMode: 'exclusive',
         }, async () => {
             const chat = getChatArray_ACU();
-            if (!Array.isArray(chat) || chat.length === 0)
+            if (!Array.isArray(chat) || chat.length === 0) {
+                logDebug_ACU(`[追平锚点预检] blocked：聊天记录为空（target=${targetMessageIndex}, isolationKey=[${isolationKey || '无标签'}]）。`);
                 return { status: 'blocked', error: '聊天记录为空，无法验证手动追平锚点。' };
+            }
             const aiMessageIndices = chat.map((message, index) => !message?.is_user ? index : -1).filter(index => index >= 0);
             if (!Number.isInteger(targetMessageIndex) || targetMessageIndex < 0 || !chat[targetMessageIndex] || chat[targetMessageIndex].is_user) {
+                logDebug_ACU(`[追平锚点预检] blocked：目标楼层无效（target=${targetMessageIndex}）。`);
                 return { status: 'blocked', error: '手动追平目标楼层无效，无法验证 V2 锚点。' };
             }
             const checkpoints = aiMessageIndices.filter(index => {
                 const tagData = readIsolatedTagData_ACU(chat[index], isolationKey);
                 return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
             });
-            if (checkpoints.length === 0)
+            if (checkpoints.length === 0) {
+                logDebug_ACU(`[追平锚点预检] ready：无 full checkpoint（target=${targetMessageIndex}, aiMessageIndices=${aiMessageIndices.length}）。`);
                 return { status: 'ready', checkpointMessageIndex: null };
+            }
             const checkpointMessageIndex = checkpoints[checkpoints.length - 1];
-            if (checkpointMessageIndex <= targetMessageIndex)
+            if (checkpointMessageIndex <= targetMessageIndex) {
+                logDebug_ACU(`[追平锚点预检] ready：checkpoint 在目标之前（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
                 return { status: 'ready', checkpointMessageIndex };
+            }
             if (checkpoints.length !== 1) {
+                logDebug_ACU(`[追平锚点预检] blocked：多 full checkpoint（${checkpoints.length} 个：${checkpoints.join('、')}, target=${targetMessageIndex}）。`);
                 return { status: 'blocked', error: '手动追平目标早于多个 V2 full checkpoint；无法安全自动重排历史，请先执行 V2 恢复诊断。' };
             }
             const sourceMessage = chat[checkpointMessageIndex];
             const sourceTagData = readIsolatedTagData_ACU(sourceMessage, isolationKey);
             if (!isV2TagData_ACU(sourceTagData)) {
+                logDebug_ACU(`[追平锚点预检] blocked：checkpoint 帧不满足 canonical 契约（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
                 return { status: 'blocked', error: '手动追平目标早于不满足 canonical 契约的 V2 checkpoint；已在调用 AI 前阻止写入，请先执行 V2 恢复诊断。' };
             }
             if (!isSafeHeaderOnlyResetCheckpoint_ACU(sourceTagData.storageFrame)) {
                 // 含真实行数据 / migration / compaction / fallback provenance 的正式 full checkpoint
                 // 不能前移（bounded replay 语义可能被污染）；需要 provisional bridge 在不动原根的
                 //前提下从更早楼层建立临时根，追平后再原子汇合回原根。
+                logDebug_ACU(`[追平锚点预检] provisional_bridge_required：checkpoint 非 header-only reset（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
                 return { status: 'provisional_bridge_required', checkpointMessageIndex };
             }
             if (hasV2ReplayArtifact_ACU$1(sourceTagData.storageFrame)) {
+                logDebug_ACU(`[追平锚点预检] blocked：checkpoint 帧携带后缀 artifact（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
                 return { status: 'blocked', error: '手动追平目标早于携带后缀 replay artifact 的 V2 checkpoint；请先执行 V2 恢复诊断。' };
             }
             const unsafeArtifactIndex = aiMessageIndices.find(index => {
@@ -72775,6 +73248,7 @@ $CONTENT
                 return hasV2ReplayArtifact_ACU$1(tagData.storageFrame);
             });
             if (unsafeArtifactIndex !== undefined) {
+                logDebug_ACU(`[追平锚点预检] blocked：checkpoint 之后存在后缀 artifact（artifact=${unsafeArtifactIndex}, checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
                 return { status: 'blocked', error: `手动追平目标之后存在无法安全重排的 V2 增量 artifact（messageIndex=${unsafeArtifactIndex}）；请先执行 V2 恢复诊断。` };
             }
             let replayBefore;
@@ -72785,9 +73259,11 @@ $CONTENT
                 });
             }
             catch (error) {
+                logDebug_ACU(`[追平锚点预检] blocked：移动前 replay 校验异常（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}, error=${error?.message || String(error)}）。`);
                 return { status: 'blocked', error: `手动追平锚点移动前 replay 校验失败：${error?.message || String(error)}` };
             }
             if (!replayBefore || replayBefore.requiresCheckpointConvergence || replayBefore.compatibilityRepairs?.length) {
+                logDebug_ACU(`[追平锚点预检] blocked：移动前 replay 依赖兼容修复（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}, convergence=${replayBefore?.requiresCheckpointConvergence}, repairs=${replayBefore?.compatibilityRepairs?.length || 0}）。`);
                 return { status: 'blocked', error: '手动追平锚点移动前 V2 replay 仍依赖兼容修复；请先执行 V2 恢复诊断。' };
             }
             const anchorMessageIndex = aiMessageIndices[0];
@@ -72837,12 +73313,15 @@ $CONTENT
                 });
             }
             catch (error) {
+                logDebug_ACU(`[追平锚点预检] blocked：移动后候选 replay 校验异常（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}, error=${error?.message || String(error)}）。`);
                 return { status: 'blocked', error: `手动追平锚点移动候选 replay 校验失败：${error?.message || String(error)}` };
             }
             if (!replayAfter || replayAfter.requiresCheckpointConvergence || replayAfter.compatibilityRepairs?.length
                 || getTableDataFingerprint_ACU(replayBefore.data) !== getTableDataFingerprint_ACU(replayAfter.data)) {
+                logDebug_ACU(`[追平锚点预检] blocked：锚点移动会改变可见表格状态（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}, convergence=${replayAfter?.requiresCheckpointConvergence}, repairs=${replayAfter?.compatibilityRepairs?.length || 0}, fingerprintSame=${replayBefore && replayAfter ? getTableDataFingerprint_ACU(replayBefore.data) === getTableDataFingerprint_ACU(replayAfter.data) : 'n/a'}）。`);
                 return { status: 'blocked', error: '手动追平锚点移动会改变当前可见表格状态，已拒绝写入；请先执行 V2 恢复诊断。' };
             }
+            logDebug_ACU(`[追平锚点预检] repaired：锚点前移 checkpoint=${checkpointMessageIndex} → ${anchorMessageIndex}（target=${targetMessageIndex}, discardedPrefix=${discardedPrefixFrames.length}）。`);
             const affectedMessages = [...new Set([anchorMessageIndex, checkpointMessageIndex, ...discardedPrefixFrames.map(item => item.messageIndex)])].map(index => ({
                 messageIndex: index,
                 message: chat[index],
@@ -72942,6 +73421,17 @@ $CONTENT
                 }
                 if (msg.TavernDB_ACU_Identity !== undefined) {
                     delete msg.TavernDB_ACU_Identity;
+                    modified = true;
+                }
+                // 漏删修复（C 方案步骤 1）：这两个字段在 MESSAGE_TABLE_FIELDS_ACU 权威清单中，
+                // 旧路径此前未删。删除后必须回到「从未填表」状态（与 helpers-data-merge.ts:709
+                // 的幂等闸门语义一致），因此与 Identity 同级置 modified=true 保证落盘。
+                if (msg.TavernDB_ACU_LocalMessageAnchor !== undefined) {
+                    delete msg.TavernDB_ACU_LocalMessageAnchor;
+                    modified = true;
+                }
+                if (msg._acu_local_template_base_state_seeded !== undefined) {
+                    delete msg._acu_local_template_base_state_seeded;
                     modified = true;
                 }
                 if (msg.TavernDB_ACU_IsolatedData) {
@@ -86031,6 +86521,30 @@ $CONTENT
                         performanceParentSpanId: options.performanceParentSpanId,
                     });
                 }
+                // 回放根准入（Task 4）：任何写目标早于最新 full checkpoint 的 bucket 必须在
+                // AI 调用（collectGroupFillResponse_ACU → callCustomOpenAI_ACU）之前被阻止。
+                // 否则 AI 先消耗 token，写入阶段才被 persist 层 fail-fast（persist.ts:1908）。
+                // provisional bridge run（manual catch-up 追平）跳过此处：其写入安全由
+                // orchestrateManualCatchUp_ACU 的 ensureManualCatchUpAnchorBeforeTarget_ACU 预检
+                // 与 persist 层 bridge 写入授权（persist.ts:2293-2295）双层保证，且此处依赖的
+                // readActiveProvisionalBridge_ACU 在编排层无法可靠读取（bridge 状态在 persist 事务内）。
+                if (!options.manualCatchUpRunId && !options.skipWriteTargetAdmission) {
+                    for (const job of jobs) {
+                        const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
+                            chat: getChatArray_ACU() || [],
+                            isolationKey: job.isolationKey,
+                            targetMessageIndex: job.saveTargetIndex,
+                        });
+                        if (!writeTargetAdmission.allow) {
+                            failedGroups.add(job.groupKey);
+                            firstError = firstError || `写目标早于 V2 回放根，已阻止本次填表：${writeTargetAdmission.reason}`;
+                            logDebug_ACU(`[V2 准入] 阻止填表：${writeTargetAdmission.reason}`);
+                        }
+                    }
+                }
+                if (firstError) {
+                    break;
+                }
                 if (jobs.length === 0) {
                     bucketSucceeded = true;
                     break;
@@ -87549,6 +88063,19 @@ $CONTENT
             if (manualRefillEnabled) {
                 const currentIsolationKey = getCurrentIsolationKey_ACU();
                 const rollbackMessageIndices = collectManualRefillRollbackMessageIndices_ACU(liveChat, currentIsolationKey, contextScopeIndices);
+                // Task 4 破坏性清理前准入：重填会先清空范围内旧数据，若最新 full checkpoint
+                // 晚于重填范围末尾，清理后写入目标早于回放根，必然撞 persist 层 fail-fast。
+                // 必须在删除任何数据前阻止，避免用户数据先被清空才报错。
+                const refillTargetIndex = contextScopeIndices[contextScopeIndices.length - 1];
+                const refillAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
+                    chat: liveChat,
+                    isolationKey: currentIsolationKey,
+                    targetMessageIndex: refillTargetIndex,
+                });
+                if (!refillAdmission.allow) {
+                    logDebug_ACU(`[手动重填准入] 阻断：${refillAdmission.reason}（refillTarget=${refillTargetIndex}, isolationKey=[${currentIsolationKey || '无标签'}]）。`);
+                    return { success: false, error: `手动重填被回放根准入阻断${refillAdmission.reason}` };
+                }
                 manualRefillSessionSnapshot = captureManualRefillSessionSnapshot_ACU(rollbackMessageIndices);
                 // 重填会先删除持久化增量，不能在 SQLite runtime 尚未 ready 时进入破坏性阶段。
                 // native 路径没有 SQLite 后置条件，保持既有行为。
@@ -87633,6 +88160,8 @@ $CONTENT
                         onProgress: options.onProgress,
                         // 范围内旧增量已在预清理中删除，提交时无需再做增量替换。
                         replaceExistingIncremental: false,
+                        // 手动重填先清空范围内旧数据再重写，范围末尾成为新根，bucket 写入天然合法。
+                        skipWriteTargetAdmission: true,
                     });
                     committedBucketCount += chunkResult.committedBucketCount;
                     if (!chunkResult.success) {
@@ -98126,6 +98655,40 @@ $CONTENT
             showToastr_ACU('info', '没有发现符合删除条件的数据。');
         }
     }
+    /**
+     * 硬清空当前聊天全部本地数据库状态（legacy popup 入口）。
+     *
+     * 与 deleteLocalDataInChat_ACU 的收尾刻意不同（C 方案 C2/C3）：
+     * purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
+     * clearTableRuntimeWithoutReload_ACU 置为空态，并明令绝不加载聊天/模板/Guide；
+     * 此处不再调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider /
+     * refreshMergedDataAndNotifyWithUI_ACU，否则会把刚清空的状态从模板/guide 重新物化回来；
+     * 世界书条目清理也由 purge 内部完成（cleanupDatabaseGeneratedWorldbookEntries_ACU），
+     * 结果进入 result.cleanupWarnings。
+     */
+    async function purgeAllLocalDataInChat_ACU() {
+        try {
+            const result = await purgeCurrentChatDatabaseState_ACU();
+            if (!result.saved) {
+                showToastr_ACU('error', result.error || '硬清空失败，详情见运行日志。', { timeOut: 10000 });
+                return;
+            }
+            if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
+                updateCardUpdateStatusDisplay_ACU();
+            }
+            const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
+            if (result.cleanupWarnings?.length) {
+                showToastr_ACU('warning', `已硬清空全部本地数据（${result.clearedMessageCount} 条消息）${removed}。警告：${result.cleanupWarnings[0]}`, { timeOut: 10000 });
+            }
+            else {
+                showToastr_ACU('success', `已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`);
+            }
+        }
+        catch (error) {
+            logError_ACU('硬清空全部本地数据失败。', error);
+            showToastr_ACU('error', `硬清空失败：${error?.message || '未知错误'}`, { timeOut: 10000 });
+        }
+    }
     async function migrateLegacySummaryVectorIndex_ACU() {
         try {
             const result = await migrateLegacySummaryVectorIndexToContentAddressed_ACU();
@@ -99595,21 +100158,18 @@ $CONTENT
         }
         if ($deleteAllLocalDataButton.length) {
             $deleteAllLocalDataButton.on('click', function () {
-                const $startFloor = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-delete-start-floor`);
-                const $endFloor = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-delete-end-floor`);
-                const startFloor = $startFloor.length ? parseInt($startFloor.val()) || null : null;
-                const endFloor = $endFloor.length && $endFloor.val() ? parseInt($endFloor.val()) || null : null;
-                // 保存楼层范围设置
-                settings_ACU.deleteStartFloor = startFloor;
-                settings_ACU.deleteEndFloor = endFloor;
-                saveSettingsAndNotify_ACU();
-                const rangeText = startFloor && endFloor ? `第${startFloor}到${endFloor}AI楼层` :
-                    startFloor ? `从第${startFloor}AI楼层开始` :
-                        endFloor ? `到第${endFloor}AI楼层结束` : "全部AI楼层";
-                if (confirm(`严重警告：这将永久删除当前聊天记录中${rangeText}【所有】数据库数据，无论其标识是什么。\n\n此操作不可恢复！\n\n确定要继续吗？`)) {
+                // C 方案：all 入口改接硬清空服务，与楼层范围设置无关（C1/C6）。
+                // 不再读楼层输入框、不再回写 settings_ACU.deleteStartFloor/deleteEndFloor。
+                const scopeText = "全部 AI 楼层、所有隔离标识";
+                if (confirm(`严重警告：此操作将硬清空当前聊天的全部本地数据库状态，与上方楼层范围设置无关，作用于${scopeText}。\n\n` +
+                    "· 含用户首条消息上的字段；\n" +
+                    "· 清除聊天级模板 scope 与 guide 容器（模板选择回到继承全局）；\n" +
+                    "· 不保留 init 锚点，重新填表时 sheetKey 会重新分配；\n" +
+                    "· 结果等价于全新会话，不可恢复。\n\n" +
+                    "全局模板、提示词与聊天正文不受影响。确定要继续吗？")) {
                     // 二次确认
-                    if (confirm(`再次确认：您真的要清空当前聊天的${rangeText}所有数据库存档吗？`)) {
-                        deleteLocalDataInChat_ACU('all', startFloor, endFloor);
+                    if (confirm(`再次确认：您真的要清空当前聊天的${scopeText}所有数据库存档吗？此操作不可撤销。`)) {
+                        purgeAllLocalDataInChat_ACU();
                     }
                 }
             });
@@ -103862,7 +104422,7 @@ $CONTENT
                                 </div>
                             </div>
                             <div style="margin-top: 6px; font-size: 0.8em; color: var(--acu-text-3);">
-                                默认全选所有AI楼层，可设置范围精确删除（只计算AI回复）
+                                默认全选所有AI楼层，可设置范围精确删除（只计算AI回复）。楼层范围仅作用于「删除当前标识本地数据」；「删除所有本地数据」忽略此设置，作用于全部 AI 楼层。
                             </div>
                         </div>
 
@@ -150600,6 +151160,47 @@ Expected function or array of functions, received type ${typeof value}.`
                 busyAction.value = '';
             }
         }
+        /**
+         * 硬清空当前聊天的全部本地数据库状态（C 方案接线 purge）。
+         *
+         * 与 deleteLocalData 的收尾刻意不同：
+         * - 不调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider（C2）：
+         *   purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
+         *   clearTableRuntimeWithoutReload_ACU 把运行时置为空态，并明令绝不加载聊天/模板/Guide；
+         *   此处若再 reload 会把刚清空的状态从模板/guide 重新物化回来，且 saved=true 会让用户误以为成功。
+         * - 不调用 cleanupWorldbookEntriesAfterDataDeletion_ACU（C3）：purge 内部已做
+         *   cleanupDatabaseGeneratedWorldbookEntries_ACU，结果进入 result.cleanupWarnings。
+         * - 不调用 refreshMergedDataAndNotify_ACU（V1 验证结论）：该函数会 loadAllChatMessages_ACU +
+         *   mergeAllIndependentTables_ACU，并在无历史数据时从指导表/模板重建 currentJsonTableData_ACU
+         *   （pipeline.ts:617-629），等价于重新物化。因此只调 refresh() 做 settings/isolation/count 级刷新。
+         */
+        async function purgeAllLocalData() {
+            busyAction.value = 'purge-all-local';
+            try {
+                const result = await purgeCurrentChatDatabaseState_ACU();
+                if (!result.saved) {
+                    message.value = null;
+                    toast.error(result.error || '硬清空失败，详情见运行日志。', { muteable: false });
+                    return;
+                }
+                refresh();
+                if (result.cleanupWarnings?.length) {
+                    toast.warning(`本地数据已全部硬清空（${result.clearedMessageCount} 条消息）。警告：${result.cleanupWarnings[0]}`, { muteable: false, durationMs: 6000 });
+                }
+                else {
+                    const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
+                    toast.success(`已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`, { muteable: false });
+                }
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] purgeAllLocalData failed', e);
+                message.value = null;
+                toast.error('硬清空失败，详情见运行日志。', { muteable: false });
+            }
+            finally {
+                busyAction.value = '';
+            }
+        }
         function setRetainRecentLayers(value) {
             const normalized = normalizeRetainRecentLayers(value);
             retainRecentLayers.value = normalized;
@@ -150643,6 +151244,7 @@ Expected function or array of functions, received type ${typeof value}.`
             resetAllDefaults,
             overrideLatestLayerWithTemplate,
             deleteLocalData,
+            purgeAllLocalData,
             setRetainRecentLayers,
         };
     }
@@ -150759,28 +151361,52 @@ Expected function or array of functions, received type ${typeof value}.`
             async function onDeleteLocalData(mode) {
                 if (runtimeDiagnostic.busy.value)
                     return;
-                const message = mode === "all"
-                    ? `删除当前聊天中 ${flow.rangeLabel.value} 的所有标识数据库数据？此操作不可恢复。`
-                    : `删除当前聊天中 ${flow.rangeLabel.value} 属于当前标识的数据库数据？此操作不可恢复。`;
+                // 按钮已改接 onPurgeAllLocalData；此处仅保留 current 路径，all 分支防御性回退到 purge，
+                // 避免任何残留调用仍走旧的「楼层范围 + 漏删字段」路径。
+                if (mode === "all") {
+                    await onPurgeAllLocalData();
+                    return;
+                }
+                const message = `删除当前聊天中 ${flow.rangeLabel.value} 属于当前标识的数据库数据？此操作不可恢复。`;
                 const confirmed = await dialogStore.confirm({
-                    title: mode === "all" ? "删除所有本地数据" : "删除当前标识本地数据",
+                    title: "删除当前标识本地数据",
                     message,
                     confirmLabel: "删除数据",
                     confirmVariant: "danger",
                 });
                 if (!confirmed)
                     return;
-                if (mode === "all" &&
-                    !(await dialogStore.confirm({
-                        title: "再次确认删除",
-                        message: "再次确认：删除所有标识的本地数据库数据？",
-                        confirmLabel: "确认删除全部",
-                        confirmVariant: "danger",
-                    })))
+                if (runtimeDiagnostic.busy.value)
+                    return;
+                void flow.deleteLocalData("current");
+            }
+            async function onPurgeAllLocalData() {
+                if (runtimeDiagnostic.busy.value)
+                    return;
+                const confirmed = await dialogStore.confirm({
+                    title: "删除所有本地数据",
+                    message: "此操作将硬清空当前聊天的全部本地数据库状态，且与上方起止楼层设置无关，作用于所有 AI 楼层：\n" +
+                        "· 清除所有隔离标识的本地数据（不只当前标识）；\n" +
+                        "· 含用户首条消息上的字段；\n" +
+                        "· 清除聊天级模板 scope 与 guide 容器（模板选择回到继承全局）；\n" +
+                        "· 不保留 init 锚点，重新填表时 sheetKey 会重新分配；\n" +
+                        "· 结果等价于全新会话，不可恢复。\n" +
+                        "全局模板、提示词与聊天正文不受影响。确认继续？",
+                    confirmLabel: "删除所有本地数据",
+                    confirmVariant: "danger",
+                });
+                if (!confirmed)
+                    return;
+                if (!(await dialogStore.confirm({
+                    title: "再次确认删除",
+                    message: "再次确认：将当前聊天恢复到从未填表的全新状态？此操作不可撤销。",
+                    confirmLabel: "确认硬清空",
+                    confirmVariant: "danger",
+                })))
                     return;
                 if (runtimeDiagnostic.busy.value)
                     return;
-                void flow.deleteLocalData(mode);
+                void flow.purgeAllLocalData();
             }
             async function onCommitMixedStorageDecision(action) {
                 if (runtimeDiagnostic.busy.value)
@@ -150885,14 +151511,14 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             onMounted(refreshAll);
             watch(useChatChangedTick(), refreshAll);
-            const __returned__ = { resetDefaultsCleanupOptions, dialogStore, flow, runtimeDiagnostic, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onCommitMixedStorageDecision, onCommitV2Recovery, onReloadSqliteRuntime, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, get dataMgmtCopy() { return dataMgmtCopy; } };
+            const __returned__ = { resetDefaultsCleanupOptions, dialogStore, flow, runtimeDiagnostic, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onPurgeAllLocalData, onCommitMixedStorageDecision, onCommitV2Recovery, onReloadSqliteRuntime, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, get dataMgmtCopy() { return dataMgmtCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-de90426c] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-de90426c] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-de90426c] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-de90426c] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-de90426c] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-de90426c] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-de90426c] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-de90426c] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-de90426c] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-de90426c] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-de90426c] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-de90426c] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-de90426c] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-de90426c] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-de90426c] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-de90426c],\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-de90426c] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-de90426c] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-de90426c] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-de90426c] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-de90426c] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-de90426c] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-de90426c] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-de90426c] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-de90426c] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-de90426c] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-de90426c] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-de90426c");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_de90426c_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-f1818959] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-f1818959] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-f1818959] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-f1818959] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-f1818959] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\r\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-f1818959] {\r\n  margin-top: 4px;\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-f1818959] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 600;\r\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-f1818959] {\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-f1818959] .acu-disclosure-group__header {\r\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-f1818959] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 8px;\r\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-f1818959] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-f1818959] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-align: left;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-f1818959] {\r\n  flex-shrink: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-f1818959] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-f1818959] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-f1818959],\r\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] {\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-f1818959] {\r\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-f1818959] {\r\n  margin-top: 16px;\r\n  padding-top: 16px;\r\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-f1818959] {\r\n  min-width: 0;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-f1818959] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-f1818959] {\r\n  margin: 4px 0 0;\r\n  overflow-wrap: anywhere;\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-f1818959] .acu-file-button,\r\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-f1818959] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] .acu-file-button,\r\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] .acu-btn {\r\n  width: 100%;\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-f1818959] {\r\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-f1818959] {\r\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-f1818959] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-f1818959] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-f1818959");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_f1818959_lang = null;
 
     const _hoisted_1$f = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$e = { class: "acu-v2-data-mgmt-page__panel-stack" };
@@ -151055,7 +151681,7 @@ Expected function or array of functions, received type ${typeof value}.`
     				loading: $setup.flow.busyAction.value === "delete-isolation-entries",
     				onClick: $setup.onDeleteCurrentIsolationEntries
     			}, {
-    				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
+    				default: withCtx(() => [..._cache[10] || (_cache[10] = [createTextVNode(
     					" 删除当前标识注入条目 ",
     					-1
     					/* CACHED */
@@ -151067,7 +151693,7 @@ Expected function or array of functions, received type ${typeof value}.`
     				loading: $setup.flow.busyAction.value === "apply-isolation",
     				onClick: $setup.onApplyIsolation
     			}, {
-    				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
+    				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
     					" 保存并应用 ",
     					-1
     					/* CACHED */
@@ -151088,7 +151714,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onFile: $setup.flow.importCombinedSettings
     					}, {
-    						default: withCtx(() => [..._cache[13] || (_cache[13] = [createBaseVNode(
+    						default: withCtx(() => [..._cache[12] || (_cache[12] = [createBaseVNode(
     							"i",
     							{ class: "fa-solid fa-download" },
     							null,
@@ -151106,7 +151732,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onClick: $setup.flow.exportCombinedSettings
     					}, {
-    						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
+    						default: withCtx(() => [..._cache[13] || (_cache[13] = [createBaseVNode(
     							"i",
     							{ class: "fa-solid fa-upload" },
     							null,
@@ -151124,7 +151750,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onClick: $setup.flow.exportJsonData
     					}, {
-    						default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
+    						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
     							"i",
     							{ class: "fa-solid fa-upload" },
     							null,
@@ -151143,7 +151769,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						loading: $setup.flow.busyAction.value === "override-latest",
     						onClick: $setup.onOverrideLatestLayer
     					}, {
-    						default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
+    						default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
     							" 模板覆盖最新层数据 ",
     							-1
     							/* CACHED */
@@ -151152,7 +151778,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					}, 8, ["disabled", "loading"])
     				]),
     				createBaseVNode("section", _hoisted_10$6, [
-    					_cache[19] || (_cache[19] = createBaseVNode(
+    					_cache[18] || (_cache[18] = createBaseVNode(
     						"h3",
     						{
     							id: "acu-checkpoint-title",
@@ -151162,7 +151788,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						-1
     						/* CACHED */
     					)),
-    					_cache[20] || (_cache[20] = createBaseVNode(
+    					_cache[19] || (_cache[19] = createBaseVNode(
     						"p",
     						{ class: "acu-v2-data-mgmt-page__section-description" },
     						" 导出当前隔离标识的表格、聊天模板和指导表。导入会清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据， 仅在当前激活隔离键的最新 AI 楼层重建数据；当前聊天表格模板会切换为文件模板，后续更新将使用该模板。 全局模板和聊天正文不变。 ",
@@ -151174,7 +151800,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onClick: $setup.flow.exportTableCheckpoint
     					}, {
-    						default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
+    						default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
     							" 导出 Checkpoint ",
     							-1
     							/* CACHED */
@@ -151186,7 +151812,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onFile: $setup.onImportTableCheckpoint
     					}, {
-    						default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
+    						default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
     							" 导入 Checkpoint ",
     							-1
     							/* CACHED */
@@ -151195,7 +151821,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					}, 8, ["disabled"])])
     				]),
     				$setup.flow.mixedStorageDecision.value ? (openBlock(), createElementBlock("section", _hoisted_12$6, [
-    					_cache[25] || (_cache[25] = createBaseVNode(
+    					_cache[24] || (_cache[24] = createBaseVNode(
     						"h3",
     						{
     							id: "acu-mixed-storage-title",
@@ -151222,7 +151848,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							64
     							/* STABLE_FRAGMENT */
     						)) : createCommentVNode("v-if", true),
-    						_cache[21] || (_cache[21] = createTextVNode(
+    						_cache[20] || (_cache[20] = createTextVNode(
     							" 可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。 ",
     							-1
     							/* CACHED */
@@ -151235,7 +151861,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "export-mixed-storage-snapshots",
     							onClick: $setup.flow.exportMixedStorageSnapshots
     						}, {
-    							default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
+    							default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
     								" 导出 legacy/V2 快照 ",
     								-1
     								/* CACHED */
@@ -151253,7 +151879,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "commit-mixed-storage-keep_v2",
     							onClick: _cache[2] || (_cache[2] = ($event) => $setup.onCommitMixedStorageDecision("keep_v2"))
     						}, {
-    							default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+    							default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
     								" 保留 V2 并清理 legacy ",
     								-1
     								/* CACHED */
@@ -151267,7 +151893,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "commit-mixed-storage-commit_merge_candidate",
     							onClick: _cache[3] || (_cache[3] = ($event) => $setup.onCommitMixedStorageDecision("commit_merge_candidate"))
     						}, {
-    							default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
+    							default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
     								" 提交受限合并候选 ",
     								-1
     								/* CACHED */
@@ -151277,7 +151903,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					])
     				])) : createCommentVNode("v-if", true),
     				$setup.flow.v2RecoverySummary.value ? (openBlock(), createElementBlock("section", _hoisted_15$5, [
-    					_cache[29] || (_cache[29] = createBaseVNode(
+    					_cache[28] || (_cache[28] = createBaseVNode(
     						"h3",
     						{
     							id: "acu-v2-recovery-title",
@@ -151300,7 +151926,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     							onClick: $setup.flow.exportV2RecoveryBackups
     						}, {
-    							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
+    							default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
     								" 导出已保存的原始 frame 备份 ",
     								-1
     								/* CACHED */
@@ -151315,7 +151941,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
     							onClick: _cache[4] || (_cache[4] = ($event) => $setup.onCommitV2Recovery(false))
     						}, {
-    							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
+    							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
     								" 应用 Checkpoint 修复/收敛 ",
     								-1
     								/* CACHED */
@@ -151330,7 +151956,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
     							onClick: _cache[5] || (_cache[5] = ($event) => $setup.onCommitV2Recovery(true))
     						}, {
-    							default: withCtx(() => [..._cache[28] || (_cache[28] = [createTextVNode(
+    							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
     								" 确认无锚点 data_replace 恢复 ",
     								-1
     								/* CACHED */
@@ -151339,7 +151965,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true)
     					])
     				])) : createCommentVNode("v-if", true),
-    				$setup.flow.v2IsolationDiagnostics.value.length ? (openBlock(), createElementBlock("section", _hoisted_18$4, [_cache[30] || (_cache[30] = createBaseVNode(
+    				$setup.flow.v2IsolationDiagnostics.value.length ? (openBlock(), createElementBlock("section", _hoisted_18$4, [_cache[29] || (_cache[29] = createBaseVNode(
     					"h3",
     					{
     						id: "acu-v2-isolation-diagnostics-title",
@@ -151492,7 +152118,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					loading: $setup.flow.busyAction.value === "scan-v2-isolation-diagnostics",
     					onClick: $setup.flow.scanV2IsolationDiagnostics
     				}, {
-    					default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
+    					default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
     						" 扫描全部 V2 隔离域 ",
     						-1
     						/* CACHED */
@@ -151508,7 +152134,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					loading: $setup.flow.busyAction.value === "prepare-v2-recovery",
     					onClick: $setup.flow.prepareV2Recovery
     				}, {
-    					default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
+    					default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
     						" 诊断 V2 数据恢复 ",
     						-1
     						/* CACHED */
@@ -151526,7 +152152,7 @@ Expected function or array of functions, received type ${typeof value}.`
     			description: $setup.dataMgmtCopy.panels.cleanup.description
     		}, {
     			default: withCtx(() => [
-    				createBaseVNode("section", _hoisted_29$1, [_cache[33] || (_cache[33] = createBaseVNode(
+    				createBaseVNode("section", _hoisted_29$1, [_cache[32] || (_cache[32] = createBaseVNode(
     					"h3",
     					{
     						id: "acu-cleanup-auto-title",
@@ -151550,7 +152176,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					_: 1
     				})])]),
     				createBaseVNode("section", _hoisted_31, [
-    					_cache[34] || (_cache[34] = createBaseVNode(
+    					_cache[33] || (_cache[33] = createBaseVNode(
     						"h3",
     						{
     							id: "acu-cleanup-manual-title",
@@ -151594,6 +152220,13 @@ Expected function or array of functions, received type ${typeof value}.`
     						_: 1
     					})])
     				]),
+    				_cache[37] || (_cache[37] = createBaseVNode(
+    					"p",
+    					{ class: "acu-v2-data-mgmt-page__meta" },
+    					" 楼层范围仅作用于「删除当前标识本地数据」；「删除所有数据」忽略该设置，作用于全部 AI 楼层。 ",
+    					-1
+    					/* CACHED */
+    				)),
     				createBaseVNode("div", _hoisted_34, [
     					createVNode($setup["AcuButton"], {
     						block: "",
@@ -151601,7 +152234,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						loading: $setup.flow.busyAction.value === "delete-current-local",
     						onClick: _cache[9] || (_cache[9] = ($event) => $setup.onDeleteLocalData("current"))
     					}, {
-    						default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
+    						default: withCtx(() => [..._cache[34] || (_cache[34] = [createTextVNode(
     							" 删除当前标识本地数据 ",
     							-1
     							/* CACHED */
@@ -151612,10 +152245,10 @@ Expected function or array of functions, received type ${typeof value}.`
     						block: "",
     						variant: "danger",
     						disabled: $setup.runtimeDiagnostic.busy.value,
-    						loading: $setup.flow.busyAction.value === "delete-all-local",
-    						onClick: _cache[10] || (_cache[10] = ($event) => $setup.onDeleteLocalData("all"))
+    						loading: $setup.flow.busyAction.value === "purge-all-local",
+    						onClick: $setup.onPurgeAllLocalData
     					}, {
-    						default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
+    						default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
     							" 删除所有本地数据 ",
     							-1
     							/* CACHED */
@@ -151628,7 +152261,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						loading: $setup.flow.busyAction.value === "reset-defaults",
     						onClick: $setup.onResetAllDefaults
     					}, {
-    						default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
+    						default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
     							" 恢复默认配置 ",
     							-1
     							/* CACHED */
@@ -151642,7 +152275,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		_: 1
     	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-de90426c"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-f1818959"]]);
 
     var _sfc_main$e = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',
@@ -156148,22 +156781,89 @@ Expected function or array of functions, received type ${typeof value}.`
                         operations,
                     };
                 });
-                const commitResult = await commitCurrentFloorTemplateChanges_ACU({
-                    isolationKey: guideIsolationKey,
-                    sheetChanges,
-                    deletedSheetKeys,
-                    guideData,
-                    syncTemplateScope: true,
-                    templateSource: templateScopeSource,
-                    presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
-                    source: 'visualizer_v2_save',
-                    reason: 'visualizer_v2_schema_change',
-                    baseRevision,
-                });
-                if (!commitResult.saved) {
-                    toastStore.error(commitResult.error || '模板/结构保存失败。', { muteable: false });
+                // 会话级模板提交分流（与 template-preset-service 的 pristine 策略对齐）：
+                // - pristine / template_only_root：空数据会话，模板结构只落聊天级 guide + scope，
+                //   绝不写 storage frame（零 full checkpoint），避免在聊天末尾立起回放根导致
+                //   后续追平撞 fail-fast。
+                // - inherit：有实质数据，走 commitCurrentFloorTemplateChanges_ACU（原有语义）。
+                // - blocked：状态无法判定或已损坏，fail-closed 阻止。
+                const switchMode = resolveTemplateSwitchMode_ACU(getChatArray_ACU(), guideIsolationKey);
+                logDebug_ACU(`[ACU-V2 Visualizer] saveTemplateToCurrentChat 分流: mode=${switchMode.mode}${switchMode.mode === 'blocked' ? `, reason=${switchMode.reason}` : ''}, deletedSheetKeys=${deletedSheetKeys.join(',') || 'none'}, changedSheetKeys=${changedSheetKeys.join(',') || 'none'}。`);
+                if (switchMode.mode === 'blocked') {
+                    toastStore.error(`模板保存已阻止：${switchMode.reason}`, { muteable: false });
                     return false;
                 }
+                let commitResult;
+                if (switchMode.mode === 'pristine') {
+                    // 已损坏聊天的自愈降级：resolveTemplateSwitchMode_ACU 只判 pristine/inherit/blocked，
+                    // 但聊天可能处于「pristine 判定 + 残留 header-only template root」的夹缝（F7）。
+                    // 此时降级函数内部会重新按 7 项条件分类：非 template_only_root 返回 ok:false 且
+                    // 零写入，仅「真的是可降级 root」才移除。因此这里无条件尝试降级，失败但属于
+                    // 「不是 template_only_root」则跳过，继续 scope-only。
+                    const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({
+                        isolationKey: guideIsolationKey,
+                        requestId: `visualizer_v2_save:${guideIsolationKey}`,
+                    });
+                    if (!demotion.ok && demotion.demoted === false && /不是 template_only_root/.test(demotion.reason || '')) {
+                        logDebug_ACU(`[ACU-V2 Visualizer] 非 template_only_root，跳过降级：${demotion.reason}`);
+                    }
+                    else if (!demotion.ok) {
+                        toastStore.error(`模板保存被降级预检阻止：${demotion.reason || 'template_only_root 降级失败。'}`, { muteable: false });
+                        return false;
+                    }
+                    const scopeOnlyBaseline = visualizer.templateBaseData && Object.keys(visualizer.templateBaseData).length > 0
+                        ? visualizer.templateBaseData
+                        : orderedData;
+                    commitResult = await commitCurrentFloorTemplateScopeOnly_ACU({
+                        isolationKey: guideIsolationKey,
+                        baselineData: scopeOnlyBaseline,
+                        candidateData: orderedData,
+                        guideData,
+                        templateSource: templateScopeSource,
+                        presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
+                        source: 'visualizer_v2_save',
+                        reason: 'visualizer_v2_template_scope_only',
+                        pristineOverride: true,
+                    });
+                    if (!commitResult.saved) {
+                        toastStore.error(commitResult.error || '模板/结构保存失败。', { muteable: false });
+                        return false;
+                    }
+                    // scope-only 不处理 deletedSheetKeys 硬删除：pristine 定义为无实质数据，但可能
+                    // 存在空 V2 frame 痕迹。删除后若残留 frame 痕迹，用 purge 清理；失败仅 warning，
+                    // 不回滚 scope-only（结构已正确，残留痕迹不影响回放）。
+                    if (deletedSheetKeys.length > 0) {
+                        try {
+                            const purgeResult = await purgeSheetKeysFromChatHistoryHard_ACU(deletedSheetKeys);
+                            if (purgeResult?.changed && isSqliteMode()) {
+                                await reloadStorageProvider();
+                            }
+                        }
+                        catch (error) {
+                            logWarn_ACU('[ACU-V2 Visualizer] scope-only 模板保存后 deletedSheetKeys 痕迹清理失败:', error);
+                            toastStore.warning('模板已保存，但已删除表的存储痕迹清理失败；请重新载入当前聊天后重试。', { muteable: false });
+                        }
+                    }
+                }
+                else {
+                    commitResult = await commitCurrentFloorTemplateChanges_ACU({
+                        isolationKey: guideIsolationKey,
+                        sheetChanges,
+                        deletedSheetKeys,
+                        guideData,
+                        syncTemplateScope: true,
+                        templateSource: templateScopeSource,
+                        presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
+                        source: 'visualizer_v2_save',
+                        reason: 'visualizer_v2_schema_change',
+                        baseRevision,
+                    });
+                    if (!commitResult.saved) {
+                        toastStore.error(commitResult.error || '模板/结构保存失败。', { muteable: false });
+                        return false;
+                    }
+                }
+                logDebug_ACU(`[ACU-V2 Visualizer] saveTemplateToCurrentChat 提交完成: mode=${switchMode.mode}, commitMode=${commitResult.mode || 'unknown'}, deletedSheetKeys=${deletedSheetKeys.join(',') || 'none'}。`);
                 try {
                     applyTemplateScopeForCurrentChat_ACU();
                 }
@@ -156242,10 +156942,16 @@ Expected function or array of functions, received type ${typeof value}.`
                     visualizer.markSaved('template-chat');
                 }
                 notifyTemplateRuntimeCommitted_ACU();
-                const removedCount = preparation.removedNullRowCount + (commitResult.removedNullRowCount || 0);
+                const removedCount = preparation.removedNullRowCount + (commitResult?.removedNullRowCount || 0);
+                const scopeOnlyMessage = switchMode.mode !== 'inherit' && commitResult.mode === 'scope_only'
+                    ? '（模板结构已同步到聊天配置，未写入任何数据帧）'
+                    : '';
                 toastStore.success(removedCount > 0
-                    ? `模板/结构已保存到当前聊天，已删除 ${deletedSheetKeys.length} 张表并移除 ${removedCount} 条缺少 row_id 的数据行。`
-                    : deletedSheetKeys.length > 0 ? `模板/结构已保存到当前聊天，已删除 ${deletedSheetKeys.length} 张表。` : '模板/结构已保存到当前聊天。', { muteable: false });
+                    ? `模板/结构已保存到当前聊天${scopeOnlyMessage}，已删除 ${deletedSheetKeys.length} 张表并移除 ${removedCount} 条缺少 row_id 的数据行。`
+                    : deletedSheetKeys.length > 0
+                        ? `模板/结构已保存到当前聊天${scopeOnlyMessage}，已删除 ${deletedSheetKeys.length} 张表。`
+                        : `模板/结构已保存到当前聊天${scopeOnlyMessage}。`, { muteable: false });
+                return true;
                 return true;
             });
         }

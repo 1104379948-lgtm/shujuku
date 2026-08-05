@@ -717,6 +717,91 @@ describe('purgeSheetKeysFromMessage_ACU', () => {
 
 });
 
+  it('Task5：checkpoint.data 无任何 sheet 键且无 manualRefillProgress 时移除 checkpoint（frame 退回无锚点形态）', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          storageFrame: {
+            version: 2,
+            headRevision: '1:removed',
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: { sheet_0: { name: '被删表' } },
+            },
+            logEntries: [{
+              seq: 1, commitRevision: '1:removed', filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'],
+              operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: { name: '被删表' }, reason: 'manual_crud' }],
+            }],
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
+    const frame = msg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
+    expect(frame.checkpoint).toBeUndefined();
+    expect(frame.logEntries).toEqual([]);
+    expect(frame.headRevision).toBeNull();
+  });
+
+  it('Task5 负例：checkpoint.data 仍有其他 sheet 键时保留 checkpoint', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: { sheet_0: { name: '被删表' }, sheet_1: { name: '保留表' } },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
+    const frame = msg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
+    expect(frame.checkpoint).toBeDefined();
+    expect(frame.checkpoint.data.sheet_0).toBeUndefined();
+    expect(frame.checkpoint.data.sheet_1).toEqual({ name: '保留表' });
+  });
+
+  it('Task5 例外：checkpoint 仍携带 manualRefillProgress 时保留 checkpoint', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: {},
+              manualRefillProgress: {
+                kind: 'manual_refill',
+                status: 'in_progress',
+                selectedSheetKeys: ['sheet_0'],
+                completedSheetMessageIndexByKey: { sheet_0: 2 },
+              },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
+    const frame = msg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
+    expect(frame.checkpoint).toBeDefined();
+    expect(frame.checkpoint.manualRefillProgress).toBeDefined();
+  });
+
+
 
 describe('purgeManualRefillIncrementalSheetKeysFromMessage_ACU', () => {
   it('只裁剪 V2 增量日志和重填进度，不动 checkpoint.data、scheduleSummary 与 independentData', () => {

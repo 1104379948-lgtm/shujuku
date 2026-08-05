@@ -87,6 +87,7 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
   });
   const deleteGenerated = vi.fn(async () => undefined);
   const deleteLocalData = vi.fn(async () => 2);
+  const purgeAllLocalData = vi.fn(async () => ({ saved: true, clearedMessageCount: 2, removedMetadata: ['TavernDB_ACU_InternalSheetGuide'] }));
   const cleanupWorldbook = vi.fn(async () => 1);
   const overrideLatest = vi.fn(async () => 3);
   const loadOrCreate = vi.fn(async () => ({ ok: true }));
@@ -216,6 +217,7 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     getChatArray_ACU: () => chat,
     deleteLocalDataInChatCore_ACU: deleteLocalData,
     overrideLatestLayerWithTemplateCore_ACU: overrideLatest,
+    purgeCurrentChatDatabaseState_ACU: purgeAllLocalData,
   }));
   vi.doMock('../../../src/service/table/table-service', () => ({
     loadOrCreateJsonTableFromChatHistory_ACU: loadOrCreate,
@@ -277,6 +279,7 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     removeHistory,
     deleteGenerated,
     deleteLocalData,
+    purgeAllLocalData,
     cleanupWorldbook,
     overrideLatest,
     loadOrCreate,
@@ -626,6 +629,121 @@ describe('DataMgmtPage', () => {
 
     mount.__resetAcuV2MountForTests();
   });
+
+  it('T5 删除所有本地数据按钮触发 purgeCurrentChatDatabaseState_ACU，不再触发旧 core', async () => {
+    const { mount, purgeAllLocalData, deleteLocalData } = await mountDataMgmtPage();
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    expect(button).not.toBeUndefined();
+    button!.click();
+    await clickDialogButton('删除所有本地数据');
+    await clickDialogButton('确认硬清空');
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(purgeAllLocalData).toHaveBeenCalledTimes(1);
+    expect(deleteLocalData).not.toHaveBeenCalled();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('T6 purge 成功后不调用 loadOrCreateJsonTableFromChatHistory 与 reloadStorageProvider（C2 no-reload 契约）', async () => {
+    const { mount, purgeAllLocalData, loadOrCreate, reloadStorageProvider } = await mountDataMgmtPage();
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    button!.click();
+    await clickDialogButton('删除所有本地数据');
+    await clickDialogButton('确认硬清空');
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(purgeAllLocalData).toHaveBeenCalledTimes(1);
+    expect(loadOrCreate).not.toHaveBeenCalled();
+    expect(reloadStorageProvider).not.toHaveBeenCalled();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('T7 purge 成功后不调用 cleanupWorldbookEntriesAfterDataDeletion（C3）', async () => {
+    const { mount, purgeAllLocalData, cleanupWorldbook } = await mountDataMgmtPage();
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    button!.click();
+    await clickDialogButton('删除所有本地');
+    await clickDialogButton('确认硬清空');
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(purgeAllLocalData).toHaveBeenCalledTimes(1);
+    expect(cleanupWorldbook).not.toHaveBeenCalled();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('T8 saved=false 时显示 error toast 且不显示成功文案', async () => {
+    const { mount, purgeAllLocalData } = await mountDataMgmtPage();
+    purgeAllLocalData.mockResolvedValueOnce({ saved: false, clearedMessageCount: 0, removedMetadata: [], error: '当前聊天记录为空。' });
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    button!.click();
+    await clickDialogButton('删除所有本地数据');
+    await clickDialogButton('确认硬清空');
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(document.querySelector('.acu-v2-toast--error')?.textContent).toContain('当前聊天记录为空');
+    expect(document.body.textContent || '').not.toContain('已删除所有本地数据');
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('T9 saved=true + cleanupWarnings 时显示 warning toast', async () => {
+    const { mount, purgeAllLocalData } = await mountDataMgmtPage();
+    purgeAllLocalData.mockResolvedValueOnce({
+      saved: true,
+      clearedMessageCount: 2,
+      removedMetadata: [],
+      cleanupWarnings: ['世界书清理失败'],
+    });
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    button!.click();
+    await clickDialogButton('所有本地数据');
+    await clickDialogButton('确认硬清空');
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('本地数据已全部硬清空');
+    expect(document.body.textContent || '').toContain('世界书清理失败');
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('T10 all 按钮两级确认；任一级取消则不调用服务', async () => {
+    const { mount, purgeAllLocalData } = await mountDataMgmtPage();
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    button!.click();
+    await clickDialogButton('删除所有本地数据');
+    // 第二级点取消（关闭对话框）
+    const layer = document.querySelector<HTMLElement>('.acu-dialog-layer');
+    const cancelButton = Array.from(layer!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('取消'));
+    expect(cancelButton).toBeDefined();
+    cancelButton!.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(purgeAllLocalData).not.toHaveBeenCalled();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
 
   it('删除当前标识注入条目会调用世界书注入条目删除链路', async () => {
     const { mount, deleteGenerated } = await mountDataMgmtPage();

@@ -123,6 +123,7 @@ vi.mock('../../../src/service/table/table-write-transaction', () => ({
 import {
   commitCurrentFloorTemplateChanges_ACU,
   commitCurrentFloorTemplateScopeOnly_ACU,
+  frameHasSuffixReplayArtifact_ACU,
   persistNullRowCleanupShards_ACU,
   persistTableMutationLogBatchV2_ACU,
   persistTableSheetCheckpointV2_ACU,
@@ -4635,3 +4636,58 @@ describe('collectV2FullCheckpointIndices_ACU / assertSingleActiveFullCheckpointV
     expect(assertSingleActiveFullCheckpointV2_ACU(mocks.chat, '', 'test')).toBeNull();
   });
 });
+
+describe('frameHasSuffixReplayArtifact_ACU', () => {
+  const fullCheckpoint = { kind: 'full', createdAt: 1, reason: 'init', data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } };
+  const intrinsicShard = { kind: 'sheet_full', createdAt: 1, reason: 'schema_change', sheetKey: 'sheet_a', data: sheetA };
+
+  it('自有 full checkpoint + 无 timeline 的 per-sheet（intrinsic）时无后缀 artifact', () => {
+    const frame = { version: 2, checkpoint: fullCheckpoint, perSheetCheckpoints: { sheet_a: intrinsicShard } };
+    expect(frameHasSuffixReplayArtifact_ACU(frame as any)).toBe(false);
+  });
+
+  it('per-sheet 携带 timeline（补挂收敛锚点）时视为真实后缀 artifact', () => {
+    const frame = {
+      version: 2,
+      checkpoint: fullCheckpoint,
+      perSheetCheckpoints: {
+        sheet_a: { ...intrinsicShard, timeline: { kind: 'sheet_introduction', activateAtMessageIndex: 5, afterSeq: 3 } },
+      },
+    };
+    expect(frameHasSuffixReplayArtifact_ACU(frame as any)).toBe(true);
+  });
+
+  it('无自有 full checkpoint 但存在 per-sheet 时视为悬空 artifact', () => {
+    const frame = { version: 2, perSheetCheckpoints: { sheet_a: intrinsicShard } };
+    expect(frameHasSuffixReplayArtifact_ACU(frame as any)).toBe(true);
+  });
+
+  it('自有 full checkpoint + headRevision 时无后缀 artifact', () => {
+    const frame = { version: 2, checkpoint: fullCheckpoint, headRevision: '3:existing' };
+    expect(frameHasSuffixReplayArtifact_ACU(frame as any)).toBe(false);
+  });
+
+  it('无 full checkpoint + headRevision 时视为悬空 artifact', () => {
+    const frame = { version: 2, headRevision: '3:existing' };
+    expect(frameHasSuffixReplayArtifact_ACU(frame as any)).toBe(true);
+  });
+
+  it('logEntries 非空即视为真实后缀 artifact', () => {
+    const frame = { version: 2, checkpoint: fullCheckpoint, logEntries: [makeEntry()] };
+    expect(frameHasSuffixReplayArtifact_ACU(frame as any)).toBe(true);
+  });
+
+  it('manualRefillProgress 存在即视为真实后缀 artifact', () => {
+    const frame = {
+      version: 2,
+      checkpoint: fullCheckpoint,
+      manualRefillProgress: { kind: 'manual_refill', status: 'in_progress', selectedSheetKeys: ['sheet_b'] },
+    };
+    expect(frameHasSuffixReplayArtifact_ACU(frame as any)).toBe(true);
+  });
+
+  it('空 frame（无 checkpoint、无 shard、无 revision）无后缀 artifact', () => {
+    expect(frameHasSuffixReplayArtifact_ACU({ version: 2 } as any)).toBe(false);
+  });
+});
+

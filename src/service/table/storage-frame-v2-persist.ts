@@ -1,6 +1,6 @@
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { advanceProvisionalBridgeCommitProgress_ACU, authorizeManualCatchUpBucketWrite_ACU, readActiveProvisionalBridge_ACU } from './manual-catch-up-provisional-bridge';
-import { cloneIsolatedData_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+import { cloneIsolatedData_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import type { StorageMode } from '../../shared/table-storage-provider';
@@ -18,6 +18,7 @@ import { createSheetInsertPlan, generateDDL, validateDDLTextAgainstHeaders_ACU }
 import { hydrateTableDataStrict_ACU } from './sqlite-template-validation';
 import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from './canonical-checkpoint-builder';
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
+import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
 
 export interface TableCheckpointGenerationConfig_ACU {
   maxEntriesAfterCheckpoint: number;
@@ -719,6 +720,52 @@ function findLatestFullCheckpoint_ACU(
   return { message: chat[index], index, checkpoint: tagData.storageFrame.checkpoint };
 }
 
+/**
+ * 统一「bounded 与 unbounded」两种视角的写目标回放根准入检查。
+ *
+ * 背景：persist 层在 `persistTableMutationLogV2Core_ACU`（1908）与 sheet checkpoint
+ * 路径（2702）对「写目标早于最新 full checkpoint」fail-fast，但该检查发生在 AI 调用
+ * 之后——AI 已消耗 token 才在写入阶段暴露。本函数把同一判定前移到编排层：任何写目标
+ * 早于回放根（最新 full checkpoint）的 bucket，在发起 AI 请求前就必须被阻止。
+ *
+ * 视角说明：
+ * - bounded（目标楼层及之前是否存在 anchor）：`hasAnyV2Checkpoint_ACU(chat, key, maxMessageIndex)`
+ *   只能回答「有没有」，无法区分「目标自身就是根」与「目标早于根」——对目标=根放行、
+ *   对目标<根阻止，必须看 unbounded 的 `findLatestFullCheckpoint_ACU` 才能区分。
+ * - unbounded：`findLatestFullCheckpoint_ACU` 给出全局最新 full checkpoint 楼层。
+ *
+ * 例外：provisional bridge run（manual catch-up 追平场景，写目标可合法早于原 full 根，
+ * 见 persist 层 2293-2295 的 bridge 写入准入）——`manualCatchUpRunId` 匹配 active bridge
+ * 时放行，避免把 bridge 的合法前移写误判为拓扑越界。
+ *
+ * @returns 可放行时返回 `{ allow: true }`；否则返回 `{ allow: false, reason, targetMessageIndex, latestFullCheckpointIndex }`
+ */
+export function assertWriteTargetNotBeforeReplayRoot_ACU(options: {
+  chat: any[];
+  isolationKey: string;
+  targetMessageIndex: number;
+  /** manual catch-up provisional bridge run 的 runId；匹配 active bridge 时放行。 */
+  manualCatchUpRunId?: string;
+}): { allow: true; reason?: never } | { allow: false; reason: string; targetMessageIndex: number; latestFullCheckpointIndex: number } {
+  const { chat, isolationKey, targetMessageIndex, manualCatchUpRunId } = options;
+  if (!Array.isArray(chat) || chat.length === 0) return { allow: true };
+  if (!Number.isInteger(targetMessageIndex) || targetMessageIndex < 0) return { allow: true };
+  const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
+  if (!latestFullCheckpoint) return { allow: true };
+  if (targetMessageIndex >= latestFullCheckpoint.index) return { allow: true };
+  // provisional bridge 例外：active bridge 且 runId 匹配 → 放行
+  if (manualCatchUpRunId && readActiveProvisionalBridge_ACU(chat, isolationKey)?.runId === manualCatchUpRunId) {
+    return { allow: true };
+  }
+  return {
+    allow: false,
+    reason: `写目标早于 V2 回放根且无有效 provisional bridge：targetMessageIndex=${targetMessageIndex}, latestFullCheckpointIndex=${latestFullCheckpoint.index}。`,
+    targetMessageIndex,
+    latestFullCheckpointIndex: latestFullCheckpoint.index,
+  };
+}
+
+
 function getLogEntriesAfterLatestCheckpoint_ACU(chat: any[], isolationKey: string): TableMutationLogEntryV2_ACU[] {
   const latestCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
   const latestCheckpointIndex = latestCheckpoint?.index ?? -1;
@@ -875,7 +922,143 @@ type TemplateCommitStorageState_ACU =
   | { kind: 'pristine_without_checkpoint' }
   | { kind: 'existing_full_checkpoint'; checkpoint: { message: any; index: number; checkpoint: TableCheckpointV2_ACU } }
   | { kind: 'legacy_persisted_data'; details: string[] }
-  | { kind: 'orphan_v2_artifacts'; details: string[] };
+  | { kind: 'orphan_v2_artifacts'; details: string[] }
+  | {
+    kind: 'template_only_root';
+    checkpoint: { message: any; index: number; checkpoint: TableCheckpointV2_ACU };
+    details: string[];
+  };
+
+/**
+ * 判定单个 Sheet 是否为 header-only（最多表头行，不含数据行）。
+ * 与 chat-service 的 isSafeHeaderOnlyResetCheckpoint_ACU 等价判定保持一致，
+ * 但这里以 isObjectRecord_ACU 先做结构保护，避免畸形结构被误判为 header-only。
+ */
+function sheetIsHeaderOnly_ACU(sheet: unknown): boolean {
+  if (!isObjectRecord_ACU(sheet)) return false;
+  const content = (sheet as { content?: unknown }).content;
+  if (!Array.isArray(content)) return false;
+  return content.length <= 1;
+}
+
+/**
+ * 判定 frame 是否携带「真实后缀 replay artifact」。
+ *
+ * 「真实后缀」= 不属于该 frame 自身 checkpoint 的 replay 证据：
+ * - per-sheet checkpoint 带 timeline → 后续补挂的收敛锚点/rebase
+ * - per-sheet checkpoint / headRevision 但该 frame 无自有 full checkpoint → 悬空 artifact
+ * - intrinsic（随自有 full checkpoint 一起写入、无 timeline 的 per-sheet；
+ *   自有 full checkpoint 下的 headRevision）→ 不算
+ *
+ * 本函数是 persist 层 template_only_root 判定（条件 6/7）与 chat-service 追平
+ * preflight（hasV2ReplayArtifact_ACU）的**唯一**判定来源。两层各自实现会漂移出
+ * 「persist 认为可降级、preflight 认为 blocked」的夹缝，故此处导出共用。
+ */
+export function frameHasSuffixReplayArtifact_ACU(frame: TableStorageFrameV2_ACU): boolean {
+  if ((frame.logEntries || []).length > 0) return true;
+  if (frame.manualRefillProgress !== undefined) return true;
+  const hasOwnFullCheckpoint = frame.checkpoint?.kind === 'full';
+  for (const checkpoint of Object.values(frame.perSheetCheckpoints || {})) {
+    if (!hasOwnFullCheckpoint) return true; // 无根却有单表锚点 = 悬空 artifact
+    if ((checkpoint as TableSheetCheckpointV2_ACU)?.timeline !== undefined) return true; // 补挂 = 真实后缀
+  }
+  const hr = frame.headRevision;
+  const hasHeadRevision = hr !== undefined && hr !== null && (typeof hr !== 'string' || hr.length > 0);
+  if (hasHeadRevision && !hasOwnFullCheckpoint) return true;
+  return false;
+}
+
+/**
+ * template_only_root 七项判定：
+ * 1. 全聊天该 isolationKey 下 full checkpoint 数量恰为 1
+ * 2. checkpoint.reason ∈ {'init', 'migration'}
+ * 3. validateCanonicalCheckpoint_ACU(checkpoint).valid === true
+ * 4. header-only：checkpoint.data 中每个 sheet_* 的 content.length <= 1
+ * 5. 该 frame logEntries.length === 0
+ * 6. 该 frame 的所有 perSheetCheckpoints 均为 intrinsic（无 timeline 且 data.content.length <= 1）
+ * 7. 该 checkpoint 之后不存在任何携带真实后缀 artifact 的 frame
+ */
+function classifyAsTemplateOnlyRoot_ACU(
+  chat: any[],
+  isolationKey: string,
+  checkpoint: { message: any; index: number; checkpoint: TableCheckpointV2_ACU },
+  frame: TableStorageFrameV2_ACU,
+): { kind: 'template_only_root'; checkpoint: { message: any; index: number; checkpoint: TableCheckpointV2_ACU }; details: string[] } | null {
+  const details: string[] = [];
+  // 条件 1：唯一 full checkpoint
+  const fullIndices = collectV2FullCheckpointIndices_ACU(chat, isolationKey);
+  if (fullIndices.length !== 1) {
+    details.push(`full_checkpoint_count=${fullIndices.length}`);
+    return null;
+  }
+  if (fullIndices[0] !== checkpoint.index) {
+    details.push(`latest_full_checkpoint_index=${fullIndices[0]} !== ${checkpoint.index}`);
+    return null;
+  }
+  // 条件 2：reason ∈ {init, migration}
+  if (!['init', 'migration'].includes(checkpoint.checkpoint.reason)) {
+    details.push(`reason=${checkpoint.checkpoint.reason}`);
+    return null;
+  }
+  // 条件 3：canonical 校验
+  if (!validateCanonicalCheckpoint_ACU(checkpoint.checkpoint).valid) {
+    details.push('canonical_invalid');
+    return null;
+  }
+  // 条件 4：checkpoint.data header-only
+  const data = checkpoint.checkpoint.data;
+  if (!isObjectRecord_ACU(data)) {
+    details.push('checkpoint_data_not_object');
+    return null;
+  }
+  const sheetKeys = Object.keys(data).filter(key => key.startsWith('sheet_'));
+  if (sheetKeys.length === 0) {
+    details.push('no_sheet_keys');
+    return null;
+  }
+  if (sheetKeys.some(key => !sheetIsHeaderOnly_ACU(data[key]))) {
+    details.push('checkpoint_has_data_rows');
+    return null;
+  }
+  // 条件 5：logEntries 为空
+  if (!Array.isArray(frame.logEntries) || frame.logEntries.length > 0) {
+    details.push('log_entries_non_empty');
+    return null;
+  }
+  // 条件 6：perSheetCheckpoints 全部 intrinsic
+  const perSheet = frame.perSheetCheckpoints || {};
+  if (!isObjectRecord_ACU(perSheet)) {
+    details.push('per_sheet_checkpoints_malformed');
+    return null;
+  }
+  for (const sheetKey of Object.keys(perSheet)) {
+    const sheetCheckpoint = perSheet[sheetKey] as TableSheetCheckpointV2_ACU;
+    if (!isObjectRecord_ACU(sheetCheckpoint)) {
+      details.push(`per_sheet_${sheetKey}_malformed`);
+      return null;
+    }
+    if (sheetCheckpoint.timeline !== undefined) {
+      details.push(`per_sheet_${sheetKey}_has_timeline`);
+      return null;
+    }
+    if (!sheetIsHeaderOnly_ACU(sheetCheckpoint.data)) {
+      details.push(`per_sheet_${sheetKey}_has_data_rows`);
+      return null;
+    }
+  }
+  // 条件 7：该 checkpoint 之后不存在任何携带真实后缀 artifact 的 frame
+  for (let index = checkpoint.index + 1; index < chat.length; index += 1) {
+    const message = chat[index];
+    if (!message || message.is_user) continue;
+    const tagData = readIsolatedTagData_ACU(message, isolationKey) as any;
+    if (!isV2TagData_ACU(tagData)) continue;
+    if (frameHasSuffixReplayArtifact_ACU(tagData.storageFrame)) {
+      details.push(`suffix_artifact_after_root=${index}`);
+      return null;
+    }
+  }
+  return { kind: 'template_only_root', checkpoint, details };
+}
 
 function classifyTemplateCommitStorageState_ACU(
   chat: any[],
@@ -912,7 +1095,17 @@ function classifyTemplateCommitStorageState_ACU(
   }
 
   if (legacyDetails.length > 0) return { kind: 'legacy_persisted_data', details: legacyDetails };
-  if (latestCheckpoint) return { kind: 'existing_full_checkpoint', checkpoint: latestCheckpoint };
+  if (latestCheckpoint) {
+    // 只保留“最新”的 full checkpoint 作为候选：若存在多个，classifyAsTemplateOnlyRoot_ACU
+    // 会在条件 1（唯一性）拒绝，从而维持 existing_full_checkpoint 语义。
+    const isolatedContainer = readIsolatedDataContainer_ACU(latestCheckpoint.message);
+    const frame = isolatedContainer?.[isolationKey]?.storageFrame;
+    if (isObjectRecord_ACU(frame)) {
+      const templateOnlyRoot = classifyAsTemplateOnlyRoot_ACU(chat, isolationKey, latestCheckpoint, frame);
+      if (templateOnlyRoot) return templateOnlyRoot;
+    }
+    return { kind: 'existing_full_checkpoint', checkpoint: latestCheckpoint };
+  }
   if (v2FrameWithoutCheckpointDetails.length > 0) {
     return { kind: 'orphan_v2_artifacts', details: [...v2FrameWithoutCheckpointDetails, ...orphanDetails] };
   }
@@ -932,6 +1125,160 @@ function classifyTemplateCommitStorageStateAfterDeletedSheets_ACU(
   }
   return classifyTemplateCommitStorageState_ACU(simulatedChat, isolationKey);
 }
+
+/**
+ * 将「template_only_root」降级为 scope-only 状态。
+ *
+ * 背景：旧版 V2 可视化编辑器在 pristine 会话中无条件写 full checkpoint（header-only），
+ * 在聊天末尾立起回放根，导致后续追平撞上「write target precedes the latest full checkpoint」
+ * fail-fast（F2）。Task 1 只防新增，本函数修复既存：把这种可证明安全的 header-only init/migration
+ * 根从聊天中移除，恢复为无 checkpoint 的 scope-only 拓扑。
+ *
+ * 安全性保障：
+ * - 仅当 classifyTemplateCommitStorageState_ACU 判定为 template_only_root（7 项条件全满足）才执行
+ * - 降级前后做 replay 指纹比对（fail-closed）：降级后每张表的 content 必须与原 checkpoint header-only
+ *   content 等价，不等价则拒绝、零写入
+ * - 原 frame 完整备份到 recoveryBackup（recoveryKind: 'demoted_template_only_root'）
+ * - saveChatToHostStrict_ACU 失败则完整还原内存并返回失败
+ */
+export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
+  isolationKey?: string;
+  requestId?: string;
+} = {}): Promise<{ ok: boolean; reason?: string; demoted?: boolean }> {
+  const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+  try {
+    return await runTableWriteTransaction_ACU({
+      source: 'system_cleanup',
+      reason: 'demoteTemplateOnlyRootToScopeOnly',
+      isolationKey,
+      writeSet: [{ kind: 'all' }],
+      maintenanceMode: 'exclusive',
+    }, async () => {
+      const chat = getChatArray_ACU();
+      if (!Array.isArray(chat) || chat.length === 0) {
+        return { ok: false, reason: '聊天记录为空，无法执行 template_only_root 降级。' };
+      }
+      const storageState = classifyTemplateCommitStorageState_ACU(chat, isolationKey);
+      if (storageState.kind !== 'template_only_root') {
+        return {
+          ok: false,
+          reason: storageState.kind === 'existing_full_checkpoint'
+            ? '检测到含真实数据或后缀 artifact 的 full checkpoint，拒绝降级，零写入。'
+            : `当前状态不是 template_only_root（实际：${storageState.kind}），拒绝降级，零写入。`,
+        };
+      }
+
+      const { message: rootMessage, index: rootIndex, checkpoint: rootCheckpoint } = storageState.checkpoint;
+      const isolatedContainer = readIsolatedDataContainer_ACU(rootMessage) || {};
+      const tagData = isolatedContainer[isolationKey] as any;
+      if (!isV2TagData_ACU(tagData) || !isObjectRecord_ACU(tagData.storageFrame)) {
+        return { ok: false, reason: 'template_only_root 帧结构异常，拒绝降级，零写入。' };
+      }
+      const sourceFrame = tagData.storageFrame as TableStorageFrameV2_ACU;
+      const backupFrame = deepClone_ACU(sourceFrame);
+
+      // 构造候选聊天：移除该 frame 的 checkpoint / perSheetCheckpoints / headRevision。
+      const candidateChat = deepClone_ACU(chat);
+      const candidateContainer = readIsolatedDataContainer_ACU(candidateChat[rootIndex]) || {};
+      // 写 recoveryBackup 必须放在「整条移除」判空之前：正常路径 frame 降级为
+      // {version:2, logEntries:[]} 标准空帧（tagData 保留，backup 随 tagData 落盘）；
+      // 仅畸形空壳（连 logEntries 都没有）才在下方整条移除 tagData，此时 backup 无处
+      // 安放，fail-closed 拒绝降级。先写 backup 消除对判空顺序的依赖。
+      const backupTagData = candidateContainer[isolationKey];
+      if (!backupTagData || typeof backupTagData !== 'object' || !isObjectRecord_ACU(backupTagData.storageFrame)) {
+        return { ok: false, reason: 'template_only_root 降级候选 tagData 缺失，拒绝写入，零写入。' };
+      }
+      backupTagData.recoveryBackup = {
+        version: 1,
+        createdAt: Date.now(),
+        recoveryKind: 'demoted_template_only_root',
+        sourceMessageIndex: rootIndex,
+        storageFrame: backupFrame,
+      } satisfies TableV2RecoveryBackup_ACU;
+      const candidateTagData = candidateContainer[isolationKey] as any;
+      if (!isV2TagData_ACU(candidateTagData) || !isObjectRecord_ACU(candidateTagData.storageFrame)) {
+        return { ok: false, reason: 'template_only_root 候选帧结构异常，拒绝降级，零写入。' };
+      }
+      const candidateFrame = candidateTagData.storageFrame as TableStorageFrameV2_ACU;
+      delete candidateFrame.checkpoint;
+      delete candidateFrame.perSheetCheckpoints;
+      delete candidateFrame.headRevision;
+      const candidateRemainingKeys = Object.keys(candidateFrame);
+      const candidateIsEmptyFrame = candidateRemainingKeys.length === 0
+        || (candidateRemainingKeys.length === 1 && candidateRemainingKeys[0] === 'version');
+      if (candidateIsEmptyFrame) {
+        delete candidateContainer[isolationKey];
+        if (Object.keys(candidateContainer).length === 0) delete candidateChat[rootIndex].TavernDB_ACU_IsolatedData;
+        else candidateChat[rootIndex].TavernDB_ACU_IsolatedData = candidateContainer;
+      } else {
+        candidateChat[rootIndex].TavernDB_ACU_IsolatedData = candidateContainer;
+      }
+
+      // 降级后候选回放结果。
+      // 正常降级形态的候选帧是干净空帧（{version:2, logEntries:[]}）：
+      // hasUnanchoredReplayArtifacts_ACU 判定为 false，replay 引擎在
+      // storage-frame-v2-replay.ts 直接返回 null（连 temporary baseline 分支都到不了）。
+      // 此时回退到 resolveHeaderOnlyTemplateSnapshot_ACU —— 降级后聊天无 full
+      // checkpoint，模板临时基线（scope/全局模板派生）正是其唯一结构来源，
+      // 与计划「候选回放退化为模板临时基线」的口径一致。
+      // 异常候选（replay 实际产出兼容修复）仍 fail-closed，不回退。
+      let replayAfter;
+      try {
+        replayAfter = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+          updateRuntimeState: false,
+          compatibilityMode: 'disabled',
+        });
+      } catch (error: any) {
+        return { ok: false, reason: `template_only_root 降级后候选 replay 校验失败：${error?.message || String(error)}` };
+      }
+      if (!replayAfter) {
+        const templateBaseline = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
+        if (!templateBaseline) {
+          return { ok: false, reason: 'template_only_root 降级后候选 replay 无法校验，且当前模板基线不可得，拒绝降级，零写入。' };
+        }
+        replayAfter = { data: templateBaseline, baseKind: 'temporary_template_baseline' };
+      }
+      if (replayAfter.requiresCheckpointConvergence || replayAfter.compatibilityRepairs?.length) {
+        return { ok: false, reason: 'template_only_root 降级后候选 replay 仍依赖兼容修复，拒绝降级，零写入。' };
+      }
+
+      // 指纹比对（fail-closed）：候选回放的每张表 content 必须与原 checkpoint 的
+      // header-only content 等价。降级后无 full checkpoint，回放退化为模板临时基线
+      // （resolveHeaderOnlyTemplateSnapshot_ACU 由 guide 派生），因此不能拿“降级前
+      // replay vs 降级后 replay”直接比（两者来源不同）；正确口径是候选回放的 content
+      // 逐表与原 checkpoint 的 header-only content 等价。
+      const afterFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(replayAfter.data));
+      const headerOnlyProjection = deepClone_ACU(rootCheckpoint.data);
+      for (const sheetKey of Object.keys(headerOnlyProjection)) {
+        if (!sheetKey.startsWith('sheet_')) continue;
+        const sheet = headerOnlyProjection[sheetKey] as Sheet_ACU;
+        sheet.content = [deepClone_ACU(sheet.content?.[0])];
+      }
+      const expectedFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(headerOnlyProjection as TableDataObject_ACU));
+      if (afterFingerprint !== expectedFingerprint) {
+        return { ok: false, reason: 'template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。' };
+      }
+
+      // 真实写回：直接应用候选的最终容器形态，避免在真实对象上重复判空造成双写不一致。
+      // 正常路径（frame 降级为 {version:2, logEntries:[]} 标准空帧）保留 tagData，
+      // recoveryBackup 随 tagData 一起落盘；仅畸形空壳才整条移除 tagData。
+      const candidateFinalContainer = candidateChat[rootIndex].TavernDB_ACU_IsolatedData;
+      if (candidateFinalContainer === undefined) delete rootMessage.TavernDB_ACU_IsolatedData;
+      else rootMessage.TavernDB_ACU_IsolatedData = candidateFinalContainer;
+      writeMessageIdentity_ACU(rootMessage, {
+        enabled: settings_ACU.dataIsolationEnabled,
+        code: settings_ACU.dataIsolationCode,
+      });
+
+      logDebug_ACU(`[V2 Persist] template_only_root 降级完成: requestId=${options.requestId || 'unknown'}, rootIndex=${rootIndex}, reason=${rootCheckpoint.reason}, fingerprint=${afterFingerprint}。`);
+      await saveChatToHostStrict_ACU();
+      return { ok: true, demoted: true };
+    });
+  } catch (error: any) {
+    return { ok: false, reason: error?.message || String(error) };
+  }
+}
+
 
 
 function isPlainObjectRecord_ACU(value: unknown): value is Record<string, any> {

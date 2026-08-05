@@ -2031,6 +2031,69 @@ describe('deleteLocalDataInChatCore_ACU', () => {
     expect(chat[0].TavernDB_ACU_TableHeaderGuide).toBe(guide);
   });
 
+  it('T1 字段清单防漂移：删除函数处理集合与权威清单差集恰为 IsolatedData', async () => {
+    const { MESSAGE_TABLE_FIELDS_ACU } = await import('../../../src/data/repositories/chat-message-data-repo');
+    const handled = new Set([
+      'TavernDB_ACU_Data',
+      'TavernDB_ACU_SummaryData',
+      'TavernDB_ACU_IndependentData',
+      'TavernDB_ACU_Identity',
+      'TavernDB_ACU_LocalMessageAnchor',
+      '_acu_local_template_base_state_seeded',
+      'TavernDB_ACU_IsolatedData',
+    ]);
+    // ModifiedKeys/UpdateGroupKeys 是更新追踪元数据，非数据本体，刻意不置 modified；此处只断言数据字段差集。
+    const dataFields = new Set(MESSAGE_TABLE_FIELDS_ACU.filter(field => !['TavernDB_ACU_ModifiedKeys', 'TavernDB_ACU_UpdateGroupKeys'].includes(field)));
+    const missing = [...dataFields].filter(field => !handled.has(field));
+    expect(missing).toEqual([]);
+    expect([...dataFields].filter(field => field === 'TavernDB_ACU_IsolatedData')).toEqual(['TavernDB_ACU_IsolatedData']);
+  });
+
+  it('T2 mode=all 全范围后 LocalMessageAnchor 与 seed 标记均被删除', async () => {
+    const chat: any[] = [
+      { is_user: true },
+      {
+        is_user: false,
+        TavernDB_ACU_Data: { sheet_0: {} },
+        TavernDB_ACU_LocalMessageAnchor: { messageIndex: 1, sheetKey: 'sheet_0' },
+        _acu_local_template_base_state_seeded: 'GREETING_LOCAL_BASE_STATE_MARKER',
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const count = await deleteLocalDataInChatCore_ACU('all');
+    expect(count).toBe(1);
+    expect(chat[1].TavernDB_ACU_LocalMessageAnchor).toBeUndefined();
+    expect(chat[1]._acu_local_template_base_state_seeded).toBeUndefined();
+    expect(mockSaveChatToHost).toHaveBeenCalledOnce();
+  });
+
+  it('T3 mode=current 且启用隔离时只删当前隔离键分片，其他标识数据保留', async () => {
+    mockSettings.dataIsolationEnabled = true;
+    mockSettings.dataIsolationCode = 'tag_A';
+    mockGetCurrentIsolationKey.mockReturnValue('tag_A');
+    const chat: any[] = [
+      { is_user: false, TavernDB_ACU_IsolatedData: { tag_A: { independentData: {} }, tag_B: { independentData: {} } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { tag_B: { independentData: {} } } },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const count = await deleteLocalDataInChatCore_ACU('current');
+    expect(count).toBe(1);
+    expect(chat[0].TavernDB_ACU_IsolatedData.tag_A).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData.tag_B).toBeDefined();
+    expect(chat[1].TavernDB_ACU_IsolatedData.tag_B).toBeDefined();
+  });
+
+  it('T4 仅剩 seed 标记可删时 deletedCount>0 且触发 saveChatToHost', async () => {
+    const chat: any[] = [
+      { is_user: true },
+      { is_user: false, _acu_local_template_base_state_seeded: 'GREETING_LOCAL_BASE_STATE_MARKER' },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const count = await deleteLocalDataInChatCore_ACU('all');
+    expect(count).toBe(1);
+    expect(chat[1]._acu_local_template_base_state_seeded).toBeUndefined();
+    expect(mockSaveChatToHost).toHaveBeenCalledOnce();
+  });
 
 });
 

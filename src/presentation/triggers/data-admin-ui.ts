@@ -6,7 +6,7 @@ import { showToastr_ACU } from '../theme/toast';
 import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
-import { getChatArray_ACU, saveChatToHost_ACU, deleteLocalDataInChatCore_ACU, overrideLatestLayerWithTemplateCore_ACU } from '../../service/chat/chat-service';
+import { getChatArray_ACU, saveChatToHost_ACU, deleteLocalDataInChatCore_ACU, overrideLatestLayerWithTemplateCore_ACU, purgeCurrentChatDatabaseState_ACU } from '../../service/chat/chat-service';
 import { isWorldbookApiAvailable_ACU } from '../../service/worldbook/worldbook-service';
 import { cleanupWorldbookEntriesAfterDataDeletion_ACU } from '../../service/worldbook/worldbook-cleanup';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../../service/runtime/state-manager';
@@ -152,6 +152,40 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
           showToastr_ACU('info', '没有发现符合删除条件的数据。');
       }
   }
+
+  /**
+   * 硬清空当前聊天全部本地数据库状态（legacy popup 入口）。
+   *
+   * 与 deleteLocalDataInChat_ACU 的收尾刻意不同（C 方案 C2/C3）：
+   * purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
+   * clearTableRuntimeWithoutReload_ACU 置为空态，并明令绝不加载聊天/模板/Guide；
+   * 此处不再调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider /
+   * refreshMergedDataAndNotifyWithUI_ACU，否则会把刚清空的状态从模板/guide 重新物化回来；
+   * 世界书条目清理也由 purge 内部完成（cleanupDatabaseGeneratedWorldbookEntries_ACU），
+   * 结果进入 result.cleanupWarnings。
+   */
+  export async function purgeAllLocalDataInChat_ACU(): Promise<void> {
+      try {
+          const result = await purgeCurrentChatDatabaseState_ACU();
+          if (!result.saved) {
+              showToastr_ACU('error', result.error || '硬清空失败，详情见运行日志。', { timeOut: 10000 });
+              return;
+          }
+          if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
+              updateCardUpdateStatusDisplay_ACU();
+          }
+          const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
+          if (result.cleanupWarnings?.length) {
+              showToastr_ACU('warning', `已硬清空全部本地数据（${result.clearedMessageCount} 条消息）${removed}。警告：${result.cleanupWarnings[0]}`, { timeOut: 10000 });
+          } else {
+              showToastr_ACU('success', `已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`);
+          }
+      } catch (error) {
+          logError_ACU('硬清空全部本地数据失败。', error);
+          showToastr_ACU('error', `硬清空失败：${error?.message || '未知错误'}`, { timeOut: 10000 });
+      }
+  }
+
 
   export async function migrateLegacySummaryVectorIndex_ACU() {
     try {

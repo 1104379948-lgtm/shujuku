@@ -34,9 +34,11 @@ import {
   resolveTableHistoryStateFromChat_ACU,
 } from '../../../service/table/table-history';
 import { isSqliteMode } from '../../../service/table/storage-mode';
-import { commitCurrentFloorTemplateChanges_ACU } from '../../../service/table/storage-frame-v2-persist';
+import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU, demoteTemplateOnlyRootToScopeOnly_ACU } from '../../../service/table/storage-frame-v2-persist';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../../../service/table/table-write-transaction';
 import { preflightSchemaMigrations_ACU } from '../../../service/table/schema-migration-preflight';
+import { resolveTemplateSwitchMode_ACU } from '../../../service/table/template-switch-mode-resolver';
+import type { TableDataObject_ACU } from '../../../shared/models/table-data';
 import { normalizeCanonicalTableRows_ACU } from '../../../shared/canonical-row-normalizer';
 import { reloadStorageProvider } from '../../../service/table/table-storage-strategy';
 import { applyTemplateScopeForCurrentChat_ACU } from '../../../service/settings/settings-service';
@@ -721,22 +723,86 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
           operations,
         };
       });
-      const commitResult = await commitCurrentFloorTemplateChanges_ACU({
-        isolationKey: guideIsolationKey,
-        sheetChanges,
-        deletedSheetKeys,
-        guideData,
-        syncTemplateScope: true,
-        templateSource: templateScopeSource,
-        presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
-        source: 'visualizer_v2_save',
-        reason: 'visualizer_v2_schema_change',
-        baseRevision,
-      });
-      if (!commitResult.saved) {
-        toastStore.error(commitResult.error || '模板/结构保存失败。', { muteable: false });
+      // 会话级模板提交分流（与 template-preset-service 的 pristine 策略对齐）：
+      // - pristine / template_only_root：空数据会话，模板结构只落聊天级 guide + scope，
+      //   绝不写 storage frame（零 full checkpoint），避免在聊天末尾立起回放根导致
+      //   后续追平撞 fail-fast。
+      // - inherit：有实质数据，走 commitCurrentFloorTemplateChanges_ACU（原有语义）。
+      // - blocked：状态无法判定或已损坏，fail-closed 阻止。
+      const switchMode = resolveTemplateSwitchMode_ACU(getChatArray_ACU(), guideIsolationKey);
+      logDebug_ACU(`[ACU-V2 Visualizer] saveTemplateToCurrentChat 分流: mode=${switchMode.mode}${switchMode.mode === 'blocked' ? `, reason=${switchMode.reason}` : ''}, deletedSheetKeys=${deletedSheetKeys.join(',') || 'none'}, changedSheetKeys=${changedSheetKeys.join(',') || 'none'}。`);
+      if (switchMode.mode === 'blocked') {
+        toastStore.error(`模板保存已阻止：${switchMode.reason}`, { muteable: false });
         return false;
       }
+      let commitResult;
+      if (switchMode.mode === 'pristine') {
+        // 已损坏聊天的自愈降级：resolveTemplateSwitchMode_ACU 只判 pristine/inherit/blocked，
+        // 但聊天可能处于「pristine 判定 + 残留 header-only template root」的夹缝（F7）。
+        // 此时降级函数内部会重新按 7 项条件分类：非 template_only_root 返回 ok:false 且
+        // 零写入，仅「真的是可降级 root」才移除。因此这里无条件尝试降级，失败但属于
+        // 「不是 template_only_root」则跳过，继续 scope-only。
+        const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({
+          isolationKey: guideIsolationKey,
+          requestId: `visualizer_v2_save:${guideIsolationKey}`,
+        });
+        if (!demotion.ok && demotion.demoted === false && /不是 template_only_root/.test(demotion.reason || '')) {
+          logDebug_ACU(`[ACU-V2 Visualizer] 非 template_only_root，跳过降级：${demotion.reason}`);
+        } else if (!demotion.ok) {
+          toastStore.error(`模板保存被降级预检阻止：${demotion.reason || 'template_only_root 降级失败。'}`, { muteable: false });
+          return false;
+        }
+        const scopeOnlyBaseline = visualizer.templateBaseData && Object.keys(visualizer.templateBaseData).length > 0
+          ? visualizer.templateBaseData
+          : orderedData;
+        commitResult = await commitCurrentFloorTemplateScopeOnly_ACU({
+          isolationKey: guideIsolationKey,
+          baselineData: scopeOnlyBaseline as any,
+          candidateData: orderedData as any,
+          guideData,
+          templateSource: templateScopeSource,
+          presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
+          source: 'visualizer_v2_save',
+          reason: 'visualizer_v2_template_scope_only',
+          pristineOverride: true,
+        });
+        if (!commitResult.saved) {
+          toastStore.error(commitResult.error || '模板/结构保存失败。', { muteable: false });
+          return false;
+        }
+        // scope-only 不处理 deletedSheetKeys 硬删除：pristine 定义为无实质数据，但可能
+        // 存在空 V2 frame 痕迹。删除后若残留 frame 痕迹，用 purge 清理；失败仅 warning，
+        // 不回滚 scope-only（结构已正确，残留痕迹不影响回放）。
+        if (deletedSheetKeys.length > 0) {
+          try {
+            const purgeResult = await purgeSheetKeysFromChatHistoryHard_ACU(deletedSheetKeys);
+            if (purgeResult?.changed && isSqliteMode()) {
+              await reloadStorageProvider();
+            }
+          } catch (error) {
+            logWarn_ACU('[ACU-V2 Visualizer] scope-only 模板保存后 deletedSheetKeys 痕迹清理失败:', error);
+            toastStore.warning('模板已保存，但已删除表的存储痕迹清理失败；请重新载入当前聊天后重试。', { muteable: false });
+          }
+        }
+      } else {
+        commitResult = await commitCurrentFloorTemplateChanges_ACU({
+          isolationKey: guideIsolationKey,
+          sheetChanges,
+          deletedSheetKeys,
+          guideData,
+          syncTemplateScope: true,
+          templateSource: templateScopeSource,
+          presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
+          source: 'visualizer_v2_save',
+          reason: 'visualizer_v2_schema_change',
+          baseRevision,
+        });
+        if (!commitResult.saved) {
+          toastStore.error(commitResult.error || '模板/结构保存失败。', { muteable: false });
+          return false;
+        }
+      }
+      logDebug_ACU(`[ACU-V2 Visualizer] saveTemplateToCurrentChat 提交完成: mode=${switchMode.mode}, commitMode=${commitResult.mode || 'unknown'}, deletedSheetKeys=${deletedSheetKeys.join(',') || 'none'}。`);
       try {
         applyTemplateScopeForCurrentChat_ACU();
       } catch (error) {
@@ -803,12 +869,18 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         visualizer.markSaved('template-chat');
       }
       notifyTemplateRuntimeCommitted_ACU();
-      const removedCount = preparation.removedNullRowCount + (commitResult.removedNullRowCount || 0);
+      const removedCount = preparation.removedNullRowCount + ((commitResult as any)?.removedNullRowCount || 0);
+      const scopeOnlyMessage = switchMode.mode !== 'inherit' && commitResult.mode === 'scope_only'
+        ? '（模板结构已同步到聊天配置，未写入任何数据帧）'
+        : '';
       toastStore.success(
         removedCount > 0
-          ? `模板/结构已保存到当前聊天，已删除 ${deletedSheetKeys.length} 张表并移除 ${removedCount} 条缺少 row_id 的数据行。`
-          : deletedSheetKeys.length > 0 ? `模板/结构已保存到当前聊天，已删除 ${deletedSheetKeys.length} 张表。` : '模板/结构已保存到当前聊天。',
+          ? `模板/结构已保存到当前聊天${scopeOnlyMessage}，已删除 ${deletedSheetKeys.length} 张表并移除 ${removedCount} 条缺少 row_id 的数据行。`
+          : deletedSheetKeys.length > 0
+            ? `模板/结构已保存到当前聊天${scopeOnlyMessage}，已删除 ${deletedSheetKeys.length} 张表。`
+            : `模板/结构已保存到当前聊天${scopeOnlyMessage}。`,
         { muteable: false });
+      return true;
       return true;
     });
   }

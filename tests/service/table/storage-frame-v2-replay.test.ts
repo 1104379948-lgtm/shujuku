@@ -4213,4 +4213,120 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     expect(projection.activeSheetKeys).toEqual(['sheet_a']);
     expect(projection.hiddenSheetKeys).toEqual([]);
   });
+
+  it('full checkpoint 起算点：更早帧留下的 active 痕迹被该快照清扫（与 replay 基线一致）', () => {
+    // replay 以最后一个 full checkpoint 为基底，帧 0 的 per-sheet checkpoint 根本不参与回放。
+    // lifecycle 若仍累积它，会产出「active 但基线不含该表」的自相矛盾结论。
+    const stale = makeSheet('sheet_stale', [['1', '旧模板数据']]);
+    const kept = makeSheet('sheet_kept', [['1', 'x']]);
+    const chat = makeChat([
+      {
+        frame: {
+          perSheetCheckpoints: {
+            sheet_stale: {
+              kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_stale', data: stale,
+              timeline: { kind: 'sheet_introduction', activateAtMessageIndex: 0, afterSeq: 0 },
+            },
+          },
+        },
+      },
+      {
+        frame: {
+          checkpoint: { kind: 'full', createdAt: 5, reason: 'schema_change', data: { sheet_kept: kept } },
+        },
+      },
+    ]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION);
+    expect(projection.activeSheetKeys).toEqual(['sheet_kept']);
+    expect(projection.statusBySheetKey.sheet_stale).toBeUndefined();
+    expect(projection.hiddenSheetKeys).toEqual([]);
+    expect(projection.indeterminateSheetKeys).toEqual([]);
+  });
+
+  it('full checkpoint 起算点：基底之前的 legacy untimed checkpoint 同样不再产出 active', () => {
+    const legacy = makeSheet('sheet_legacy', [['1', '旧数据']]);
+    const kept = makeSheet('sheet_kept', [['1', 'x']]);
+    const chat = makeChat([
+      {
+        frame: {
+          perSheetCheckpoints: {
+            sheet_legacy: { kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_legacy', data: legacy },
+          },
+        },
+      },
+      {
+        frame: {
+          checkpoint: { kind: 'full', createdAt: 5, reason: 'schema_change', data: { sheet_kept: kept } },
+        },
+      },
+    ]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION);
+    expect(projection.activeSheetKeys).toEqual(['sheet_kept']);
+    expect(projection.statusBySheetKey.sheet_legacy).toBeUndefined();
+  });
+
+  it('full checkpoint 起算点：基底之前的 hide 证据必须保留（compaction 迁移隐藏表依赖）', () => {
+    // hide 的表按设计不出现在 full checkpoint.data 中，其数据唯一存放处是 hide checkpoint。
+    // 起算点清扫不得把这份 restoreSourceData 一起丢弃，否则边界 checkpoint 写入会失败。
+    const hidden = makeSheet('sheet_hidden', [['1', '离开数据']]);
+    const kept = makeSheet('sheet_kept', [['1', 'x']]);
+    const chat = makeChat([
+      {
+        frame: {
+          perSheetCheckpoints: {
+            sheet_hidden: {
+              kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_hidden', data: hidden,
+              timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 0 },
+            },
+          },
+        },
+      },
+      {
+        frame: {
+          checkpoint: { kind: 'full', createdAt: 5, reason: 'schema_change', data: { sheet_kept: kept } },
+        },
+      },
+    ]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION);
+    expect(projection.activeSheetKeys).toEqual(['sheet_kept']);
+    expect(projection.hiddenSheetKeys).toEqual(['sheet_hidden']);
+    expect(projection.statusBySheetKey.sheet_hidden.restoreSourceData?.content).toEqual(hidden.content);
+  });
+
+  it('full checkpoint 起算点：基底之前 hide 后又 reveal 的表，可见性由基底快照裁决', () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const kept = makeSheet('sheet_kept', [['1', 'y']]);
+    const chat = makeChat([
+      {
+        frame: {
+          perSheetCheckpoints: {
+            sheet_a: {
+              kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_a', data: sheet,
+              timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 0 },
+            },
+          },
+        },
+      },
+      {
+        frame: {
+          perSheetCheckpoints: {
+            sheet_a: {
+              kind: 'sheet_full', createdAt: 3, reason: 'schema_change', sheetKey: 'sheet_a', data: sheet,
+              timeline: { kind: 'sheet_reveal', activateAtMessageIndex: 1, afterSeq: 0 },
+            },
+          },
+        },
+      },
+      {
+        frame: {
+          checkpoint: { kind: 'full', createdAt: 5, reason: 'schema_change', data: { sheet_a: sheet, sheet_kept: kept } },
+        },
+      },
+    ]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION);
+    // reveal 撤销了更早的 hidden 结论；基底 full 快照含 sheet_a → active，且不残留 hidden。
+    expect(projection.activeSheetKeys).toEqual(['sheet_a', 'sheet_kept']);
+    expect(projection.hiddenSheetKeys).toEqual([]);
+  });
+
 });

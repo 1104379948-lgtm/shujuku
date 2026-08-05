@@ -47,7 +47,7 @@ function resolveTableApiPresetOverride_ACU(tableName: any): string {
     return (typeof preset === 'string' && preset.trim()) ? preset.trim() : '';
 }
 import { checkIfFirstTimeInit_ACU, ensureLegacyStorageMigratedBeforeWrite_ACU } from './table-service';
-import { assertSingleActiveFullCheckpointV2_ACU, hasAnyV2Checkpoint_ACU } from './storage-frame-v2-persist';
+import { assertSingleActiveFullCheckpointV2_ACU, assertWriteTargetNotBeforeReplayRoot_ACU, hasAnyV2Checkpoint_ACU } from './storage-frame-v2-persist';
 import { parseAndApplyTableEditsToData_ACU, prepareAIInput_ACU } from '../ai/prompt-builder';
 import { extractStrictJsonTableFillResponse_ACU } from '../ai/prompt-builder/strict-json-table-fill';
 import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
@@ -1716,6 +1716,12 @@ async function processGroupedRuntimeChunkCore_ACU(
         manualCatchUpRun?: boolean;
         /** 手动追平 run 的 runId，用于 provisional bridge 写入准入（t5）。 */
         manualCatchUpRunId?: string;
+        /**
+         * 跳过回放根准入（Task 4）。仅手动重填（clearBeforeUpdate）使用：该路径先清空
+         * 范围内旧数据再重写，范围末尾成为新根，bucket 写入天然合法；准入应在清理后的
+         * 拓扑上评估，而不是清理前。
+         */
+        skipWriteTargetAdmission?: boolean;
         performanceRunId?: string;
         performanceParentSpanId?: string;
     } = {}
@@ -1960,6 +1966,32 @@ async function processGroupedRuntimeChunkCore_ACU(
                     performanceParentSpanId: options.performanceParentSpanId,
                 });
             }
+
+            // 回放根准入（Task 4）：任何写目标早于最新 full checkpoint 的 bucket 必须在
+            // AI 调用（collectGroupFillResponse_ACU → callCustomOpenAI_ACU）之前被阻止。
+            // 否则 AI 先消耗 token，写入阶段才被 persist 层 fail-fast（persist.ts:1908）。
+            // provisional bridge run（manual catch-up 追平）跳过此处：其写入安全由
+            // orchestrateManualCatchUp_ACU 的 ensureManualCatchUpAnchorBeforeTarget_ACU 预检
+            // 与 persist 层 bridge 写入授权（persist.ts:2293-2295）双层保证，且此处依赖的
+            // readActiveProvisionalBridge_ACU 在编排层无法可靠读取（bridge 状态在 persist 事务内）。
+            if (!options.manualCatchUpRunId && !options.skipWriteTargetAdmission) {
+                for (const job of jobs) {
+                    const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
+                        chat: getChatArray_ACU() || [],
+                        isolationKey: job.isolationKey,
+                        targetMessageIndex: job.saveTargetIndex,
+                    });
+                    if (!writeTargetAdmission.allow) {
+                        failedGroups.add(job.groupKey);
+                        firstError = firstError || `写目标早于 V2 回放根，已阻止本次填表：${writeTargetAdmission.reason}`;
+                        logDebug_ACU(`[V2 准入] 阻止填表：${writeTargetAdmission.reason}`);
+                    }
+                }
+            }
+            if (firstError) {
+                break;
+            }
+
 
             if (jobs.length === 0) {
                 bucketSucceeded = true;
@@ -3654,8 +3686,24 @@ export async function orchestrateManualUpdate_ACU(
         // 手动填表先无条件清空本次范围内选中表的 checkpoint 与增量，再完全沿用自动填表语义
         // （逐 bucket 取 bucketFirstMessageIndex - 1）解析基底。初始基线保持原位，不做前移。
         if (manualRefillEnabled) {
+
             const currentIsolationKey = getCurrentIsolationKey_ACU();
             const rollbackMessageIndices = collectManualRefillRollbackMessageIndices_ACU(liveChat, currentIsolationKey, contextScopeIndices);
+
+            // Task 4 破坏性清理前准入：重填会先清空范围内旧数据，若最新 full checkpoint
+            // 晚于重填范围末尾，清理后写入目标早于回放根，必然撞 persist 层 fail-fast。
+            // 必须在删除任何数据前阻止，避免用户数据先被清空才报错。
+            const refillTargetIndex = contextScopeIndices[contextScopeIndices.length - 1];
+            const refillAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
+                chat: liveChat,
+                isolationKey: currentIsolationKey,
+                targetMessageIndex: refillTargetIndex,
+            });
+            if (!refillAdmission.allow) {
+                logDebug_ACU(`[手动重填准入] 阻断：${refillAdmission.reason}（refillTarget=${refillTargetIndex}, isolationKey=[${currentIsolationKey || '无标签'}]）。`);
+                return { success: false, error: `手动重填被回放根准入阻断${refillAdmission.reason}` };
+            }
+
             manualRefillSessionSnapshot = captureManualRefillSessionSnapshot_ACU(rollbackMessageIndices);
 
             // 重填会先删除持久化增量，不能在 SQLite runtime 尚未 ready 时进入破坏性阶段。
@@ -3743,6 +3791,8 @@ export async function orchestrateManualUpdate_ACU(
                     onProgress: options.onProgress,
                     // 范围内旧增量已在预清理中删除，提交时无需再做增量替换。
                     replaceExistingIncremental: false,
+                    // 手动重填先清空范围内旧数据再重写，范围末尾成为新根，bucket 写入天然合法。
+                    skipWriteTargetAdmission: true,
                 });
                 committedBucketCount += chunkResult.committedBucketCount;
                 if (!chunkResult.success) {

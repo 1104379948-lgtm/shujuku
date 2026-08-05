@@ -24,7 +24,7 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } 
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
 import { settings_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
-import { clearTableFieldsForIsolation_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+import { MESSAGE_TABLE_FIELDS_ACU, clearTableFieldsForIsolation_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
 import { LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
 import { peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
@@ -36,7 +36,7 @@ import { assignSummaryVectorIndexStateToTagData_ACU, readSummaryVectorIndexState
 import type { ChatSummaryVectorIndexManifest_ACU, ChatSummaryVectorIndexState_ACU, SummaryVectorIndexSafeGcScopeHint_ACU } from '../vector/summary-vector-index-types';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
-import { assertSingleActiveFullCheckpointV2_ACU } from '../table/storage-frame-v2-persist';
+import { assertSingleActiveFullCheckpointV2_ACU, frameHasSuffixReplayArtifact_ACU } from '../table/storage-frame-v2-persist';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { hasActiveProvisionalBridgeAnywhere_ACU, recoverProvisionalBridgeSession_ACU } from '../table/manual-catch-up-provisional-bridge';
 import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../table/storage-frame-v2-types';
@@ -1460,11 +1460,25 @@ function isSafeHeaderOnlyResetCheckpoint_ACU(frame: any): boolean {
     return true;
 }
 
+/**
+ * 判定 frame 是否携带「不属于自身 checkpoint」的 replay artifact。
+ *
+ * 判定标准直接复用 persist 层的 frameHasSuffixReplayArtifact_ACU，不在本文件另写
+ * 一份：两层若各自实现，会漂移出「persist 认为该 root 可降级、本 preflight 认为
+ * blocked」的夹缝，正是本次要修的 F7 同类问题。
+ *
+ * 与旧实现的差异：旧版把「随根写入、无 timeline 的 per-sheet checkpoint」和
+ * 「自有 full checkpoint 下的 headRevision」也算作 artifact。这会让一个仅含
+ * header-only init root 的正常 frame 被误判为「携带后缀 artifact」而 blocked
+ * （1518），即使它没有任何后续增量。新语义只认真实后缀。
+ *
+ * 对 1526 / 1551 两个调用点结论不变：那两处只检查非 root 帧，而 1503 已保证
+ * 全聊天仅存在一个 full checkpoint，故这些帧必然无自有 full checkpoint，其
+ * per-sheet checkpoint 与 headRevision 仍被判为真实后缀。
+ */
 function hasV2ReplayArtifact_ACU(frame: any): boolean {
-    return (frame?.logEntries || []).length > 0
-        || Object.keys(frame?.perSheetCheckpoints || {}).length > 0
-        || frame?.manualRefillProgress !== undefined
-        || (frame?.headRevision !== undefined && frame.headRevision !== null);
+    if (!frame || typeof frame !== 'object') return false;
+    return frameHasSuffixReplayArtifact_ACU(frame as TableStorageFrameV2_ACU);
 }
 
 /**
@@ -1488,34 +1502,48 @@ export async function ensureManualCatchUpAnchorBeforeTarget_ACU(
         maintenanceMode: 'exclusive',
     }, async () => {
         const chat = getChatArray_ACU();
-        if (!Array.isArray(chat) || chat.length === 0) return { status: 'blocked', error: '聊天记录为空，无法验证手动追平锚点。' };
+        if (!Array.isArray(chat) || chat.length === 0) {
+            logDebug_ACU(`[追平锚点预检] blocked：聊天记录为空（target=${targetMessageIndex}, isolationKey=[${isolationKey || '无标签'}]）。`);
+            return { status: 'blocked', error: '聊天记录为空，无法验证手动追平锚点。' };
+        }
         const aiMessageIndices = chat.map((message, index) => !message?.is_user ? index : -1).filter(index => index >= 0);
         if (!Number.isInteger(targetMessageIndex) || targetMessageIndex < 0 || !chat[targetMessageIndex] || chat[targetMessageIndex].is_user) {
+            logDebug_ACU(`[追平锚点预检] blocked：目标楼层无效（target=${targetMessageIndex}）。`);
             return { status: 'blocked', error: '手动追平目标楼层无效，无法验证 V2 锚点。' };
         }
         const checkpoints = aiMessageIndices.filter(index => {
             const tagData = readIsolatedTagData_ACU(chat[index], isolationKey) as any;
             return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
         });
-        if (checkpoints.length === 0) return { status: 'ready', checkpointMessageIndex: null };
+        if (checkpoints.length === 0) {
+            logDebug_ACU(`[追平锚点预检] ready：无 full checkpoint（target=${targetMessageIndex}, aiMessageIndices=${aiMessageIndices.length}）。`);
+            return { status: 'ready', checkpointMessageIndex: null };
+        }
         const checkpointMessageIndex = checkpoints[checkpoints.length - 1];
-        if (checkpointMessageIndex <= targetMessageIndex) return { status: 'ready', checkpointMessageIndex };
+        if (checkpointMessageIndex <= targetMessageIndex) {
+            logDebug_ACU(`[追平锚点预检] ready：checkpoint 在目标之前（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
+            return { status: 'ready', checkpointMessageIndex };
+        }
         if (checkpoints.length !== 1) {
+            logDebug_ACU(`[追平锚点预检] blocked：多 full checkpoint（${checkpoints.length} 个：${checkpoints.join('、')}, target=${targetMessageIndex}）。`);
             return { status: 'blocked', error: '手动追平目标早于多个 V2 full checkpoint；无法安全自动重排历史，请先执行 V2 恢复诊断。' };
         }
 
         const sourceMessage = chat[checkpointMessageIndex];
         const sourceTagData = readIsolatedTagData_ACU(sourceMessage, isolationKey) as any;
         if (!isV2TagData_ACU(sourceTagData)) {
+            logDebug_ACU(`[追平锚点预检] blocked：checkpoint 帧不满足 canonical 契约（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
             return { status: 'blocked', error: '手动追平目标早于不满足 canonical 契约的 V2 checkpoint；已在调用 AI 前阻止写入，请先执行 V2 恢复诊断。' };
         }
         if (!isSafeHeaderOnlyResetCheckpoint_ACU(sourceTagData.storageFrame)) {
             // 含真实行数据 / migration / compaction / fallback provenance 的正式 full checkpoint
             // 不能前移（bounded replay 语义可能被污染）；需要 provisional bridge 在不动原根的
             //前提下从更早楼层建立临时根，追平后再原子汇合回原根。
+            logDebug_ACU(`[追平锚点预检] provisional_bridge_required：checkpoint 非 header-only reset（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
             return { status: 'provisional_bridge_required', checkpointMessageIndex };
         }
         if (hasV2ReplayArtifact_ACU(sourceTagData.storageFrame)) {
+            logDebug_ACU(`[追平锚点预检] blocked：checkpoint 帧携带后缀 artifact（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
             return { status: 'blocked', error: '手动追平目标早于携带后缀 replay artifact 的 V2 checkpoint；请先执行 V2 恢复诊断。' };
         }
 
@@ -1526,6 +1554,7 @@ export async function ensureManualCatchUpAnchorBeforeTarget_ACU(
             return hasV2ReplayArtifact_ACU(tagData.storageFrame);
         });
         if (unsafeArtifactIndex !== undefined) {
+            logDebug_ACU(`[追平锚点预检] blocked：checkpoint 之后存在后缀 artifact（artifact=${unsafeArtifactIndex}, checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}）。`);
             return { status: 'blocked', error: `手动追平目标之后存在无法安全重排的 V2 增量 artifact（messageIndex=${unsafeArtifactIndex}）；请先执行 V2 恢复诊断。` };
         }
 
@@ -1536,9 +1565,11 @@ export async function ensureManualCatchUpAnchorBeforeTarget_ACU(
                 compatibilityMode: 'disabled',
             });
         } catch (error: any) {
+            logDebug_ACU(`[追平锚点预检] blocked：移动前 replay 校验异常（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}, error=${error?.message || String(error)}）。`);
             return { status: 'blocked', error: `手动追平锚点移动前 replay 校验失败：${error?.message || String(error)}` };
         }
         if (!replayBefore || replayBefore.requiresCheckpointConvergence || replayBefore.compatibilityRepairs?.length) {
+            logDebug_ACU(`[追平锚点预检] blocked：移动前 replay 依赖兼容修复（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}, convergence=${replayBefore?.requiresCheckpointConvergence}, repairs=${replayBefore?.compatibilityRepairs?.length || 0}）。`);
             return { status: 'blocked', error: '手动追平锚点移动前 V2 replay 仍依赖兼容修复；请先执行 V2 恢复诊断。' };
         }
 
@@ -1587,12 +1618,15 @@ export async function ensureManualCatchUpAnchorBeforeTarget_ACU(
                 compatibilityMode: 'disabled',
             });
         } catch (error: any) {
+            logDebug_ACU(`[追平锚点预检] blocked：移动后候选 replay 校验异常（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}, error=${error?.message || String(error)}）。`);
             return { status: 'blocked', error: `手动追平锚点移动候选 replay 校验失败：${error?.message || String(error)}` };
         }
         if (!replayAfter || replayAfter.requiresCheckpointConvergence || replayAfter.compatibilityRepairs?.length
             || getTableDataFingerprint_ACU(replayBefore.data) !== getTableDataFingerprint_ACU(replayAfter.data)) {
+            logDebug_ACU(`[追平锚点预检] blocked：锚点移动会改变可见表格状态（checkpoint=${checkpointMessageIndex}, target=${targetMessageIndex}, convergence=${replayAfter?.requiresCheckpointConvergence}, repairs=${replayAfter?.compatibilityRepairs?.length || 0}, fingerprintSame=${replayBefore && replayAfter ? getTableDataFingerprint_ACU(replayBefore.data) === getTableDataFingerprint_ACU(replayAfter.data) : 'n/a'}）。`);
             return { status: 'blocked', error: '手动追平锚点移动会改变当前可见表格状态，已拒绝写入；请先执行 V2 恢复诊断。' };
         }
+        logDebug_ACU(`[追平锚点预检] repaired：锚点前移 checkpoint=${checkpointMessageIndex} → ${anchorMessageIndex}（target=${targetMessageIndex}, discardedPrefix=${discardedPrefixFrames.length}）。`);
 
         const affectedMessages = [...new Set([anchorMessageIndex, checkpointMessageIndex, ...discardedPrefixFrames.map(item => item.messageIndex)])].map(index => ({
             messageIndex: index,
@@ -1699,6 +1733,17 @@ async function deleteLocalDataInChatCoreInner_ACU(
             }
             if (msg.TavernDB_ACU_Identity !== undefined) {
                 delete msg.TavernDB_ACU_Identity;
+                modified = true;
+            }
+            // 漏删修复（C 方案步骤 1）：这两个字段在 MESSAGE_TABLE_FIELDS_ACU 权威清单中，
+            // 旧路径此前未删。删除后必须回到「从未填表」状态（与 helpers-data-merge.ts:709
+            // 的幂等闸门语义一致），因此与 Identity 同级置 modified=true 保证落盘。
+            if (msg.TavernDB_ACU_LocalMessageAnchor !== undefined) {
+                delete msg.TavernDB_ACU_LocalMessageAnchor;
+                modified = true;
+            }
+            if (msg._acu_local_template_base_state_seeded !== undefined) {
+                delete msg._acu_local_template_base_state_seeded;
                 modified = true;
             }
             if (msg.TavernDB_ACU_IsolatedData) {

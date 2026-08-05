@@ -25,7 +25,7 @@ import {
 } from '../../service/settings/settings-service';
 import { getCurrentStorageMode, isSqliteMode } from '../../service/table/storage-mode';
 import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
-import { getChatArray_ACU, deleteLocalDataInChatCore_ACU, overrideLatestLayerWithTemplateCore_ACU } from '../../service/chat/chat-service';
+import { getChatArray_ACU, deleteLocalDataInChatCore_ACU, overrideLatestLayerWithTemplateCore_ACU, purgeCurrentChatDatabaseState_ACU } from '../../service/chat/chat-service';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../../service/table/table-service';
 import { cleanupWorldbookEntriesAfterDataDeletion_ACU } from '../../service/worldbook/worldbook-cleanup';
 import { deleteAllGeneratedEntries_ACU, refreshMergedDataAndNotify_ACU } from '../../service/worldbook/pipeline';
@@ -697,6 +697,46 @@ export function useDataManagement() {
     }
   }
 
+
+  /**
+   * 硬清空当前聊天的全部本地数据库状态（C 方案接线 purge）。
+   *
+   * 与 deleteLocalData 的收尾刻意不同：
+   * - 不调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider（C2）：
+   *   purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
+   *   clearTableRuntimeWithoutReload_ACU 把运行时置为空态，并明令绝不加载聊天/模板/Guide；
+   *   此处若再 reload 会把刚清空的状态从模板/guide 重新物化回来，且 saved=true 会让用户误以为成功。
+   * - 不调用 cleanupWorldbookEntriesAfterDataDeletion_ACU（C3）：purge 内部已做
+   *   cleanupDatabaseGeneratedWorldbookEntries_ACU，结果进入 result.cleanupWarnings。
+   * - 不调用 refreshMergedDataAndNotify_ACU（V1 验证结论）：该函数会 loadAllChatMessages_ACU +
+   *   mergeAllIndependentTables_ACU，并在无历史数据时从指导表/模板重建 currentJsonTableData_ACU
+   *   （pipeline.ts:617-629），等价于重新物化。因此只调 refresh() 做 settings/isolation/count 级刷新。
+   */
+  async function purgeAllLocalData(): Promise<void> {
+    busyAction.value = 'purge-all-local';
+    try {
+      const result = await purgeCurrentChatDatabaseState_ACU();
+      if (!result.saved) {
+        message.value = null;
+        toast.error(result.error || '硬清空失败，详情见运行日志。', { muteable: false });
+        return;
+      }
+      refresh();
+      if (result.cleanupWarnings?.length) {
+        toast.warning(`本地数据已全部硬清空（${result.clearedMessageCount} 条消息）。警告：${result.cleanupWarnings[0]}`, { muteable: false, durationMs: 6000 });
+      } else {
+        const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
+        toast.success(`已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`, { muteable: false });
+      }
+    } catch (e: any) {
+      logError_ACU('[ACU-V2] purgeAllLocalData failed', e);
+      message.value = null;
+      toast.error('硬清空失败，详情见运行日志。', { muteable: false });
+    } finally {
+      busyAction.value = '';
+    }
+  }
+
   function setRetainRecentLayers(value: number | string): void {
     const normalized = normalizeRetainRecentLayers(value);
     retainRecentLayers.value = normalized;
@@ -741,6 +781,7 @@ export function useDataManagement() {
     resetAllDefaults,
     overrideLatestLayerWithTemplate,
     deleteLocalData,
+    purgeAllLocalData,
     setRetainRecentLayers,
   };
 }

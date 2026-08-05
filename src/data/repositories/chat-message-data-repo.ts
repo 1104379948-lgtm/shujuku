@@ -600,6 +600,15 @@ function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>
         if (deleteSheetKeysFromRecord_ACU(checkpoint.scheduleSummary, sheetKeys)) changed = true;
         if (purgeEventSheetKeysV2_ACU(checkpoint.event, sheetKeys)) changed = true;
         if (purgeManualRefillProgressV2_ACU(checkpoint.manualRefillProgress, sheetKeys)) changed = true;
+        // Task 5：checkpoint.data 已无任何 sheet_ 键时，该 checkpoint 失去全部表内容，
+        // 保留只会让 replay 以空根继续（并诱发“写目标早于回放根”类伪拓扑）。直接移除，
+        // 让 frame 退回“无锚点 + logEntries”形态，由后续写入按初始 checkpoint 重建。
+        // 例外：checkpoint 仍携带 manualRefillProgress 时保留——那是进度的合法载体，
+        // 删除会丢失重填进度（既有测试「从 V2 manualRefillProgress 中移除目标 sheet」依赖此行为）。
+        if (!hasSheetKeyInRecord_ACU(checkpoint.data) && checkpoint.manualRefillProgress === undefined) {
+            delete frame.checkpoint;
+            changed = true;
+        }
     }
 
     if (purgeEventSheetKeysV2_ACU(frame.event, sheetKeys)) changed = true;
@@ -658,6 +667,12 @@ function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>
         if (nextEntries.length !== frame.logEntries.length) changed = true;
         frame.logEntries = nextEntries;
         if (changed) normalizeManualRefillFrameHeadRevisionV2_ACU(frame, previousHeadRevision, previousEntryRevisions);
+        // Task 5：logEntries 清空后 headRevision 失去语义（它指向日志头），必须一并清掉，
+        // 否则空 frame 仍带 headRevision 会被 hasUnanchoredReplayArtifacts 类判定误认为 artifact。
+        if (frame.logEntries.length === 0 && frame.headRevision !== undefined && frame.headRevision !== null) {
+            frame.headRevision = null;
+            changed = true;
+        }
     }
 
     return changed;

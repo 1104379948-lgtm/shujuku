@@ -1208,13 +1208,17 @@ describe('reconcileChatTemplate_ACU 生命周期感知（阶段2）', () => {
     expect(plan.sheetChanges).toEqual([]);
   });
 
-  it('active 但基线缺失的表被模板包含时阻止（不覆盖活数据）', async () => {
+  it('active 但基线缺失的表被模板包含时按 introduction 继续（覆盖风险由提交层权威判定）', async () => {
     const baseline = state({
       sheet_other: sheet('sheet_other', '其他表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值'),
     });
     const template = state({
       sheet_bei_bao: sheet('sheet_bei_bao', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT -- 名称'),
     });
+    // lifecycle 是历史 timeline 归并，不是「当前是否活跃」的权威来源。它与同一时点的
+    // replay 基线不一致时，协调层若 fail-closed，用户重新读取表格也无法改变历史事实，
+    // 错误必然复现（不可自救死局）。活数据保护由 persist 端 activeHas /
+    // introductionHistoryEvidence_ACU 用权威事实执行。
     const lifecycle = makeLifecycle({
       sheet_other: { status: 'active' },
       sheet_bei_bao: { status: 'active' },
@@ -1224,8 +1228,12 @@ describe('reconcileChatTemplate_ACU 生命周期感知（阶段2）', () => {
       baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, lifecycle,
     });
 
-    expect(plan.blockers.join('\n')).toContain('仍为 active');
-    expect(plan.sheetChanges).toEqual([]);
+    expect(plan.blockers).toEqual([]);
+    expect(plan.sheetChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_bei_bao' }),
+    ]));
+    // 稳定 key 仍按显示名派生，不新造 key。
+    expect(plan.candidateData.sheet_bei_bao).toBeDefined();
   });
 
   it('隐藏表中 indeterminate 表被隐藏时阻止（不静默隐藏未知历史）', async () => {

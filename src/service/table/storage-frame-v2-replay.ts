@@ -139,16 +139,38 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
   const statusBySheetKey: Record<string, TableSheetLifecycleEntryV2_ACU> = {};
   let sawIndeterminateFrame = false;
 
-  for (const ref of frameRefs) {
+  // 起算点必须与 replay 对齐：回放以最后一个 full checkpoint 为基底，更早帧的
+  // per-sheet checkpoint 一律不再应用。若这里仍从全历史累积 active，早已被后续 full
+  // 快照淘汰的表会永久停留在 active，与同一时点的 replay 基线互相矛盾，使模板协调层
+  // 拿到「lifecycle=active 但基线不含该表」的不可自救状态。
+  const baseFrameIndex = findLastFullCheckpointFrameIndex_ACU(frameRefs);
+  if (baseFrameIndex > 0) {
+    // full 快照对 active 集合权威，对 hidden 集合不权威：hide 的数据按设计只存在于
+    // hide checkpoint，不进 full checkpoint.data。基底之前因此只回收 hide 证据
+    // （含 restoreSourceData，compaction 迁移隐藏表依赖它），其余历史痕迹一律丢弃。
+    collectHiddenLifecycleEntriesBeforeBase_ACU(frameRefs, baseFrameIndex, statusBySheetKey);
+  }
+
+  for (let frameIndex = Math.max(0, baseFrameIndex); frameIndex < frameRefs.length; frameIndex += 1) {
+    const ref = frameRefs[frameIndex];
     const frame = ref.frame;
     if (!frame || typeof frame !== 'object' || Array.isArray(frame)) {
       sawIndeterminateFrame = true;
       continue;
     }
 
-    // 全量 checkpoint：包含该 sheetKey 即视为当前可见（除非被后续 hide 覆盖）。
-    const checkpointData = (frame.checkpoint as any)?.data;
+    // 全量 checkpoint = 该时点完整数据库快照：它列出的表为 active；它未列出的 active 表
+    // 已被该快照淘汰，必须撤销结论（hidden 保留可恢复数据，indeterminate 保留 fail-closed）。
+    const frameCheckpoint = frame.checkpoint as any;
+    const checkpointData = frameCheckpoint?.data;
     if (checkpointData && typeof checkpointData === 'object' && !Array.isArray(checkpointData)) {
+      if (frameCheckpoint.kind === 'full') {
+        for (const [sheetKey, entry] of Object.entries(statusBySheetKey)) {
+          if (entry.status !== 'active') continue;
+          if (Object.prototype.hasOwnProperty.call(checkpointData, sheetKey)) continue;
+          delete statusBySheetKey[sheetKey];
+        }
+      }
       for (const sheetKey of Object.keys(checkpointData)) {
         if (!sheetKey.startsWith('sheet_')) continue;
         statusBySheetKey[sheetKey] = {
@@ -237,6 +259,76 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
 }
 
 
+/** replay 的回放基底：最后一个 full checkpoint 所在帧在 frameRefs 中的下标（无则 -1）。 */
+function findLastFullCheckpointFrameIndex_ACU(frameRefs: V2FrameRef_ACU[]): number {
+  for (let index = frameRefs.length - 1; index >= 0; index -= 1) {
+    if ((frameRefs[index].frame as any)?.checkpoint?.kind === 'full') return index;
+  }
+  return -1;
+}
+
+/**
+ * 只回收回放基底之前的 hide 证据。hide 的表按设计不出现在 full checkpoint.data 中，
+ * 其数据唯一存放处就是 hide checkpoint；compaction 迁移隐藏表（chat-service）与
+ * reveal 恢复都依赖这份 restoreSourceData，所以它不能随基底之前的历史一起被丢弃。
+ * 其余 timeline（introduction / rebase / reveal）的可见性结论已被基底 full 快照取代。
+ */
+function collectHiddenLifecycleEntriesBeforeBase_ACU(
+  frameRefs: V2FrameRef_ACU[],
+  baseFrameIndex: number,
+  statusBySheetKey: Record<string, TableSheetLifecycleEntryV2_ACU>,
+): void {
+  for (let index = 0; index < baseFrameIndex; index += 1) {
+    const ref = frameRefs[index];
+    const frame = ref.frame;
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame)) continue;
+    let validatedCheckpoints: TableSheetCheckpointV2_ACU[];
+    try {
+      validatedCheckpoints = getValidatedSheetCheckpoints_ACU(frame, ref.messageIndex);
+    } catch {
+      // 基底之前的帧在 replay 中本就不参与回放；结构不可判定时不产出 hide 证据，
+      // 由 compaction / reveal 各自的 fail-closed 路径继续兜底。
+      continue;
+    }
+    for (const checkpoint of getValidatedTimelineCheckpointsForFrame_ACU(validatedCheckpoints)) {
+      const { sheetKey } = checkpoint;
+      if (!sheetKey.startsWith('sheet_')) continue;
+      const timeline = checkpoint.timeline!;
+      if (timeline.kind !== 'sheet_hide') {
+        delete statusBySheetKey[sheetKey];
+        continue;
+      }
+      if (timeline.afterSeq === undefined || !Number.isInteger(timeline.afterSeq) || timeline.afterSeq < 0) continue;
+      const entry: TableSheetLifecycleEntryV2_ACU = {
+        status: 'hidden',
+        lastTimelineKind: 'sheet_hide',
+        lastTimelineMessageIndex: ref.messageIndex,
+        lastTimelineAfterSeq: timeline.afterSeq,
+      };
+      if (checkpoint.data && typeof checkpoint.data === 'object' && !Array.isArray(checkpoint.data)) {
+        entry.restoreSourceData = deepClone_ACU(checkpoint.data);
+      }
+      statusBySheetKey[sheetKey] = entry;
+    }
+  }
+}
+
+
+/**
+ * 判定 frameRefs 中是否存在「无锚点 replay artifacts」——服务于「回放能否开始」。
+ *
+ * **语义差异警告**：本函数与 persist 层的 `frameHasSuffixReplayArtifact_ACU`
+ * （storage-frame-v2-persist.ts，chat-service 追平 preflight 也复用它）判定标准
+ * **刻意不同**，不要把两者「统一」：
+ *
+ * - 本函数问的是「这些帧里有没有任何需要回放的证据」。此处把 intrinsic 证据
+ *   （随根写入、无 timeline 的 per-sheet checkpoint；headRevision）也算作
+ *   artifact 是**正确**的：调用方在没有 full checkpoint 时据此决定是否允许用
+ *   模板临时基线回放，漏判会让本该恢复的历史被直接丢弃。
+ * - `frameHasSuffixReplayArtifact_ACU` 问的是「这个 frame 有没有不属于它自身
+ *   checkpoint 的后续增量」，用于判断某个 root 能否安全降级/前移，因此必须排除
+ *   intrinsic，否则正常的 header-only root 会被误判为携带后缀 artifact。
+ */
 function hasUnanchoredReplayArtifacts_ACU(frameRefs: V2FrameRef_ACU[]): boolean {
   return frameRefs.some(({ frame }) => {
     const persistedFrame = frame as unknown as Record<string, unknown>;

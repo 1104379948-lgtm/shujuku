@@ -5435,6 +5435,78 @@ describe('processGroupedRuntimeChunk_ACU', () => {
       vi.mocked(isSqliteMode).mockReturnValue(false);
     }
   });
+
+  it('写目标早于 V2 回放根时在 AI 调用前失败（Task 4 准入，零 token 消耗）', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    // full checkpoint 位于 #2（晚于本 bucket 的写目标 #1）：写目标早于回放根。
+    // 旧逻辑会先调用 AI（collectGroupFillResponse_ACU → callCustomOpenAI_ACU），
+    // 消耗 token 后才在 persist 层被 fail-fast（persist.ts:1908）。
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: false, mes: 'AI 1' },
+      { is_user: false, mes: 'AI 2' },
+      { is_user: false, mes: 'AI 3', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' }, sheet_0: { uid: 'sheet_0', name: '表A', content: [['row_id', '值']] } } }, logEntries: [] } } } },
+    ]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    } as any);
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'manual_independent');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('写目标早于 V2 回放根');
+    // 准入在 AI 调用之前拦截：零 token 消耗路径成立。
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockPrepareAIInput).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+  });
+
+  it('写目标等于 V2 回放根时放行（Task 4 准入不误伤根自身）', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    // full checkpoint 位于 #1，bucket 写目标同为 #1：target === 根，应放行。
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: false, mes: 'AI 1', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' }, sheet_0: { uid: 'sheet_0', name: '表A', content: [['row_id', '值']] } } }, logEntries: [] } } } },
+    ]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    } as any);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'manual_independent');
+
+    expect(result.success).toBe(true);
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+  });
+
+  it('无 V2 回放根时放行（Task 4 准入不得把无 checkpoint 误判为目标早于根）', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    // 聊天无任何 full checkpoint：全新会话首次填表，应放行。
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: true }, { is_user: false, mes: 'AI回复' }]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    } as any);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'manual_independent');
+
+    expect(result.success).toBe(true);
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+  });
+
 });
 
 describe('orchestrateManualCatchUp_ACU', () => {

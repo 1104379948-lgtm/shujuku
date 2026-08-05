@@ -66,6 +66,9 @@ const serviceMock = vi.hoisted(() => ({
   isSqliteMode: vi.fn(() => false),
   ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU: vi.fn(async () => ({ success: true, dataWasReset: false })),
   commitCurrentFloorTemplateChanges_ACU: vi.fn(async () => ({ saved: true, mode: 'template_only', messageIndex: 0, checkpoints: [], removedNullRowCount: 0 })),
+  commitCurrentFloorTemplateScopeOnly_ACU: vi.fn(async () => ({ saved: true, mode: 'scope_only', messageIndex: 0, checkpoints: [], removedNullRowCount: 0 })),
+  demoteTemplateOnlyRootToScopeOnly_ACU: vi.fn(async () => ({ ok: true, demoted: false, reason: '不是 template_only_root' })),
+  resolveTemplateSwitchMode_ACU: vi.fn(() => ({ mode: 'inherit' })),
   reloadStorageProvider: vi.fn(async () => undefined),
   applyTemplateScopeForCurrentChat_ACU: vi.fn(() => ({ mode: 'chat_override' })),
   buildChatSheetGuideDataFromData_ACU: vi.fn((data: Record<string, any>) => data),
@@ -150,6 +153,8 @@ vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
 }));
 vi.mock('../../../src/service/table/storage-frame-v2-persist', () => ({
   commitCurrentFloorTemplateChanges_ACU: serviceMock.commitCurrentFloorTemplateChanges_ACU,
+  commitCurrentFloorTemplateScopeOnly_ACU: serviceMock.commitCurrentFloorTemplateScopeOnly_ACU,
+  demoteTemplateOnlyRootToScopeOnly_ACU: serviceMock.demoteTemplateOnlyRootToScopeOnly_ACU,
   persistTableMutationLogBatchV2_ACU: serviceMock.persistTableMutationLogBatchV2_ACU,
 }));
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
@@ -191,6 +196,9 @@ vi.mock('../../../src/service/vector/summary-vector-index-chat-service', () => (
 }));
 vi.mock('../../../src/service/table/schema-migration-preflight', () => ({
   preflightSchemaMigrations_ACU: serviceMock.preflightSchemaMigrations_ACU,
+}));
+vi.mock('../../../src/service/table/template-switch-mode-resolver', () => ({
+  resolveTemplateSwitchMode_ACU: serviceMock.resolveTemplateSwitchMode_ACU,
 }));
 vi.mock('../../../src/presentation-v2/stores/toast-store', () => ({
   useToastStore: () => toastMock,
