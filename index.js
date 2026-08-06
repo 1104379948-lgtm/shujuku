@@ -37235,7 +37235,8 @@ $CONTENT
         const actualDryRun = { convertedRowCount, failedRowCount: 0, lossyRowCount };
         if (verifyDryRun && canonicalJson_ACU$1(operation.dryRun) !== canonicalJson_ACU$1(actualDryRun))
             throw new Error('schema migration V2 dryRun 与实际逐行转换不一致。');
-        return { sheet: { ...deepClone_ACU$5(currentSheet), uid: operation.targetSchema.uid, content, sourceData: { ...currentSheet.sourceData, ddl: operation.targetSchema.ddl } }, dryRun: actualDryRun };
+        const sourceData = { ...currentSheet.sourceData, ddl: operation.targetSchema.ddl };
+        return { sheet: { ...deepClone_ACU$5(currentSheet), uid: operation.targetSchema.uid, content, sourceData }, dryRun: actualDryRun };
     }
     /**
      * P2 reader/preflight constructor. Production writers remain frozen: this
@@ -37564,6 +37565,225 @@ $CONTENT
                 throw error;
             }
         });
+    }
+    /**
+     * 列名重绑纯工具：把历史物理列名（或别名表里的其他列名）改写为当前物理列名。
+     *
+     * 调用方注入 columnAliases（来自 buildSheetColumnAliasMap_ACU 的物理表 → 列别名表）
+     * 与当前目标物理表名；本模块保持零依赖，不解析 schema、不做相似度猜测。
+     *
+     * 安全边界（计划 4.1）：
+     * - 只在可证明是列引用的位置替换：UPDATE SET 左侧、INSERT 列清单、WHERE/RETURNING
+     *   中的非函数非关键字裸标识符。
+     * - 不碰：字符串字面量、注释（tokens 已跳过）、VALUES 中的值、函数名、AS 后别名、
+     *   限定符点号左侧。
+     * - 语句含目标表之外的表引用（JOIN / 子查询 / 逗号连接多表 / INSERT...SELECT）时
+     *   整条放弃列重绑并抛结构化错误：跨表列归属无法在不解析 schema 的纯工具里证明。
+     * - 命中 ambiguousColumns → 抛 SQL_COLUMN_ALIAS_AMBIGUOUS_ACU。
+     * - 别名表查不到 → 原样保留，交给 SQLite 报真实 no such column（无证据不猜）。
+     * - 不提供 lenient 选项：写路径重绑错误会静默写进错误列并持久化，必须 fail closed。
+     */
+    function rebindSqlMutationColumnReferences_ACU(statements, columnAliases, targetPhysicalTableName, options = {}) {
+        const tableKey = decodeSqlIdentifier_ACU(targetPhysicalTableName).toLowerCase();
+        const tableColumns = columnAliases.get(tableKey);
+        const resolvedAliases = new Map();
+        if (tableColumns) {
+            for (const [alias, physicalName] of tableColumns) {
+                const aliasKey = decodeSqlIdentifier_ACU(alias).toLowerCase();
+                if (aliasKey)
+                    resolvedAliases.set(aliasKey, physicalName);
+            }
+        }
+        const normalizedAmbiguous = new Set();
+        for (const alias of options.ambiguousColumns || []) {
+            normalizedAmbiguous.add(decodeSqlIdentifier_ACU(alias).toLowerCase());
+        }
+        return statements.map(statement => {
+            const values = tokens(statement);
+            const target = mutationTarget(statement, values);
+            // 无法识别 mutation 目标 → 原样放行（无证据不猜）。
+            if (!target)
+                return statement;
+            // 目标表不是当前物理表 → 不重绑（避免把别名表里的列套到别的表上）。
+            if (decodeSqlIdentifier_ACU(target.value).toLowerCase() !== tableKey)
+                return statement;
+            // INSERT...SELECT / 子查询：SELECT 出现即含子查询语义，放弃列重绑、原样放行。
+            // 这类语句是 V2 历史日志中的合法回放路径（replay.test.ts:869 的 WITH...UPDATE...
+            // SELECT... 子查询用例）。子查询内列归属无法在不解析 schema 的纯工具中证明，
+            // 强行重绑可能改错子查询内部标识符；原样放行后，若列名真是历史名，SQLite 会
+            // 报真实的 no such column —— 仍是 fail closed，只是错误信息不是本工具的结构化码。
+            // SELECT 检测必须先于跨表检测：INSERT...SELECT / UPDATE...FROM 等含多表引用，
+            // 但属于既有合法放行路径（如 sql-table-service 的「不支持 INSERT SELECT」校验在
+            // 列重绑之后才执行）；若先抛跨表拒绝会改变原有错误优先级与契约。
+            if (values.some(value => keyword(value, 'SELECT'))) {
+                return statement;
+            }
+            // 跨表检测：references() 首项即目标表自身，多于 1 项说明含 JOIN/逗号连接/CTE 关联。
+            const tableReferences = references(statement, values, target);
+            if (tableReferences.length > 1) {
+                throw structuredMutationColumnError_ACU('SQL_COLUMN_CROSS_TABLE_REFUSED_ACU', 'SQL 写入包含目标表之外的关联表列归属无法在不解析 schema 的纯工具中证明，已拒绝列重绑。请改用当前物理列名直接书写。');
+            }
+            const replacements = collectMutationColumnReplacements_ACU(statement, values, resolvedAliases, normalizedAmbiguous, options.resolveAmbiguity);
+            let result = statement;
+            for (const { token, value } of replacements) {
+                options.onRebound?.({ from: decodeSqlIdentifier_ACU(token.value), to: value });
+            }
+            for (const { token, value } of [...replacements].sort((left, right) => right.token.start - left.token.start)) {
+                result = `${result.slice(0, token.start)}${format(value, token.quote)}${result.slice(token.end)}`;
+            }
+            return result;
+        });
+    }
+    /**
+     * 按语句 mutation target 自动选择列 map 的纯包装（计划 3.7）。
+     *
+     * 实时写批次可能包含多条语句、各自指向不同目标表；调用方（applyEdits 等）
+     * 不必预先知道单一 sheet。本函数只解析 mutation target（token 级），
+     * 不读取 schema、不引入依赖：
+     * - 每条语句独立解析目标表名，查 columnAliases 里对应的列别名表并重绑；
+     * - 目标表在 columnAliases 中不存在 → 原样放行（该表未注册列别名，交给 SQLite）；
+     * - 无法解析 mutation target → 原样放行（无证据不猜）。
+     *
+     * 冲突按目标表隔离：ambiguousColumns 以「物理表名(小写) → 冲突别名集」组织，
+     * 命中即结构化拒绝（SQL_COLUMN_ALIAS_AMBIGUOUS_ACU），绝不原样放行成
+     * no such column。跨表/子查询语义与 rebindSqlMutationColumnReferences_ACU 一致。
+     */
+    function rebindSqlMutationColumnsByTarget_ACU(statements, columnAliases, options = {}) {
+        return statements.map(statement => {
+            let targetTableName = null;
+            try {
+                const values = tokens(statement);
+                const target = mutationTarget(statement, values);
+                if (!target)
+                    return statement;
+                targetTableName = decodeSqlIdentifier_ACU(target.value);
+                const targetKey = decodeSqlIdentifier_ACU(target.value).toLowerCase();
+                const tableColumns = columnAliases.get(targetKey);
+                if (!tableColumns)
+                    return statement; // 未注册列别名的目标表 → 原样放行
+                return rebindSqlMutationColumnReferences_ACU([statement], columnAliases, target.value, {
+                    ambiguousColumns: options.ambiguousColumns?.get(targetKey),
+                    onRebound: options.onRebound
+                        ? rebind => options.onRebound?.({ ...rebind, targetTable: targetTableName })
+                        : undefined,
+                    resolveAmbiguity: options.resolveAmbiguity
+                        ? alias => options.resolveAmbiguity?.(targetTableName, alias) || []
+                        : undefined,
+                })[0];
+            }
+            catch (error) {
+                // 与单表重绑一致：无 lenient，错误必须上抛（避免静默写进错误列）。
+                throw error;
+            }
+        });
+    }
+    function structuredMutationColumnError_ACU(code, message) {
+        const error = new Error(`[${code}] ${message}`);
+        Object.defineProperty(error, 'code', { value: code, enumerable: false });
+        return error;
+    }
+    /**
+     * 收集可证明是列引用的重绑点。统一按位置语义扫描，不做内容猜测：
+     * - UPDATE：SET 之后、WHERE/RETURNING 之前，depth 相同且后跟 `=` 的标识符（列赋值左侧）；
+     * - INSERT/REPLACE：表名后紧邻括号（depth+1）内的逗号分隔标识符（列清单）；
+     * - WHERE / RETURNING：非函数、非关键字、非 AS 别名、非限定符左侧的裸标识符。
+     */
+    function collectMutationColumnReplacements_ACU(sql, values, aliases, ambiguous, resolveAmbiguity) {
+        const replacements = [];
+        const handledStarts = new Set();
+        const addIfAlias = (token) => {
+            if (!token)
+                return;
+            const key = decodeSqlIdentifier_ACU(token.value).toLowerCase();
+            if (ambiguous.has(key)) {
+                const candidates = resolveAmbiguity?.(token.value) || [];
+                const candidateText = candidates.length > 0
+                    ? ` 候选列：${candidates.map(candidate => `${candidate.target}（证据：${candidate.evidence}）`).join('、')}。`
+                    : '';
+                throw structuredMutationColumnError_ACU('SQL_COLUMN_ALIAS_AMBIGUOUS_ACU', `SQL 写入引用了歧义列名「${token.value}」：该名称同时映射到多列，无法安全重绑。请改用当前唯一物理列名。${candidateText}`);
+            }
+            const target = aliases.get(key);
+            if (!target || target.toLowerCase() === key)
+                return;
+            if (handledStarts.has(token.start))
+                return;
+            handledStarts.add(token.start);
+            replacements.push({ token, value: target });
+        };
+        const first = values[0];
+        const actionIndex = keyword(first, 'WITH')
+            ? values.findIndex((token, index) => index > 0 && token.depth === 0
+                && ['INSERT', 'REPLACE', 'UPDATE', 'DELETE'].includes(token.value.toUpperCase()))
+            : 0;
+        const action = values[actionIndex];
+        if (!action)
+            return replacements;
+        const actionValue = action.value.toUpperCase();
+        const actionDepth = action.depth;
+        if (actionValue === 'UPDATE') {
+            // SET 子句：action 之后找同 depth 的 SET，其后的 `col =` 左侧标识符为列。
+            let setIndex = -1;
+            for (let index = actionIndex + 1; index < values.length; index += 1) {
+                const token = values[index];
+                if (token.depth !== actionDepth)
+                    continue;
+                if (keyword(token, 'SET')) {
+                    setIndex = index;
+                    break;
+                }
+                if (['WHERE', 'GROUP', 'ORDER', 'LIMIT'].includes(token.value.toUpperCase()))
+                    break;
+            }
+            if (setIndex >= 0) {
+                for (let index = setIndex + 1; index < values.length; index += 1) {
+                    const token = values[index];
+                    if (token.depth !== actionDepth)
+                        continue;
+                    if (['WHERE', 'GROUP', 'ORDER', 'LIMIT', 'RETURNING'].includes(token.value.toUpperCase()))
+                        break;
+                    const next = values[index + 1];
+                    // `=` 不是标识符 token，next 是 `=` 之后的值 token；检查两者之间含 `=`。
+                    if (next && next.depth === token.depth && /=/.test(sql.slice(token.end, next.start))) {
+                        addIfAlias(token);
+                    }
+                }
+            }
+        }
+        else if (actionValue === 'INSERT' || actionValue === 'REPLACE') {
+            // 列清单：目标表 token 之后第一个 depth+1 的括号 token，其内同 depth 标识符为列。
+            const openIndex = values.findIndex(token => token.depth === actionDepth + 1 && token.start > action.start);
+            if (openIndex >= 0) {
+                let cursor = openIndex + 1;
+                while (cursor < values.length && values[cursor].depth >= actionDepth + 1) {
+                    const token = values[cursor];
+                    if (token.depth === actionDepth + 1) {
+                        if (token.value === ')')
+                            break;
+                        addIfAlias(token);
+                    }
+                    cursor += 1;
+                }
+            }
+        }
+        // WHERE / RETURNING 裸标识符（含 UPDATE SET 的值、DELETE WHERE）：全语句扫描，
+        // 排除函数调用、AS 后别名、限定符点号左侧、关键字。已处理的 token 用 start 去重。
+        for (let index = 0; index < values.length; index += 1) {
+            const token = values[index];
+            if (token.quote !== null)
+                continue;
+            if (READ_COLUMN_KEYWORDS_ACU.has(token.value.toUpperCase()))
+                continue;
+            if (isFunctionCall_ACU(sql, values, index))
+                continue;
+            const previous = values[index - 1];
+            if (previous && previous.depth === token.depth && keyword(previous, 'AS'))
+                continue;
+            const beforeDot = values[index - 1];
+            if (beforeDot && beforeDot.depth === token.depth && /^\s*\.\s*$/.test(sql.slice(beforeDot.end, token.start)))
+                continue;
+            addIfAlias(token);
+        }
+        return replacements;
     }
     const READ_SCOPE_TERMINATORS_ACU = new Set(['UNION', 'EXCEPT', 'INTERSECT']);
     const READ_FROM_TERMINATORS_ACU = new Set(['WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'UNION', 'EXCEPT', 'INTERSECT', 'WINDOW']);
@@ -38156,64 +38376,224 @@ $CONTENT
         }
         return rebound;
     }
-    /** Builds table-scoped column aliases without guessing ambiguous fallback DDL columns. */
-    function buildSheetColumnAliasMap_ACU(sources) {
+    /**
+     * Builds the target-first, conflict-safe column alias registry shared by SQL
+     * readers and writers.
+     *
+     * 单一目标原则（计划 3.1）：第一个参数是当前 SQLite/runtime/replay state 的
+     * 权威目标 schema；所有别名只能指向目标 schema 中真实存在的物理列。
+     * supplementalSources 只提供别名证据，绝不提供目标列——模板中存在但目标中
+     * 不存在的列不得注册（保持 SQLite 原始 no such column，防止把已删除列误写
+     * 到别处）。
+     *
+     * 每列允许的别名来源（计划 3.2）：
+     * - current_physical：resolveEffectiveDDL 的 mapping.sqlName（自身，不构成重绑）；
+     * - display_name：当前表头显示名；
+     * - fallback_slug：对目标完整表头调用一次 mapSqlColumnIdentifiers_ACU 得到的
+     *   确定性拼音列名（按 sourceIndex 对齐，绝不逐列 slug 造成碰撞错误）；
+     * - authored_ddl：当前显式 DDL 的作者列名；若当前 runtime 是 fallback，则从可信
+     *   supplemental template 的 DDL 按唯一 canonical 显示名映射到目标列；
+     * - declared_display_alias：sourceData.columnAliases 中声明的历史显示名。
+     *
+     * 冲突语义：同一别名指向多个目标列 → 删除该别名并记录 conflicts 与全部候选
+     * 证据；supplemental 中独有、目标不存在的列 → 不注册；禁止相似度/编辑距离/
+     * 模糊拼音/列序号兜底。
+     */
+    function buildSheetColumnAliasMap_ACU(targetData, options = {}) {
         const aliases = new Map();
         const conflicts = new Map();
-        for (const source of sources) {
-            if (!source || typeof source !== 'object')
+        const sourceByAlias = new Map();
+        const conflictCandidates = new Map();
+        const recordConflictCandidate = (columnConflictCandidates, aliasKey, target, evidence) => {
+            const list = columnConflictCandidates.get(aliasKey) || [];
+            if (!list.some(candidate => candidate.target.toLowerCase() === target.toLowerCase() && candidate.evidence === evidence)) {
+                list.push({ target, evidence });
+            }
+            columnConflictCandidates.set(aliasKey, list);
+        };
+        const addColumnAlias = (tableColumns, tableEvidence, tableConflictCandidates, tableConflicts, source, target, evidence) => {
+            const sourceKey = String(source).toLowerCase();
+            const targetKey = String(target).toLowerCase();
+            if (!sourceKey || sourceKey === targetKey)
+                return;
+            const existing = tableColumns.get(sourceKey);
+            if (existing && existing.toLowerCase() !== targetKey) {
+                // 同一别名指向不同真实列 → 双向删除并记冲突（与表别名同语义）。
+                recordConflictCandidate(tableConflictCandidates, sourceKey, existing, tableEvidence.get(existing.toLowerCase()) || evidence);
+                recordConflictCandidate(tableConflictCandidates, sourceKey, target, evidence);
+                if (tableColumns.get(existing.toLowerCase()) === existing)
+                    tableColumns.delete(existing.toLowerCase());
+                tableColumns.delete(sourceKey);
+                tableEvidence.delete(existing.toLowerCase());
+                tableEvidence.delete(sourceKey);
+                tableConflicts.add(sourceKey);
+                return;
+            }
+            if (tableColumns.has(sourceKey))
+                return;
+            tableColumns.set(sourceKey, target);
+            tableEvidence.set(sourceKey, evidence);
+        };
+        if (!targetData || typeof targetData !== 'object') {
+            return { aliases, conflicts, sourceByAlias, conflictCandidates };
+        }
+        // ── 目标 schema 注册：current physical / display / fallback slug ──
+        for (const [sheetKey, value] of Object.entries(targetData)) {
+            if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object')
                 continue;
-            for (const [sheetKey, value] of Object.entries(source)) {
+            const sheet = value;
+            const physicalName = getPhysicalTableNameForSheet_ACU(targetData, sheetKey);
+            const columns = aliases.get(physicalName) || new Map();
+            const tableConflicts = conflicts.get(physicalName) || new Set();
+            const tableConflictCandidates = conflictCandidates.get(physicalName) || new Map();
+            const tableEvidence = sourceByAlias.get(physicalName) || new Map();
+            const resolved = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, physicalName);
+            for (const mapping of resolved.columnMap.mappings) {
+                // 自身物理名（target）不构成重绑，但注册 key 使读/写能识别它。
+                columns.set(String(mapping.sqlName).toLowerCase(), mapping.sqlName);
+                // display_name 证据
+                addColumnAlias(columns, tableEvidence, tableConflictCandidates, tableConflicts, mapping.displayName, mapping.sqlName, 'display_name');
+            }
+            // fallback_slug：对目标完整表头调用一次 mapSqlColumnIdentifiers_ACU，
+            // 按 sourceIndex 对齐（计划 6.1：必须批量计算，碰撞后缀 _2/_3 由映射器保证）。
+            const headers = Array.isArray(sheet.content?.[0]) ? sheet.content[0].map((h) => String(h ?? '')) : [];
+            if (headers.length > 0) {
+                const { mappings: slugMappings } = mapSqlColumnIdentifiers_ACU(headers);
+                const resolvedBySourceIndex = new Map(resolved.columnMap.mappings.map(mapping => [mapping.sourceIndex, mapping.sqlName]));
+                for (const slugMapping of slugMappings) {
+                    const targetSqlName = resolvedBySourceIndex.get(slugMapping.index);
+                    if (!targetSqlName)
+                        continue;
+                    addColumnAlias(columns, tableEvidence, tableConflictCandidates, tableConflicts, slugMapping.sqlName, targetSqlName, 'fallback_slug');
+                }
+            }
+            aliases.set(physicalName, columns);
+            if (tableConflicts.size > 0)
+                conflicts.set(physicalName, tableConflicts);
+            if (tableEvidence.size > 0)
+                sourceByAlias.set(physicalName, tableEvidence);
+            if (tableConflictCandidates.size > 0)
+                conflictCandidates.set(physicalName, tableConflictCandidates);
+        }
+        // ── supplemental 别名证据：authored_ddl（唯一 canonical 显示名映射）──
+        const targetSheetByCanonicalName = new Map();
+        for (const [sheetKey, value] of Object.entries(targetData)) {
+            if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object')
+                continue;
+            const sheet = value;
+            const canonicalName = canonicalizeDisplayName_ACU(sheet?.name);
+            if (!canonicalName)
+                continue;
+            if (targetSheetByCanonicalName.has(canonicalName))
+                continue;
+            targetSheetByCanonicalName.set(canonicalName, { sheetKey, physicalName: getPhysicalTableNameForSheet_ACU(targetData, sheetKey) });
+        }
+        for (const rawSupplement of options.supplementalSources || []) {
+            if (!rawSupplement || typeof rawSupplement !== 'object')
+                continue;
+            let supplement;
+            try {
+                supplement = rawSupplement;
+                // 校验表身份可解析（同表名/别名冲突会让身份定位失败，跳过该源）。
+                resolvePhysicalTableNames_ACU(rawSupplement);
+            }
+            catch (error) {
+                if (options.skipInvalidSupplementalSources)
+                    continue;
+                throw error;
+            }
+            for (const [sheetKey, value] of Object.entries(supplement)) {
                 if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object')
                     continue;
                 const sheet = value;
-                const physicalName = getPhysicalTableNameForSheet_ACU(source, sheetKey);
-                const columns = aliases.get(physicalName) || new Map();
-                const resolved = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, physicalName);
-                const columnConflicts = conflicts.get(physicalName) || new Set();
-                for (const mapping of resolved.columnMap.mappings) {
-                    columns.set(String(mapping.sqlName).toLowerCase(), mapping.sqlName);
-                    columns.set(String(mapping.displayName).toLowerCase(), mapping.sqlName);
-                }
-                if (resolved.source !== 'explicit' && resolved.originalDDL) {
-                    const claimedTargets = new Map();
-                    const rejectedTargets = new Set();
-                    const fallbackAliases = new Map();
-                    for (const column of parseDDLColumnInfos_ACU(resolved.originalDDL)) {
-                        const sourceKey = column.sqlName.toLowerCase();
-                        const matched = resolved.columnMap.mappings.filter(mapping => (mapping.displayName === column.sqlName || mapping.displayName === column.comment));
-                        if (matched.length !== 1) {
-                            columnConflicts.add(sourceKey);
-                            continue;
+                const canonicalName = canonicalizeDisplayName_ACU(sheet?.name);
+                const target = canonicalName ? targetSheetByCanonicalName.get(canonicalName) : undefined;
+                if (!target)
+                    continue; // 表身份未唯一命中目标 sheet → 不提供任何列证据
+                const tableColumns = aliases.get(target.physicalName) || new Map();
+                const tableConflicts = conflicts.get(target.physicalName) || new Set();
+                const tableConflictCandidates = conflictCandidates.get(target.physicalName) || new Map();
+                const tableEvidence = sourceByAlias.get(target.physicalName) || new Map();
+                const supplementalDDL = String(sheet?.sourceData?.ddl || '');
+                if (supplementalDDL) {
+                    // 目标列的 canonical 显示名 → 物理名索引（唯一映射）。
+                    // mapping.displayName 来自目标 content[0] 表头，统一按 canonical 显示名索引；
+                    // fallback 的 sqlName（拼音 slug）也一并登记，作为补充英文列名的确定性桥。
+                    const targetCanonicalToSql = new Map();
+                    const targetResolved = resolveEffectiveDDL(targetData[target.sheetKey], targetData[target.sheetKey]?.uid || target.sheetKey, target.physicalName);
+                    for (const mapping of targetResolved.columnMap.mappings) {
+                        const canonicalDisplay = canonicalizeDisplayName_ACU(mapping.displayName);
+                        const canonicalSql = canonicalizeDisplayName_ACU(mapping.sqlName);
+                        if (canonicalDisplay) {
+                            // 同一 canonical 显示名指向不同目标列 → 不再作为唯一索引，删除防误配。
+                            if (targetCanonicalToSql.has(canonicalDisplay) && targetCanonicalToSql.get(canonicalDisplay) !== mapping.sqlName)
+                                targetCanonicalToSql.delete(canonicalDisplay);
+                            else
+                                targetCanonicalToSql.set(canonicalDisplay, mapping.sqlName);
                         }
-                        const target = matched[0].sqlName;
-                        const targetKey = target.toLowerCase();
-                        if (rejectedTargets.has(targetKey)) {
-                            columnConflicts.add(sourceKey);
-                            continue;
+                        if (canonicalSql) {
+                            if (targetCanonicalToSql.has(canonicalSql) && targetCanonicalToSql.get(canonicalSql) !== mapping.sqlName)
+                                targetCanonicalToSql.delete(canonicalSql);
+                            else
+                                targetCanonicalToSql.set(canonicalSql, mapping.sqlName);
                         }
-                        const claimedSource = claimedTargets.get(targetKey);
-                        if (!claimedSource || claimedSource === sourceKey) {
-                            claimedTargets.set(targetKey, sourceKey);
-                            fallbackAliases.set(sourceKey, target);
-                            continue;
-                        }
-                        fallbackAliases.delete(claimedSource);
-                        fallbackAliases.delete(sourceKey);
-                        columnConflicts.add(claimedSource);
-                        columnConflicts.add(sourceKey);
-                        claimedTargets.delete(targetKey);
-                        rejectedTargets.add(targetKey);
                     }
-                    for (const [source, target] of fallbackAliases)
-                        columns.set(source, target);
+                    // 补充模板的「作者 DDL 列名 → 补充表头显示名」是模板内部的结构对齐：
+                    // DDL 列序与 content[0] 表头序一致（与 resolveEffectiveDDL 的 sourceIndex
+                    // 对齐同源，非位置猜测）。补充表头（如「当前详细地点」）canonical 唯一命中
+                    // 目标列，则该补充 DDL 列名（如 current_location）注册为指向目标物理列的别名。
+                    // 列数不一致或表头无法唯一命中 → 不注册，保持 SQLite 原始 no such column。
+                    // 注意：不能对补充 sheet 调用 resolveEffectiveDDL —— 英文无注释 DDL + 中文
+                    // 表头的模板会被 resolveInsertColumnMappings 判定「表头没有对应 DDL 列」而抛错，
+                    // 这会破坏 skipInvalidSupplementalSources 的容错语义。
+                    const supplementalColumns = parseDDLColumnInfos_ACU(supplementalDDL);
+                    const supplementalHeaders = Array.isArray(sheet?.content?.[0])
+                        ? sheet.content[0].map((h) => String(h ?? ''))
+                        : [];
+                    if (supplementalColumns.length > 0
+                        && supplementalColumns.length === supplementalHeaders.length) {
+                        for (let index = 0; index < supplementalColumns.length; index += 1) {
+                            const column = supplementalColumns[index];
+                            const headerCanonical = canonicalizeDisplayName_ACU(supplementalHeaders[index]);
+                            if (!headerCanonical)
+                                continue;
+                            const targetSqlName = targetCanonicalToSql.get(headerCanonical);
+                            if (!targetSqlName)
+                                continue; // 补充表头显示名未唯一命中目标列 → 不注册
+                            addColumnAlias(tableColumns, tableEvidence, tableConflictCandidates, tableConflicts, column.sqlName, targetSqlName, 'authored_ddl');
+                        }
+                    }
                 }
-                aliases.set(physicalName, columns);
-                if (columnConflicts.size > 0)
-                    conflicts.set(physicalName, columnConflicts);
+                // declared_display_alias：sourceData.columnAliases 声明的历史显示名。
+                const rawColumnAliases = sheet?.sourceData?.columnAliases;
+                if (rawColumnAliases && typeof rawColumnAliases === 'object' && !Array.isArray(rawColumnAliases)) {
+                    const targetCanonicalToSql = new Map();
+                    const targetResolved = resolveEffectiveDDL(targetData[target.sheetKey], targetData[target.sheetKey]?.uid || target.sheetKey, target.physicalName);
+                    for (const mapping of targetResolved.columnMap.mappings) {
+                        const canonical = canonicalizeDisplayName_ACU(mapping.displayName);
+                        if (canonical && !targetCanonicalToSql.has(canonical))
+                            targetCanonicalToSql.set(canonical, mapping.sqlName);
+                    }
+                    for (const [physicalName, aliases] of Object.entries(rawColumnAliases)) {
+                        const physicalCanonical = canonicalizeDisplayName_ACU(physicalName);
+                        const targetSqlName = physicalCanonical ? targetCanonicalToSql.get(physicalCanonical) : undefined;
+                        if (!targetSqlName)
+                            continue; // 物理名未唯一命中目标列 → 不注册
+                        for (const alias of Array.isArray(aliases) ? aliases : []) {
+                            addColumnAlias(tableColumns, tableEvidence, tableConflictCandidates, tableConflicts, String(alias ?? ''), targetSqlName, 'declared_display_alias');
+                        }
+                    }
+                }
+                aliases.set(target.physicalName, tableColumns);
+                if (tableConflicts.size > 0)
+                    conflicts.set(target.physicalName, tableConflicts);
+                if (tableEvidence.size > 0)
+                    sourceByAlias.set(target.physicalName, tableEvidence);
+                if (tableConflictCandidates.size > 0)
+                    conflictCandidates.set(target.physicalName, tableConflictCandidates);
             }
         }
-        return { aliases, conflicts };
+        return { aliases, conflicts, sourceByAlias, conflictCandidates };
     }
     function isSqlWordStart_ACU(char) {
         return /^[A-Za-z_\u0080-\uFFFF]$/.test(char);
@@ -38406,7 +38786,7 @@ $CONTENT
             return { ...rebound, sql: translateLegacyReadSqlSafely_ACU(rebound.sql, translateSql, rebound.protectedIdentifierSpans) };
         }
         const { aliases: tableAliases, conflicts: tableConflicts } = buildSheetTableAliasMap_ACU([tableData]);
-        const { aliases: columnAliases, conflicts: columnConflicts } = buildSheetColumnAliasMap_ACU([tableData]);
+        const { aliases: columnAliases, conflicts: columnConflicts } = buildSheetColumnAliasMap_ACU(tableData);
         const referencedTableAliases = new Set();
         const referencedColumnConflicts = new Set();
         const rebound = rebindSqlReadIdentifiers_ACU(sql, tableAliases, columnAliases, {
@@ -39632,7 +40012,7 @@ $CONTENT
         }
         return { aliases, conflicts };
     }
-    async function applySqlBatchOperationV2_ACU(state, operation, runtime) {
+    async function applySqlBatchOperationV2_ACU(state, operation, runtime, supplementalTemplate) {
         const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
         if (statements.length === 0)
             return;
@@ -39642,8 +40022,38 @@ $CONTENT
             lenient: true,
             ambiguousAliases: conflicts,
         });
+        // 列名重绑（计划 Phase 4）：仅 sql_sheet_batch 执行。sql_batch 是旧无归属类型，
+        // 不做列重绑（计划 3.2）。表重绑已把目标表改写为当前物理名，故列别名以该
+        // 物理名为 key 查询。列重绑抛错不捕获，让调用点的既有 wrapper 附加
+        // messageIndex / seq / operationIndex 上下文；不提供 lenient（计划 4.1）。
+        let columnReboundStatements = replayStatements;
+        if (operation.kind === 'sql_sheet_batch'
+            && typeof operation.sheetKey === 'string'
+            && state[operation.sheetKey]) {
+            const sheetKey = operation.sheetKey;
+            const targetTableName = getPhysicalTableNameForSheet_ACU(state, sheetKey);
+            // 每个 operation 内构造：补锚经 commitReplayCandidate_ACU 更新 state 后，
+            // 这里天然拿到补锚后的最新 state，无需额外重建（计划 4.3 确认项）。
+            // target-first（计划 5.2）：target=state（checkpoint 权威），
+            // supplemental=当前模板 header-only（只提供别名证据，绝不提供目标列）。
+            const { aliases: columnAliases, conflicts: columnConflicts, sourceByAlias, conflictCandidates } = buildSheetColumnAliasMap_ACU(state, {
+                supplementalSources: [supplementalTemplate],
+                skipInvalidSupplementalSources: true,
+            });
+            const evidenceByAlias = sourceByAlias.get(targetTableName);
+            const candidatesByAlias = conflictCandidates.get(targetTableName);
+            columnReboundStatements = rebindSqlMutationColumnReferences_ACU(replayStatements, columnAliases, targetTableName, {
+                ambiguousColumns: columnConflicts.get(targetTableName),
+                // Phase 6：歧义拒绝时给出全部候选列与各自证据来源。
+                resolveAmbiguity: candidatesByAlias
+                    ? alias => candidatesByAlias.get(alias.toLowerCase()) || []
+                    : undefined,
+                onRebound: ({ from, to }) => logWarn_ACU(`[V2 Replay][column-rebind] sheetKey=${sheetKey}, from=${from}, to=${to}, `
+                    + `evidence=${evidenceByAlias?.get(from.toLowerCase()) || 'unknown'}`),
+            });
+        }
         const params = Array.isArray(operation.params) ? operation.params : undefined;
-        runtime.engine.runBatch(replayStatements, params);
+        runtime.engine.runBatch(columnReboundStatements, params);
     }
     function assertMetaUpdateDoesNotChangeDdl_ACU(patch) {
         const sourceData = patch.meta?.sourceData;
@@ -39888,7 +40298,7 @@ $CONTENT
             }
         }
     }
-    async function applyTableOperationV2_ACU(state, operation, runtime) {
+    async function applyTableOperationV2_ACU(state, operation, runtime, supplementalTemplate) {
         if (!operation || typeof operation !== 'object' || typeof operation.kind !== 'string') {
             throw new Error('[V2 Replay] operation 缺少有效 kind。');
         }
@@ -39907,7 +40317,7 @@ $CONTENT
             if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
                 if (!effectiveRuntime)
                     throw new Error(`${operation.kind} replay requires runtime`);
-                await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime);
+                await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime, supplementalTemplate);
                 if (ownedRuntime)
                     exportSqlReplayRuntime_ACU(ownedRuntime, state);
                 return;
@@ -40049,6 +40459,12 @@ $CONTENT
         let headerOnlyTemplateFingerprint = '';
         runtime.syncBridge = new SyncBridge(runtime.engine);
         try {
+            // 列重绑 supplemental 与补锚共用同一份当前模板 header-only 快照：
+            // 提前解析一次并缓存（惰性），避免每个 operation 重复解析。
+            // 解析失败 → null，列重绑退化为无 supplemental（仍 target-first fail closed）。
+            headerOnlyTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
+            if (headerOnlyTemplate)
+                headerOnlyTemplateFingerprint = getTableDataFingerprint_ACU(headerOnlyTemplate);
             for (const ref of frameRefs) {
                 if (ref.messageIndex < replayStartMessageIndex)
                     continue;
@@ -40095,12 +40511,6 @@ $CONTENT
                                         && typeof operation.sheetKey === 'string'
                                         && operation.sheetKey.startsWith('sheet_')
                                         && !Object.prototype.hasOwnProperty.call(state, operation.sheetKey)) {
-                                        if (headerOnlyTemplate === undefined) {
-                                            headerOnlyTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
-                                            headerOnlyTemplateFingerprint = headerOnlyTemplate
-                                                ? getTableDataFingerprint_ACU(headerOnlyTemplate)
-                                                : '';
-                                        }
                                         const templateSheet = headerOnlyTemplate?.[operation.sheetKey];
                                         if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
                                             const candidate = buildReplayCandidate_ACU(runtime, state);
@@ -40119,7 +40529,7 @@ $CONTENT
                                             logWarn_ACU(`[V2 Replay] operation 执行点缺少目标表，已从当前聊天模板临时补锚：sheetKey=${operation.sheetKey}, messageIndex=${ref.messageIndex}, seq=${entry.seq}, operationIndex=${operationIndex}。该状态需要由 recovery 或 compaction 固化。`);
                                         }
                                     }
-                                    await applyTableOperationV2_ACU(state, operation, runtime);
+                                    await applyTableOperationV2_ACU(state, operation, runtime, headerOnlyTemplate);
                                 }
                                 catch (error) {
                                     const message = error instanceof Error ? error.message : String(error);
@@ -42254,6 +42664,22 @@ $CONTENT
      *   content 等价，不等价则拒绝、零写入
      * - 原 frame 完整备份到 recoveryBackup（recoveryKind: 'demoted_template_only_root'）
      * - saveChatToHostStrict_ACU 失败则完整还原内存并返回失败
+     *
+     * 返回值契约（调用方必须依赖字段，不得匹配 reason 文案）：
+     * - { ok: true, demoted: true }
+     *     确实存在可降级 root 且已移除并落盘。
+     * - { ok: false, demoted: false, noReplayRoot: true }
+     *     聊天中不存在 full checkpoint（空聊天 / pristine / 悬空 artifact），
+     *     replay 无根，结构零冲突。降级无事可做，**不构成任何写入阻断理由**：
+     *     调用方应继续 scope-only 提交（scope-only 本身不写 storage frame）。
+     * - { ok: false, demoted: false, noReplayRoot 缺省/false }
+     *     聊天中存在回放根但无法安全移除，或状态危险（真实数据根 / legacy 漂移）。
+     *     残留根会在 replay 中重建旧结构、与新模板 scope 冲突，
+     *     调用方必须 fail-closed 中止，零写入。
+     *
+     * 注意：本函数是「机会性清理」，不是保存的前置条件。禁止调用方把
+     * 「降级没做成」等同于「保存不允许」——那会让最正常的 pristine 会话
+     * 永久无法保存模板（历史缺陷即此）。
      */
     async function demoteTemplateOnlyRootToScopeOnly_ACU(options = {}) {
         const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
@@ -42267,22 +42693,42 @@ $CONTENT
             }, async () => {
                 const chat = getChatArray_ACU();
                 if (!Array.isArray(chat) || chat.length === 0) {
-                    return { ok: false, reason: '聊天记录为空，无法执行 template_only_root 降级。' };
+                    // 空聊天没有任何 frame，replay 无根：属「无需清理」，不是失败。
+                    return {
+                        ok: false,
+                        demoted: false,
+                        noReplayRoot: true,
+                        reason: '聊天记录为空，不存在任何回放根，无需降级。',
+                    };
                 }
                 const storageState = classifyTemplateCommitStorageState_ACU(chat, isolationKey);
                 if (storageState.kind !== 'template_only_root') {
+                    // 判据是「聊天里有没有 full checkpoint（回放根）」，不是「降级动作是否适用」：
+                    // - 无根 → replay 退化为模板临时基线，scope-only 不写 frame，结构零冲突 → 放行
+                    // - 有根但不可安全移除 → 残留根会重建旧结构 → fail-closed
+                    const noReplayRoot = storageState.kind === 'pristine_without_checkpoint'
+                        || storageState.kind === 'orphan_v2_artifacts';
+                    if (storageState.kind === 'orphan_v2_artifacts') {
+                        // 悬空 artifact 不阻止模板保存（无 full checkpoint，scope-only 不写 frame），
+                        // 但会让后续追平 preflight blocked，留痕以便事故复盘。
+                        logWarn_ACU(`[V2 Persist] 无回放根可降级，但检测到悬空 V2 artifact: isolationKey=${isolationKey}, details=${storageState.details.join(', ')}。`);
+                    }
                     return {
                         ok: false,
+                        demoted: false,
+                        noReplayRoot,
                         reason: storageState.kind === 'existing_full_checkpoint'
-                            ? '检测到含真实数据或后缀 artifact 的 full checkpoint，拒绝降级，零写入。'
-                            : `当前状态不是 template_only_root（实际：${storageState.kind}），拒绝降级，零写入。`,
+                            ? '检测到含真实数据或后缀 artifact 的 full checkpoint，无法安全移除回放根，拒绝降级，零写入。'
+                            : storageState.kind === 'legacy_persisted_data'
+                                ? `检测到 legacy 表格数据（${storageState.details.join(', ')}）与 pristine 判定冲突，拒绝降级，零写入。`
+                                : `当前状态为 ${storageState.kind}，不存在需要降级的回放根。`,
                     };
                 }
                 const { message: rootMessage, index: rootIndex, checkpoint: rootCheckpoint } = storageState.checkpoint;
                 const isolatedContainer = readIsolatedDataContainer_ACU(rootMessage) || {};
                 const tagData = isolatedContainer[isolationKey];
                 if (!isV2TagData_ACU(tagData) || !isObjectRecord_ACU$2(tagData.storageFrame)) {
-                    return { ok: false, reason: 'template_only_root 帧结构异常，拒绝降级，零写入。' };
+                    return { ok: false, demoted: false, reason: 'template_only_root 帧结构异常，拒绝降级，零写入。' };
                 }
                 const sourceFrame = tagData.storageFrame;
                 const backupFrame = deepClone_ACU$1(sourceFrame);
@@ -42295,7 +42741,7 @@ $CONTENT
                 // 安放，fail-closed 拒绝降级。先写 backup 消除对判空顺序的依赖。
                 const backupTagData = candidateContainer[isolationKey];
                 if (!backupTagData || typeof backupTagData !== 'object' || !isObjectRecord_ACU$2(backupTagData.storageFrame)) {
-                    return { ok: false, reason: 'template_only_root 降级候选 tagData 缺失，拒绝写入，零写入。' };
+                    return { ok: false, demoted: false, reason: 'template_only_root 降级候选 tagData 缺失，拒绝写入，零写入。' };
                 }
                 backupTagData.recoveryBackup = {
                     version: 1,
@@ -42306,7 +42752,7 @@ $CONTENT
                 };
                 const candidateTagData = candidateContainer[isolationKey];
                 if (!isV2TagData_ACU(candidateTagData) || !isObjectRecord_ACU$2(candidateTagData.storageFrame)) {
-                    return { ok: false, reason: 'template_only_root 候选帧结构异常，拒绝降级，零写入。' };
+                    return { ok: false, demoted: false, reason: 'template_only_root 候选帧结构异常，拒绝降级，零写入。' };
                 }
                 const candidateFrame = candidateTagData.storageFrame;
                 delete candidateFrame.checkpoint;
@@ -42341,17 +42787,17 @@ $CONTENT
                     });
                 }
                 catch (error) {
-                    return { ok: false, reason: `template_only_root 降级后候选 replay 校验失败：${error?.message || String(error)}` };
+                    return { ok: false, demoted: false, reason: `template_only_root 降级后候选 replay 校验失败：${error?.message || String(error)}` };
                 }
                 if (!replayAfter) {
                     const templateBaseline = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
                     if (!templateBaseline) {
-                        return { ok: false, reason: 'template_only_root 降级后候选 replay 无法校验，且当前模板基线不可得，拒绝降级，零写入。' };
+                        return { ok: false, demoted: false, reason: 'template_only_root 降级后候选 replay 无法校验，且当前模板基线不可得，拒绝降级，零写入。' };
                     }
                     replayAfter = { data: templateBaseline, baseKind: 'temporary_template_baseline' };
                 }
                 if (replayAfter.requiresCheckpointConvergence || replayAfter.compatibilityRepairs?.length) {
-                    return { ok: false, reason: 'template_only_root 降级后候选 replay 仍依赖兼容修复，拒绝降级，零写入。' };
+                    return { ok: false, demoted: false, reason: 'template_only_root 降级后候选 replay 仍依赖兼容修复，拒绝降级，零写入。' };
                 }
                 // 指纹比对（fail-closed）：候选回放的每张表 content 必须与原 checkpoint 的
                 // header-only content 等价。降级后无 full checkpoint，回放退化为模板临时基线
@@ -42368,7 +42814,7 @@ $CONTENT
                 }
                 const expectedFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(headerOnlyProjection));
                 if (afterFingerprint !== expectedFingerprint) {
-                    return { ok: false, reason: 'template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。' };
+                    return { ok: false, demoted: false, reason: 'template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。' };
                 }
                 // 真实写回：直接应用候选的最终容器形态，避免在真实对象上重复判空造成双写不一致。
                 // 正常路径（frame 降级为 {version:2, logEntries:[]} 标准空帧）保留 tagData，
@@ -42388,7 +42834,7 @@ $CONTENT
             });
         }
         catch (error) {
-            return { ok: false, reason: error?.message || String(error) };
+            return { ok: false, demoted: false, reason: error?.message || String(error) };
         }
     }
     function isPlainObjectRecord_ACU(value) {
@@ -52186,6 +52632,43 @@ $CONTENT
         });
     }
     /**
+     * 统一表名 + 列名重绑入口（计划 4.1）。顺序固定：
+     * 1. 表名重绑到运行时物理表（沿用既有 rebindSqlMutationTableIdentifiers_ACU）；
+     * 2. 以 targetData 构建 target-first 列 registry，以当前聊天模板作为 supplemental；
+     * 3. 按重绑后的目标表名进行列重绑（按语句 mutation target 自动选列 map）。
+     *
+     * 返回最终 runtime SQL；日志与持久化 operation 必须使用最终 SQL，
+     * 避免每次 replay 重复纠正。
+     */
+    function rebindSqlMutationIdentifiers_ACU(statements, targetData, supplementalData, options = {}) {
+        // 有运行时目标 schema 时，表名只能由它（或调用方显式提供的补充源）判定。
+        // 不能让隐式当前模板参与表重绑：快照级 API 可能在与当前聊天模板无关的历史
+        // 数据上运行，模板恰好含同名作者 DDL 时会制造虚假的表歧义。目标为空时仍保留
+        // 既有模板补充能力，供首次建表等无运行时表场景使用。
+        const hasTargetSheets = Object.keys(targetData || {}).some(key => key.startsWith('sheet_'));
+        const tableSupplemental = supplementalData === undefined && hasTargetSheets ? null : supplementalData;
+        const tableRebound = rebindSqlMutationTableIdentifiers_ACU(statements, targetData, tableSupplemental, options);
+        const templateSource = supplementalData === undefined
+            ? resolveCurrentChatTemplateForAliases_ACU()
+            : supplementalData;
+        const { aliases: columnAliases, conflicts: columnConflicts, conflictCandidates } = buildSheetColumnAliasMap_ACU(targetData, {
+            supplementalSources: [templateSource],
+            skipInvalidSupplementalSources: true,
+        });
+        // 冲突别名 → 目标表 → 冲突集：命中即结构化拒绝（fail closed），不原样放行。
+        const ambiguousByTarget = new Map();
+        for (const [tableName, tableConflicts] of columnConflicts) {
+            ambiguousByTarget.set(tableName.toLowerCase(), new Set(tableConflicts));
+        }
+        return rebindSqlMutationColumnsByTarget_ACU(tableRebound, columnAliases, {
+            ambiguousColumns: ambiguousByTarget,
+            resolveAmbiguity: (targetTable, alias) => {
+                const candidates = conflictCandidates.get(targetTable.toLowerCase())?.get(alias.toLowerCase());
+                return candidates || [];
+            },
+        });
+    }
+    /**
      * 解析当前聊天生效模板，仅用于 rebind 别名补充。
      * 解析失败时返回 null：别名补充是增强项，绝不能因此让 rebind 整体失败。
      */
@@ -52829,7 +53312,7 @@ $CONTENT
             const userParams = [];
             (Array.isArray(sqlTexts) ? sqlTexts : []).forEach((sqlText, index) => {
                 const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-                const runtimeStatements = rebindSqlMutationTableIdentifiers_ACU(normalizedStatements, (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }));
+                const runtimeStatements = rebindSqlMutationIdentifiers_ACU(normalizedStatements, (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }));
                 runtimeStatements.forEach(statement => {
                     userStatements.push(statement);
                     userParams.push(runtimeStatements.length === 1 ? paramsList?.[index] : undefined);
@@ -52867,7 +53350,7 @@ $CONTENT
             this._ensureTablesFromTemplate(scope);
             const normalizedGroups = (Array.isArray(sqlTexts) ? sqlTexts : []).map(sqlText => {
                 const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-                return rebindSqlMutationTableIdentifiers_ACU(normalizedStatements, (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }), scope?.templateData, { requireKnownTables: Boolean(scope?.templateData) });
+                return rebindSqlMutationIdentifiers_ACU(normalizedStatements, (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }), scope?.templateData, { requireKnownTables: Boolean(scope?.templateData) });
             });
             const userStatements = normalizedGroups.flat();
             if (userStatements.length === 0) {
@@ -52947,7 +53430,7 @@ $CONTENT
                 }
                 // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
                 const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
-                const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }))[0];
+                const runtimeSql = rebindSqlMutationIdentifiers_ACU([normalizedSql], (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }))[0];
                 const result = this.engine.run(runtimeSql, params);
                 this._syncToJson();
                 return { changes: result.changes, errors: [] };
@@ -53388,7 +53871,7 @@ $CONTENT
         try {
             const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
             const snapshotCopy = JSON.parse(JSON.stringify(tableData || {}));
-            const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], snapshotCopy)[0];
+            const runtimeSql = rebindSqlMutationIdentifiers_ACU([normalizedSql], snapshotCopy)[0];
             await engine.init();
             syncBridge.loadFromTableData(snapshotCopy, { strict: true });
             const result = engine.run(runtimeSql, params);
@@ -53436,7 +53919,7 @@ $CONTENT
             }
             const snapshotCopy = JSON.parse(JSON.stringify(tableData || {}));
             const requireKnownTables = operationOptions.requireSheetScopedOperations === true;
-            const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))), snapshotCopy, snapshotCopy, { requireKnownTables });
+            const reboundStatements = rebindSqlMutationIdentifiers_ACU(rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))), snapshotCopy, undefined, { requireKnownTables });
             const statements = materializeSystemRowIdsForSqlInserts_ACU(reboundStatements, snapshotCopy);
             await engine.init();
             syncBridge.loadFromTableData(snapshotCopy, { strict: true });
@@ -60172,6 +60655,7 @@ $CONTENT
         if (resolvedDDL.source !== 'explicit') {
             text += `-- WARNING: ${resolvedDDL.diagnostics[0]} 原始 DDL 未被改写。\n`;
         }
+        text += '-- SQL 写入时，以上 CREATE TABLE 中的列名是本轮唯一权威；Note/Trigger 中与其不一致的示例不得照抄，必须按上述列名改写。\n';
         if (options.authoredTableName) {
             text += `-- SQL 写入必须严格使用本表上方 CREATE TABLE 中的表名 ${options.authoredTableName}；不得使用其他名称。\n`;
         }
@@ -71547,16 +72031,11 @@ $CONTENT
         }
     }
     async function runSqliteRuntimeMutationCommit_ACU(options) {
-        const operations = options.operations ?? [{
-                kind: 'sql_batch',
-                statements: [options.sql],
-                ...(normalizeSqlBindParams_ACU(options.params) ? { params: normalizeSqlBindParams_ACU(options.params) } : {}),
-            }];
-        return runTableUpdateCommit_ACU({ ...options, operations }, async ({ workingData }) => {
+        return runTableUpdateCommit_ACU(options, async ({ workingData }) => {
             const provider = await ensureStorageProviderReady_ACU();
             const runtimeData = (workingData || currentJsonTableData_ACU);
             const runtimeSql = runtimeData
-                ? rebindSqlMutationTableIdentifiers_ACU([options.sql], runtimeData)[0]
+                ? rebindSqlMutationIdentifiers_ACU([options.sql], runtimeData)[0]
                 : options.sql;
             const mutationResult = provider.executeMutation(runtimeSql, options.params);
             if (mutationResult.errors?.length) {
@@ -85970,7 +86449,7 @@ $CONTENT
                 }
                 let reboundStatements;
                 try {
-                    reboundStatements = rebindSqlMutationTableIdentifiers_ACU(normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''), baseSnapshot, capturedSqlApplyScope?.templateData, { requireKnownTables: true });
+                    reboundStatements = rebindSqlMutationIdentifiers_ACU(normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''), baseSnapshot, capturedSqlApplyScope?.templateData, { requireKnownTables: true });
                     // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
                     assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
                 }
@@ -102189,7 +102668,7 @@ $CONTENT
         if (raw === '*')
             return raw;
         const tableData = currentJsonTableData_ACU;
-        const { aliases, conflicts } = buildSheetColumnAliasMap_ACU([tableData]);
+        const { aliases, conflicts } = buildSheetColumnAliasMap_ACU(tableData);
         const normalized = raw.toLowerCase();
         if (conflicts.get(englishTableName)?.has(normalized)) {
             throw new Error(`queryTableRows: ambiguous column alias ${raw}.`);
@@ -102444,7 +102923,8 @@ $CONTENT
                         skipChatSave: args.skipChatSave,
                     }, async ({ workingData }) => {
                         const provider = await ensureStorageProviderReady_ACU();
-                        const runtimeStatements = rebindSqlMutationTableIdentifiers_ACU(splitSqlStatements(String(args.sql || '').replace(/<!--|-->/g, '').trim()), (workingData || currentJsonTableData_ACU));
+                        const runtimeData = (workingData || currentJsonTableData_ACU);
+                        const runtimeStatements = rebindSqlMutationIdentifiers_ACU(splitSqlStatements(String(args.sql || '').replace(/<!--|-->/g, '').trim()), runtimeData);
                         const batchResult = typeof provider.applyEditsBatch === 'function'
                             ? provider.applyEditsBatch(runtimeStatements, 'raw_sql_api')
                             // 保留语句边界，避免可选 batch 能力缺失时将多条 SQL 拼成非法单句。
@@ -156892,17 +157372,23 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 let commitResult;
                 if (switchMode.mode === 'pristine') {
-                    // 已损坏聊天的自愈降级：resolveTemplateSwitchMode_ACU 只判 pristine/inherit/blocked，
-                    // 但聊天可能处于「pristine 判定 + 残留 header-only template root」的夹缝（F7）。
-                    // 此时降级函数内部会重新按 7 项条件分类：非 template_only_root 返回 ok:false 且
-                    // 零写入，仅「真的是可降级 root」才移除。因此这里无条件尝试降级，失败但属于
-                    // 「不是 template_only_root」则跳过，继续 scope-only。
+                    // pristine 会话的模板保存只写聊天级 guide + template scope（见
+                    // commitCurrentFloorTemplateScopeOnly_ACU + pristineOverride），不写任何
+                    // storage frame。因此这里唯一需要防的是「聊天里残留的回放根会在 replay 中
+                    // 重建旧结构、与新模板 scope 冲突」。
+                    //
+                    // 降级是机会性清理，不是保存的前置条件：
+                    // - noReplayRoot: true → 聊天无 full checkpoint，结构零冲突，直接继续 scope-only
+                    // - 其余 ok: false → 有根但清不掉，或状态危险，fail-closed 阻止，零写入
+                    //
+                    // 不得改回按 reason 文案匹配，也不得把「降级没做成」当作「保存不允许」：
+                    // 两者任一都会让最正常的 pristine 会话永久无法保存模板（历史缺陷即此）。
                     const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({
                         isolationKey: guideIsolationKey,
                         requestId: `visualizer_v2_save:${guideIsolationKey}`,
                     });
-                    if (!demotion.ok && demotion.demoted === false && /不是 template_only_root/.test(demotion.reason || '')) {
-                        logDebug_ACU(`[ACU-V2 Visualizer] 非 template_only_root，跳过降级：${demotion.reason}`);
+                    if (!demotion.ok && demotion.noReplayRoot === true) {
+                        logDebug_ACU(`[ACU-V2 Visualizer] 聊天无回放根，跳过降级直接 scope-only：${demotion.reason}`);
                     }
                     else if (!demotion.ok) {
                         toastStore.error(`模板保存被降级预检阻止：${demotion.reason || 'template_only_root 降级失败。'}`, { muteable: false });

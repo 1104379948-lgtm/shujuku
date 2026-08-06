@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decodeSqlIdentifier_ACU, rebindSqlMutationTableReferences_ACU, rebindSqlReadIdentifiers_ACU } from '../../src/shared/sql-mutation-table-rebind';
+import { decodeSqlIdentifier_ACU, rebindSqlMutationColumnReferences_ACU, rebindSqlMutationColumnsByTarget_ACU, rebindSqlMutationTableReferences_ACU, rebindSqlReadIdentifiers_ACU } from '../../src/shared/sql-mutation-table-rebind';
 
 describe('sql mutation table rebind', () => {
   it('只重绑定表引用，保持字符串和注释原样', () => {
@@ -393,3 +393,223 @@ describe('sql mutation table rebind', () => {
     expect(result).toBe('UPDATE juesebiao SET row_id = row_id WHERE row_id = 1');
   });
 });
+
+describe('sql mutation column rebind', () => {
+  const columnAliases = new Map([
+    ['quanjushujubiao', new Map([
+      ['current_location', 'dangqianweizhi'],
+      ['prev_scene_time', 'shangyichangjing'],
+      ['cur_time', 'dangqianshijian'],
+    ])],
+  ]);
+
+  it('UPDATE SET 列名重绑为当前物理列名', () => {
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ["UPDATE quanjushujubiao SET current_location = '新地点' WHERE row_id = 1"],
+      columnAliases,
+      'quanjushujubiao',
+    );
+    expect(result).toBe("UPDATE quanjushujubiao SET dangqianweizhi = '新地点' WHERE row_id = 1");
+  });
+
+  it('INSERT 列清单重绑，但 VALUES 与字符串字面量原样', () => {
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ["INSERT INTO quanjushujubiao (current_location, prev_scene_time) VALUES ('地点', '之前')"],
+      columnAliases,
+      'quanjushujubiao',
+    );
+    expect(result).toBe("INSERT INTO quanjushujubiao (dangqianweizhi, shangyichangjing) VALUES ('地点', '之前')");
+  });
+
+  it('WHERE 子句中的历史列名重绑，注释与字符串不动', () => {
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ["UPDATE quanjushujubiao SET cur_time = 'x' WHERE current_location = '起点' /* comment */ AND prev_scene_time = 'a'"],
+      columnAliases,
+      'quanjushujubiao',
+    );
+    expect(result).toBe("UPDATE quanjushujubiao SET dangqianshijian = 'x' WHERE dangqianweizhi = '起点' /* comment */ AND shangyichangjing = 'a'");
+  });
+
+  it('别名查不到时原样保留，不猜测', () => {
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ["UPDATE quanjushujubiao SET nonexistent = 'x' WHERE row_id = 1"],
+      columnAliases,
+      'quanjushujubiao',
+    );
+    expect(result).toBe("UPDATE quanjushujubiao SET nonexistent = 'x' WHERE row_id = 1");
+  });
+
+  it('目标表不是当前物理表时不重绑', () => {
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ["UPDATE other_table SET current_location = 'x' WHERE row_id = 1"],
+      columnAliases,
+      'quanjushujubiao',
+    );
+    expect(result).toBe("UPDATE other_table SET current_location = 'x' WHERE row_id = 1");
+  });
+
+  it('含 JOIN / 关联表时整条拒绝列重绑（跨表无法证明归属）', () => {
+    expect(() => rebindSqlMutationColumnReferences_ACU(
+      ['UPDATE quanjushujubiao SET current_location = other.x FROM other WHERE quanjushujubiao.row_id = other.row_id'],
+      columnAliases,
+      'quanjushujubiao',
+    )).toThrow('SQL_COLUMN_CROSS_TABLE_REFUSED_ACU');
+  });
+
+  it('INSERT...SELECT 含 SELECT 关键词：无法安全改列时原样放行，由上层/SQLite fail closed', () => {
+    // 计划 3.3-5：无法安全改列时原样放行，让上层（sql-table-service 的
+    // materializeSystemRowIdsForSqlInserts_ACU「不支持 INSERT SELECT」校验）或
+    // SQLite 自己 fail closed。INSERT SELECT 的列来自 SELECT 来源表，纯工具无法
+    // 证明归属，不能强行重绑；SELECT 检测先于跨表检测，故不抛跨表拒绝。
+    const result = rebindSqlMutationColumnReferences_ACU(
+      ['INSERT INTO quanjushujubiao (current_location) SELECT prev_scene_time FROM quanjushujubiao WHERE row_id = 1'],
+      columnAliases,
+      'quanjushujubiao',
+    );
+    expect(result[0]).toBe('INSERT INTO quanjushujubiao (current_location) SELECT prev_scene_time FROM quanjushujubiao WHERE row_id = 1');
+  });
+
+  it('UPDATE + SELECT 子查询（单表）：跳过列重绑、原样放行', () => {
+    // replay.test.ts:869 的历史合法回放路径：WITH source AS (...) UPDATE [global_state]
+    // SET story_state = (SELECT story_state FROM source) ...。source 是 CTE，
+    // references() 用 isCteReference 排除 CTE 引用 → 只有 1 个表引用 → 走 SELECT 跳过
+    // 分支原样放行。子查询内列归属不可证，不猜；若列名真是历史名，SQLite 报真实
+    // no such column，仍 fail closed。
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ["WITH source AS (SELECT 1 AS row_id, 'x' AS story_state) UPDATE quanjushujubiao SET story_state = (SELECT story_state FROM source) WHERE row_id = (SELECT row_id FROM source)"],
+      columnAliases,
+      'quanjushujubiao',
+    );
+    expect(result).toBe("WITH source AS (SELECT 1 AS row_id, 'x' AS story_state) UPDATE quanjushujubiao SET story_state = (SELECT story_state FROM source) WHERE row_id = (SELECT row_id FROM source)");
+  });
+
+  it('命中歧义列时抛结构化错误 SQL_COLUMN_ALIAS_AMBIGUOUS_ACU', () => {
+    expect(() => rebindSqlMutationColumnReferences_ACU(
+      ["UPDATE quanjushujubiao SET current_location = 'x' WHERE row_id = 1"],
+      columnAliases,
+      'quanjushujubiao',
+      { ambiguousColumns: new Set(['current_location']) },
+    )).toThrow('SQL_COLUMN_ALIAS_AMBIGUOUS_ACU');
+  });
+
+  it('quoted identifier 重绑且保留引号风格', () => {
+    const quoted = new Map([
+      ['quanjushujubiao', new Map([['current_location', 'dangqianweizhi']])],
+    ]);
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ['UPDATE quanjushujubiao SET "current_location" = \'x\' WHERE row_id = 1'],
+      quoted,
+      'quanjushujubiao',
+    );
+    expect(result).toBe('UPDATE quanjushujubiao SET "dangqianweizhi" = \'x\' WHERE row_id = 1');
+  });
+
+  it('不提供 lenient：无别名证据时原样保留（不吞 SQLite 错误）', () => {
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ["UPDATE quanjushujubiao SET current_location = 'x' WHERE row_id = 1"],
+      new Map(),
+      'quanjushujubiao',
+    );
+    expect(result).toBe("UPDATE quanjushujubiao SET current_location = 'x' WHERE row_id = 1");
+  });
+
+  it('INSERT ... ON CONFLICT DO UPDATE：列清单与 DO UPDATE SET 左侧重绑，excluded 限定符右侧不重绑', () => {
+    // 风险点 4：EXCLUDED 不在 READ_COLUMN_KEYWORDS_ACU 中，但 excluded 自身不在别名表
+    // 则原样保留；excluded.current_location 的点号右侧被限定符规则排除。
+    // DO UPDATE SET 左侧 current_location 经全语句扫描命中别名并重绑。
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ["INSERT INTO quanjushujubiao (current_location) VALUES ('地点') ON CONFLICT (row_id) DO UPDATE SET current_location = excluded.current_location"],
+      columnAliases,
+      'quanjushujubiao',
+    );
+    expect(result).toBe("INSERT INTO quanjushujubiao (dangqianweizhi) VALUES ('地点') ON CONFLICT (row_id) DO UPDATE SET dangqianweizhi = excluded.current_location");
+  });
+
+  it('INSERT OR REPLACE INTO t (a, b) VALUES (...)：列清单重绑，VALUES 原样', () => {
+    // 风险点 5：OR REPLACE 位于 action 与目标表之间，mutationTarget 应能定位目标表，
+    // 列清单检测按 depth 定位第一个括号，不受 VALUES 括号干扰。
+    const [result] = rebindSqlMutationColumnReferences_ACU(
+      ["INSERT OR REPLACE INTO quanjushujubiao (current_location, prev_scene_time) VALUES ('地点', '之前')"],
+      columnAliases,
+      'quanjushujubiao',
+    );
+    expect(result).toBe("INSERT OR REPLACE INTO quanjushujubiao (dangqianweizhi, shangyichangjing) VALUES ('地点', '之前')");
+  });
+
+  it('Phase 6：歧义拒绝时错误信息含全部候选列与各自证据来源', () => {
+    expect(() => rebindSqlMutationColumnReferences_ACU(
+      ["UPDATE quanjushujubiao SET current_location = 'x' WHERE row_id = 1"],
+      columnAliases,
+      'quanjushujubiao',
+      {
+        ambiguousColumns: new Set(['current_location']),
+        resolveAmbiguity: alias => [
+          { target: 'prev_scene_time', evidence: 'physical_alias' },
+          { target: 'cur_time', evidence: 'display_name' },
+        ],
+      },
+    )).toThrow(/SQL_COLUMN_ALIAS_AMBIGUOUS_ACU.*current_location.*prev_scene_time.*physical_alias.*cur_time.*display_name/s);
+  });
+});
+
+  it('rebindSqlMutationColumnsByTarget_ACU：按每条语句 mutation target 自动选择列 map', () => {
+    const multiTableAliases = new Map([
+      ['quanjushujubiao', new Map([['current_location', 'dangqianweizhi']])],
+      ['juesebiao', new Map([['char_name', 'juesemingcheng']])],
+    ]);
+    const result = rebindSqlMutationColumnsByTarget_ACU(
+      [
+        "UPDATE quanjushujubiao SET current_location = '新地点' WHERE row_id = 1",
+        "UPDATE juesebiao SET char_name = '助手' WHERE row_id = 2",
+      ],
+      multiTableAliases,
+    );
+    expect(result[0]).toBe("UPDATE quanjushujubiao SET dangqianweizhi = '新地点' WHERE row_id = 1");
+    expect(result[1]).toBe("UPDATE juesebiao SET juesemingcheng = '助手' WHERE row_id = 2");
+  });
+
+  it('rebindSqlMutationColumnsByTarget_ACU：目标表未注册列别名时原样放行', () => {
+    const result = rebindSqlMutationColumnsByTarget_ACU(
+      ["UPDATE weizhubiao SET whatever = 'x' WHERE row_id = 1"],
+      new Map([['quanjushujubiao', new Map([['current_location', 'dangqianweizhi']])]]),
+    );
+    expect(result[0]).toBe("UPDATE weizhubiao SET whatever = 'x' WHERE row_id = 1");
+  });
+
+  it('rebindSqlMutationColumnsByTarget_ACU：歧义按目标表隔离，仅命中目标表冲突', () => {
+    const aliases = new Map([
+      ['quanjushujubiao', new Map([['current_location', 'dangqianweizhi']])],
+      ['juesebiao', new Map([['current_location', 'jueseweizhi']])],
+    ]);
+    // 只有 quanjushujubiao 的 current_location 冲突；juesebiao 的 current_location
+    // 无歧义 → 正常重绑为 jueseweizhi，不受另一张表冲突影响（按目标表隔离）。
+    const result = rebindSqlMutationColumnsByTarget_ACU(
+      [
+        "UPDATE juesebiao SET current_location = 'x' WHERE row_id = 1",
+      ],
+      aliases,
+      { ambiguousColumns: new Map([['quanjushujubiao', new Set(['current_location'])]]) },
+    );
+    expect(result[0]).toBe("UPDATE juesebiao SET jueseweizhi = 'x' WHERE row_id = 1");
+    // quanjushujubiao 命中歧义 → 结构化拒绝。
+    expect(() => rebindSqlMutationColumnsByTarget_ACU(
+      ["UPDATE quanjushujubiao SET current_location = 'x' WHERE row_id = 1"],
+      aliases,
+      { ambiguousColumns: new Map([['quanjushujubiao', new Set(['current_location'])]]) },
+    )).toThrow('SQL_COLUMN_ALIAS_AMBIGUOUS_ACU');
+  });
+
+  it('rebindSqlMutationColumnsByTarget_ACU：跨表拒绝与 SELECT 放行语义与单表一致', () => {
+    const aliases = new Map([['quanjushujubiao', new Map([['current_location', 'dangqianweizhi']])]]);
+    // JOIN 多表 → 拒绝。
+    expect(() => rebindSqlMutationColumnsByTarget_ACU(
+      ['UPDATE quanjushujubiao SET current_location = other.x FROM other WHERE quanjushujubiao.row_id = other.row_id'],
+      aliases,
+    )).toThrow('SQL_COLUMN_CROSS_TABLE_REFUSED_ACU');
+    // INSERT...SELECT → 原样放行（由上层/SQLite fail closed）。
+    const [result] = rebindSqlMutationColumnsByTarget_ACU(
+      ['INSERT INTO quanjushujubiao (current_location) SELECT prev_scene_time FROM quanjushujubiao WHERE row_id = 1'],
+      aliases,
+    );
+    expect(result).toBe('INSERT INTO quanjushujubiao (current_location) SELECT prev_scene_time FROM quanjushujubiao WHERE row_id = 1');
+  });

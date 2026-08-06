@@ -67,6 +67,7 @@ vi.mock('../../src/service/template/chat-scope', () => ({
   },
   buildChatSheetGuideDataFromData_ACU: (data: any) => clone(data),
   getChatSheetGuideDataForIsolationKey_ACU: () => h.guide,
+  getCurrentChatTemplateScopeState_ACU: () => h.scopeTemplate || null,
   setChatSheetGuideDataForIsolationKey_ACU: (_key: string, guideData: any, options: any) => {
     h.guide = clone(guideData);
     if (options?.syncTemplateScope) h.scopeTemplate = { templateStr: JSON.stringify(options.templateSource), presetName: options.presetName || '' };

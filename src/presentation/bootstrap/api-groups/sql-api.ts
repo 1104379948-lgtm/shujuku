@@ -9,7 +9,7 @@ import { ensureStorageProviderReady_ACU, getStorageProvider, getStorageRuntimeHe
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { resolvePhysicalTableNames_ACU } from '../../../shared/sheet-identity';
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
-import { buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements } from '../../../service/table/sql-table-service';
+import { buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, rebindSqlMutationIdentifiers_ACU, splitSqlStatements } from '../../../service/table/sql-table-service';
 import type { TableWriteConflictUnitV2_ACU } from '../../../service/table/storage-frame-v2-types';
 import type { SqlMutationResult, SqlQueryResult } from '../../../shared/table-storage-provider';
 import { buildSheetColumnAliasMap_ACU, buildSheetTableAliasMap_ACU, type ReadQueryResolveResult_ACU } from '../../../shared/sql-read-resolver';
@@ -391,7 +391,7 @@ function resolveQueryColumn_ACU(englishTableName: string, column: string): strin
     if (!raw) throw new Error('queryTableRows: column must not be empty.');
     if (raw === '*') return raw;
     const tableData = currentJsonTableData_ACU as Record<string, any> | null;
-    const { aliases, conflicts } = buildSheetColumnAliasMap_ACU([tableData]);
+    const { aliases, conflicts } = buildSheetColumnAliasMap_ACU(tableData);
     const normalized = raw.toLowerCase();
     if (conflicts.get(englishTableName)?.has(normalized)) {
         throw new Error(`queryTableRows: ambiguous column alias ${raw}.`);
@@ -652,9 +652,10 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     skipChatSave: args.skipChatSave,
                 }, async ({ workingData }) => {
                     const provider = await ensureStorageProviderReady_ACU();
-                    const runtimeStatements = rebindSqlMutationTableIdentifiers_ACU(
+                    const runtimeData = (workingData || currentJsonTableData_ACU) as any;
+                    const runtimeStatements = rebindSqlMutationIdentifiers_ACU(
                         splitSqlStatements(String(args.sql || '').replace(/<!--|-->/g, '').trim()),
-                        (workingData || currentJsonTableData_ACU) as any,
+                        runtimeData,
                     );
                     const batchResult = typeof provider.applyEditsBatch === 'function'
                         ? provider.applyEditsBatch(runtimeStatements, 'raw_sql_api')

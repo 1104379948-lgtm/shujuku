@@ -69,6 +69,23 @@ vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
 
 vi.mock('../../../src/shared/defaults', () => ({
   buildDefaultContentOptimizationPromptGroup_ACU: vi.fn(() => []),
+  defaultVectorMemoryConfig_ACU: {
+    enabled: false,
+    threshold: 50,
+    archiveTriggerCount: 9,
+    archiveBatchSize: 3,
+    archiveMaxConcurrency: 3,
+    summaryIndexArchiveMaxConcurrency: 30,
+    summaryIndexArchiveEmbeddingConcurrency: 3,
+    topK: 200,
+    minScore: 0.45,
+    embeddingEndpoint: '',
+    embeddingApiKey: '',
+    embeddingModel: '',
+    rerankEndpoint: '',
+    rerankApiKey: '',
+    rerankModel: '',
+  },
 }));
 
 vi.mock('../../../src/service/runtime/template-vars/sql-query-var', () => ({

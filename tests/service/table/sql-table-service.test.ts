@@ -567,6 +567,88 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
   });
 
+  it('7.3 双轨：runtime 目标为 fallback 拼音，SQL 用模板 authored 英文列名 → 写入成功', async () => {
+    // 目标 sheet 无显式 DDL（fallback_missing），表头中文 → 物理列是确定性拼音。
+    // SQL 使用作者 DDL 英文名 item_name/quantity，经 supplemental（当前聊天模板）
+    // 的「DDL 列名 ↔ 表头显示名」结构对齐映射到目标拼音列。
+    const inputSnapshot: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory',
+        name: '背包物品表',
+        sourceData: {},
+        content: [
+          ['row_id', '物品名称', '数量'],
+          ['1', '铁剑', '3'],
+        ],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    };
+    mockGetCurrentChatTemplateScopeState.mockReturnValue({
+      mode: 'chat_override',
+      isolationKey: '',
+      templateStr: JSON.stringify({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'inventory',
+          name: '背包物品表',
+          sourceData: { ddl: TEST_DDL },
+          content: [['row_id', '物品名称', '数量'], ['99', '示例', '1']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 1,
+        },
+      }),
+    });
+
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      "UPDATE beibaowupinbiao SET item_name = '圣剑' WHERE row_id = 1",
+      inputSnapshot,
+      'auto_standard',
+      { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
+    );
+    expect(result.success).toBe(true);
+    expect(result.workingData?.sheet_0.content[1][1]).toBe('圣剑');
+  });
+
+  it('7.3 双轨：runtime 目标为 explicit 英文 DDL，SQL 用 fallback 拼音列名 → 写入成功', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    // mapSqlColumnIdentifiers_ACU(['row_id', 'item_name', 'quantity']) 的确定性拼音为
+    // ['row_id', 'item_name', 'quantity']；为验证异名桥接，目标表头使用中文显示名，
+    // 并由显式 DDL 注释证明其与英文物理列的对应关系。
+    inputSnapshot.sheet_0.sourceData.ddl = `CREATE TABLE inventory (
+      row_id INTEGER PRIMARY KEY, -- 行号
+      item_name TEXT NOT NULL, -- 物品名称
+      quantity INTEGER DEFAULT 1 -- 数量
+    );`;
+    inputSnapshot.sheet_0.content = [['row_id', '物品名称', '数量'], ['1', '铁剑', '3']];
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      "UPDATE beibaowupinbiao SET wu_pin_ming_cheng = '圣剑' WHERE row_id = 1",
+      inputSnapshot,
+      'auto_standard',
+      { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
+    );
+    expect(result.success).toBe(true);
+    expect(result.workingData?.sheet_0.content[1][1]).toBe('圣剑');
+  });
+
+  it('7.3 双轨：supplemental 独有列不得写入 target（无证据不注册，SQLite no such column）', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      "UPDATE beibaowupinbiao SET nonexistent_col = 'x' WHERE row_id = 1",
+      inputSnapshot,
+      'auto_standard',
+      { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('no such column');
+    // 零持久化：输入快照未被修改。
+    expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
+  });
+
+
   it('为同一批 INSERT 按当前最大 row_id 连续分配，并持久化具体身份', async () => {
     const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
     inputSnapshot.sheet_0.content.push(['3', '盾牌', '1']);

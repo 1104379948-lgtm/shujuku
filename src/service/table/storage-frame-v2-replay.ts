@@ -15,8 +15,8 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
 import { getPhysicalTableNameForSheet_ACU } from '../../shared/sheet-identity';
 import { parseDDLTableName } from '../../shared/ddl-utils';
-import { decodeSqlIdentifier_ACU, rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
-import { buildSheetTableAliasMap_ACU } from '../../shared/sql-read-resolver';
+import { decodeSqlIdentifier_ACU, rebindSqlMutationColumnReferences_ACU, rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
+import { buildSheetColumnAliasMap_ACU, buildSheetTableAliasMap_ACU, type SheetColumnAliasEvidence_ACU } from '../../shared/sql-read-resolver';
 import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { repairTableDataFromAudit_ACU } from './table-data-repair';
 
@@ -53,6 +53,22 @@ export function hasStructuralReplayCompatibilityRepairs_ACU(
   return Boolean(repairs?.some(repair => repair.severity !== 'provisional'));
 }
 
+/**
+ * 列身份重绑诊断（Phase 4b）。
+ *
+ * 刻意**不进** `compatibilityRepairs`：全仓约 18 处直接用
+ * `compatibilityRepairs?.length` 作为「拒绝写入 / 拒绝切模板 / 拒绝追平锚点 /
+ * blocked_checkpoint_convergence」的硬阻塞条件（storage-frame-v2-persist.ts:492、
+ * :529、:634、:1277、:2011、:2041、:2590、:3535、:3914；chat-service.ts:886、:905、
+ * :1572、:1625、:2542；mixed-storage-decision.ts:238、:247；
+ * manual-catch-up-provisional-bridge.ts:566、:682、:768），这些点绕过了
+ * `hasStructuralReplayCompatibilityRepairs_ACU` 的 provisional 过滤，因此
+ * `severity: 'provisional'` 在那里不起作用。
+ *
+ * 列重绑同样是确定性映射：同一份 frame + 同一份 schema 每次回放结果相同，不依赖
+ * 任何临时构造，也没有需要 checkpoint 固化的状态。它只写稳定日志，不驱动收敛，
+ * 更不向 replay 结果暴露会被调用方误当作持久化状态的诊断字段。
+ */
 export interface TableReplayResultV2_ACU {
   data: TableDataObject_ACU;
   baseKind: TableReplayBaseKindV2_ACU;
@@ -996,6 +1012,7 @@ async function applySqlBatchOperationV2_ACU(
   state: TableDataObject_ACU,
   operation: Extract<TableMutationOperationV2_ACU, { kind: 'sql_batch' | 'sql_sheet_batch' }>,
   runtime: SqlReplayRuntime_ACU,
+  supplementalTemplate: TableDataObject_ACU | null | undefined,
 ): Promise<void> {
   const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
   if (statements.length === 0) return;
@@ -1005,8 +1022,45 @@ async function applySqlBatchOperationV2_ACU(
     lenient: true,
     ambiguousAliases: conflicts,
   });
+  // 列名重绑（计划 Phase 4）：仅 sql_sheet_batch 执行。sql_batch 是旧无归属类型，
+  // 不做列重绑（计划 3.2）。表重绑已把目标表改写为当前物理名，故列别名以该
+  // 物理名为 key 查询。列重绑抛错不捕获，让调用点的既有 wrapper 附加
+  // messageIndex / seq / operationIndex 上下文；不提供 lenient（计划 4.1）。
+  let columnReboundStatements = replayStatements;
+  if (operation.kind === 'sql_sheet_batch'
+    && typeof operation.sheetKey === 'string'
+    && state[operation.sheetKey]) {
+    const sheetKey = operation.sheetKey;
+    const targetTableName = getPhysicalTableNameForSheet_ACU(state, sheetKey);
+    // 每个 operation 内构造：补锚经 commitReplayCandidate_ACU 更新 state 后，
+    // 这里天然拿到补锚后的最新 state，无需额外重建（计划 4.3 确认项）。
+    // target-first（计划 5.2）：target=state（checkpoint 权威），
+    // supplemental=当前模板 header-only（只提供别名证据，绝不提供目标列）。
+    const { aliases: columnAliases, conflicts: columnConflicts, sourceByAlias, conflictCandidates } = buildSheetColumnAliasMap_ACU(state, {
+      supplementalSources: [supplementalTemplate],
+      skipInvalidSupplementalSources: true,
+    });
+    const evidenceByAlias = sourceByAlias.get(targetTableName);
+    const candidatesByAlias = conflictCandidates.get(targetTableName);
+    columnReboundStatements = rebindSqlMutationColumnReferences_ACU(
+      replayStatements,
+      columnAliases,
+      targetTableName,
+      {
+        ambiguousColumns: columnConflicts.get(targetTableName),
+        // Phase 6：歧义拒绝时给出全部候选列与各自证据来源。
+        resolveAmbiguity: candidatesByAlias
+          ? alias => candidatesByAlias.get(alias.toLowerCase()) || []
+          : undefined,
+        onRebound: ({ from, to }) => logWarn_ACU(
+          `[V2 Replay][column-rebind] sheetKey=${sheetKey}, from=${from}, to=${to}, `
+          + `evidence=${evidenceByAlias?.get(from.toLowerCase()) || 'unknown'}`,
+        ),
+      },
+    );
+  }
   const params = Array.isArray(operation.params) ? operation.params : undefined;
-  runtime.engine.runBatch(replayStatements, params);
+  runtime.engine.runBatch(columnReboundStatements, params);
 }
 
 
@@ -1252,6 +1306,7 @@ export async function applyTableOperationV2_ACU(
   state: TableDataObject_ACU,
   operation: TableMutationOperationV2_ACU,
   runtime?: SqlReplayRuntime_ACU,
+  supplementalTemplate?: TableDataObject_ACU | null,
 ): Promise<void> {
   if (!operation || typeof operation !== 'object' || typeof (operation as any).kind !== 'string') {
     throw new Error('[V2 Replay] operation 缺少有效 kind。');
@@ -1270,7 +1325,7 @@ export async function applyTableOperationV2_ACU(
     }
     if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
       if (!effectiveRuntime) throw new Error(`${operation.kind} replay requires runtime`);
-      await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime);
+      await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime, supplementalTemplate);
       if (ownedRuntime) exportSqlReplayRuntime_ACU(ownedRuntime, state);
       return;
     }
@@ -1427,6 +1482,11 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
   runtime.syncBridge = new SyncBridge(runtime.engine);
 
   try {
+    // 列重绑 supplemental 与补锚共用同一份当前模板 header-only 快照：
+    // 提前解析一次并缓存（惰性），避免每个 operation 重复解析。
+    // 解析失败 → null，列重绑退化为无 supplemental（仍 target-first fail closed）。
+    headerOnlyTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
+    if (headerOnlyTemplate) headerOnlyTemplateFingerprint = getTableDataFingerprint_ACU(headerOnlyTemplate);
     for (const ref of frameRefs) {
       if (ref.messageIndex < replayStartMessageIndex) continue;
       const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
@@ -1473,12 +1533,6 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
                   && typeof operation.sheetKey === 'string'
                   && operation.sheetKey.startsWith('sheet_')
                   && !Object.prototype.hasOwnProperty.call(state, operation.sheetKey)) {
-                  if (headerOnlyTemplate === undefined) {
-                    headerOnlyTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
-                    headerOnlyTemplateFingerprint = headerOnlyTemplate
-                      ? getTableDataFingerprint_ACU(headerOnlyTemplate)
-                      : '';
-                  }
                   const templateSheet = headerOnlyTemplate?.[operation.sheetKey];
                   if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
                     const candidate = buildReplayCandidate_ACU(runtime, state);
@@ -1497,7 +1551,12 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
                     logWarn_ACU(`[V2 Replay] operation 执行点缺少目标表，已从当前聊天模板临时补锚：sheetKey=${operation.sheetKey}, messageIndex=${ref.messageIndex}, seq=${entry.seq}, operationIndex=${operationIndex}。该状态需要由 recovery 或 compaction 固化。`);
                   }
                 }
-                await applyTableOperationV2_ACU(state, operation, runtime);
+                await applyTableOperationV2_ACU(
+                  state,
+                  operation,
+                  runtime,
+                  headerOnlyTemplate,
+                );
               } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
                 throw new Error(

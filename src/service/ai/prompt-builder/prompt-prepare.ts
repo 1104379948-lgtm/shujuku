@@ -552,6 +552,7 @@ export function formatTableForSqliteMode(
     if (resolvedDDL.source !== 'explicit') {
         text += `-- WARNING: ${resolvedDDL.diagnostics[0]} 原始 DDL 未被改写。\n`;
     }
+    text += '-- SQL 写入时，以上 CREATE TABLE 中的列名是本轮唯一权威；Note/Trigger 中与其不一致的示例不得照抄，必须按上述列名改写。\n';
     if (options.authoredTableName) {
         text += `-- SQL 写入必须严格使用本表上方 CREATE TABLE 中的表名 ${options.authoredTableName}；不得使用其他名称。\n`;
     }

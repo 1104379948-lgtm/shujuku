@@ -38,6 +38,10 @@ vi.mock('../../src/service/template/chat-scope', () => ({
   buildChatSheetGuideDataFromData_ACU: vi.fn(() => ({ sheet_0: { headers: ['A'] } })),
   ensureChatSheetGuideSeeded_ACU: vi.fn().mockResolvedValue(null),
   getChatSheetGuideDataForIsolationKey_ACU: vi.fn(() => null),
+  getCurrentChatTemplateScopeState_ACU: vi.fn(() => null),
+  getGlobalTemplateSnapshotForCurrentProfile_ACU: vi.fn(() => null),
+  sanitizeTemplateSnapshotForChat_ACU: vi.fn(() => null),
+  ensureStableRowIdsForSeedRows_ACU: vi.fn((rows: any[]) => rows),
   getSortedSheetKeys_ACU: vi.fn((d: any) => d ? Object.keys(d).filter((k: string) => k.startsWith('sheet_')).sort() : []),
   ensureStableRowIdsForSheetContent_ACU: vi.fn((content: any) => {
     if (!Array.isArray(content) || content.length === 0) return [];

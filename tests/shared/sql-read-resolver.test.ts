@@ -3,6 +3,7 @@ import {
   rebindSheetKeysThroughTableAliases_ACU,
   resolveHistoricalSheetKeyMigrations_ACU,
   resolveReadQuerySql_ACU,
+  buildSheetColumnAliasMap_ACU,
   SheetTableAliasResolutionError_ACU,
 } from '../../src/shared/sql-read-resolver';
 
@@ -90,7 +91,11 @@ describe('sql read resolver', () => {
       .toBe('SELECT coalesce(content, 0) 数量, count(content) 总数 FROM missing_table');
   });
 
-  it('fallback 原始 DDL 列名竞争同一表头时不重绑定任一列', () => {
+  it('fallback 目标中，无效 DDL 列名无证据不注册：SQL 原样放行由 SQLite fail closed', () => {
+    // 目标 DDL 首列不是 row_id INTEGER PRIMARY KEY → resolveEffectiveDDL 判定
+    // fallback_invalid，目标 schema 由表头生成（row_id, ming_cheng）。
+    // old_name_a/old_name_b 只存在于无效 DDL 中，目标 schema 不存在 → 无证据不注册，
+    // 不产生重绑也不产生冲突；SQL 保持原样，由 SQLite 报 no such column（fail closed）。
     const result = resolveReadQuerySql_ACU(
       'SELECT old_name_a, old_name_b FROM legacy',
       {
@@ -110,8 +115,130 @@ describe('sql read resolver', () => {
       tableRebindCount: 1,
       columnRebindCount: 0,
     });
-    expect(result.columnConflicts).toEqual(expect.arrayContaining(['old_name_a', 'old_name_b']));
-    expect(result.conflicts).toEqual(expect.arrayContaining(['old_name_a', 'old_name_b']));
+    expect(result.columnConflicts).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it('target-first registry：显式英文目标接受显示名和 fallback 拼音别名', () => {
+    const target = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表',
+        sourceData: { ddl: `CREATE TABLE inventory (
+          row_id INTEGER PRIMARY KEY,
+          item_name TEXT, -- 物品名称
+          quantity INTEGER -- 数量
+        );` },
+        content: [['row_id', '物品名称', '数量']],
+      },
+    } as any;
+
+    const result = buildSheetColumnAliasMap_ACU(target);
+    const columns = [...result.aliases.values()][0];
+    expect(columns.get('物品名称')).toBe('item_name');
+    expect(columns.get('wu_pin_ming_cheng')).toBe('item_name');
+  });
+
+  it('target-first registry：fallback 目标仅用同名 supplemental 表头证实 authored DDL 别名', () => {
+    const target = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表', sourceData: {},
+        content: [['row_id', '物品名称', '数量']],
+      },
+    } as any;
+    const supplemental = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, quantity INTEGER);' },
+        content: [['row_id', '物品名称', '数量']],
+      },
+    } as any;
+
+    const result = buildSheetColumnAliasMap_ACU(target, { supplementalSources: [supplemental] });
+    const columns = [...result.aliases.values()][0];
+    expect(columns.get('item_name')).toBe('wu_pin_ming_cheng');
+    expect(columns.get('quantity')).toBe('shu_liang');
+    expect(result.sourceByAlias.get([...result.aliases.keys()][0])?.get('item_name')).toBe('authored_ddl');
+  });
+
+  it('target-first registry：fallback slug 保留批量映射的碰撞后缀', () => {
+    const target = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表',
+        sourceData: { ddl: `CREATE TABLE inventory (
+          row_id INTEGER PRIMARY KEY,
+          first_value TEXT, -- a b
+          second_value TEXT -- a-b
+        );` },
+        content: [['row_id', 'a b', 'a-b']],
+      },
+    } as any;
+
+    const columns = [...buildSheetColumnAliasMap_ACU(target).aliases.values()][0];
+    expect(columns.get('a_b')).toBe('first_value');
+    expect(columns.get('a_b_2')).toBe('second_value');
+  });
+
+  it('target-first registry：supplemental 独有列和废弃 columnPhysicalAliases 均不引入目标列', () => {
+    const target = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表',
+        sourceData: { columnPhysicalAliases: { unsafe_legacy: 'wu_pin_ming_cheng' } },
+        content: [['row_id', '物品名称', '数量']],
+      },
+    } as any;
+    const supplemental = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, retired_column TEXT);' },
+        content: [['row_id', '物品名称', '已删除列']],
+      },
+    } as any;
+
+    const columns = [...buildSheetColumnAliasMap_ACU(target, { supplementalSources: [supplemental] }).aliases.values()][0];
+    expect(columns.get('item_name')).toBe('wu_pin_ming_cheng');
+    expect(columns.has('retired_column')).toBe(false);
+    expect(columns.has('unsafe_legacy')).toBe(false);
+  });
+
+  it('target-first registry：多个 supplemental 对同一别名给出不同目标时删除映射并保留候选证据', () => {
+    const target = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表', sourceData: {},
+        content: [['row_id', '物品名称', '数量']],
+      },
+    } as any;
+    const firstSupplemental = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, legacy_name TEXT, quantity INTEGER);' },
+        content: [['row_id', '物品名称', '数量']],
+      },
+    } as any;
+    const secondSupplemental = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, legacy_name INTEGER);' },
+        content: [['row_id', '物品名称', '数量']],
+      },
+    } as any;
+
+    const result = buildSheetColumnAliasMap_ACU(target, { supplementalSources: [firstSupplemental, secondSupplemental] });
+    const tableName = [...result.aliases.keys()][0];
+    expect(result.aliases.get(tableName)?.has('legacy_name')).toBe(false);
+    expect(result.conflicts.get(tableName)).toEqual(new Set(['legacy_name']));
+    expect(result.conflictCandidates.get(tableName)?.get('legacy_name')).toEqual(expect.arrayContaining([
+      { target: 'wu_pin_ming_cheng', evidence: 'authored_ddl' },
+      { target: 'shu_liang', evidence: 'authored_ddl' },
+    ]));
   });
 
   it('仅报告本次查询实际引用的表别名冲突', () => {

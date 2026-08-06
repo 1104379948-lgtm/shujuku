@@ -41,8 +41,8 @@ import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_ACU, PhysicalTableNameCollisionError_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
-import { rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
-import { buildSheetTableAliasMap_ACU } from '../../shared/sql-read-resolver';
+import { rebindSqlMutationTableReferences_ACU, rebindSqlMutationColumnsByTarget_ACU } from '../../shared/sql-mutation-table-rebind';
+import { buildSheetTableAliasMap_ACU, buildSheetColumnAliasMap_ACU } from '../../shared/sql-read-resolver';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
@@ -362,6 +362,53 @@ export function rebindSqlMutationTableIdentifiers_ACU(
   return rebindSqlMutationTableReferences_ACU(statements, aliases, {
     ...options,
     ambiguousAliases: conflicts,
+  });
+}
+
+
+/**
+ * 统一表名 + 列名重绑入口（计划 4.1）。顺序固定：
+ * 1. 表名重绑到运行时物理表（沿用既有 rebindSqlMutationTableIdentifiers_ACU）；
+ * 2. 以 targetData 构建 target-first 列 registry，以当前聊天模板作为 supplemental；
+ * 3. 按重绑后的目标表名进行列重绑（按语句 mutation target 自动选列 map）。
+ *
+ * 返回最终 runtime SQL；日志与持久化 operation 必须使用最终 SQL，
+ * 避免每次 replay 重复纠正。
+ */
+export function rebindSqlMutationIdentifiers_ACU(
+  statements: string[],
+  targetData: TableDataObject_ACU,
+  supplementalData?: TableDataObject_ACU | Record<string, unknown> | null,
+  options: { requireKnownTables?: boolean } = {},
+): string[] {
+  // 有运行时目标 schema 时，表名只能由它（或调用方显式提供的补充源）判定。
+  // 不能让隐式当前模板参与表重绑：快照级 API 可能在与当前聊天模板无关的历史
+  // 数据上运行，模板恰好含同名作者 DDL 时会制造虚假的表歧义。目标为空时仍保留
+  // 既有模板补充能力，供首次建表等无运行时表场景使用。
+  const hasTargetSheets = Object.keys(targetData || {}).some(key => key.startsWith('sheet_'));
+  const tableSupplemental = supplementalData === undefined && hasTargetSheets ? null : supplementalData;
+  const tableRebound = rebindSqlMutationTableIdentifiers_ACU(statements, targetData, tableSupplemental, options);
+  const templateSource = supplementalData === undefined
+    ? resolveCurrentChatTemplateForAliases_ACU()
+    : supplementalData;
+  const { aliases: columnAliases, conflicts: columnConflicts, conflictCandidates } = buildSheetColumnAliasMap_ACU(
+    targetData,
+    {
+      supplementalSources: [templateSource],
+      skipInvalidSupplementalSources: true,
+    },
+  );
+  // 冲突别名 → 目标表 → 冲突集：命中即结构化拒绝（fail closed），不原样放行。
+  const ambiguousByTarget = new Map<string, Set<string>>();
+  for (const [tableName, tableConflicts] of columnConflicts) {
+    ambiguousByTarget.set(tableName.toLowerCase(), new Set(tableConflicts));
+  }
+  return rebindSqlMutationColumnsByTarget_ACU(tableRebound, columnAliases, {
+    ambiguousColumns: ambiguousByTarget,
+    resolveAmbiguity: (targetTable, alias) => {
+      const candidates = conflictCandidates.get(targetTable.toLowerCase())?.get(alias.toLowerCase());
+      return candidates || [];
+    },
   });
 }
 
@@ -1064,7 +1111,7 @@ export class SqlTableService implements ITableStorageProvider {
     const userParams: ((string | number | null)[] | undefined)[] = [];
     (Array.isArray(sqlTexts) ? sqlTexts : []).forEach((sqlText, index) => {
       const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-      const runtimeStatements = rebindSqlMutationTableIdentifiers_ACU(
+      const runtimeStatements = rebindSqlMutationIdentifiers_ACU(
         normalizedStatements,
         (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
       );
@@ -1115,7 +1162,7 @@ export class SqlTableService implements ITableStorageProvider {
 
     const normalizedGroups = (Array.isArray(sqlTexts) ? sqlTexts : []).map(sqlText => {
       const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-      return rebindSqlMutationTableIdentifiers_ACU(
+      return rebindSqlMutationIdentifiers_ACU(
         normalizedStatements,
         (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
         scope?.templateData,
@@ -1216,7 +1263,7 @@ export class SqlTableService implements ITableStorageProvider {
 
       // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
       const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
-      const runtimeSql = rebindSqlMutationTableIdentifiers_ACU(
+      const runtimeSql = rebindSqlMutationIdentifiers_ACU(
         [normalizedSql],
         (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
       )[0];
@@ -1686,7 +1733,7 @@ export async function applyParameterizedSqlMutationToTableDataSnapshot_ACU(
   try {
     const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
     const snapshotCopy = JSON.parse(JSON.stringify(tableData || {})) as TableDataObject_ACU;
-    const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], snapshotCopy)[0];
+    const runtimeSql = rebindSqlMutationIdentifiers_ACU([normalizedSql], snapshotCopy)[0];
     await engine.init();
     syncBridge.loadFromTableData(snapshotCopy, { strict: true });
     const result = engine.run(runtimeSql, params);
@@ -1741,10 +1788,10 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
 
     const snapshotCopy = JSON.parse(JSON.stringify(tableData || {})) as TableDataObject_ACU;
     const requireKnownTables = operationOptions.requireSheetScopedOperations === true;
-    const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(
+    const reboundStatements = rebindSqlMutationIdentifiers_ACU(
       rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))),
       snapshotCopy,
-      snapshotCopy,
+      undefined,
       { requireKnownTables },
     );
     const statements = materializeSystemRowIdsForSqlInserts_ACU(reboundStatements, snapshotCopy);

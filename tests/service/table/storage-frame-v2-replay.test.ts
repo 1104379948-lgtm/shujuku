@@ -287,7 +287,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
     );
 
-    expect(liveResult.success).toBe(true);
+    expect(liveResult.success, liveResult.error).toBe(true);
     expect(liveResult.workingData?.sheet_0.content).toEqual([
       ['row_id', 'name'],
       ['1', '铁剑'],
@@ -346,7 +346,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
     );
 
-    expect(liveResult.success).toBe(true);
+    expect(liveResult.success, liveResult.error).toBe(true);
     expect(liveResult.operations).toEqual([{
       kind: 'sql_sheet_batch',
       sheetKey: 'sheet_0',
@@ -398,7 +398,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       'auto_standard',
       { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
     );
-    expect(liveResult.success).toBe(true);
+    expect(liveResult.success, liveResult.error).toBe(true);
     expect(liveResult.workingData).toBeDefined();
     expect(liveResult.operations).toEqual([{
       kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system',

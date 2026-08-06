@@ -8,7 +8,7 @@ import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } f
 import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from './manual-catch-up-provisional-bridge';
 import type { ReplaceExistingIncrementalOptions_ACU } from './storage-frame-v2-persist';
 import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
-import { buildSqlSheetBatchOperations_ACU, rebindSqlMutationTableIdentifiers_ACU } from './sql-table-service';
+import { buildSqlSheetBatchOperations_ACU, rebindSqlMutationIdentifiers_ACU } from './sql-table-service';
 
 export interface TableUpdateCommitApplyContext_ACU {
   transactionContext: TableWriteTransactionContext_ACU;
@@ -299,16 +299,11 @@ export interface RunSqliteRuntimeMutationCommitOptions_ACU<T> extends RunTableUp
 export async function runSqliteRuntimeMutationCommit_ACU<T>(
   options: RunSqliteRuntimeMutationCommitOptions_ACU<T>,
 ): Promise<RunTableUpdateCommitResult_ACU<T>> {
-  const operations = options.operations ?? [{
-    kind: 'sql_batch' as const,
-    statements: [options.sql],
-    ...(normalizeSqlBindParams_ACU(options.params) ? { params: normalizeSqlBindParams_ACU(options.params) } : {}),
-  }];
-  return runTableUpdateCommit_ACU({ ...options, operations }, async ({ workingData }) => {
+  return runTableUpdateCommit_ACU(options, async ({ workingData }) => {
     const provider = await ensureStorageProviderReady_ACU();
     const runtimeData = (workingData || currentJsonTableData_ACU) as TableDataObject_ACU | null;
     const runtimeSql = runtimeData
-      ? rebindSqlMutationTableIdentifiers_ACU([options.sql], runtimeData)[0]
+      ? rebindSqlMutationIdentifiers_ACU([options.sql], runtimeData)[0]
       : options.sql;
     const mutationResult = provider.executeMutation(runtimeSql, options.params);
     if (mutationResult.errors?.length) {

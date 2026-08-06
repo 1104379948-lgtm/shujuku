@@ -24,6 +24,7 @@ vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () =
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
   clearSummaryVectorIndexFlushQueueForCurrentScope_ACU: (...args: any[]) => h.clearFlush(...args),
+  clearSummaryVectorIndexCredentialCooldowns_ACU: vi.fn(),
 }));
 
 import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../../src/service/vector/summary-vector-index-rebuild-service';

@@ -947,6 +947,8 @@ function accumulateColumnAliases_ACU(
 
 
 
+
+
 function buildRetainedColumnDDL_ACU(before: Sheet_ACU, template: Sheet_ACU, targetColumns: ReturnType<typeof parseDDLColumnInfos_ACU>, targetHeaders: string[], retainedColumns: ReturnType<typeof parseDDLColumnInfos_ACU>, retainedHeaders: string[]): string {
   const templateDDL = String(template.sourceData?.ddl || '');
   const tableName = parseDDLTableName(templateDDL);

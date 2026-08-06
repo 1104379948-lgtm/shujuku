@@ -3,11 +3,43 @@ import { parseDDLColumnInfos_ACU, parseDDLTableName } from './ddl-utils';
 import { canonicalizeDisplayName_ACU, getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from './sheet-identity';
 import { resolveEffectiveDDL } from '../data/sqlite/schema-mapper';
 import { rebindSqlReadIdentifiers_ACU } from './sql-mutation-table-rebind';
+import { mapSqlColumnIdentifiers_ACU } from './sql-identifier-mapper';
 import { logWarn_ACU } from './utils';
+
+/**
+ * 列别名的证据来源。用于 replay 侧记录「这次列重绑凭什么证据成立」，
+ * 便于误重绑事后取证。只列可证明的三种：
+ * - display_name：别名是该列的显示名（表头）；
+ * - authored_ddl：别名来自作者原 DDL 的列名（fallback 场景下的桥）；
+ * - fallback_slug：别名是目标完整表头经 mapSqlColumnIdentifiers_ACU 得到的确定性拼音列名；
+ * - declared_display_alias：别名来自 sourceData.columnAliases 声明的历史显示名（身份证据）。
+ *
+ * 不设 current_physical：物理列名（target）自身不构成重绑，不会作为别名 key 出现。
+ */
+export type SheetColumnAliasEvidence_ACU = 'display_name' | 'authored_ddl' | 'fallback_slug' | 'declared_display_alias';
+
+/** 歧义别名的候选目标列：一个别名曾映射到的全部目标列及其证据来源。 */
+export interface SheetColumnAliasConflictCandidate_ACU {
+  /** 冲突时该别名指向的真实列名。 */
+  target: string;
+  /** 该指向的证据来源。 */
+  evidence: SheetColumnAliasEvidence_ACU;
+}
 
 export interface SheetColumnAliasMapResult_ACU {
   aliases: Map<string, Map<string, string>>;
   conflicts: Map<string, Set<string>>;
+  /**
+   * 物理表名 → 歧义别名 → 候选目标列列表。仅用于写路径歧义拒绝时
+   * 给出「全部候选与各自证据来源」的结构化诊断；读路径不消费。
+   * 与 conflicts 同步：conflicts 里的别名在此必有条目（至少两个候选）。
+   */
+  conflictCandidates: Map<string, Map<string, SheetColumnAliasConflictCandidate_ACU[]>>;
+  /**
+   * 物理表名 → (别名 → 证据来源)。仅供诊断/取证，读路径不消费。
+   * 与 aliases 同步维护：冲突删除别名时一并删除其证据。
+   */
+  sourceByAlias: Map<string, Map<string, SheetColumnAliasEvidence_ACU>>;
 }
 
 export interface SheetAliasMapResult_ACU {
@@ -220,65 +252,233 @@ export function rebindSheetKeysThroughTableAliases_ACU(
   return rebound;
 }
 
-/** Builds table-scoped column aliases without guessing ambiguous fallback DDL columns. */
+/**
+ * Builds the target-first, conflict-safe column alias registry shared by SQL
+ * readers and writers.
+ *
+ * 单一目标原则（计划 3.1）：第一个参数是当前 SQLite/runtime/replay state 的
+ * 权威目标 schema；所有别名只能指向目标 schema 中真实存在的物理列。
+ * supplementalSources 只提供别名证据，绝不提供目标列——模板中存在但目标中
+ * 不存在的列不得注册（保持 SQLite 原始 no such column，防止把已删除列误写
+ * 到别处）。
+ *
+ * 每列允许的别名来源（计划 3.2）：
+ * - current_physical：resolveEffectiveDDL 的 mapping.sqlName（自身，不构成重绑）；
+ * - display_name：当前表头显示名；
+ * - fallback_slug：对目标完整表头调用一次 mapSqlColumnIdentifiers_ACU 得到的
+ *   确定性拼音列名（按 sourceIndex 对齐，绝不逐列 slug 造成碰撞错误）；
+ * - authored_ddl：当前显式 DDL 的作者列名；若当前 runtime 是 fallback，则从可信
+ *   supplemental template 的 DDL 按唯一 canonical 显示名映射到目标列；
+ * - declared_display_alias：sourceData.columnAliases 中声明的历史显示名。
+ *
+ * 冲突语义：同一别名指向多个目标列 → 删除该别名并记录 conflicts 与全部候选
+ * 证据；supplemental 中独有、目标不存在的列 → 不注册；禁止相似度/编辑距离/
+ * 模糊拼音/列序号兜底。
+ */
 export function buildSheetColumnAliasMap_ACU(
-  sources: Iterable<TableDataObject_ACU | Record<string, unknown> | null | undefined>,
+  targetData: TableDataObject_ACU | Record<string, unknown> | null | undefined,
+  options: {
+    supplementalSources?: Iterable<TableDataObject_ACU | Record<string, unknown> | null | undefined>;
+    skipInvalidSupplementalSources?: boolean;
+  } = {},
 ): SheetColumnAliasMapResult_ACU {
   const aliases = new Map<string, Map<string, string>>();
   const conflicts = new Map<string, Set<string>>();
-  for (const source of sources) {
-    if (!source || typeof source !== 'object') continue;
-    for (const [sheetKey, value] of Object.entries(source)) {
+  const sourceByAlias = new Map<string, Map<string, SheetColumnAliasEvidence_ACU>>();
+  const conflictCandidates = new Map<string, Map<string, SheetColumnAliasConflictCandidate_ACU[]>>();
+  const recordConflictCandidate = (
+    columnConflictCandidates: Map<string, SheetColumnAliasConflictCandidate_ACU[]>,
+    aliasKey: string,
+    target: string,
+    evidence: SheetColumnAliasEvidence_ACU,
+  ): void => {
+    const list = columnConflictCandidates.get(aliasKey) || [];
+    if (!list.some(candidate => candidate.target.toLowerCase() === target.toLowerCase() && candidate.evidence === evidence)) {
+      list.push({ target, evidence });
+    }
+    columnConflictCandidates.set(aliasKey, list);
+  };
+  const addColumnAlias = (
+    tableColumns: Map<string, string>,
+    tableEvidence: Map<string, SheetColumnAliasEvidence_ACU>,
+    tableConflictCandidates: Map<string, SheetColumnAliasConflictCandidate_ACU[]>,
+    tableConflicts: Set<string>,
+    source: string,
+    target: string,
+    evidence: SheetColumnAliasEvidence_ACU,
+  ): void => {
+    const sourceKey = String(source).toLowerCase();
+    const targetKey = String(target).toLowerCase();
+    if (!sourceKey || sourceKey === targetKey) return;
+    const existing = tableColumns.get(sourceKey);
+    if (existing && existing.toLowerCase() !== targetKey) {
+      // 同一别名指向不同真实列 → 双向删除并记冲突（与表别名同语义）。
+      recordConflictCandidate(tableConflictCandidates, sourceKey, existing, tableEvidence.get(existing.toLowerCase()) || evidence);
+      recordConflictCandidate(tableConflictCandidates, sourceKey, target, evidence);
+      if (tableColumns.get(existing.toLowerCase()) === existing) tableColumns.delete(existing.toLowerCase());
+      tableColumns.delete(sourceKey);
+      tableEvidence.delete(existing.toLowerCase());
+      tableEvidence.delete(sourceKey);
+      tableConflicts.add(sourceKey);
+      return;
+    }
+    if (tableColumns.has(sourceKey)) return;
+    tableColumns.set(sourceKey, target);
+    tableEvidence.set(sourceKey, evidence);
+  };
+
+  if (!targetData || typeof targetData !== 'object') {
+    return { aliases, conflicts, sourceByAlias, conflictCandidates };
+  }
+
+  // ── 目标 schema 注册：current physical / display / fallback slug ──
+  for (const [sheetKey, value] of Object.entries(targetData)) {
+    if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object') continue;
+    const sheet = value as any;
+    const physicalName = getPhysicalTableNameForSheet_ACU(targetData as TableDataObject_ACU, sheetKey);
+    const columns = aliases.get(physicalName) || new Map<string, string>();
+    const tableConflicts = conflicts.get(physicalName) || new Set<string>();
+    const tableConflictCandidates = conflictCandidates.get(physicalName) || new Map<string, SheetColumnAliasConflictCandidate_ACU[]>();
+    const tableEvidence = sourceByAlias.get(physicalName) || new Map<string, SheetColumnAliasEvidence_ACU>();
+    const resolved = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, physicalName);
+    for (const mapping of resolved.columnMap.mappings) {
+      // 自身物理名（target）不构成重绑，但注册 key 使读/写能识别它。
+      columns.set(String(mapping.sqlName).toLowerCase(), mapping.sqlName);
+      // display_name 证据
+      addColumnAlias(columns, tableEvidence, tableConflictCandidates, tableConflicts,
+        mapping.displayName, mapping.sqlName, 'display_name');
+    }
+    // fallback_slug：对目标完整表头调用一次 mapSqlColumnIdentifiers_ACU，
+    // 按 sourceIndex 对齐（计划 6.1：必须批量计算，碰撞后缀 _2/_3 由映射器保证）。
+    const headers = Array.isArray(sheet.content?.[0]) ? sheet.content[0].map((h: unknown) => String(h ?? '')) : [];
+    if (headers.length > 0) {
+      const { mappings: slugMappings } = mapSqlColumnIdentifiers_ACU(headers);
+      const resolvedBySourceIndex = new Map(resolved.columnMap.mappings.map(mapping => [mapping.sourceIndex, mapping.sqlName]));
+      for (const slugMapping of slugMappings) {
+        const targetSqlName = resolvedBySourceIndex.get(slugMapping.index);
+        if (!targetSqlName) continue;
+        addColumnAlias(columns, tableEvidence, tableConflictCandidates, tableConflicts,
+          slugMapping.sqlName, targetSqlName, 'fallback_slug');
+      }
+    }
+    aliases.set(physicalName, columns);
+    if (tableConflicts.size > 0) conflicts.set(physicalName, tableConflicts);
+    if (tableEvidence.size > 0) sourceByAlias.set(physicalName, tableEvidence);
+    if (tableConflictCandidates.size > 0) conflictCandidates.set(physicalName, tableConflictCandidates);
+  }
+
+  // ── supplemental 别名证据：authored_ddl（唯一 canonical 显示名映射）──
+  const targetSheetByCanonicalName = new Map<string, { sheetKey: string; physicalName: string }>();
+  for (const [sheetKey, value] of Object.entries(targetData)) {
+    if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object') continue;
+    const sheet = value as any;
+    const canonicalName = canonicalizeDisplayName_ACU(sheet?.name);
+    if (!canonicalName) continue;
+    if (targetSheetByCanonicalName.has(canonicalName)) continue;
+    targetSheetByCanonicalName.set(canonicalName, { sheetKey, physicalName: getPhysicalTableNameForSheet_ACU(targetData as TableDataObject_ACU, sheetKey) });
+  }
+  for (const rawSupplement of options.supplementalSources || []) {
+    if (!rawSupplement || typeof rawSupplement !== 'object') continue;
+    let supplement: TableDataObject_ACU | Record<string, unknown>;
+    try {
+      supplement = rawSupplement;
+      // 校验表身份可解析（同表名/别名冲突会让身份定位失败，跳过该源）。
+      resolvePhysicalTableNames_ACU(rawSupplement as TableDataObject_ACU);
+    } catch (error) {
+      if (options.skipInvalidSupplementalSources) continue;
+      throw error;
+    }
+    for (const [sheetKey, value] of Object.entries(supplement)) {
       if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object') continue;
       const sheet = value as any;
-      const physicalName = getPhysicalTableNameForSheet_ACU(source as TableDataObject_ACU, sheetKey);
-      const columns = aliases.get(physicalName) || new Map<string, string>();
-      const resolved = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, physicalName);
-      const columnConflicts = conflicts.get(physicalName) || new Set<string>();
-      for (const mapping of resolved.columnMap.mappings) {
-        columns.set(String(mapping.sqlName).toLowerCase(), mapping.sqlName);
-        columns.set(String(mapping.displayName).toLowerCase(), mapping.sqlName);
-      }
-      if (resolved.source !== 'explicit' && resolved.originalDDL) {
-        const claimedTargets = new Map<string, string>();
-        const rejectedTargets = new Set<string>();
-        const fallbackAliases = new Map<string, string>();
-        for (const column of parseDDLColumnInfos_ACU(resolved.originalDDL)) {
-          const sourceKey = column.sqlName.toLowerCase();
-          const matched = resolved.columnMap.mappings.filter(mapping => (
-            mapping.displayName === column.sqlName || mapping.displayName === column.comment
-          ));
-          if (matched.length !== 1) {
-            columnConflicts.add(sourceKey);
-            continue;
+      const canonicalName = canonicalizeDisplayName_ACU(sheet?.name);
+      const target = canonicalName ? targetSheetByCanonicalName.get(canonicalName) : undefined;
+      if (!target) continue; // 表身份未唯一命中目标 sheet → 不提供任何列证据
+ const tableColumns = aliases.get(target.physicalName) || new Map<string, string>();
+      const tableConflicts = conflicts.get(target.physicalName) || new Set<string>();
+      const tableConflictCandidates = conflictCandidates.get(target.physicalName) || new Map<string, SheetColumnAliasConflictCandidate_ACU[]>();
+      const tableEvidence = sourceByAlias.get(target.physicalName) || new Map<string, SheetColumnAliasEvidence_ACU>();
+      const supplementalDDL = String(sheet?.sourceData?.ddl || '');
+      if (supplementalDDL) {
+        // 目标列的 canonical 显示名 → 物理名索引（唯一映射）。
+        // mapping.displayName 来自目标 content[0] 表头，统一按 canonical 显示名索引；
+        // fallback 的 sqlName（拼音 slug）也一并登记，作为补充英文列名的确定性桥。
+        const targetCanonicalToSql = new Map<string, string>();
+        const targetResolved = resolveEffectiveDDL(
+          (targetData as any)[target.sheetKey],
+          (targetData as any)[target.sheetKey]?.uid || target.sheetKey,
+          target.physicalName,
+        );
+        for (const mapping of targetResolved.columnMap.mappings) {
+          const canonicalDisplay = canonicalizeDisplayName_ACU(mapping.displayName);
+          const canonicalSql = canonicalizeDisplayName_ACU(mapping.sqlName);
+          if (canonicalDisplay) {
+            // 同一 canonical 显示名指向不同目标列 → 不再作为唯一索引，删除防误配。
+            if (targetCanonicalToSql.has(canonicalDisplay) && targetCanonicalToSql.get(canonicalDisplay) !== mapping.sqlName) targetCanonicalToSql.delete(canonicalDisplay);
+            else targetCanonicalToSql.set(canonicalDisplay, mapping.sqlName);
           }
-          const target = matched[0].sqlName;
-          const targetKey = target.toLowerCase();
-          if (rejectedTargets.has(targetKey)) {
-            columnConflicts.add(sourceKey);
-            continue;
+          if (canonicalSql) {
+            if (targetCanonicalToSql.has(canonicalSql) && targetCanonicalToSql.get(canonicalSql) !== mapping.sqlName) targetCanonicalToSql.delete(canonicalSql);
+            else targetCanonicalToSql.set(canonicalSql, mapping.sqlName);
           }
-          const claimedSource = claimedTargets.get(targetKey);
-          if (!claimedSource || claimedSource === sourceKey) {
-            claimedTargets.set(targetKey, sourceKey);
-            fallbackAliases.set(sourceKey, target);
-            continue;
-          }
-          fallbackAliases.delete(claimedSource);
-          fallbackAliases.delete(sourceKey);
-          columnConflicts.add(claimedSource);
-          columnConflicts.add(sourceKey);
-          claimedTargets.delete(targetKey);
-          rejectedTargets.add(targetKey);
         }
-        for (const [source, target] of fallbackAliases) columns.set(source, target);
+        // 补充模板的「作者 DDL 列名 → 补充表头显示名」是模板内部的结构对齐：
+        // DDL 列序与 content[0] 表头序一致（与 resolveEffectiveDDL 的 sourceIndex
+        // 对齐同源，非位置猜测）。补充表头（如「当前详细地点」）canonical 唯一命中
+        // 目标列，则该补充 DDL 列名（如 current_location）注册为指向目标物理列的别名。
+        // 列数不一致或表头无法唯一命中 → 不注册，保持 SQLite 原始 no such column。
+        // 注意：不能对补充 sheet 调用 resolveEffectiveDDL —— 英文无注释 DDL + 中文
+        // 表头的模板会被 resolveInsertColumnMappings 判定「表头没有对应 DDL 列」而抛错，
+        // 这会破坏 skipInvalidSupplementalSources 的容错语义。
+        const supplementalColumns = parseDDLColumnInfos_ACU(supplementalDDL);
+        const supplementalHeaders = Array.isArray(sheet?.content?.[0])
+          ? sheet.content[0].map((h: unknown) => String(h ?? ''))
+          : [];
+        if (supplementalColumns.length > 0
+          && supplementalColumns.length === supplementalHeaders.length) {
+          for (let index = 0; index < supplementalColumns.length; index +=1) {
+            const column = supplementalColumns[index];
+            const headerCanonical = canonicalizeDisplayName_ACU(supplementalHeaders[index]);
+            if (!headerCanonical) continue;
+            const targetSqlName = targetCanonicalToSql.get(headerCanonical);
+            if (!targetSqlName) continue; // 补充表头显示名未唯一命中目标列 → 不注册
+            addColumnAlias(tableColumns, tableEvidence, tableConflictCandidates, tableConflicts,
+              column.sqlName, targetSqlName, 'authored_ddl');
+          }
+        }
       }
-      aliases.set(physicalName, columns);
-      if (columnConflicts.size > 0) conflicts.set(physicalName, columnConflicts);
+      // declared_display_alias：sourceData.columnAliases 声明的历史显示名。
+      const rawColumnAliases = (sheet?.sourceData as Record<string, any> | undefined)?.columnAliases;
+      if (rawColumnAliases && typeof rawColumnAliases === 'object' && !Array.isArray(rawColumnAliases)) {
+        const targetCanonicalToSql = new Map<string, string>();
+        const targetResolved = resolveEffectiveDDL(
+          (targetData as any)[target.sheetKey],
+          (targetData as any)[target.sheetKey]?.uid || target.sheetKey,
+          target.physicalName,
+        );
+        for (const mapping of targetResolved.columnMap.mappings) {
+          const canonical = canonicalizeDisplayName_ACU(mapping.displayName);
+          if (canonical && !targetCanonicalToSql.has(canonical)) targetCanonicalToSql.set(canonical, mapping.sqlName);
+        }
+        for (const [physicalName, aliases] of Object.entries(rawColumnAliases)) {
+          const physicalCanonical = canonicalizeDisplayName_ACU(physicalName);
+          const targetSqlName = physicalCanonical ? targetCanonicalToSql.get(physicalCanonical) : undefined;
+          if (!targetSqlName) continue; // 物理名未唯一命中目标列 → 不注册
+          for (const alias of Array.isArray(aliases) ? aliases : []) {
+            addColumnAlias(tableColumns, tableEvidence, tableConflictCandidates, tableConflicts,
+              String(alias ?? ''), targetSqlName, 'declared_display_alias');
+          }
+        }
+      }
+      aliases.set(target.physicalName, tableColumns);
+      if (tableConflicts.size > 0) conflicts.set(target.physicalName, tableConflicts);
+      if (tableEvidence.size > 0) sourceByAlias.set(target.physicalName, tableEvidence);
+      if (tableConflictCandidates.size > 0) conflictCandidates.set(target.physicalName, tableConflictCandidates);
     }
   }
-  return { aliases, conflicts };
+  return { aliases, conflicts, sourceByAlias, conflictCandidates };
 }
+
 
 function isSqlWordStart_ACU(char: string): boolean {
   return /^[A-Za-z_\u0080-\uFFFF]$/.test(char);
@@ -447,7 +647,7 @@ export function resolveReadQuerySql_ACU(
     return { ...rebound, sql: translateLegacyReadSqlSafely_ACU(rebound.sql, translateSql, rebound.protectedIdentifierSpans) };
   }
   const { aliases: tableAliases, conflicts: tableConflicts } = buildSheetTableAliasMap_ACU([tableData]);
-  const { aliases: columnAliases, conflicts: columnConflicts } = buildSheetColumnAliasMap_ACU([tableData]);
+  const { aliases: columnAliases, conflicts: columnConflicts } = buildSheetColumnAliasMap_ACU(tableData);
 
   const referencedTableAliases = new Set<string>();
   const referencedColumnConflicts = new Set<string>();

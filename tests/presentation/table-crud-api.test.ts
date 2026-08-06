@@ -47,6 +47,7 @@ const {
   mockBuildSqlSheetBatchOperations,
   mockPersistTablesToChatMessage,
   mockRebindSqlMutationTableIdentifiers,
+  mockRebindSqlMutationIdentifiers,
   mockExecuteRuntimeMutation,
   mockGetRuntimeData,
   mockCreateRuntimeSnapshot,
@@ -67,6 +68,7 @@ const {
   })),
   mockPersistTablesToChatMessage: vi.fn().mockResolvedValue({ saved: true, messageIndex: 0 }),
   mockRebindSqlMutationTableIdentifiers: vi.fn((statements: string[]) => statements),
+  mockRebindSqlMutationIdentifiers: vi.fn((statements: string[]) => statements),
   mockExecuteRuntimeMutation: vi.fn((_sql: string, _params?: any[]) => ({
     changes: 1,
     errors: [] as string[],
@@ -108,6 +110,7 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
 vi.mock('../../src/service/table/sql-table-service', () => ({
   applyParameterizedSqlMutationToTableDataSnapshot_ACU: mockApplyParameterizedSqlMutation,
   buildSqlSheetBatchOperations_ACU: mockBuildSqlSheetBatchOperations,
+  rebindSqlMutationIdentifiers_ACU: mockRebindSqlMutationIdentifiers,
   rebindSqlMutationTableIdentifiers_ACU: mockRebindSqlMutationTableIdentifiers,
 }));
 

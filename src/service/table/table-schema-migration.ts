@@ -378,7 +378,8 @@ function buildMigratedSheetV2_ACU(currentSheet: Sheet_ACU, operation: TableSheet
   if (lossyRowCount > 0 && !operation.migrationPolicy?.lossyConversionConfirmed) throw new Error('有损 conversion 需要 lossyConversionConfirmed。');
   const actualDryRun = { convertedRowCount, failedRowCount: 0, lossyRowCount };
   if (verifyDryRun && canonicalJson_ACU(operation.dryRun) !== canonicalJson_ACU(actualDryRun)) throw new Error('schema migration V2 dryRun 与实际逐行转换不一致。');
-  return { sheet: { ...deepClone_ACU(currentSheet), uid: operation.targetSchema.uid, content, sourceData: { ...currentSheet.sourceData, ddl: operation.targetSchema.ddl } }, dryRun: actualDryRun };
+  const sourceData = { ...currentSheet.sourceData, ddl: operation.targetSchema.ddl };
+  return { sheet: { ...deepClone_ACU(currentSheet), uid: operation.targetSchema.uid, content, sourceData }, dryRun: actualDryRun };
 }
 
 /**

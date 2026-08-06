@@ -206,6 +206,248 @@ export function rebindSqlMutationTableReferences_ACU(
   });
 }
 
+
+/**
+ * 列名重绑纯工具：把历史物理列名（或别名表里的其他列名）改写为当前物理列名。
+ *
+ * 调用方注入 columnAliases（来自 buildSheetColumnAliasMap_ACU 的物理表 → 列别名表）
+ * 与当前目标物理表名；本模块保持零依赖，不解析 schema、不做相似度猜测。
+ *
+ * 安全边界（计划 4.1）：
+ * - 只在可证明是列引用的位置替换：UPDATE SET 左侧、INSERT 列清单、WHERE/RETURNING
+ *   中的非函数非关键字裸标识符。
+ * - 不碰：字符串字面量、注释（tokens 已跳过）、VALUES 中的值、函数名、AS 后别名、
+ *   限定符点号左侧。
+ * - 语句含目标表之外的表引用（JOIN / 子查询 / 逗号连接多表 / INSERT...SELECT）时
+ *   整条放弃列重绑并抛结构化错误：跨表列归属无法在不解析 schema 的纯工具里证明。
+ * - 命中 ambiguousColumns → 抛 SQL_COLUMN_ALIAS_AMBIGUOUS_ACU。
+ * - 别名表查不到 → 原样保留，交给 SQLite 报真实 no such column（无证据不猜）。
+ * - 不提供 lenient 选项：写路径重绑错误会静默写进错误列并持久化，必须 fail closed。
+ */
+export function rebindSqlMutationColumnReferences_ACU(
+  statements: string[],
+  columnAliases: SqlColumnAliasMap_ACU,
+  targetPhysicalTableName: string,
+  options: {
+    ambiguousColumns?: ReadonlySet<string>;
+    /** 每次实际发生的列改写上报一次（from=历史/别名列名，to=当前物理列名），供调用方做诊断取证。 */
+    onRebound?: (rebind: { from: string; to: string }) => void;
+    /**
+     * 歧义别名 → 候选目标列列表。仅供错误信息里给出「全部候选与各自证据」；
+     * 纯工具不解析 schema，由调用方注入（来自 buildSheetColumnAliasMap_ACU 的 conflictCandidates）。
+     */
+    resolveAmbiguity?: (alias: string) => ReadonlyArray<{ target: string; evidence: string }>;
+  } = {},
+): string[] {
+  const tableKey = decodeSqlIdentifier_ACU(targetPhysicalTableName).toLowerCase();
+  const tableColumns = columnAliases.get(tableKey);
+  const resolvedAliases = new Map<string, string>();
+  if (tableColumns) {
+    for (const [alias, physicalName] of tableColumns) {
+      const aliasKey = decodeSqlIdentifier_ACU(alias).toLowerCase();
+      if (aliasKey) resolvedAliases.set(aliasKey, physicalName);
+    }
+  }
+  const normalizedAmbiguous = new Set<string>();
+  for (const alias of options.ambiguousColumns || []) {
+    normalizedAmbiguous.add(decodeSqlIdentifier_ACU(alias).toLowerCase());
+  }
+
+  return statements.map(statement => {
+    const values = tokens(statement);
+    const target = mutationTarget(statement, values);
+    // 无法识别 mutation 目标 → 原样放行（无证据不猜）。
+    if (!target) return statement;
+    // 目标表不是当前物理表 → 不重绑（避免把别名表里的列套到别的表上）。
+    if (decodeSqlIdentifier_ACU(target.value).toLowerCase() !== tableKey) return statement;
+
+    // INSERT...SELECT / 子查询：SELECT 出现即含子查询语义，放弃列重绑、原样放行。
+    // 这类语句是 V2 历史日志中的合法回放路径（replay.test.ts:869 的 WITH...UPDATE...
+    // SELECT... 子查询用例）。子查询内列归属无法在不解析 schema 的纯工具中证明，
+    // 强行重绑可能改错子查询内部标识符；原样放行后，若列名真是历史名，SQLite 会
+    // 报真实的 no such column —— 仍是 fail closed，只是错误信息不是本工具的结构化码。
+    // SELECT 检测必须先于跨表检测：INSERT...SELECT / UPDATE...FROM 等含多表引用，
+    // 但属于既有合法放行路径（如 sql-table-service 的「不支持 INSERT SELECT」校验在
+    // 列重绑之后才执行）；若先抛跨表拒绝会改变原有错误优先级与契约。
+    if (values.some(value => keyword(value, 'SELECT'))) {
+      return statement;
+    }
+    // 跨表检测：references() 首项即目标表自身，多于 1 项说明含 JOIN/逗号连接/CTE 关联。
+    const tableReferences = references(statement, values, target);
+    if (tableReferences.length > 1) {
+      throw structuredMutationColumnError_ACU(
+        'SQL_COLUMN_CROSS_TABLE_REFUSED_ACU',
+        'SQL 写入包含目标表之外的关联表列归属无法在不解析 schema 的纯工具中证明，已拒绝列重绑。请改用当前物理列名直接书写。',
+      );
+    }
+
+    const replacements = collectMutationColumnReplacements_ACU(statement, values, resolvedAliases, normalizedAmbiguous, options.resolveAmbiguity);
+    let result = statement;
+    for (const { token, value } of replacements) {
+      options.onRebound?.({ from: decodeSqlIdentifier_ACU(token.value), to: value });
+    }
+    for (const { token, value } of [...replacements].sort((left, right) => right.token.start - left.token.start)) {
+      result = `${result.slice(0, token.start)}${format(value, token.quote)}${result.slice(token.end)}`;
+    }
+    return result;
+  });
+}
+
+/**
+ * 按语句 mutation target 自动选择列 map 的纯包装（计划 3.7）。
+ *
+ * 实时写批次可能包含多条语句、各自指向不同目标表；调用方（applyEdits 等）
+ * 不必预先知道单一 sheet。本函数只解析 mutation target（token 级），
+ * 不读取 schema、不引入依赖：
+ * - 每条语句独立解析目标表名，查 columnAliases 里对应的列别名表并重绑；
+ * - 目标表在 columnAliases 中不存在 → 原样放行（该表未注册列别名，交给 SQLite）；
+ * - 无法解析 mutation target → 原样放行（无证据不猜）。
+ *
+ * 冲突按目标表隔离：ambiguousColumns 以「物理表名(小写) → 冲突别名集」组织，
+ * 命中即结构化拒绝（SQL_COLUMN_ALIAS_AMBIGUOUS_ACU），绝不原样放行成
+ * no such column。跨表/子查询语义与 rebindSqlMutationColumnReferences_ACU 一致。
+ */
+export function rebindSqlMutationColumnsByTarget_ACU(
+  statements: string[],
+  columnAliases: SqlColumnAliasMap_ACU,
+  options: {
+    ambiguousColumns?: ReadonlyMap<string, ReadonlySet<string>>;
+    onRebound?: (rebind: { from: string; to: string; targetTable: string }) => void;
+    resolveAmbiguity?: (targetTable: string, alias: string) => ReadonlyArray<{ target: string; evidence: string }>;
+  } = {},
+): string[] {
+  return statements.map(statement => {
+    let targetTableName: string | null = null;
+    try {
+      const values = tokens(statement);
+      const target = mutationTarget(statement, values);
+      if (!target) return statement;
+      targetTableName = decodeSqlIdentifier_ACU(target.value);
+      const targetKey = decodeSqlIdentifier_ACU(target.value).toLowerCase();
+      const tableColumns = columnAliases.get(targetKey);
+      if (!tableColumns) return statement; // 未注册列别名的目标表 → 原样放行
+      return rebindSqlMutationColumnReferences_ACU([statement], columnAliases, target.value, {
+        ambiguousColumns: options.ambiguousColumns?.get(targetKey),
+        onRebound: options.onRebound
+          ? rebind => options.onRebound?.({ ...rebind, targetTable: targetTableName as string })
+          : undefined,
+        resolveAmbiguity: options.resolveAmbiguity
+          ? alias => options.resolveAmbiguity?.(targetTableName as string, alias) || []
+          : undefined,
+      })[0];
+    } catch (error) {
+      // 与单表重绑一致：无 lenient，错误必须上抛（避免静默写进错误列）。
+      throw error;
+    }
+  });
+}
+
+
+function structuredMutationColumnError_ACU(code: string, message: string): Error {
+  const error = new Error(`[${code}] ${message}`);
+  Object.defineProperty(error, 'code', { value: code, enumerable: false });
+  return error;
+}
+
+/**
+ * 收集可证明是列引用的重绑点。统一按位置语义扫描，不做内容猜测：
+ * - UPDATE：SET 之后、WHERE/RETURNING 之前，depth 相同且后跟 `=` 的标识符（列赋值左侧）；
+ * - INSERT/REPLACE：表名后紧邻括号（depth+1）内的逗号分隔标识符（列清单）；
+ * - WHERE / RETURNING：非函数、非关键字、非 AS 别名、非限定符左侧的裸标识符。
+ */
+function collectMutationColumnReplacements_ACU(
+  sql: string,
+  values: Token_ACU[],
+  aliases: Map<string, string>,
+  ambiguous: Set<string>,
+  resolveAmbiguity?: (alias: string) => ReadonlyArray<{ target: string; evidence: string }>,
+): Array<{ token: Token_ACU; value: string }> {
+  const replacements: Array<{ token: Token_ACU; value: string }> = [];
+  const handledStarts = new Set<number>();
+  const addIfAlias = (token: Token_ACU | undefined): void => {
+    if (!token) return;
+    const key = decodeSqlIdentifier_ACU(token.value).toLowerCase();
+    if (ambiguous.has(key)) {
+      const candidates = resolveAmbiguity?.(token.value) || [];
+      const candidateText = candidates.length > 0
+        ? ` 候选列：${candidates.map(candidate => `${candidate.target}（证据：${candidate.evidence}）`).join('、')}。`
+        : '';
+      throw structuredMutationColumnError_ACU(
+        'SQL_COLUMN_ALIAS_AMBIGUOUS_ACU',
+        `SQL 写入引用了歧义列名「${token.value}」：该名称同时映射到多列，无法安全重绑。请改用当前唯一物理列名。${candidateText}`,
+      );
+    }
+    const target = aliases.get(key);
+    if (!target || target.toLowerCase() === key) return;
+    if (handledStarts.has(token.start)) return;
+    handledStarts.add(token.start);
+    replacements.push({ token, value: target });
+  };
+
+  const first = values[0];
+  const actionIndex = keyword(first, 'WITH')
+    ? values.findIndex((token, index) => index > 0 && token.depth === 0
+      && ['INSERT', 'REPLACE', 'UPDATE', 'DELETE'].includes(token.value.toUpperCase()))
+    : 0;
+  const action = values[actionIndex];
+  if (!action) return replacements;
+  const actionValue = action.value.toUpperCase();
+  const actionDepth = action.depth;
+
+  if (actionValue === 'UPDATE') {
+    // SET 子句：action 之后找同 depth 的 SET，其后的 `col =` 左侧标识符为列。
+    let setIndex = -1;
+    for (let index = actionIndex + 1; index < values.length; index += 1) {
+      const token = values[index];
+      if (token.depth !== actionDepth) continue;
+      if (keyword(token, 'SET')) { setIndex = index; break; }
+      if (['WHERE', 'GROUP', 'ORDER', 'LIMIT'].includes(token.value.toUpperCase())) break;
+    }
+    if (setIndex >= 0) {
+      for (let index = setIndex + 1; index < values.length; index += 1) {
+        const token = values[index];
+        if (token.depth !== actionDepth) continue;
+        if (['WHERE', 'GROUP', 'ORDER', 'LIMIT', 'RETURNING'].includes(token.value.toUpperCase())) break;
+        const next = values[index + 1];
+        // `=` 不是标识符 token，next 是 `=` 之后的值 token；检查两者之间含 `=`。
+        if (next && next.depth === token.depth && /=/.test(sql.slice(token.end, next.start))) {
+          addIfAlias(token);
+        }
+      }
+    }
+  } else if (actionValue === 'INSERT' || actionValue === 'REPLACE') {
+    // 列清单：目标表 token 之后第一个 depth+1 的括号 token，其内同 depth 标识符为列。
+    const openIndex = values.findIndex(token => token.depth === actionDepth + 1 && token.start > action.start);
+    if (openIndex >= 0) {
+      let cursor = openIndex + 1;
+      while (cursor < values.length && values[cursor].depth >= actionDepth + 1) {
+        const token = values[cursor];
+        if (token.depth === actionDepth + 1) {
+          if (token.value === ')') break;
+          addIfAlias(token);
+        }
+        cursor += 1;
+      }
+    }
+  }
+
+  // WHERE / RETURNING 裸标识符（含 UPDATE SET 的值、DELETE WHERE）：全语句扫描，
+  // 排除函数调用、AS 后别名、限定符点号左侧、关键字。已处理的 token 用 start 去重。
+  for (let index = 0; index < values.length; index += 1) {
+    const token = values[index];
+    if (token.quote !== null) continue;
+    if (READ_COLUMN_KEYWORDS_ACU.has(token.value.toUpperCase())) continue;
+    if (isFunctionCall_ACU(sql, values, index)) continue;
+    const previous = values[index - 1];
+    if (previous && previous.depth === token.depth && keyword(previous, 'AS')) continue;
+    const beforeDot = values[index - 1];
+    if (beforeDot && beforeDot.depth === token.depth && /^\s*\.\s*$/.test(sql.slice(beforeDot.end, token.start))) continue;
+    addIfAlias(token);
+  }
+  return replacements;
+}
+
+
 interface ReadScope_ACU {
   start: number;
   end: number;

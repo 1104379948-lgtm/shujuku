@@ -138,6 +138,7 @@ describe('formatTableForSqliteMode', () => {
     };
     const result = formatTableForSqliteMode(table, 0, 'sheet_0', null);
     expect(result).toContain('CREATE TABLE inventory');
+    expect(result).toContain('以上 CREATE TABLE 中的列名是本轮唯一权威');
   });
 
   it('作者英文表名覆盖内部 runtime 名，供 AI 作为写入契约使用', () => {
@@ -211,6 +212,7 @@ describe('formatTableForSqliteMode', () => {
     expect(result).toContain('-- INSERT: 获得新物品时插入');
     expect(result).toContain('-- UPDATE: 物品数量变化时更新');
     expect(result).toContain('-- DELETE: 丢弃物品时删除');
+    expect(result).toContain('Note/Trigger 中与其不一致的示例不得照抄');
   });
 
   // ═══════════════════════════════════════════════════════════════
