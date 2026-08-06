@@ -177,24 +177,44 @@ export function checkAutoUpdatePreConditions_ACU(
     isAutoUpdatingCard: boolean,
     currentJsonTableData: any,
     allChatMessagesLength: number
-): { canProceed: boolean; reason?: string } {
+): {
+    canProceed: boolean;
+
+    reason?: string;
+    /** 稳定原因码：供诊断日志区分失败分支，不承诺为面向用户的文案 */
+    code?:
+        | 'auto_update_disabled'
+        | 'core_apis_not_ready'
+        | 'update_in_flight'
+        | 'api_not_configured'
+        | 'runtime_not_ready'
+        | 'chat_too_short';
+} {
     if (!settings.autoUpdateEnabled) {
-        return { canProceed: false, reason: 'Auto update is disabled via settings.' };
+        return { canProceed: false, reason: 'Auto update is disabled via settings.', code: 'auto_update_disabled' };
     }
 
     const apiIsConfigured = (settings.apiMode === 'custom' && (settings.apiConfig.useMainApi || (settings.apiConfig.url && settings.apiConfig.model))) || (settings.apiMode === 'tavern' && settings.tavernProfile);
 
-    if (!coreApisAreReady || isAutoUpdatingCard || !apiIsConfigured || !currentJsonTableData) {
-        return { canProceed: false, reason: 'Pre-flight checks failed.' };
+    if (!coreApisAreReady) {
+        return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'core_apis_not_ready' };
+    }
+    if (isAutoUpdatingCard) {
+        return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'update_in_flight' };
+    }
+    if (!apiIsConfigured) {
+        return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'api_not_configured' };
+    }
+    if (!currentJsonTableData) {
+        return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'runtime_not_ready' };
     }
 
     if (allChatMessagesLength < 2) {
-        return { canProceed: false, reason: 'Chat history too short.' };
+        return { canProceed: false, reason: 'Chat history too short.', code: 'chat_too_short' };
     }
 
     return { canProceed: true };
 }
-
 // ============================================================
 // 执行编排
 // ============================================================

@@ -10,7 +10,6 @@ import { getChatArray_ACU } from "../../service/chat/chat-service";
 import {
   coreApisAreReady_ACU,
   currentChatFileIdentifier_ACU,
-  currentJsonTableData_ACU,
   getCurrentIsolationKey_ACU,
   settings_ACU,
 } from "../../service/runtime/state-manager";
@@ -23,6 +22,7 @@ import {
 import { getCurrentStorageMode } from "../../service/table/storage-mode";
 import { resolveTableHistoryStateFromChat_ACU } from "../../service/table/table-history";
 import { switchStorageMode } from "../../service/table/table-storage-strategy";
+import { getCurrentTableDisplayData_ACU } from "../../service/settings/settings-readers";
 import { getSortedSheetKeys_ACU } from "../../service/template/chat-scope";
 import { getActiveTemplatePresetMeta_ACU } from "../../service/template/template-preset-service";
 import {
@@ -173,7 +173,7 @@ function currentSheetKeys(): string[] {
   try {
     deferLogRefresh = true;
     try {
-      return getSortedSheetKeys_ACU(currentJsonTableData_ACU || {});
+      return getSortedSheetKeys_ACU(getCurrentTableDisplayData_ACU() || {});
     } finally {
       deferLogRefresh = false;
     }
@@ -494,10 +494,11 @@ function readCurrentSqlTemplateCheck(): SqlTemplateCheck {
     invalidDdlNames: [],
   };
 
-  if (!currentJsonTableData_ACU) return result;
+  const displayData = getCurrentTableDisplayData_ACU();
+  if (!displayData) return result;
 
   for (const key of currentSheetKeys()) {
-    const table = currentJsonTableData_ACU?.[key] as any;
+    const table = displayData[key] as any;
     if (!table || typeof table !== "object") continue;
     result.total++;
 
@@ -813,7 +814,8 @@ export function useDashboardPage(): DashboardPageState {
 
   const tableRows = computed<DashboardTableStatusRow[]>(() => {
     void dataRefreshTick.value;
-    if (!currentJsonTableData_ACU) return [];
+    const displayData = getCurrentTableDisplayData_ACU();
+    if (!displayData) return [];
     const chat = getChatArray_ACU();
     const totalAi = chat.filter((msg: any) => msg && !msg.is_user).length;
     const globalFrequency = normalizePositiveInteger_ACU(
@@ -827,7 +829,7 @@ export function useDashboardPage(): DashboardPageState {
     const currentIsolationKey = getCurrentIsolationKey_ACU();
 
     return sheetKeys.value.map((key) => {
-      const table = currentJsonTableData_ACU?.[key] || {};
+      const table = displayData[key] || {};
       const config = table.updateConfig || {};
       const rawFrequency = Number.isFinite(config.updateFrequency)
         ? Math.trunc(config.updateFrequency)

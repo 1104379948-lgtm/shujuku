@@ -46,6 +46,8 @@ export interface AutoFillSkipContext_ACU {
   /** 解析阶段的候选楼层索引 */
   candidateIndexes?: number[];
   inFlight?: boolean;
+  /** 前置检查失败分支的稳定原因码（来自 checkAutoUpdatePreConditions_ACU） */
+  preconditionReason?: string;
 }
 
 export function logAutoFillSkip_ACU(
@@ -68,6 +70,7 @@ export function logAutoFillSkip_ACU(
     resolvedMessageIndex,
     candidateIndexes,
     inFlight,
+    preconditionReason,
   } = context;
   const log = AUTO_FILL_SKIP_WARN_REASONS_ACU.has(reason) ? logWarn_ACU : logDebug_ACU;
   log('[AutoFill] Trigger skipped', {
@@ -87,5 +90,6 @@ export function logAutoFillSkip_ACU(
     resolvedMessageIndex,
     candidateIndexes,
     inFlight,
+    preconditionReason,
   });
 }

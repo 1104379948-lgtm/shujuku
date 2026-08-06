@@ -138,6 +138,7 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
       logAutoFillSkip_ACU('preconditions_failed', {
         aiFloorCount: allChatMessages_ACU.filter((message: any) => !message.is_user).length,
         inFlight: isAutoUpdatingCard_ACU,
+        preconditionReason: preCheck.code,
       });
       return;
     }

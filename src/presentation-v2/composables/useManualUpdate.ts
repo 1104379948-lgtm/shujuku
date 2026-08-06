@@ -1,6 +1,5 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import {
-  currentJsonTableData_ACU,
   settings_ACU,
   abortAllActiveRequests_ACU,
   _set_isAutoUpdatingCard_ACU,
@@ -10,7 +9,11 @@ import {
 } from '../../service/runtime/state-manager';
 import { getChatArray_ACU } from '../../service/chat/chat-service';
 import { saveSettings_ACU } from '../../service/settings/settings-service';
-import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
+import {
+  getCurrentTableDisplayData_ACU,
+  getCurrentWorldbookConfig_ACU,
+  hasRuntimeTableData_ACU,
+} from '../../service/settings/settings-readers';
 import { getSortedSheetKeys_ACU } from '../../service/template/chat-scope';
 import { collectV2CheckpointFloorsFromChat_ACU } from '../../service/table/table-history';
 import {
@@ -38,6 +41,8 @@ export interface ManualUpdateState {
   catchUpBusy: Ref<boolean>;
   sheetKeys: ComputedRef<string[]>;
   sheetNames: ComputedRef<Record<string, string>>;
+  /** runtime 是否已持有真实表格数据；false（如 purge 后）时展示层仅展示模板，选择器应禁用 */
+  runtimeReady: ComputedRef<boolean>;
   selectedSheetSummary: ComputedRef<string>;
   checkpointFloorsLabel: ComputedRef<string>;
   manualRefillRangeLabel: ComputedRef<string>;
@@ -55,10 +60,39 @@ export interface ManualUpdateState {
 
 function currentSheetKeys(): string[] {
   try {
-    return getSortedSheetKeys_ACU(currentJsonTableData_ACU || {});
+    return getSortedSheetKeys_ACU(getCurrentTableDisplayData_ACU() || {});
   } catch {
     return [];
   }
+}
+
+/**
+ * 执行用表键：仅 runtime 真实表。
+ * runtime 未就绪（purge 后为 null / 空）时返回 []，避免把模板表
+ * 当作可执行数据传给 orchestrator。
+ */
+function runtimeExecutionSheetKeys(): string[] {
+  if (!hasRuntimeTableData_ACU()) return [];
+  try {
+    return getSortedSheetKeys_ACU(getCurrentTableDisplayData_ACU() || {});
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * TOCTOU 执行边界校验：确认后重新读取 runtime，
+ * 要求当前 runtime 表集合与确认前快照完全一致，且快照目标仍全部有效。
+ * 任一变化（purge、表删除、新增表、外部直接写 Ref 篡改选择）都会 fail-closed 阻断，
+ * 避免在确认文案与最终执行目标不一致的情况下继续破坏性操作。
+ */
+function runtimeTargetsStillMatch(snapshotKeys: string[], requestedKeys: string[]): boolean {
+  if (!requestedKeys.length || !hasRuntimeTableData_ACU()) return false;
+  const currentKeys = runtimeExecutionSheetKeys();
+  if (currentKeys.length !== snapshotKeys.length) return false;
+  const snapshotSet = new Set(snapshotKeys);
+  if (!currentKeys.every((key) => snapshotSet.has(key))) return false;
+  return requestedKeys.every((key) => snapshotSet.has(key));
 }
 
 function resolveManualSelection(keys: string[]): string[] {
@@ -70,7 +104,12 @@ function resolveManualSelection(keys: string[]): string[] {
 }
 
 function saveManualSelection(keys: string[]): void {
-  const valid = new Set(currentSheetKeys());
+  // runtime 未就绪（如 purge 后）时禁止写入手动选表配置：
+  // 此时展示的是模板表，若把空选择写回会永久覆盖用户原有选表偏好
+  // （hasManualSelection=true + manualSelectedTables=[]），待 runtime 恢复后
+  // resolveManualSelection 会错误地继续返回空数组。必须 fail-closed 保持原状态。
+  if (!hasRuntimeTableData_ACU()) return;
+  const valid = new Set(runtimeExecutionSheetKeys());
   settings_ACU.manualSelectedTables = keys.filter(key => valid.has(key));
   settings_ACU.hasManualSelection = true;
   saveSettings_ACU();
@@ -193,7 +232,7 @@ function normalizeManualProgressMessage(message: string): string {
 export function useManualUpdate(): ManualUpdateState {
   const dialogStore = useDialogStore();
   const toast = useToastStore();
-  const selectedManualTableKeys = ref<string[]>(resolveManualSelection(currentSheetKeys()));
+  const selectedManualTableKeys = ref<string[]>(resolveManualSelection(runtimeExecutionSheetKeys()));
   const manualContextDepth = ref(resolveManualContextDepth());
   const manualBatchSize = ref(resolveManualBatchSize());
   const manualExtraHint = ref('');
@@ -278,10 +317,17 @@ export function useManualUpdate(): ManualUpdateState {
     return currentSheetKeys();
   });
 
+  /** runtime 就绪判据：仅真实表存在时选择器才允许交互 */
+  const runtimeReady = computed<boolean>(() => {
+    void refreshTick.value;
+    return hasRuntimeTableData_ACU();
+  });
+
   const sheetNames = computed<Record<string, string>>(() => {
+    const displayData = getCurrentTableDisplayData_ACU() || {};
     const names: Record<string, string> = {};
     for (const key of sheetKeys.value) {
-      names[key] = String(currentJsonTableData_ACU?.[key]?.name || key);
+      names[key] = String(displayData[key]?.name || key);
     }
     return names;
   });
@@ -367,7 +413,7 @@ export function useManualUpdate(): ManualUpdateState {
   });
 
   function refresh(): void {
-    selectedManualTableKeys.value = resolveManualSelection(currentSheetKeys());
+    selectedManualTableKeys.value = resolveManualSelection(runtimeExecutionSheetKeys());
     manualContextDepth.value = resolveManualContextDepth();
     manualBatchSize.value = resolveManualBatchSize();
     refreshTick.value++;
@@ -388,13 +434,14 @@ export function useManualUpdate(): ManualUpdateState {
   }
 
   function setManualSelectedKeys(keys: string[]): void {
-    selectedManualTableKeys.value = keys.slice();
+    const valid = new Set(runtimeExecutionSheetKeys());
+    selectedManualTableKeys.value = keys.filter((key) => valid.has(key));
     saveManualSelection(selectedManualTableKeys.value);
     refreshTick.value++;
   }
 
   function selectAllManualTables(): void {
-    setManualSelectedKeys(sheetKeys.value);
+    setManualSelectedKeys(runtimeExecutionSheetKeys());
   }
 
   function selectNoManualTables(): void {
@@ -403,65 +450,82 @@ export function useManualUpdate(): ManualUpdateState {
 
   async function runManualUpdate(): Promise<void> {
     if (manualUpdateBusy.value || catchUpBusy.value) return;
+    // 空选择优先于 runtime 状态判断：保持原有提示，避免误报“运行时未就绪”。
     if (!selectedManualTableKeys.value.length) {
       toast.warning('未选择需要手动填表的表格。');
       return;
     }
-
-    manualUpdateBusy.value = true;
-    const confirmed = await dialogStore.confirm({
-      title: '执行手动填表',
-      message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或终止时会回滚到本次操作前的状态。`,
-      dangerMessage: checkpointRiskMessage.value || undefined,
-      confirmLabel: '确认并继续',
-      cancelLabel: '取消',
-      confirmVariant: 'danger',
-    });
-    if (!confirmed) {
-      manualUpdateBusy.value = false;
+    // 执行边界校验（确认前）：selected keys 必须仍是当前 runtime 真实表。
+    // 展示层可回退模板，但破坏性重填绝不允许把模板表当作执行目标；
+    // 也防止任何外部直接写 Ref 绕过 setter 隔离后仍被这里放行。
+    // 在弹确认框前建立不可变快照：确认文案与最终执行目标必须来自同一快照。
+    const requestedTargetKeys = selectedManualTableKeys.value.slice();
+    const snapshotRuntimeKeys = runtimeExecutionSheetKeys();
+    const runtimeKeys = new Set(snapshotRuntimeKeys);
+    const validTargetKeys = requestedTargetKeys.filter((key) => runtimeKeys.has(key));
+    if (!snapshotRuntimeKeys.length || validTargetKeys.length !== requestedTargetKeys.length) {
+      toast.warning('当前表格运行时未就绪，无法执行手动填表。');
       return;
     }
-    // 兼容沿用 clearBeforeUpdate 参数名；service 层实际执行事务式重填，不会预清空聊天记录。
-    const clearBeforeUpdate = true;
-    const targetManualTableKeys = selectedManualTableKeys.value.slice();
 
-    progressToastId = null;
-    abortRequested = false;
-    _set_wasStoppedByUser_ACU(false);
-    notifyProgress('手动填表开始。');
-    const extra = manualExtraHint.value.trim();
-    if (extra) _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
-    const handleProgress = (event: CardUpdateProgressEvent) => {
-      notifyProgress(progressLabel(event));
-      if (event.phase === 'complete') {
-        try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
-        refreshTick.value++;
-      }
-    };
-
-    const runProcessBatch = (indices: number[], mode: string, options: any) =>
-      processUpdatesBatch_ACU(indices, mode, options, (
-        messagesToUse: any[],
-        saveTargetIndex: number,
-        updateMode: string,
-        isSilentMode: boolean,
-        targetSheetKeys: string[] | null,
-        requestOptions: Record<string, any> | null,
-        progressContext: BatchUpdateProgressContext,
-      ) => executeCardUpdateCore_ACU(
-        messagesToUse,
-        saveTargetIndex,
-        false,
-        updateMode,
-        isSilentMode,
-        targetSheetKeys,
-        requestOptions,
-        new AbortController(),
-        progressContext,
-        handleProgress,
-      ));
-
+    manualUpdateBusy.value = true;
     try {
+      const confirmed = await dialogStore.confirm({
+        title: '执行手动填表',
+        message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或终止时会回滚到本次操作前的状态。`,
+        dangerMessage: checkpointRiskMessage.value || undefined,
+        confirmLabel: '确认并继续',
+        cancelLabel: '取消',
+        confirmVariant: 'danger',
+      });
+      if (!confirmed) return;
+      // 兼容沿用 clearBeforeUpdate 参数名；service 层实际执行事务式重填，不会预清空聊天记录。
+      const clearBeforeUpdate = true;
+      // 确认后 TOCTOU 复检：确认期间 runtime 可能被 purge/表删除/新增表改变。
+      // 若当前 runtime 表集合与确认前快照不一致，或目标已失效，必须 fail-closed 阻断，
+      // 不得静默缩减/替换执行目标后继续破坏性重填。
+      if (!runtimeTargetsStillMatch(snapshotRuntimeKeys, requestedTargetKeys)) {
+        toast.warning('表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。');
+        return;
+      }
+      const targetManualTableKeys = requestedTargetKeys.slice();
+
+      progressToastId = null;
+      abortRequested = false;
+      _set_wasStoppedByUser_ACU(false);
+      notifyProgress('手动填表开始。');
+      const extra = manualExtraHint.value.trim();
+      if (extra) _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
+      const handleProgress = (event: CardUpdateProgressEvent) => {
+        notifyProgress(progressLabel(event));
+        if (event.phase === 'complete') {
+          try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
+          refreshTick.value++;
+        }
+      };
+
+      const runProcessBatch = (indices: number[], mode: string, options: any) =>
+        processUpdatesBatch_ACU(indices, mode, options, (
+          messagesToUse: any[],
+          saveTargetIndex: number,
+          updateMode: string,
+          isSilentMode: boolean,
+          targetSheetKeys: string[] | null,
+          requestOptions: Record<string, any> | null,
+          progressContext: BatchUpdateProgressContext,
+        ) => executeCardUpdateCore_ACU(
+          messagesToUse,
+          saveTargetIndex,
+          false,
+          updateMode,
+          isSilentMode,
+          targetSheetKeys,
+          requestOptions,
+          new AbortController(),
+          progressContext,
+          handleProgress,
+        ));
+
       const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
       let result: Awaited<ReturnType<typeof orchestrateManualUpdate_ACU>>;
       try {
@@ -469,7 +533,12 @@ export function useManualUpdate(): ManualUpdateState {
           targetManualTableKeys,
           runProcessBatch,
           async () => { await refreshMergedDataAndNotify_ACU(); },
-          { clearBeforeUpdate, onProgress: handleProgress },
+          {
+            clearBeforeUpdate,
+            onProgress: handleProgress,
+            // 把确认前快照传给 service 层：orchestrator 在破坏性清理前会再次校验 runtime。
+            executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
+          },
         );
       } finally {
         restoreAutoUpdateSettings();
@@ -535,15 +604,25 @@ export function useManualUpdate(): ManualUpdateState {
 
   async function runManualCatchUp(): Promise<void> {
     if (manualUpdateBusy.value || catchUpBusy.value) return;
+    // 空选择优先于 runtime 状态判断：保持原有提示，避免误报“运行时未就绪”。
     if (!selectedManualTableKeys.value.length) {
       toast.warning('未选择需要追平的表格。');
       return;
     }
+    // 执行边界校验（确认前）：追平同样绝不允许把模板表当作执行目标。
+    // 弹确认框前建立不可变快照：确认文案与最终执行目标必须来自同一快照。
+    const requestedTargetKeys = selectedManualTableKeys.value.slice();
+    const snapshotRuntimeKeys = runtimeExecutionSheetKeys();
+    const runtimeKeys = new Set(snapshotRuntimeKeys);
+    const validTargetKeys = requestedTargetKeys.filter((key) => runtimeKeys.has(key));
+    if (!snapshotRuntimeKeys.length || validTargetKeys.length !== requestedTargetKeys.length) {
+      toast.warning('当前表格运行时未就绪，无法执行手动追平。');
+      return;
+    }
 
     catchUpBusy.value = true;
-    const targetKeys = selectedManualTableKeys.value.slice();
     try {
-      const planningResult = await prepareManualCatchUpPlan_ACU(targetKeys);
+      const planningResult = await prepareManualCatchUpPlan_ACU(requestedTargetKeys);
       if (!planningResult.success || !planningResult.plan) {
         finishToast('error', planningResult.error || '无法生成手动追平计划。');
         return;
@@ -568,16 +647,26 @@ export function useManualUpdate(): ManualUpdateState {
       });
       if (!confirmed) return;
 
+      // 确认后 TOCTOU 复检：确认期间 runtime 可能被 purge/表删除/新增表改变。
+      // 追平计划基于确认前快照生成，若当前 runtime 表集合与快照不一致，
+      // 必须重新规划并要求用户重新确认，避免“确认的计划”与“执行的目标”不一致。
+      if (!runtimeTargetsStillMatch(snapshotRuntimeKeys, requestedTargetKeys)) {
+        finishToast('warning', '表格运行时在确认期间发生变化，已取消本次追平，请重新确认目标。');
+        return;
+      }
       progressToastId = null;
       abortRequested = false;
       catchUpAbortController = new AbortController();
       notifyProgress('手动追平开始。', requestCatchUpAbort);
       const result = await orchestrateManualCatchUp_ACU(
-        targetKeys,
+        requestedTargetKeys,
         refreshMergedDataAndNotify_ACU,
         {
           abortController: catchUpAbortController,
           onProgress: event => notifyProgress(progressLabel(event), requestCatchUpAbort),
+          // 把确认前快照传给 service 层：orchestrator 内部会再次校验 runtime 一致性，
+          // 使 TOCTOU 防护延伸到 UI 复检之后的异步窗口。
+          executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
         },
       );
       if (result.outcome === 'sync_pending') {
@@ -615,6 +704,7 @@ export function useManualUpdate(): ManualUpdateState {
     catchUpBusy,
     sheetKeys,
     sheetNames,
+    runtimeReady,
     selectedSheetSummary,
     checkpointFloorsLabel,
     manualRefillRangeLabel,

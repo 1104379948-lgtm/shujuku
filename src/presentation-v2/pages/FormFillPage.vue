@@ -130,6 +130,7 @@
           :sheet-keys="manualUpdate.sheetKeys.value"
           :selected-keys="manualUpdate.selectedManualTableKeys.value"
           :sheet-names="manualUpdate.sheetNames.value"
+          :disabled="!manualUpdate.runtimeReady.value"
           empty-text="当前没有可手动填表的表格。"
           @update:selected-keys="manualUpdate.setManualSelectedKeys($event)"
           @select-all="manualUpdate.selectAllManualTables"

@@ -131,7 +131,7 @@ export interface ManualUpdateResult {
     /** terminal manualRefillProgress 是否已严格保存。 */
     terminalProgressSaved?: boolean;
     /** 面向 UI/恢复诊断的稳定失败分类；不得依赖错误文案解析。 */
-    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required';
+    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'catch_up_runtime_changed_after_confirmation' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required';
     catchUpPlan?: ManualCatchUpPlan_ACU;
 }
 
@@ -2793,6 +2793,24 @@ function collectEffectiveAiMessageIndices_ACU(chat: any[]): number[] {
     return skipped > 0 ? allAiMessageIndices.slice(0, -skipped) : allAiMessageIndices;
 }
 
+/**
+ * 确认后 TOCTOU 复检的核心判定：只比较 runtime 真实表键与确认前快照。
+ * 绝不允许模板兜底——展示回退（parseTableTemplateJson_ACU）不能成为执行资格。
+ * runtime 缺失或表集合与快照不一致时返回 false，调用方必须 fail-closed 阻断。
+ */
+function runtimeSheetKeysMatchSnapshot_ACU(snapshotKeys: string[]): boolean {
+    if (!Array.isArray(snapshotKeys) || snapshotKeys.length === 0) return false;
+    const liveRuntimeTable = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+        ? (currentJsonTableData_ACU as Record<string, any>)
+        : null;
+    if (!liveRuntimeTable) return false;
+    const liveSheetKeys = Object.keys(liveRuntimeTable).filter(key => key.startsWith('sheet_')).sort();
+    const normalizedSnapshotKeys = [...snapshotKeys].sort();
+    if (liveSheetKeys.length !== normalizedSnapshotKeys.length) return false;
+    const snapshotSet = new Set(normalizedSnapshotKeys);
+    return liveSheetKeys.every(key => snapshotSet.has(key));
+}
+
 function createManualCatchUpRunId_ACU(): string {
     return `manual-catch-up-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -2825,11 +2843,17 @@ export async function prepareManualCatchUpPlan_ACU(targetKeys: string[]): Promis
         return { success: false, error: '聊天记录为空，无法执行追平。' };
     }
 
+    // 追平资格只认 runtime 真实表，绝不允许用模板兜底：
+    // runtime 若在此前被 purge 清空，目标集合必须为空，防止展示回退渗进执行资格判定。
+    // 模板仅用于后续规划时解析表配置（name/updateConfig/preset），不能作为目标存在的依据。
     const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
+    const runtimeTableData = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+        ? (currentJsonTableData_ACU as Record<string, any>)
+        : null;
     const selectedSheetKeys = [...new Set(targetKeys.filter(key =>
         typeof key === 'string'
         && key.startsWith('sheet_')
-        && Boolean(templateData[key] || currentJsonTableData_ACU?.[key])
+        && Boolean(runtimeTableData?.[key])
     ))].sort();
     if (selectedSheetKeys.length === 0) {
         return { success: false, error: '未找到可追平的已选表格。' };
@@ -2838,7 +2862,7 @@ export async function prepareManualCatchUpPlan_ACU(targetKeys: string[]): Promis
     const effectiveAiMessageIndices = collectEffectiveAiMessageIndices_ACU(chat);
     const isolationKey = getCurrentIsolationKey_ACU();
     const plan = planManualCatchUpWaves_ACU(effectiveAiMessageIndices, selectedSheetKeys.map(sheetKey => {
-        const sheet = templateData[sheetKey] || currentJsonTableData_ACU?.[sheetKey] || {};
+        const sheet = runtimeTableData?.[sheetKey] || templateData[sheetKey] || {};
         const history = resolveTableHistoryStateFromChat_ACU(chat, {
             sheetKey,
             isSummaryTable: isSummaryOrOutlineTable_ACU(String(sheet.name || '')),
@@ -2872,6 +2896,13 @@ export async function orchestrateManualCatchUp_ACU(
     options: {
         abortController?: AbortController;
         onProgress?: (event: CardUpdateProgressEvent) => void;
+        /**
+         * UI 确认前的 runtime 表键快照（可选）。
+         * 提供时，orchestrator 在内部规划完成、任何 AI 调用或持久化写入之前
+         * 重新校验当前 runtime 与快照的一致性；若 runtime 在确认期间被 purge
+         * 或表集合变化，直接 fail-closed 阻断，防止展示回退/陈旧目标继续执行。
+         */
+        executionSnapshot?: { sheetKeys: string[] };
     } = {},
 ): Promise<ManualUpdateResult> {
     if (isAutoUpdatingCard_ACU) {
@@ -2921,6 +2952,31 @@ export async function orchestrateManualCatchUp_ACU(
     }
     const plan = planningResult.plan;
     const selectedSheetKeys = [...new Set(plan.waves.flatMap(wave => wave.sheetKeys))].sort();
+
+    // 确认后 TOCTOU 复检（service 层最终准入）：
+    // UI 层在调用前已复检一次，但 orchestrator 内部跨越了 loadAllChatMessages/reloadStorage
+    // 等多个异步边界，runtime 可能在此间被 purge 或表集合变化。这里在内部规划完成、
+    // 任何锚点预检/写 bridge/AI 调用之前再次核对当前 runtime 与确认前快照。
+    // 只比较 runtime 真实表键，绝不允许模板兜底：展示回退不能成为执行资格。
+    // 契约：executionSnapshot 未提供（undefined）→ legacy 不启用保护；
+    // 显式提供（即使 sheetKeys 为空/非法）→ 必须 fail-closed，禁止静默降级。
+    const executionSnapshot = options.executionSnapshot?.sheetKeys;
+    if (options.executionSnapshot !== undefined) {
+        if (!runtimeSheetKeysMatchSnapshot_ACU(executionSnapshot)) {
+            logWarn_ACU('[手动追平] runtime 表集合在确认期间变化，已阻止执行（快照未匹配）。');
+            return {
+                success: false,
+                outcome: 'blocked',
+                error: '表格运行时在确认期间发生变化，已取消追平，请重新确认目标。',
+                catchUpPlan: plan,
+                committedBucketCount: 0,
+                dataCommitted: false,
+                replayVerified: false,
+                terminalProgressSaved: false,
+                diagnosticCode: 'catch_up_runtime_changed_after_confirmation',
+            };
+        }
+    }
 
     if (plan.waves.length === 0) {
         return {
@@ -3000,6 +3056,63 @@ export async function orchestrateManualCatchUp_ACU(
             }
             logDebug_ACU(`[手动追平] 已建立 provisional bridge：runId=${runId}, root=${establishResult.provisionalRootIndex}, originalFull=${anchorPreflight.checkpointMessageIndex}。`);
             provisionalBridgeOriginalFullIndex = anchorPreflight.checkpointMessageIndex;
+        }
+    }
+
+    // 最终准入（第二次复检）：锚点预检/establishProvisionalBridge_ACU 都是异步边界，
+    // 等待期间 runtime 可能被 purge 或表集合变化。紧邻 AI 调用与 bucket 写入再次核对，
+    // 覆盖“第一次复检通过 → 锚点/bridge 建立 → AI 调用”之间的窗口。
+    if (options.executionSnapshot !== undefined) {
+        if (!runtimeSheetKeysMatchSnapshot_ACU(executionSnapshot)) {
+            logWarn_ACU('[手动追平] runtime 在 AI 调用前一刻变化，已阻止执行（快照未匹配）。');
+            // 若本 run 已建立 provisional bridge，二检阻断不能直接返回：bridge 已持久化
+            // 拓扑改写（临时 full + 原 full 备份移除），必须零提交 rollback，否则残留
+            // active bridge 会让下次追平依赖 recovery，属于半事务式退出。
+            if (provisionalBridgeOriginalFullIndex !== null) {
+                // rollbackProvisionalBridge_ACU 内部经 runTableWriteTransaction_ACU 执行，
+                // 事务获取/调度/回调中的非预期异常可能让 Promise reject，而不是 resolve 为
+                // { ok: false }。reject 与 { ok: false } 必须统一收敛为结构化完整性失败，
+                // 否则已持久化的 active bridge 会在无诊断的情况下残留。
+                let rollbackError: string | undefined;
+                try {
+                    const rollbackResult = await rollbackProvisionalBridge_ACU(runId, {
+                        chatKey: currentChatFileIdentifier_ACU,
+                        isolationKey: getCurrentIsolationKey_ACU(),
+                    });
+                    if (!rollbackResult.ok) {
+                        rollbackError = (rollbackResult as { ok: false; error: string }).error;
+                    }
+                } catch (rollbackThrown: any) {
+                    rollbackError = rollbackThrown?.message || String(rollbackThrown || 'rollback 抛异常');
+                }
+                if (rollbackError !== undefined) {
+                    logError_ACU('[手动追平] runtime 变化阻断后 provisional bridge 回滚失败：', rollbackError);
+                    return {
+                        success: false,
+                        outcome: 'integrity_failed',
+                        error: `表格运行时在确认期间发生变化；provisional bridge 回滚失败：${rollbackError}。请先执行恢复收敛再重试。`,
+                        catchUpPlan: plan,
+                        committedBucketCount: 0,
+                        dataCommitted: false,
+                        replayVerified: false,
+                        terminalProgressSaved: false,
+                        diagnosticCode: 'bridge_finalize_failed',
+                    };
+                }
+                provisionalBridgeFinalized = true;
+                logWarn_ACU('[手动追平] runtime 变化阻断：已回滚本次 provisional bridge，未遗留 active bridge。');
+            }
+            return {
+                success: false,
+                outcome: 'blocked',
+                error: '表格运行时在确认期间发生变化，已取消本次追平，请重新确认目标。',
+                catchUpPlan: plan,
+                committedBucketCount: 0,
+                dataCommitted: false,
+                replayVerified: false,
+                terminalProgressSaved: false,
+                diagnosticCode: 'catch_up_runtime_changed_after_confirmation',
+            };
         }
     }
 
@@ -3537,6 +3650,13 @@ export async function orchestrateManualUpdate_ACU(
     options: {
         clearBeforeUpdate?: boolean;
         onProgress?: (event: CardUpdateProgressEvent) => void;
+        /**
+         * UI 确认前的 runtime 键快照（可选）。
+         * 提供时，orchestrator 在破坏性清理（clearManualRefillSheetDataInRange_ACU）
+         * 之前重新校验当前 runtime 与快照的一致性；runtime 若在确认期间被 purge
+         * 或表集合变化，直接 fail-closed 阻断，防止对已失效目标执行破坏性重填。
+         */
+        executionSnapshot?: { sheetKeys: string[] };
     } = {},
 ): Promise<ManualUpdateResult> {
     let manualRefillSessionSnapshot: ReturnType<typeof captureManualRefillSessionSnapshot_ACU> | null = null;
@@ -3678,6 +3798,20 @@ export async function orchestrateManualUpdate_ACU(
         const groupKeys = Object.keys(updateGroups);
 
         const manualRefillEnabled = options.clearBeforeUpdate === true;
+        // 破坏性/普通手动更新前 TOCTOU 复检（service 层最终准入，与 clearBeforeUpdate 无关）：
+        // UI 层在调用前已复检一次，但 orchestrator 内部已跨越 loadAllChatMessages/refreshData
+        // 等异步边界；runtime 可能在此间被 purge 或表集合变化。显式提供 executionSnapshot
+        // 即表示调用方要求保护——无论是否重填路径，都必须在任何 AI 调用/数据写入前再次
+        // 核对当前 runtime 与确认前快照，防止对确认后已失效的目标执行更新。
+        // 契约：executionSnapshot 未提供（undefined）→ legacy 路径不启用保护；
+        // 显式提供（即使 sheetKeys 为空/非法）→ 必须 fail-closed，禁止静默降级。
+        const manualUpdateSnapshotKeys = options.executionSnapshot?.sheetKeys;
+        if (options.executionSnapshot !== undefined) {
+            if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
+                logWarn_ACU('[Manual Update] runtime 在确认期间变化，已阻止手动更新（快照未匹配）。');
+                return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
+            }
+        }
         // 最终 commit 只能消费本次会话开始时解析出的模板，不能在 bucket 已写入后重新读取
         // chat override / profile 全局模板；后者在长事务期间变化会让 fallback 根与本次重填依据脱节。
         const frozenManualRefillTemplateData = manualRefillEnabled
@@ -3716,6 +3850,16 @@ export async function orchestrateManualUpdate_ACU(
                 }
             }
 
+            // 最终准入（第二次复检）：ensureStorageProviderReady_ACU 也是异步边界，
+            // 等待期间 runtime 可能被 purge/表集合变化。必须紧邻破坏性清理再次核对，
+            // 覆盖“第一次复检通过 → await provider ready → 清理开始”之间的窗口。
+            if (options.executionSnapshot !== undefined) {
+                if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
+                    logWarn_ACU('[Manual Refill] runtime 在清理前一刻变化，已阻止破坏性重填（快照未匹配）。');
+                    return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
+                }
+            }
+
             try {
                 await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
             } catch (error: any) {
@@ -3738,6 +3882,23 @@ export async function orchestrateManualUpdate_ACU(
                 return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
             }
 
+        }
+
+        // 最终准入（复检）：重填分支内已跨过 ensureStorageProviderReady_ACU / reloadStorageProvider
+        // 异步边界，普通路径也跨过 planning 与分组构建；紧邻 AI 调用与 bucket 写入再次核对，
+        // 覆盖“首次复检通过 → 所有异步边界 → AI 调用”之间的窗口。显式提供快照即要求保护，
+        // 无论是否重填路径，都必须在调用 AI 前 fail-closed。
+        // 注意：重填路径执行到这里时，破坏性清理与 reload 已经发生。若 runtime 在此间变化，
+        // 直接 return 会绕过 failManualRefillSession，导致“旧数据已清、新数据未写”的净损失。
+        // 因此重填路径必须走 failManualRefillSession（零提交时恢复 manualRefillSessionSnapshot）。
+        if (options.executionSnapshot !== undefined) {
+            if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
+                logWarn_ACU('[Manual Update] runtime 在 AI 调用前一刻变化，已阻止手动更新（快照未匹配）。');
+                if (manualRefillEnabled) {
+                    return await failManualRefillSession('表格运行时在确认期间发生变化，已取消本次手动填表并回滚已清理的数据，请确认后重试。');
+                }
+                return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
+            }
         }
 
         _set_isAutoUpdatingCard_ACU(true);
@@ -3785,6 +3946,22 @@ export async function orchestrateManualUpdate_ACU(
                     error: checkpointError?.message || 'AI 楼层边界 checkpoint 建立异常，已停止手动更新以避免跳楼推进。',
                 });
                 break;
+            }
+            // 最终复检（每个 chunk 紧邻 AI 调用）：loadAllChatMessages_ACU 与
+            // ensureV2BoundaryCheckpointForRetainedBuffer_ACU 都是异步边界，等待期间
+            // runtime 可能被 purge/表集合变化。必须在 processGroupedRuntimeChunk_ACU
+            // 之前最后一次核对确认前快照，否则会把 stale target 带入 AI/持久化链路。
+            // 重填路径：破坏性清理已发生，失败必须走 failManualRefillSession
+            // （零提交恢复 snapshot，已保留成果并刷新），不得裸返回。
+            // 普通路径：结构化失败返回。
+            if (options.executionSnapshot !== undefined) {
+                if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
+                    logWarn_ACU(`[Manual Update] runtime 在第 ${chunkIndex} 批 AI 调用前一刻变化，已阻止该批执行（快照未匹配）。`);
+                    if (manualRefillEnabled) {
+                        return await failManualRefillSession('表格运行时在确认期间发生变化，已取消本次手动填表并回滚已清理的数据，请确认后重试。');
+                    }
+                    return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
+                }
             }
             try {
                 const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {

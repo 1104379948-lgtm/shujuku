@@ -8,6 +8,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const STORAGE_KEY = "acu_v2_ui_state";
 
+const m = vi.hoisted(() => ({
+  parseTableTemplateJson_ACU: vi.fn(),
+}));
+
 function createSettings() {
   return {
     apiMode: "custom",
@@ -121,11 +125,35 @@ async function mountDashboardPage(
     developerOptionsEnabled?: boolean;
     warnLogEnabled?: boolean;
     failStorageSwitch?: boolean;
+    historyState?: Record<string, unknown>;
+    templateData?: Record<string, unknown> | null;
   } = {},
 ) {
   vi.resetModules();
   document.body.innerHTML = "";
   document.head.innerHTML = "";
+  m.parseTableTemplateJson_ACU.mockReset();
+  m.parseTableTemplateJson_ACU.mockImplementation(() => {
+    // 默认注入可被 Dashboard 展示的确定性模板 fixture（含 seed row）
+    return {
+      sheet_purge: {
+        name: "PurgeFallbackTable",
+        content: [
+          ["row_id", "值"],
+          ["seed_row_1", "不应被视为聊天数据"],
+        ],
+        updateConfig: { updateFrequency: 7, skipFloors: 2 },
+      },
+    };
+  });
+  vi.doMock("../../../src/shared/utils", async () => {
+    const actual = await vi.importActual<typeof import("../../../src/shared/utils")>("src/shared/utils");
+    return {
+      ...actual,
+      parseTableTemplateJson_ACU: m.parseTableTemplateJson_ACU,
+    };
+  });
+
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
@@ -183,14 +211,15 @@ async function mountDashboardPage(
     }),
   }));
   vi.doMock("../../../src/service/table/table-history", () => ({
-    resolveTableHistoryStateFromChat_ACU: (_chat: any[], options: any) => ({
+    resolveTableHistoryStateFromChat_ACU: (_chat: any[], opts: any) => ({
       latestAiMessageIndex: 4,
       latestDataMessageIndex: 3,
-      lastTrackedUpdateMessageIndex: options.sheetKey === "sheet_a" ? 1 : -1,
+      lastTrackedUpdateMessageIndex: opts.sheetKey === "sheet_a" ? 1 : -1,
       latestDataAiFloor: 2,
-      lastTrackedUpdateAiFloor: options.sheetKey === "sheet_a" ? 1 : 0,
-      hasAnyData: true,
-      hasTrackedUpdate: options.sheetKey === "sheet_a",
+      lastTrackedUpdateAiFloor: opts.sheetKey === "sheet_a" ? 1 : 0,
+      hasAnyData: opts.sheetKey === "sheet_a",
+      hasTrackedUpdate: opts.sheetKey === "sheet_a",
+      ...(options.historyState || {}),
     }),
   }));
   vi.doMock("../../../src/service/table/storage-mode", () => ({
@@ -238,7 +267,9 @@ async function mountDashboardPage(
   const mount = await import("../../../src/presentation-v2/bootstrap/mount");
   await mount.openAcuV2App();
   await new Promise((r) => setTimeout(r, 0));
-  return { mount, settings, saveSettings, enableFlightMode, disableFlightMode };
+  const { useDashboardPage } = await import("../../../src/presentation-v2/composables/useDashboardPage");
+  const dashboard = useDashboardPage();
+  return { mount, settings, saveSettings, enableFlightMode, disableFlightMode, dashboard };
 }
 
 beforeEach(() => {
@@ -248,6 +279,30 @@ beforeEach(() => {
 });
 
 describe("DashboardPage", () => {
+  it("runtime 为 null 时展示全局模板表名与配置，不把 seed rows 当作已有聊天数据", async () => {
+    const { dashboard } = await mountDashboardPage(createSettings(), null);
+
+    expect(dashboard.hasTables.value).toBe(true);
+    const rows = dashboard.tableRows.value;
+    expect(rows.length).toBe(1);
+    expect(rows[0].name).toBe("PurgeFallbackTable");
+    // updateConfig 来自模板 fixture（updateFrequency=7, skipFloors=2），
+    // 且模板 fixture 内含 seed row，不得被当作已初始化的聊天数据。
+    expect(rows[0].frequency).toBe(7);
+    expect(rows[0].skip).toBe(2);
+    expect(rows[0].hasTrackedUpdate).toBe(false);
+    expect(rows[0].hasAnyData).toBe(false);
+    expect(rows[0].lastUpdatedLabel).toBe("未初始");
+  });
+
+  it("runtime 为 null 时模板回退以 stripSeedRows 读取全局模板", async () => {
+    const { dashboard } = await mountDashboardPage(createSettings(), null);
+    expect(dashboard.hasTables.value).toBe(true);
+    // useDashboardPage 内的 display reader必须通过 parseTableTemplateJson_ACU({ stripSeedRows: true })
+    // 读取模板，避免把模板预置行当作聊天数据。
+    expect(m.parseTableTemplateJson_ACU).toHaveBeenCalledWith({ stripSeedRows: true });
+  });
+
   it("配置状态面板移除后，仪表盘展示运行概览和开关面板", () => {
     const source = readFileSync(
       "src/presentation-v2/pages/DashboardPage.vue",

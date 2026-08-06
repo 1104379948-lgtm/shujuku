@@ -141,6 +141,8 @@ async function mountFormFillPage(
   vi.doMock('../../../src/service/settings/settings-readers', () => ({
     getCurrentWorldbookConfig_ACU: () => worldbookConfig,
     getCurrentCharSettings_ACU: () => ({ worldbookConfig }),
+    getCurrentTableDisplayData_ACU: () => createTableData(),
+    hasRuntimeTableData_ACU: () => true,
   }));
   vi.doMock('../../../src/presentation-v2/composables/useTableTemplatePresets', () => ({
     useTableTemplatePresets: () => ({

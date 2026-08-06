@@ -376,6 +376,9 @@ export async function handleManualUpdate_ACU() {
             {
                 clearBeforeUpdate: true,
                 onProgress: event => handleProgressEvent(event, false, manualProgressToast),
+                // 注意：legacy 入口未传 executionSnapshot，不启用确认期 TOCTOU 快照防护
+                // （该防护由 V2 UI useManualUpdate 在确认前建立快照并传入 service）。
+                // 刻意保持兼容，不把可选参数改为必填。
             }
         );
 

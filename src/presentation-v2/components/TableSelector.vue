@@ -3,9 +3,10 @@
     <div v-if="!sheetKeys.length" class="acu-v2-table-selector__empty">{{ emptyText }}</div>
     <template v-else>
       <div class="acu-v2-table-selector__actions">
-        <AcuButton size="sm" @click="$emit('select-all')">全选</AcuButton>
-        <AcuButton size="sm" @click="$emit('select-none')">全不选</AcuButton>
+        <AcuButton size="sm" :disabled="disabled" @click="$emit('select-all')">全选</AcuButton>
+        <AcuButton size="sm" :disabled="disabled" @click="$emit('select-none')">全不选</AcuButton>
         <span class="acu-v2-table-selector__count">已选 {{ selectedKeys.length }} / {{ sheetKeys.length }}</span>
+        <span v-if="disabled" class="acu-v2-table-selector__readonly-hint">仅展示模板：数据库运行时未加载，暂不可选择执行目标</span>
       </div>
       <div class="acu-v2-table-selector__grid">
         <div
@@ -15,6 +16,7 @@
         >
           <AcuCheckbox
             :model-value="selectedSet.has(key)"
+            :disabled="disabled"
             :label="nameFor(key)"
             @update:model-value="toggle(key, $event)"
           />
@@ -34,6 +36,7 @@ const props = defineProps<{
   selectedKeys: string[];
   sheetNames: Record<string, string>;
   emptyText?: string;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{

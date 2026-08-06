@@ -78646,6 +78646,52 @@ $CONTENT
             : [];
         return saved.filter((key) => availableKeys.includes(key));
     }
+    /**
+     * 获取当前表格展示数据（presentation fallback）。
+     *
+     * 语义：这是 **只读展示** 数据源，不是 runtime 就绪判据。
+     * - 若 currentJsonTableData_ACU 为对象且含有效 sheet_*，直接返回 runtime；
+     * - 否则（硬清空后 runtime 为 null，或尚未加载）回退到当前生效全局模板的
+     *   去除 seed rows 结构，供 FormFill/Dashboard 显示表名与配置；
+     * - 模板解析失败或无有效 sheet 时返回 null，页面维持空态。
+     *
+     * 约束：本函数不修改 state-manager，不保存 settings，不触发 provider、
+     * 世界书或聊天加载；不得把返回值当作 runtime ready 或持久化成功依据。
+     */
+    function getCurrentTableDisplayData_ACU() {
+        if (currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object') {
+            const hasSheet = Object.keys(currentJsonTableData_ACU).some(key => key.startsWith('sheet_'));
+            if (hasSheet)
+                return currentJsonTableData_ACU;
+        }
+        try {
+            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true });
+            if (templateData
+                && typeof templateData === 'object'
+                && Object.keys(templateData).some(key => key.startsWith('sheet_')))
+                return templateData;
+        }
+        catch {
+            // 模板无法解析时返回 null，页面维持空态，不抛出破坏页面。
+        }
+        return null;
+    }
+    /**
+     * runtime 是否已持有真实数据（含有效 sheet_*）。
+     *
+     * 语义：这是 **执行就绪判据**，与展示回退严格区分。
+     * - 仅当 currentJsonTableData_ACU 为对象且含 sheet_* 时返回 true；
+     * - purge 硬清空后 runtime 为 null / 空对象时返回 false；
+     * - 不读取模板，不解析，无任何副作用。
+     *
+     * 用途：手动填表 / 追平等破坏性执行必须以此判据守卫，避免把展示用
+     * 模板表当作真实 runtime 表传给 orchestrator。
+     */
+    function hasRuntimeTableData_ACU() {
+        return !!(currentJsonTableData_ACU
+            && typeof currentJsonTableData_ACU === 'object'
+            && Object.keys(currentJsonTableData_ACU).some((key) => key.startsWith('sheet_')));
+    }
 
     /**
      * service/runtime/state-manager.ts — Re-export 门面
@@ -85022,14 +85068,23 @@ $CONTENT
      */
     function checkAutoUpdatePreConditions_ACU(settings, coreApisAreReady, isAutoUpdatingCard, currentJsonTableData, allChatMessagesLength) {
         if (!settings.autoUpdateEnabled) {
-            return { canProceed: false, reason: 'Auto update is disabled via settings.' };
+            return { canProceed: false, reason: 'Auto update is disabled via settings.', code: 'auto_update_disabled' };
         }
         const apiIsConfigured = (settings.apiMode === 'custom' && (settings.apiConfig.useMainApi || (settings.apiConfig.url && settings.apiConfig.model))) || (settings.apiMode === 'tavern' && settings.tavernProfile);
-        if (!coreApisAreReady || isAutoUpdatingCard || !apiIsConfigured || !currentJsonTableData) {
-            return { canProceed: false, reason: 'Pre-flight checks failed.' };
+        if (!coreApisAreReady) {
+            return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'core_apis_not_ready' };
+        }
+        if (isAutoUpdatingCard) {
+            return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'update_in_flight' };
+        }
+        if (!apiIsConfigured) {
+            return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'api_not_configured' };
+        }
+        if (!currentJsonTableData) {
+            return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'runtime_not_ready' };
         }
         if (allChatMessagesLength < 2) {
-            return { canProceed: false, reason: 'Chat history too short.' };
+            return { canProceed: false, reason: 'Chat history too short.', code: 'chat_too_short' };
         }
         return { canProceed: true };
     }
@@ -89615,6 +89670,26 @@ $CONTENT
         const skipped = Math.max(0, Math.trunc(Number(settings_ACU.skipUpdateFloors) || 0));
         return skipped > 0 ? allAiMessageIndices.slice(0, -skipped) : allAiMessageIndices;
     }
+    /**
+     * 确认后 TOCTOU 复检的核心判定：只比较 runtime 真实表键与确认前快照。
+     * 绝不允许模板兜底——展示回退（parseTableTemplateJson_ACU）不能成为执行资格。
+     * runtime 缺失或表集合与快照不一致时返回 false，调用方必须 fail-closed 阻断。
+     */
+    function runtimeSheetKeysMatchSnapshot_ACU(snapshotKeys) {
+        if (!Array.isArray(snapshotKeys) || snapshotKeys.length === 0)
+            return false;
+        const liveRuntimeTable = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+            ? currentJsonTableData_ACU
+            : null;
+        if (!liveRuntimeTable)
+            return false;
+        const liveSheetKeys = Object.keys(liveRuntimeTable).filter(key => key.startsWith('sheet_')).sort();
+        const normalizedSnapshotKeys = [...snapshotKeys].sort();
+        if (liveSheetKeys.length !== normalizedSnapshotKeys.length)
+            return false;
+        const snapshotSet = new Set(normalizedSnapshotKeys);
+        return liveSheetKeys.every(key => snapshotSet.has(key));
+    }
     function createManualCatchUpRunId_ACU() {
         return `manual-catch-up-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     }
@@ -89643,17 +89718,23 @@ $CONTENT
         if (!Array.isArray(chat) || chat.length === 0) {
             return { success: false, error: '聊天记录为空，无法执行追平。' };
         }
+        // 追平资格只认 runtime 真实表，绝不允许用模板兜底：
+        // runtime 若在此前被 purge 清空，目标集合必须为空，防止展示回退渗进执行资格判定。
+        // 模板仅用于后续规划时解析表配置（name/updateConfig/preset），不能作为目标存在的依据。
         const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
+        const runtimeTableData = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+            ? currentJsonTableData_ACU
+            : null;
         const selectedSheetKeys = [...new Set(targetKeys.filter(key => typeof key === 'string'
                 && key.startsWith('sheet_')
-                && Boolean(templateData[key] || currentJsonTableData_ACU?.[key])))].sort();
+                && Boolean(runtimeTableData?.[key])))].sort();
         if (selectedSheetKeys.length === 0) {
             return { success: false, error: '未找到可追平的已选表格。' };
         }
         const effectiveAiMessageIndices = collectEffectiveAiMessageIndices_ACU(chat);
         const isolationKey = getCurrentIsolationKey_ACU();
         const plan = planManualCatchUpWaves_ACU(effectiveAiMessageIndices, selectedSheetKeys.map(sheetKey => {
-            const sheet = templateData[sheetKey] || currentJsonTableData_ACU?.[sheetKey] || {};
+            const sheet = runtimeTableData?.[sheetKey] || templateData[sheetKey] || {};
             const history = resolveTableHistoryStateFromChat_ACU(chat, {
                 sheetKey,
                 isSummaryTable: isSummaryOrOutlineTable_ACU(String(sheet.name || '')),
@@ -89725,6 +89806,30 @@ $CONTENT
         }
         const plan = planningResult.plan;
         const selectedSheetKeys = [...new Set(plan.waves.flatMap(wave => wave.sheetKeys))].sort();
+        // 确认后 TOCTOU 复检（service 层最终准入）：
+        // UI 层在调用前已复检一次，但 orchestrator 内部跨越了 loadAllChatMessages/reloadStorage
+        // 等多个异步边界，runtime 可能在此间被 purge 或表集合变化。这里在内部规划完成、
+        // 任何锚点预检/写 bridge/AI 调用之前再次核对当前 runtime 与确认前快照。
+        // 只比较 runtime 真实表键，绝不允许模板兜底：展示回退不能成为执行资格。
+        // 契约：executionSnapshot 未提供（undefined）→ legacy 不启用保护；
+        // 显式提供（即使 sheetKeys 为空/非法）→ 必须 fail-closed，禁止静默降级。
+        const executionSnapshot = options.executionSnapshot?.sheetKeys;
+        if (options.executionSnapshot !== undefined) {
+            if (!runtimeSheetKeysMatchSnapshot_ACU(executionSnapshot)) {
+                logWarn_ACU('[手动追平] runtime 表集合在确认期间变化，已阻止执行（快照未匹配）。');
+                return {
+                    success: false,
+                    outcome: 'blocked',
+                    error: '表格运行时在确认期间发生变化，已取消追平，请重新确认目标。',
+                    catchUpPlan: plan,
+                    committedBucketCount: 0,
+                    dataCommitted: false,
+                    replayVerified: false,
+                    terminalProgressSaved: false,
+                    diagnosticCode: 'catch_up_runtime_changed_after_confirmation',
+                };
+            }
+        }
         if (plan.waves.length === 0) {
             return {
                 success: true,
@@ -89801,6 +89906,63 @@ $CONTENT
                 }
                 logDebug_ACU(`[手动追平] 已建立 provisional bridge：runId=${runId}, root=${establishResult.provisionalRootIndex}, originalFull=${anchorPreflight.checkpointMessageIndex}。`);
                 provisionalBridgeOriginalFullIndex = anchorPreflight.checkpointMessageIndex;
+            }
+        }
+        // 最终准入（第二次复检）：锚点预检/establishProvisionalBridge_ACU 都是异步边界，
+        // 等待期间 runtime 可能被 purge 或表集合变化。紧邻 AI 调用与 bucket 写入再次核对，
+        // 覆盖“第一次复检通过 → 锚点/bridge 建立 → AI 调用”之间的窗口。
+        if (options.executionSnapshot !== undefined) {
+            if (!runtimeSheetKeysMatchSnapshot_ACU(executionSnapshot)) {
+                logWarn_ACU('[手动追平] runtime 在 AI 调用前一刻变化，已阻止执行（快照未匹配）。');
+                // 若本 run 已建立 provisional bridge，二检阻断不能直接返回：bridge 已持久化
+                // 拓扑改写（临时 full + 原 full 备份移除），必须零提交 rollback，否则残留
+                // active bridge 会让下次追平依赖 recovery，属于半事务式退出。
+                if (provisionalBridgeOriginalFullIndex !== null) {
+                    // rollbackProvisionalBridge_ACU 内部经 runTableWriteTransaction_ACU 执行，
+                    // 事务获取/调度/回调中的非预期异常可能让 Promise reject，而不是 resolve 为
+                    // { ok: false }。reject 与 { ok: false } 必须统一收敛为结构化完整性失败，
+                    // 否则已持久化的 active bridge 会在无诊断的情况下残留。
+                    let rollbackError;
+                    try {
+                        const rollbackResult = await rollbackProvisionalBridge_ACU(runId, {
+                            chatKey: currentChatFileIdentifier_ACU,
+                            isolationKey: getCurrentIsolationKey_ACU(),
+                        });
+                        if (!rollbackResult.ok) {
+                            rollbackError = rollbackResult.error;
+                        }
+                    }
+                    catch (rollbackThrown) {
+                        rollbackError = rollbackThrown?.message || String(rollbackThrown || 'rollback 抛异常');
+                    }
+                    if (rollbackError !== undefined) {
+                        logError_ACU('[手动追平] runtime 变化阻断后 provisional bridge 回滚失败：', rollbackError);
+                        return {
+                            success: false,
+                            outcome: 'integrity_failed',
+                            error: `表格运行时在确认期间发生变化；provisional bridge 回滚失败：${rollbackError}。请先执行恢复收敛再重试。`,
+                            catchUpPlan: plan,
+                            committedBucketCount: 0,
+                            dataCommitted: false,
+                            replayVerified: false,
+                            terminalProgressSaved: false,
+                            diagnosticCode: 'bridge_finalize_failed',
+                        };
+                    }
+                    provisionalBridgeFinalized = true;
+                    logWarn_ACU('[手动追平] runtime 变化阻断：已回滚本次 provisional bridge，未遗留 active bridge。');
+                }
+                return {
+                    success: false,
+                    outcome: 'blocked',
+                    error: '表格运行时在确认期间发生变化，已取消本次追平，请重新确认目标。',
+                    catchUpPlan: plan,
+                    committedBucketCount: 0,
+                    dataCommitted: false,
+                    replayVerified: false,
+                    terminalProgressSaved: false,
+                    diagnosticCode: 'catch_up_runtime_changed_after_confirmation',
+                };
             }
         }
         const maxConcurrentGroups = Math.max(1, Math.trunc(Number(settings_ACU.maxConcurrentGroups) || 1));
@@ -90446,6 +90608,20 @@ $CONTENT
             });
             const groupKeys = Object.keys(updateGroups);
             const manualRefillEnabled = options.clearBeforeUpdate === true;
+            // 破坏性/普通手动更新前 TOCTOU 复检（service 层最终准入，与 clearBeforeUpdate 无关）：
+            // UI 层在调用前已复检一次，但 orchestrator 内部已跨越 loadAllChatMessages/refreshData
+            // 等异步边界；runtime 可能在此间被 purge 或表集合变化。显式提供 executionSnapshot
+            // 即表示调用方要求保护——无论是否重填路径，都必须在任何 AI 调用/数据写入前再次
+            // 核对当前 runtime 与确认前快照，防止对确认后已失效的目标执行更新。
+            // 契约：executionSnapshot 未提供（undefined）→ legacy 路径不启用保护；
+            // 显式提供（即使 sheetKeys 为空/非法）→ 必须 fail-closed，禁止静默降级。
+            const manualUpdateSnapshotKeys = options.executionSnapshot?.sheetKeys;
+            if (options.executionSnapshot !== undefined) {
+                if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
+                    logWarn_ACU('[Manual Update] runtime 在确认期间变化，已阻止手动更新（快照未匹配）。');
+                    return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
+                }
+            }
             // 最终 commit 只能消费本次会话开始时解析出的模板，不能在 bucket 已写入后重新读取
             // chat override / profile 全局模板；后者在长事务期间变化会让 fallback 根与本次重填依据脱节。
             const frozenManualRefillTemplateData = manualRefillEnabled
@@ -90480,6 +90656,15 @@ $CONTENT
                         return { success: false, error: `SQLite 运行时未就绪，已阻止重填：${error?.message || String(error)}` };
                     }
                 }
+                // 最终准入（第二次复检）：ensureStorageProviderReady_ACU 也是异步边界，
+                // 等待期间 runtime 可能被 purge/表集合变化。必须紧邻破坏性清理再次核对，
+                // 覆盖“第一次复检通过 → await provider ready → 清理开始”之间的窗口。
+                if (options.executionSnapshot !== undefined) {
+                    if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
+                        logWarn_ACU('[Manual Refill] runtime 在清理前一刻变化，已阻止破坏性重填（快照未匹配）。');
+                        return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
+                    }
+                }
                 try {
                     await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
                 }
@@ -90501,6 +90686,22 @@ $CONTENT
                     const rollbackError = await rollbackManualRefillSession();
                     const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
                     return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
+                }
+            }
+            // 最终准入（复检）：重填分支内已跨过 ensureStorageProviderReady_ACU / reloadStorageProvider
+            // 异步边界，普通路径也跨过 planning 与分组构建；紧邻 AI 调用与 bucket 写入再次核对，
+            // 覆盖“首次复检通过 → 所有异步边界 → AI 调用”之间的窗口。显式提供快照即要求保护，
+            // 无论是否重填路径，都必须在调用 AI 前 fail-closed。
+            // 注意：重填路径执行到这里时，破坏性清理与 reload 已经发生。若 runtime 在此间变化，
+            // 直接 return 会绕过 failManualRefillSession，导致“旧数据已清、新数据未写”的净损失。
+            // 因此重填路径必须走 failManualRefillSession（零提交时恢复 manualRefillSessionSnapshot）。
+            if (options.executionSnapshot !== undefined) {
+                if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
+                    logWarn_ACU('[Manual Update] runtime 在 AI 调用前一刻变化，已阻止手动更新（快照未匹配）。');
+                    if (manualRefillEnabled) {
+                        return await failManualRefillSession('表格运行时在确认期间发生变化，已取消本次手动填表并回滚已清理的数据，请确认后重试。');
+                    }
+                    return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
                 }
             }
             _set_isAutoUpdatingCard_ACU(true);
@@ -90547,6 +90748,22 @@ $CONTENT
                         error: checkpointError?.message || 'AI 楼层边界 checkpoint 建立异常，已停止手动更新以避免跳楼推进。',
                     });
                     break;
+                }
+                // 最终复检（每个 chunk 紧邻 AI 调用）：loadAllChatMessages_ACU 与
+                // ensureV2BoundaryCheckpointForRetainedBuffer_ACU 都是异步边界，等待期间
+                // runtime 可能被 purge/表集合变化。必须在 processGroupedRuntimeChunk_ACU
+                // 之前最后一次核对确认前快照，否则会把 stale target 带入 AI/持久化链路。
+                // 重填路径：破坏性清理已发生，失败必须走 failManualRefillSession
+                // （零提交恢复 snapshot，已保留成果并刷新），不得裸返回。
+                // 普通路径：结构化失败返回。
+                if (options.executionSnapshot !== undefined) {
+                    if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
+                        logWarn_ACU(`[Manual Update] runtime 在第 ${chunkIndex} 批 AI 调用前一刻变化，已阻止该批执行（快照未匹配）。`);
+                        if (manualRefillEnabled) {
+                            return await failManualRefillSession('表格运行时在确认期间发生变化，已取消本次手动填表并回滚已清理的数据，请确认后重试。');
+                        }
+                        return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
+                    }
                 }
                 try {
                     const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
@@ -90671,7 +90888,7 @@ $CONTENT
         'resolved_message_not_ai',
     ]);
     function logAutoFillSkip_ACU(reason, context = {}) {
-        const { eventType, messageId, eventMessageId, chatKey, isolationKey, liveIsolationKey, lastGenerationType, aiFloorCount, capturedChatLength, capturedAiFloorCount, liveChatLength, liveAiFloorCount, resolvedMessageIndex, candidateIndexes, inFlight, } = context;
+        const { eventType, messageId, eventMessageId, chatKey, isolationKey, liveIsolationKey, lastGenerationType, aiFloorCount, capturedChatLength, capturedAiFloorCount, liveChatLength, liveAiFloorCount, resolvedMessageIndex, candidateIndexes, inFlight, preconditionReason, } = context;
         const log = AUTO_FILL_SKIP_WARN_REASONS_ACU.has(reason) ? logWarn_ACU : logDebug_ACU;
         log('[AutoFill] Trigger skipped', {
             reason,
@@ -90690,6 +90907,7 @@ $CONTENT
             resolvedMessageIndex,
             candidateIndexes,
             inFlight,
+            preconditionReason,
         });
     }
 
@@ -90784,6 +91002,7 @@ $CONTENT
                 logAutoFillSkip_ACU('preconditions_failed', {
                     aiFloorCount: allChatMessages_ACU.filter((message) => !message.is_user).length,
                     inFlight: isAutoUpdatingCard_ACU,
+                    preconditionReason: preCheck.code,
                 });
                 return;
             }
@@ -93044,6 +93263,9 @@ $CONTENT
             {
                 clearBeforeUpdate: true,
                 onProgress: event => handleProgressEvent(event, false, manualProgressToast),
+                // 注意：legacy 入口未传 executionSnapshot，不启用确认期 TOCTOU 快照防护
+                // （该防护由 V2 UI useManualUpdate 在确认前建立快照并传入 service）。
+                // 刻意保持兼容，不把可选参数改为必填。
             });
             clearLoadingToast(manualProgressToast);
             manualProgressToast = null;
@@ -120258,7 +120480,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 2,
 	class: "acu-dialog__checklist"
     };
-    const _hoisted_6$p = { class: "acu-dialog__check-option" };
+    const _hoisted_6$q = { class: "acu-dialog__check-option" };
     const _hoisted_7$n = { class: "acu-dialog__check-label" };
     const _hoisted_8$l = {
 	key: 0,
@@ -120337,7 +120559,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: option.disabled,
 						"onUpdate:modelValue": ($event) => $setup.dialog.setCheckedValue(option.value, $event)
 					}, {
-						default: withCtx(() => [createBaseVNode("span", _hoisted_6$p, [createBaseVNode(
+						default: withCtx(() => [createBaseVNode("span", _hoisted_6$q, [createBaseVNode(
 							"span",
 							_hoisted_7$n,
 							toDisplayString(option.label),
@@ -121969,7 +122191,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-panel__actions"
     };
     const _hoisted_5$q = ["id", "aria-hidden"];
-    const _hoisted_6$o = { class: "acu-panel__description-region-inner" };
+    const _hoisted_6$p = { class: "acu-panel__description-region-inner" };
     const _hoisted_7$m = { class: "acu-panel__body" };
     function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$U, [
@@ -122018,7 +122240,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				id: $setup.descriptionId,
 				class: "acu-panel__description-region",
 				"aria-hidden": !$setup.descriptionOpen
-			}, [createBaseVNode("div", _hoisted_6$o, [createVNode($setup["AcuInfoBanner"], {
+			}, [createBaseVNode("div", _hoisted_6$p, [createVNode($setup["AcuInfoBanner"], {
 				class: "acu-panel__description-banner",
 				tone: $props.descriptionTone
 			}, {
@@ -122265,7 +122487,7 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_4$w = ["onClick"];
     const _hoisted_5$p = { class: "acu-preset-dd__item-name" };
-    const _hoisted_6$n = {
+    const _hoisted_6$o = {
 	key: 0,
 	class: "acu-preset-dd__item-meta"
     };
@@ -122320,7 +122542,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					),
 					item.meta ? (openBlock(), createElementBlock(
 						"span",
-						_hoisted_6$n,
+						_hoisted_6$o,
 						toDisplayString(item.meta),
 						1
 						/* TEXT */
@@ -122624,7 +122846,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-api-config-panel__danger"
     };
-    const _hoisted_6$m = { class: "acu-api-config-panel__inline-action" };
+    const _hoisted_6$n = { class: "acu-api-config-panel__inline-action" };
     const _hoisted_7$k = {
 	key: 0,
 	class: "acu-api-config-panel__two-col"
@@ -122783,7 +123005,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.activeDraft.tavernProfile = $event)
 								}, null, 8, ["options", "model-value"])]),
 								_: 1
-							}), createBaseVNode("div", _hoisted_6$m, [createVNode($setup["AcuButton"], { onClick: $setup.store.refreshTavernProfiles }, {
+							}), createBaseVNode("div", _hoisted_6$n, [createVNode($setup["AcuButton"], { onClick: $setup.store.refreshTavernProfiles }, {
 								default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
 									"刷新列表",
 									-1
@@ -125930,7 +126152,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_3$w = { class: "acu-prompt-segs__list" };
     const _hoisted_4$s = { class: "acu-prompt-segs__item-head" };
     const _hoisted_5$n = { class: "acu-prompt-segs__index" };
-    const _hoisted_6$l = { class: "acu-prompt-segs__actions" };
+    const _hoisted_6$m = { class: "acu-prompt-segs__actions" };
     const _hoisted_7$j = {
 	key: 0,
 	class: "acu-prompt-segs__empty"
@@ -125995,7 +126217,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"model-value",
 						"onUpdate:modelValue"
 					])) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_6$l, [$props.allowMove ? (openBlock(), createElementBlock(
+					createBaseVNode("div", _hoisted_6$m, [$props.allowMove ? (openBlock(), createElementBlock(
 						Fragment,
 						{ key: 0 },
 						[createVNode($setup["AcuIconButton"], {
@@ -126177,7 +126399,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_3$v = { class: "acu-v2-plot-task-editor__grid" };
     const _hoisted_4$r = { class: "acu-v2-plot-task-editor__grid" };
     const _hoisted_5$m = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_6$k = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
+    const _hoisted_6$l = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_7$i = { class: "acu-v2-plot-task-editor__toggles" };
     const _hoisted_8$h = { class: "acu-v2-plot-task-editor__grid" };
     const _hoisted_9$f = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
@@ -126292,7 +126514,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				-1
 				/* CACHED */
 			)),
-			createBaseVNode("div", _hoisted_6$k, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_6$l, [createVNode($setup["AcuFormRow"], {
 				label: "任务描述",
 				hint: "说明这个推进任务负责什么。留空时不参与 Agent Skill 判断。"
 			}, {
@@ -126461,7 +126683,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_3$u = { class: "acu-v2-plot-tasks__cards" };
     const _hoisted_4$q = ["onClick"];
     const _hoisted_5$l = { class: "acu-v2-plot-tasks__name" };
-    const _hoisted_6$j = {
+    const _hoisted_6$k = {
 	class: "acu-v2-plot-tasks__stage",
 	title: "阶段号 — 同阶段并发，跨阶段串行"
     };
@@ -126533,7 +126755,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				),
 				createBaseVNode(
 					"span",
-					_hoisted_6$j,
+					_hoisted_6$k,
 					"阶段 " + toDisplayString(task.stage),
 					1
 					/* TEXT */
@@ -126597,7 +126819,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_3$t = { class: "acu-v2-manage-item__actions" };
     const _hoisted_4$p = { class: "acu-v2-form__section" };
     const _hoisted_5$k = { class: "acu-v2-form__section" };
-    const _hoisted_6$i = { class: "acu-v2-plot-drawer__rules" };
+    const _hoisted_6$j = { class: "acu-v2-plot-drawer__rules" };
     const _hoisted_7$g = { class: "acu-v2-form__section" };
     const _hoisted_8$f = { class: "acu-v2-plot-drawer__actions" };
     function _sfc_render$G(_ctx, _cache, $props, $setup, $data, $options) {
@@ -126766,7 +126988,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)])]),
 							_: 1
 						}),
-						createBaseVNode("div", _hoisted_6$i, [createVNode($setup["AcuRulePairList"], {
+						createBaseVNode("div", _hoisted_6$j, [createVNode($setup["AcuRulePairList"], {
 							label: "提取规则",
 							"model-value": $props.contextRules.extractRules,
 							"start-placeholder": "提取开始边界",
@@ -129710,7 +129932,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_3$p = { class: "acu-dashboard-storage-mode__label" };
     const _hoisted_4$m = { class: "acu-dashboard-storage-mode__desc-main" };
     const _hoisted_5$j = { class: "acu-dashboard-storage-mode__cards" };
-    const _hoisted_6$h = {
+    const _hoisted_6$i = {
 	class: "acu-dashboard-storage-mode__icon",
 	"aria-hidden": "true"
     };
@@ -129759,7 +129981,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						key: option.value,
 						class: normalizeClass(["acu-dashboard-storage-mode__card", { "acu-dashboard-storage-mode__card--active": option.value === $props.modelValue }])
 					},
-					[createBaseVNode("span", _hoisted_6$h, [createBaseVNode(
+					[createBaseVNode("span", _hoisted_6$i, [createBaseVNode(
 						"i",
 						{ class: normalizeClass(option.iconClass) },
 						null,
@@ -130155,7 +130377,7 @@ Expected function or array of functions, received type ${typeof value}.`
         try {
             deferLogRefresh = true;
             try {
-                return getSortedSheetKeys_ACU(currentJsonTableData_ACU || {});
+                return getSortedSheetKeys_ACU(getCurrentTableDisplayData_ACU() || {});
             }
             finally {
                 deferLogRefresh = false;
@@ -130401,10 +130623,11 @@ Expected function or array of functions, received type ${typeof value}.`
             missingDdlNames: [],
             invalidDdlNames: [],
         };
-        if (!currentJsonTableData_ACU)
+        const displayData = getCurrentTableDisplayData_ACU();
+        if (!displayData)
             return result;
         for (const key of currentSheetKeys$1()) {
-            const table = currentJsonTableData_ACU?.[key];
+            const table = displayData[key];
             if (!table || typeof table !== "object")
                 continue;
             result.total++;
@@ -130648,7 +130871,8 @@ Expected function or array of functions, received type ${typeof value}.`
         });
         const tableRows = computed(() => {
             void dataRefreshTick.value;
-            if (!currentJsonTableData_ACU)
+            const displayData = getCurrentTableDisplayData_ACU();
+            if (!displayData)
                 return [];
             const chat = getChatArray_ACU();
             const totalAi = chat.filter((msg) => msg && !msg.is_user).length;
@@ -130656,7 +130880,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const globalSkip = normalizeNonNegativeInteger_ACU$1(settings_ACU.skipUpdateFloors, 0);
             const currentIsolationKey = getCurrentIsolationKey_ACU();
             return sheetKeys.value.map((key) => {
-                const table = currentJsonTableData_ACU?.[key] || {};
+                const table = displayData[key] || {};
                 const config = table.updateConfig || {};
                 const rawFrequency = Number.isFinite(config.updateFrequency)
                     ? Math.trunc(config.updateFrequency)
@@ -131093,7 +131317,7 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_4$k = { class: "acu-v2-dashboard-page__health-body" };
     const _hoisted_5$i = { class: "acu-v2-dashboard-page__health-heading" };
-    const _hoisted_6$g = { class: "acu-v2-dashboard-page__health-side" };
+    const _hoisted_6$h = { class: "acu-v2-dashboard-page__health-side" };
     const _hoisted_7$e = ["data-acu-toggle-group"];
     function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$z, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-dashboard-page__grid" }, {
@@ -131132,7 +131356,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								1
 								/* TEXT */
 							)]),
-							createBaseVNode("div", _hoisted_6$g, [createVNode($setup["AcuBadge"], { variant: item.badgeVariant }, {
+							createBaseVNode("div", _hoisted_6$h, [createVNode($setup["AcuBadge"], { variant: item.badgeVariant }, {
 								default: withCtx(() => [createTextVNode(
 									toDisplayString(item.badge),
 									1
@@ -131242,7 +131466,8 @@ Expected function or array of functions, received type ${typeof value}.`
             sheetKeys: {},
             selectedKeys: {},
             sheetNames: {},
-            emptyText: {}
+            emptyText: {},
+            disabled: { type: Boolean }
         },
         emits: ["update:selectedKeys", "select-all", "select-none"],
         setup(__props, { expose: __expose, emit: __emit }) {
@@ -131270,8 +131495,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-table-selector[data-v-b5fa0e1c] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-table-selector__empty[data-v-b5fa0e1c] {\r\n  padding: 10px 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-table-selector__actions[data-v-b5fa0e1c] { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;\n}\n.acu-v2-table-selector__count[data-v-b5fa0e1c] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-table-selector__grid[data-v-b5fa0e1c] {\r\n  display: grid; gap: 6px;\r\n  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));\r\n  max-height: 240px; overflow: auto;\r\n  padding: 0;\r\n  border: 0; border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-table-selector__item[data-v-b5fa0e1c] {\r\n  padding: 8px 10px;\r\n  border: 0; border-radius: var(--acu-radius-sm);\r\n  background: transparent; min-width: 0;\n}\r\n", "src/presentation-v2/components/TableSelector.vue#style-0-b5fa0e1c");
-    var TableSelector_vue_vue_type_style_index_0_scoped_b5fa0e1c_lang = null;
+    injectSfcStyle("\n.acu-v2-table-selector[data-v-b306689c] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-table-selector__empty[data-v-b306689c] {\n  padding: 10px 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n  border: 0;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n}\n.acu-v2-table-selector__actions[data-v-b306689c] { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;\n}\n.acu-v2-table-selector__count[data-v-b306689c] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-table-selector__grid[data-v-b306689c] {\n  display: grid; gap: 6px;\n  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));\n  max-height: 240px; overflow: auto;\n  padding: 0;\n  border: 0; border-radius: 0;\n  background: transparent;\n}\n.acu-v2-table-selector__item[data-v-b306689c] {\n  padding: 8px 10px;\n  border: 0; border-radius: var(--acu-radius-sm);\n  background: transparent; min-width: 0;\n}\n", "src/presentation-v2/components/TableSelector.vue#style-0-b306689c");
+    var TableSelector_vue_vue_type_style_index_0_scoped_b306689c_lang = null;
 
     const _hoisted_1$y = { class: "acu-v2-table-selector" };
     const _hoisted_2$s = {
@@ -131280,7 +131505,11 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_3$m = { class: "acu-v2-table-selector__actions" };
     const _hoisted_4$j = { class: "acu-v2-table-selector__count" };
-    const _hoisted_5$h = { class: "acu-v2-table-selector__grid" };
+    const _hoisted_5$h = {
+	key: 0,
+	class: "acu-v2-table-selector__readonly-hint"
+    };
+    const _hoisted_6$g = { class: "acu-v2-table-selector__grid" };
     function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$y, [!$props.sheetKeys.length ? (openBlock(), createElementBlock(
 		"div",
@@ -131294,6 +131523,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		[createBaseVNode("div", _hoisted_3$m, [
 			createVNode($setup["AcuButton"], {
 				size: "sm",
+				disabled: $props.disabled,
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("select-all"))
 			}, {
 				default: withCtx(() => [..._cache[2] || (_cache[2] = [createTextVNode(
@@ -131302,9 +131532,10 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* CACHED */
 				)])]),
 				_: 1
-			}),
+			}, 8, ["disabled"]),
 			createVNode($setup["AcuButton"], {
 				size: "sm",
+				disabled: $props.disabled,
 				onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("select-none"))
 			}, {
 				default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
@@ -131313,15 +131544,16 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* CACHED */
 				)])]),
 				_: 1
-			}),
+			}, 8, ["disabled"]),
 			createBaseVNode(
 				"span",
 				_hoisted_4$j,
 				"已选 " + toDisplayString($props.selectedKeys.length) + " / " + toDisplayString($props.sheetKeys.length),
 				1
 				/* TEXT */
-			)
-		]), createBaseVNode("div", _hoisted_5$h, [(openBlock(true), createElementBlock(
+			),
+			$props.disabled ? (openBlock(), createElementBlock("span", _hoisted_5$h, "仅展示模板：数据库运行时未加载，暂不可选择执行目标")) : createCommentVNode("v-if", true)
+		]), createBaseVNode("div", _hoisted_6$g, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.sheetKeys, (key) => {
@@ -131330,10 +131562,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					class: "acu-v2-table-selector__item"
 				}, [createVNode($setup["AcuCheckbox"], {
 					"model-value": $setup.selectedSet.has(key),
+					disabled: $props.disabled,
 					label: $setup.nameFor(key),
 					"onUpdate:modelValue": ($event) => $setup.toggle(key, $event)
 				}, null, 8, [
 					"model-value",
+					"disabled",
 					"label",
 					"onUpdate:modelValue"
 				])]);
@@ -131345,15 +131579,47 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* STABLE_FRAGMENT */
 	))]);
     }
-    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-b5fa0e1c"]]);
+    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-b306689c"]]);
 
     function currentSheetKeys() {
         try {
-            return getSortedSheetKeys_ACU(currentJsonTableData_ACU || {});
+            return getSortedSheetKeys_ACU(getCurrentTableDisplayData_ACU() || {});
         }
         catch {
             return [];
         }
+    }
+    /**
+     * 执行用表键：仅 runtime 真实表。
+     * runtime 未就绪（purge 后为 null / 空）时返回 []，避免把模板表
+     * 当作可执行数据传给 orchestrator。
+     */
+    function runtimeExecutionSheetKeys() {
+        if (!hasRuntimeTableData_ACU())
+            return [];
+        try {
+            return getSortedSheetKeys_ACU(getCurrentTableDisplayData_ACU() || {});
+        }
+        catch {
+            return [];
+        }
+    }
+    /**
+     * TOCTOU 执行边界校验：确认后重新读取 runtime，
+     * 要求当前 runtime 表集合与确认前快照完全一致，且快照目标仍全部有效。
+     * 任一变化（purge、表删除、新增表、外部直接写 Ref 篡改选择）都会 fail-closed 阻断，
+     * 避免在确认文案与最终执行目标不一致的情况下继续破坏性操作。
+     */
+    function runtimeTargetsStillMatch(snapshotKeys, requestedKeys) {
+        if (!requestedKeys.length || !hasRuntimeTableData_ACU())
+            return false;
+        const currentKeys = runtimeExecutionSheetKeys();
+        if (currentKeys.length !== snapshotKeys.length)
+            return false;
+        const snapshotSet = new Set(snapshotKeys);
+        if (!currentKeys.every((key) => snapshotSet.has(key)))
+            return false;
+        return requestedKeys.every((key) => snapshotSet.has(key));
     }
     function resolveManualSelection(keys) {
         if (!keys.length)
@@ -131365,7 +131631,13 @@ Expected function or array of functions, received type ${typeof value}.`
         return saved.filter((key) => valid.has(key));
     }
     function saveManualSelection(keys) {
-        const valid = new Set(currentSheetKeys());
+        // runtime 未就绪（如 purge 后）时禁止写入手动选表配置：
+        // 此时展示的是模板表，若把空选择写回会永久覆盖用户原有选表偏好
+        // （hasManualSelection=true + manualSelectedTables=[]），待 runtime 恢复后
+        // resolveManualSelection 会错误地继续返回空数组。必须 fail-closed 保持原状态。
+        if (!hasRuntimeTableData_ACU())
+            return;
+        const valid = new Set(runtimeExecutionSheetKeys());
         settings_ACU.manualSelectedTables = keys.filter(key => valid.has(key));
         settings_ACU.hasManualSelection = true;
         saveSettings_ACU();
@@ -131464,7 +131736,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function useManualUpdate() {
         const dialogStore = useDialogStore();
         const toast = useToastStore();
-        const selectedManualTableKeys = ref(resolveManualSelection(currentSheetKeys()));
+        const selectedManualTableKeys = ref(resolveManualSelection(runtimeExecutionSheetKeys()));
         const manualContextDepth = ref(resolveManualContextDepth());
         const manualBatchSize = ref(resolveManualBatchSize());
         const manualExtraHint = ref('');
@@ -131546,10 +131818,16 @@ Expected function or array of functions, received type ${typeof value}.`
             void refreshTick.value;
             return currentSheetKeys();
         });
+        /** runtime 就绪判据：仅真实表存在时选择器才允许交互 */
+        const runtimeReady = computed(() => {
+            void refreshTick.value;
+            return hasRuntimeTableData_ACU();
+        });
         const sheetNames = computed(() => {
+            const displayData = getCurrentTableDisplayData_ACU() || {};
             const names = {};
             for (const key of sheetKeys.value) {
-                names[key] = String(currentJsonTableData_ACU?.[key]?.name || key);
+                names[key] = String(displayData[key]?.name || key);
             }
             return names;
         });
@@ -131632,7 +131910,7 @@ Expected function or array of functions, received type ${typeof value}.`
             }
         });
         function refresh() {
-            selectedManualTableKeys.value = resolveManualSelection(currentSheetKeys());
+            selectedManualTableKeys.value = resolveManualSelection(runtimeExecutionSheetKeys());
             manualContextDepth.value = resolveManualContextDepth();
             manualBatchSize.value = resolveManualBatchSize();
             refreshTick.value++;
@@ -131650,12 +131928,13 @@ Expected function or array of functions, received type ${typeof value}.`
             saveSettings_ACU();
         }
         function setManualSelectedKeys(keys) {
-            selectedManualTableKeys.value = keys.slice();
+            const valid = new Set(runtimeExecutionSheetKeys());
+            selectedManualTableKeys.value = keys.filter((key) => valid.has(key));
             saveManualSelection(selectedManualTableKeys.value);
             refreshTick.value++;
         }
         function selectAllManualTables() {
-            setManualSelectedKeys(sheetKeys.value);
+            setManualSelectedKeys(runtimeExecutionSheetKeys());
         }
         function selectNoManualTables() {
             setManualSelectedKeys([]);
@@ -131663,49 +131942,72 @@ Expected function or array of functions, received type ${typeof value}.`
         async function runManualUpdate() {
             if (manualUpdateBusy.value || catchUpBusy.value)
                 return;
+            // 空选择优先于 runtime 状态判断：保持原有提示，避免误报“运行时未就绪”。
             if (!selectedManualTableKeys.value.length) {
                 toast.warning('未选择需要手动填表的表格。');
                 return;
             }
-            manualUpdateBusy.value = true;
-            const confirmed = await dialogStore.confirm({
-                title: '执行手动填表',
-                message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或终止时会回滚到本次操作前的状态。`,
-                dangerMessage: checkpointRiskMessage.value || undefined,
-                confirmLabel: '确认并继续',
-                cancelLabel: '取消',
-                confirmVariant: 'danger',
-            });
-            if (!confirmed) {
-                manualUpdateBusy.value = false;
+            // 执行边界校验（确认前）：selected keys 必须仍是当前 runtime 真实表。
+            // 展示层可回退模板，但破坏性重填绝不允许把模板表当作执行目标；
+            // 也防止任何外部直接写 Ref 绕过 setter 隔离后仍被这里放行。
+            // 在弹确认框前建立不可变快照：确认文案与最终执行目标必须来自同一快照。
+            const requestedTargetKeys = selectedManualTableKeys.value.slice();
+            const snapshotRuntimeKeys = runtimeExecutionSheetKeys();
+            const runtimeKeys = new Set(snapshotRuntimeKeys);
+            const validTargetKeys = requestedTargetKeys.filter((key) => runtimeKeys.has(key));
+            if (!snapshotRuntimeKeys.length || validTargetKeys.length !== requestedTargetKeys.length) {
+                toast.warning('当前表格运行时未就绪，无法执行手动填表。');
                 return;
             }
-            // 兼容沿用 clearBeforeUpdate 参数名；service 层实际执行事务式重填，不会预清空聊天记录。
-            const clearBeforeUpdate = true;
-            const targetManualTableKeys = selectedManualTableKeys.value.slice();
-            progressToastId = null;
-            abortRequested = false;
-            _set_wasStoppedByUser_ACU(false);
-            notifyProgress('手动填表开始。');
-            const extra = manualExtraHint.value.trim();
-            if (extra)
-                _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
-            const handleProgress = (event) => {
-                notifyProgress(progressLabel$1(event));
-                if (event.phase === 'complete') {
-                    try {
-                        topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
-                    }
-                    catch (_) { }
-                    refreshTick.value++;
-                }
-            };
-            const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, handleProgress));
+            manualUpdateBusy.value = true;
             try {
+                const confirmed = await dialogStore.confirm({
+                    title: '执行手动填表',
+                    message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或终止时会回滚到本次操作前的状态。`,
+                    dangerMessage: checkpointRiskMessage.value || undefined,
+                    confirmLabel: '确认并继续',
+                    cancelLabel: '取消',
+                    confirmVariant: 'danger',
+                });
+                if (!confirmed)
+                    return;
+                // 兼容沿用 clearBeforeUpdate 参数名；service 层实际执行事务式重填，不会预清空聊天记录。
+                const clearBeforeUpdate = true;
+                // 确认后 TOCTOU 复检：确认期间 runtime 可能被 purge/表删除/新增表改变。
+                // 若当前 runtime 表集合与确认前快照不一致，或目标已失效，必须 fail-closed 阻断，
+                // 不得静默缩减/替换执行目标后继续破坏性重填。
+                if (!runtimeTargetsStillMatch(snapshotRuntimeKeys, requestedTargetKeys)) {
+                    toast.warning('表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。');
+                    return;
+                }
+                const targetManualTableKeys = requestedTargetKeys.slice();
+                progressToastId = null;
+                abortRequested = false;
+                _set_wasStoppedByUser_ACU(false);
+                notifyProgress('手动填表开始。');
+                const extra = manualExtraHint.value.trim();
+                if (extra)
+                    _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
+                const handleProgress = (event) => {
+                    notifyProgress(progressLabel$1(event));
+                    if (event.phase === 'complete') {
+                        try {
+                            topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
+                        }
+                        catch (_) { }
+                        refreshTick.value++;
+                    }
+                };
+                const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, handleProgress));
                 const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
                 let result;
                 try {
-                    result = await orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, { clearBeforeUpdate, onProgress: handleProgress });
+                    result = await orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, {
+                        clearBeforeUpdate,
+                        onProgress: handleProgress,
+                        // 把确认前快照传给 service 层：orchestrator 在破坏性清理前会再次校验 runtime。
+                        executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
+                    });
                 }
                 finally {
                     restoreAutoUpdateSettings();
@@ -131772,14 +132074,24 @@ Expected function or array of functions, received type ${typeof value}.`
         async function runManualCatchUp() {
             if (manualUpdateBusy.value || catchUpBusy.value)
                 return;
+            // 空选择优先于 runtime 状态判断：保持原有提示，避免误报“运行时未就绪”。
             if (!selectedManualTableKeys.value.length) {
                 toast.warning('未选择需要追平的表格。');
                 return;
             }
+            // 执行边界校验（确认前）：追平同样绝不允许把模板表当作执行目标。
+            // 弹确认框前建立不可变快照：确认文案与最终执行目标必须来自同一快照。
+            const requestedTargetKeys = selectedManualTableKeys.value.slice();
+            const snapshotRuntimeKeys = runtimeExecutionSheetKeys();
+            const runtimeKeys = new Set(snapshotRuntimeKeys);
+            const validTargetKeys = requestedTargetKeys.filter((key) => runtimeKeys.has(key));
+            if (!snapshotRuntimeKeys.length || validTargetKeys.length !== requestedTargetKeys.length) {
+                toast.warning('当前表格运行时未就绪，无法执行手动追平。');
+                return;
+            }
             catchUpBusy.value = true;
-            const targetKeys = selectedManualTableKeys.value.slice();
             try {
-                const planningResult = await prepareManualCatchUpPlan_ACU(targetKeys);
+                const planningResult = await prepareManualCatchUpPlan_ACU(requestedTargetKeys);
                 if (!planningResult.success || !planningResult.plan) {
                     finishToast('error', planningResult.error || '无法生成手动追平计划。');
                     return;
@@ -131799,13 +132111,23 @@ Expected function or array of functions, received type ${typeof value}.`
                 });
                 if (!confirmed)
                     return;
+                // 确认后 TOCTOU 复检：确认期间 runtime 可能被 purge/表删除/新增表改变。
+                // 追平计划基于确认前快照生成，若当前 runtime 表集合与快照不一致，
+                // 必须重新规划并要求用户重新确认，避免“确认的计划”与“执行的目标”不一致。
+                if (!runtimeTargetsStillMatch(snapshotRuntimeKeys, requestedTargetKeys)) {
+                    finishToast('warning', '表格运行时在确认期间发生变化，已取消本次追平，请重新确认目标。');
+                    return;
+                }
                 progressToastId = null;
                 abortRequested = false;
                 catchUpAbortController = new AbortController();
                 notifyProgress('手动追平开始。', requestCatchUpAbort);
-                const result = await orchestrateManualCatchUp_ACU(targetKeys, refreshMergedDataAndNotify_ACU, {
+                const result = await orchestrateManualCatchUp_ACU(requestedTargetKeys, refreshMergedDataAndNotify_ACU, {
                     abortController: catchUpAbortController,
                     onProgress: event => notifyProgress(progressLabel$1(event), requestCatchUpAbort),
+                    // 把确认前快照传给 service 层：orchestrator 内部会再次校验 runtime 一致性，
+                    // 使 TOCTOU 防护延伸到 UI 复检之后的异步窗口。
+                    executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
                 });
                 if (result.outcome === 'sync_pending') {
                     showCatchUpSyncPending();
@@ -131850,6 +132172,7 @@ Expected function or array of functions, received type ${typeof value}.`
             catchUpBusy,
             sheetKeys,
             sheetNames,
+            runtimeReady,
             selectedSheetSummary,
             checkpointFloorsLabel,
             manualRefillRangeLabel,
@@ -131897,8 +132220,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-dd4f917d] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-dd4f917d] {\n  grid-template-areas:\n    \"status update\"\n    \"manual template\"\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-dd4f917d] {\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-dd4f917d] {\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-dd4f917d] {\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-dd4f917d] {\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-dd4f917d] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-dd4f917d] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-dd4f917d] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-dd4f917d] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-dd4f917d] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-dd4f917d] {\n  color: var(--acu-danger);\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-dd4f917d] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-dd4f917d] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-dd4f917d],\n.acu-v2-form-fill-page__status-table td[data-v-dd4f917d] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-dd4f917d] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-dd4f917d] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-dd4f917d] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-dd4f917d] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-dd4f917d] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-dd4f917d] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-dd4f917d] {\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-dd4f917d] {\n    grid-template-areas:\n      \"status\"\n      \"update\"\n      \"manual\"\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-dd4f917d] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-dd4f917d");
-    var FormFillPage_vue_vue_type_style_index_0_scoped_dd4f917d_lang = null;
+    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-400489db] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-400489db] {\n  grid-template-areas:\n    \"status update\"\n    \"manual template\"\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-400489db] {\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-400489db] {\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-400489db] {\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-400489db] {\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-400489db] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-400489db] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-400489db] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-400489db] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-400489db] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-400489db] {\n  color: var(--acu-danger);\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-400489db] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-400489db] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-400489db],\n.acu-v2-form-fill-page__status-table td[data-v-400489db] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-400489db] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-400489db] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-400489db] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-400489db] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-400489db] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-400489db] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-400489db] {\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-400489db] {\n    grid-template-areas:\n      \"status\"\n      \"update\"\n      \"manual\"\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-400489db] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-400489db");
+    var FormFillPage_vue_vue_type_style_index_0_scoped_400489db_lang = null;
 
     const _hoisted_1$x = { class: "acu-v2-form-fill-page" };
     const _hoisted_2$r = ["title"];
@@ -132122,6 +132445,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"sheet-keys": $setup.manualUpdate.sheetKeys.value,
 						"selected-keys": $setup.manualUpdate.selectedManualTableKeys.value,
 						"sheet-names": $setup.manualUpdate.sheetNames.value,
+						disabled: !$setup.manualUpdate.runtimeReady.value,
 						"empty-text": "当前没有可手动填表的表格。",
 						"onUpdate:selectedKeys": _cache[2] || (_cache[2] = ($event) => $setup.manualUpdate.setManualSelectedKeys($event)),
 						onSelectAll: $setup.manualUpdate.selectAllManualTables,
@@ -132130,6 +132454,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"sheet-keys",
 						"selected-keys",
 						"sheet-names",
+						"disabled",
 						"onSelectAll",
 						"onSelectNone"
 					]),
@@ -132194,7 +132519,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-dd4f917d"]]);
+    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-400489db"]]);
 
     var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPromptDrawer',
@@ -139552,6 +139877,8 @@ Expected function or array of functions, received type ${typeof value}.`
          * - 不调用 refreshMergedDataAndNotify_ACU（V1 验证结论）：该函数会 loadAllChatMessages_ACU +
          *   mergeAllIndependentTables_ACU，并在无历史数据时从指导表/模板重建 currentJsonTableData_ACU
          *   （pipeline.ts:617-629），等价于重新物化。因此只调 refresh() 做 settings/isolation/count 级刷新。
+         * - 表格页面（FormFill/Dashboard）的显示由 getCurrentTableDisplayData_ACU 纯读取回退到
+         *   当前全局模板（stripSeedRows），页面 mount/既有 refresh tick 即可展示，无需重新物化 runtime。
          */
         async function applyPurgeOutcome(result) {
             if (!result.saved) {

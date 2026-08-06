@@ -4,7 +4,9 @@ const m = vi.hoisted(() => ({
   wasStopped: false,
   executePlan: vi.fn(),
   logSkip: vi.fn(),
+  buildPlan: vi.fn(() => ({ tablesToUpdate: [{ sheetKey: 'sheet_0' }], updateGroups: { group_1: {} } })),
   getChat: vi.fn(() => [{ is_user: true }, { is_user: false }]),
+  preCheck: { canProceed: true, reason: '' },
 }));
 
 vi.mock('../../../src/presentation/components/plot-editors', () => ({
@@ -21,9 +23,9 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   _set_manualExtraHint_ACU: vi.fn(), _set_wasStoppedByUser_ACU: vi.fn(),
 }));
 vi.mock('../../../src/service/table/update-scheduler', () => ({
-  checkAutoUpdatePreConditions_ACU: vi.fn(() => ({ canProceed: true, reason: '' })),
+  checkAutoUpdatePreConditions_ACU: vi.fn(() => m.preCheck),
   handleFloorIncreaseDelay_ACU: vi.fn(async () => undefined),
-  buildAutoUpdatePlan_ACU: vi.fn(() => ({ tablesToUpdate: [{ sheetKey: 'sheet_0' }], updateGroups: { group_1: {} } })),
+  buildAutoUpdatePlan_ACU: (...args: any[]) => m.buildPlan(...args),
   executeAutoUpdatePlan_ACU: (...args: any[]) => m.executePlan(...args),
 }));
 vi.mock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: (...args: any[]) => m.getChat(...args), saveChatToHost_ACU: vi.fn() }));
@@ -43,7 +45,21 @@ vi.mock('../../../src/service/table/update-orchestrator', () => ({ processGroupe
 async function settleMicrotasks() { await Promise.resolve(); await Promise.resolve(); }
 
 describe('triggerAutomaticUpdateIfNeeded_ACU 并发补跑', () => {
-  beforeEach(() => { m.wasStopped = false; m.executePlan.mockReset(); m.logSkip.mockReset(); });
+  beforeEach(() => { m.wasStopped = false; m.executePlan.mockReset(); m.logSkip.mockReset(); m.buildPlan.mockReset(); m.preCheck = { canProceed: true, reason: '' }; });
+
+  it('前置检查失败时记录稳定原因码到诊断日志', async () => {
+    m.preCheck = { canProceed: false, reason: 'Pre-flight checks failed.', code: 'runtime_not_ready' };
+    const { triggerAutomaticUpdateIfNeeded_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
+    await triggerAutomaticUpdateIfNeeded_ACU();
+    await settleMicrotasks();
+    expect(m.logSkip).toHaveBeenCalledWith('preconditions_failed', expect.objectContaining({
+      preconditionReason: 'runtime_not_ready',
+    }));
+    // fail-closed：前置检查失败时只记录一次 skip，不构建也不执行更新计划。
+    expect(m.logSkip).toHaveBeenCalledTimes(1);
+    expect(m.buildPlan).not.toHaveBeenCalled();
+    expect(m.executePlan).not.toHaveBeenCalled();
+  });
 
   it('执行中到达多个触发时合并为一次后续执行', async () => {
     let releaseFirst!: () => void;

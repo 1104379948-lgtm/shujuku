@@ -43,10 +43,12 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
 }));
 
 import {
+  getCurrentTableDisplayData_ACU,
   getCurrentCharSettings_ACU,
   getCurrentWorldbookConfig_ACU,
   getSelectedImportTableKeys_ACU,
   getSelectedManualTableKeys_ACU,
+ hasRuntimeTableData_ACU,
 } from '../../../src/service/settings/settings-readers';
 
 beforeEach(() => {
@@ -146,5 +148,76 @@ describe('持久化表格选择读取器', () => {
     mockSettings.importSelectedTables = ['sheet_b', 'deleted'];
 
     expect(getSelectedImportTableKeys_ACU()).toEqual(['sheet_b']);
+  });
+});
+
+describe('hasRuntimeTableData_ACU 执行就绪判据', () => {
+  it('runtime 含 sheet_* 时返回 true（不解析模板）', () => {
+    currentTables = { sheet_a: {}, mate: {} };
+    parseTableTemplate.mockReturnValue({ sheet_tpl: {} });
+    expect(hasRuntimeTableData_ACU()).toBe(true);
+    // 就绪判据不得触发模板解析
+    expect(parseTableTemplate).not.toHaveBeenCalled();
+  });
+
+  it('runtime 为 null（purge 后）时返回 false，即使模板可解析', () => {
+    currentTables = null;
+    parseTableTemplate.mockReturnValue({ sheet_tpl: {} });
+    expect(hasRuntimeTableData_ACU()).toBe(false);
+    expect(parseTableTemplate).not.toHaveBeenCalled();
+  });
+
+  it('runtime 仅有 mate / 空对象时返回 false', () => {
+    currentTables = { mate: {} };
+    expect(hasRuntimeTableData_ACU()).toBe(false);
+    currentTables = {};
+    expect(hasRuntimeTableData_ACU()).toBe(false);
+  });
+});
+
+
+describe('getCurrentTableDisplayData_ACU', () => {
+  it('runtime 有表时直接返回 runtime，不解析模板', () => {
+    currentTables = { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } };
+    parseTableTemplate.mockClear();
+
+    const result = getCurrentTableDisplayData_ACU();
+
+    expect(result).toBe(currentTables);
+    expect(parseTableTemplate).not.toHaveBeenCalled();
+  });
+
+  it('runtime 为 null 时回退到去除 seed rows 的全局模板', () => {
+    currentTables = null;
+    const templateData = { sheet_a: { name: 'A', content: [['h1']] }, sheet_b: { name: 'B' } };
+    parseTableTemplate.mockReturnValue(templateData);
+
+    const result = getCurrentTableDisplayData_ACU();
+
+    expect(result).toBe(templateData);
+    expect(parseTableTemplate).toHaveBeenCalledWith({ stripSeedRows: true });
+  });
+
+  it('runtime 为空对象（无 sheet_*）时同样回退模板', () => {
+    currentTables = { mate: { type: 'chatSheets', version: 1 } };
+    parseTableTemplate.mockReturnValue({ sheet_c: { name: 'C' } });
+
+    const result = getCurrentTableDisplayData_ACU();
+
+    expect(result).toEqual({ sheet_c: { name: 'C' } });
+  });
+
+  it('模板解析失败时返回 null，不抛出', () => {
+    currentTables = null;
+    parseTableTemplate.mockImplementation(() => { throw new Error('parse failed'); });
+
+    expect(getCurrentTableDisplayData_ACU()).toBeNull();
+  });
+
+  it('模板无有效 sheet_* 时返回 null', () => {
+    currentTables = null;
+    parseTableTemplate.mockReturnValue({ mate: { type: 'chatSheets' } });
+
+    expect(getCurrentTableDisplayData_ACU()).toBeNull();
   });
 });

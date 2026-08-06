@@ -96,3 +96,51 @@ export function getSelectedImportTableKeys_ACU(): string[] {
         : [];
     return saved.filter((key: string) => availableKeys.includes(key));
 }
+
+/**
+ * 获取当前表格展示数据（presentation fallback）。
+ *
+ * 语义：这是 **只读展示** 数据源，不是 runtime 就绪判据。
+ * - 若 currentJsonTableData_ACU 为对象且含有效 sheet_*，直接返回 runtime；
+ * - 否则（硬清空后 runtime 为 null，或尚未加载）回退到当前生效全局模板的
+ *   去除 seed rows 结构，供 FormFill/Dashboard 显示表名与配置；
+ * - 模板解析失败或无有效 sheet 时返回 null，页面维持空态。
+ *
+ * 约束：本函数不修改 state-manager，不保存 settings，不触发 provider、
+ * 世界书或聊天加载；不得把返回值当作 runtime ready 或持久化成功依据。
+ */
+export function getCurrentTableDisplayData_ACU(): Record<string, any> | null {
+  if (currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object') {
+    const hasSheet = Object.keys(currentJsonTableData_ACU).some(key => key.startsWith('sheet_'));
+    if (hasSheet) return currentJsonTableData_ACU;
+  }
+  try {
+    const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true });
+    if (
+      templateData
+      && typeof templateData === 'object'
+      && Object.keys(templateData).some(key => key.startsWith('sheet_'))
+    ) return templateData;
+  } catch {
+    // 模板无法解析时返回 null，页面维持空态，不抛出破坏页面。
+  }
+  return null;
+}
+/**
+ * runtime 是否已持有真实数据（含有效 sheet_*）。
+ *
+ * 语义：这是 **执行就绪判据**，与展示回退严格区分。
+ * - 仅当 currentJsonTableData_ACU 为对象且含 sheet_* 时返回 true；
+ * - purge 硬清空后 runtime 为 null / 空对象时返回 false；
+ * - 不读取模板，不解析，无任何副作用。
+ *
+ * 用途：手动填表 / 追平等破坏性执行必须以此判据守卫，避免把展示用
+ * 模板表当作真实 runtime 表传给 orchestrator。
+ */
+export function hasRuntimeTableData_ACU(): boolean {
+  return !!(
+    currentJsonTableData_ACU
+    && typeof currentJsonTableData_ACU === 'object'
+    && Object.keys(currentJsonTableData_ACU).some((key) => key.startsWith('sheet_'))
+  );
+}
