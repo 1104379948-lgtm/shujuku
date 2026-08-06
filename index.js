@@ -3898,19 +3898,19 @@ $CONTENT
     };
     const AGENT_CONTEXT_SETTINGS_LIMITS_ACU = {
         // Compatibility field name: layer count, 1 layer = 1 AI reply plus its preceding user input.
-        decisionRecentContextCharLimit: { min: 1, max: 20 },
+        decisionRecentContextCharLimit: { min: 1 },
         // Deprecated compatibility field; no separate UI control or Agent decision layer source.
-        decisionPreviousPlotCharLimit: { min: 1, max: 20 },
+        decisionPreviousPlotCharLimit: { min: 1 },
         // Deprecated compatibility field; do not use it to reintroduce content previews.
-        decisionWorldbookContentPreviewLimit: { min: 200, max: 5000 },
-        decisionWorldbookCandidateLimit: { min: 1, max: 300 },
+        decisionWorldbookContentPreviewLimit: { min: 200 },
+        decisionWorldbookCandidateLimit: { min: 1 },
         // Deprecated compatibility field; do not use it to reintroduce content previews.
-        skillifyContentPreviewLimit: { min: 200, max: 5000 },
-        skillifyMaxEntries: { min: 1, max: 300 },
-        plotWorldbookScanMessageLimit: { min: 1, max: 20 },
-        agentAiMaxRetries: { min: 1, max: 10 },
-        greenlightMinTkBudget: { min: 0, max: 200000 },
-        greenlightMaxTkBudget: { min: 1, max: 200000 },
+        skillifyContentPreviewLimit: { min: 200 },
+        skillifyMaxEntries: { min: 1 },
+        plotWorldbookScanMessageLimit: { min: 1 },
+        agentAiMaxRetries: { min: 1 },
+        greenlightMinTkBudget: { min: 0 },
+        greenlightMaxTkBudget: { min: 1 },
     };
     function buildDefaultAgentDecisionPromptSegments_ACU() {
         return [
@@ -57179,7 +57179,7 @@ $CONTENT
             const limits = AGENT_CONTEXT_SETTINGS_LIMITS_ACU[key];
             const raw = Number(source[key]);
             const base = Number.isFinite(raw) ? Math.trunc(raw) : fallback;
-            result[key] = Math.max(limits.min, Math.min(limits.max, base));
+            result[key] = Math.max(limits.min, Math.min(Number.MAX_SAFE_INTEGER, base));
         }
         return result;
     }
@@ -57341,7 +57341,8 @@ $CONTENT
     function normalizePositiveInt_ACU(value, fallback, min, max) {
         const raw = Number(value);
         const base = Number.isFinite(raw) ? Math.trunc(raw) : fallback;
-        return Math.max(min, Math.min(max, base));
+        const bounded = max === undefined ? Math.min(Number.MAX_SAFE_INTEGER, base) : Math.min(max, base);
+        return Math.max(min, bounded);
     }
     function normalizeControlPatch_ACU(value) {
         return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -57397,8 +57398,8 @@ $CONTENT
                 : defaults.managedEntryPrefix,
             finalInjectionMode: 'prompt_template',
             restoreOnDisable: source.restoreOnDisable !== false,
-            agentDecisionConcurrency: normalizePositiveInt_ACU(source.agentDecisionConcurrency, defaults.agentDecisionConcurrency, 1, 5),
-            maxSkillifyConcurrency: normalizePositiveInt_ACU(source.maxSkillifyConcurrency, defaults.maxSkillifyConcurrency, 1, 5),
+            agentDecisionConcurrency: normalizePositiveInt_ACU(source.agentDecisionConcurrency, defaults.agentDecisionConcurrency, 1),
+            maxSkillifyConcurrency: normalizePositiveInt_ACU(source.maxSkillifyConcurrency, defaults.maxSkillifyConcurrency, 1),
             contextSettings,
             contextSettingsConfigured: source.contextSettingsConfigured === true,
             agentDecisionPromptSegments: normalizeEditablePromptSegments_ACU(source.agentDecisionPromptSegments, promptTemplates.agentDecisionPromptSegments),
@@ -58312,7 +58313,7 @@ $CONTENT
         const raw = Number.isFinite(Number(options.maxAiRetries)) && Number(options.maxAiRetries) > 0
             ? Number(options.maxAiRetries)
             : contextSettings.agentAiMaxRetries;
-        return Math.max(1, Math.min(10, Math.trunc(raw)));
+        return Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(raw)));
     }
     async function skillifySingleEntry_ACU(summary, options, control, progressState) {
         const skipReason = shouldSkipSkillifyEntry_ACU(summary, options);
@@ -58425,7 +58426,7 @@ $CONTENT
         const configuredConcurrency = Number.isFinite(Number(options.maxConcurrency)) && Number(options.maxConcurrency) > 0
             ? Number(options.maxConcurrency)
             : (Number(control.maxSkillifyConcurrency) || buildDefaultAgentWorldbookControl_ACU().maxSkillifyConcurrency);
-        const concurrency = Math.max(1, Math.min(configuredConcurrency, 5));
+        const concurrency = Math.max(1, Math.min(configuredConcurrency, candidates.length, Number.MAX_SAFE_INTEGER));
         const progressState = { current: 0, total: candidates.length, updated: 0, skipped: 0, failed: 0 };
         options.onProgress?.({ phase: 'processing', ...progressState });
         const results = await runWithConcurrency_ACU(candidates, concurrency, async (summary, index) => {
@@ -63914,7 +63915,7 @@ $CONTENT
         const candidates = summaries.slice(0, normalizePositiveInteger_ACU$1(candidateLimit, summaries.length || 1));
         if (candidates.length === 0)
             return [];
-        const shardCount = Math.min(candidates.length, Math.max(1, Math.min(5, Math.trunc(Number(configuredConcurrency) || 1))));
+        const shardCount = Math.min(candidates.length, Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(Number(configuredConcurrency) || 1))));
         const entriesPerShard = Math.floor(candidates.length / shardCount);
         const entryRemainder = candidates.length % shardCount;
         const totalMinBudget = normalizeTkBudgetNumber_ACU(minTkBudget, 0);
@@ -64060,7 +64061,7 @@ $CONTENT
                 return emptyDecision_ACU(originalTasks, 'agent_mode_disabled');
             const effectivePlotSettings = { ...params.plotSettings, agentWorldbookControl: control };
             const contextSettings = normalizeAgentContextSettings_ACU(control.contextSettings);
-            const maxAiAttempts = Math.max(1, Math.min(10, Math.trunc(Number(contextSettings.agentAiMaxRetries) || 1)));
+            const maxAiAttempts = Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(Number(contextSettings.agentAiMaxRetries) || 1)));
             const readContext = params.sharedContext?.worldbookReadContext;
             const { summaries } = await collectWorldbookSummariesFromSnapshot_ACU(contextSettings, readContext);
             const shards = createAgentDecisionShards_ACU(summaries, contextSettings.decisionWorldbookCandidateLimit, control.agentDecisionConcurrency, contextSettings.greenlightMinTkBudget, contextSettings.greenlightMaxTkBudget);
@@ -125540,7 +125541,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 description: "将当前接管条目分片后并发分析。请求数和最坏重试数会随并发数放大，别把 API 当免费算力池。",
                 concurrency: {
                     label: "Agent 决策并发数",
-                    hint: "默认 1，范围 1-5。条目按实际非空分片并发分析，绿灯最小与最大 TK 预算都会精确拆分并交给各分片辅助选择；合并后仍按完整最大预算做安全校验。",
+                    hint: "默认 1，页面不设固定上限；实际并发不会超过可分析的条目数。条目按实际非空分片并发分析，绿灯最小与最大 TK 预算都会精确拆分并交给各分片辅助选择；合并后仍按完整最大预算做安全校验。",
                 },
             },
             skillifySettings: {
@@ -125548,7 +125549,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 description: "控制一键 Skill 化的执行行为。并发数越高，请求压力越大；别把 API 当成无限吞吐的黑洞。",
                 maxConcurrency: {
                     label: "Skill 化 API 并发数",
-                    hint: "一键 Skill 化同时调用 Agent Skill API 的条目数量。默认 3，范围 1-5。",
+                    hint: "一键 Skill 化同时调用 Agent Skill API 的条目数量。默认 3，页面不设固定上限；实际并发不会超过待处理条目数。",
                 },
             },
             executionMode: {
@@ -125561,7 +125562,7 @@ Expected function or array of functions, received type ${typeof value}.`
             },
             contextSettings: {
                 title: "上下文参数",
-                description: "这些参数会影响 Agent 决策、世界书 Skill 化和剧情世界书扫描。输入会被硬上限夹紧，别指望把模型窗口当垃圾桶无限塞。",
+                description: "这些参数会影响 Agent 决策、世界书 Skill 化和剧情世界书扫描。页面不设固定上限；过大的候选数、上下文、重试次数或预算会放大 API 消耗，并可能超过模型与服务能力。",
                 resetButton: "恢复默认上下文参数",
                 resetSuccess: "已恢复默认上下文参数。",
                 fields: {
@@ -134733,8 +134734,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-agent-advanced[data-v-5e915b32] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-5e915b32] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-5e915b32] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-5e915b32] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-5e915b32],\r\n.acu-agent-advanced__prompt-head h5[data-v-5e915b32] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-5e915b32] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-5e915b32] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-5e915b32] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-5e915b32] .acu-form-row,\r\n.acu-agent-advanced[data-v-5e915b32] .acu-form-row__control,\r\n.acu-agent-advanced[data-v-5e915b32] .acu-input,\r\n.acu-agent-advanced[data-v-5e915b32] .acu-segmented,\r\n.acu-agent-advanced[data-v-5e915b32] .acu-prompt-segs {\r\n  min-width: 0;\r\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-5e915b32] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-5e915b32] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-5e915b32] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-5e915b32],\r\n  .acu-agent-advanced__prompt-head[data-v-5e915b32] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-5e915b32] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-5e915b32");
-    var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_5e915b32_lang = null;
+    injectSfcStyle("\n.acu-agent-advanced[data-v-9f89b5d2] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-9f89b5d2] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-9f89b5d2] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-9f89b5d2] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-9f89b5d2],\n.acu-agent-advanced__prompt-head h5[data-v-9f89b5d2] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-9f89b5d2] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-9f89b5d2] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-9f89b5d2] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-9f89b5d2] .acu-form-row,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-form-row__control,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-input,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-segmented,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-prompt-segs {\n  min-width: 0;\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-9f89b5d2] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-9f89b5d2] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-9f89b5d2] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-9f89b5d2],\n  .acu-agent-advanced__prompt-head[data-v-9f89b5d2] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-9f89b5d2] { padding: 8px;\n}\n}\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-9f89b5d2");
+    var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_9f89b5d2_lang = null;
 
     const _hoisted_1$n = { class: "acu-agent-advanced" };
     const _hoisted_2$l = { class: "acu-agent-advanced__section" };
@@ -134828,14 +134829,12 @@ Expected function or array of functions, received type ${typeof value}.`
 							size: "sm",
 							"model-value": $setup.agentControl.contextSettings.value[field.key],
 							min: field.limits.min,
-							max: field.limits.max,
 							step: field.step,
 							disabled: !$setup.agentControl.isReady.value,
 							onChange: ($event) => $setup.onContextChange(field.key, $event)
 						}, null, 8, [
 							"model-value",
 							"min",
-							"max",
 							"step",
 							"disabled",
 							"onChange"
@@ -134866,17 +134865,11 @@ Expected function or array of functions, received type ${typeof value}.`
 					type: "number",
 					size: "sm",
 					"model-value": $setup.agentControl.agentDecisionConcurrency.value,
-					min: $setup.agentControl.agentDecisionConcurrencyLimits.min,
-					max: $setup.agentControl.agentDecisionConcurrencyLimits.max,
+					min: 1,
 					step: 1,
 					disabled: !$setup.agentControl.isReady.value,
 					onChange: $setup.onAgentDecisionConcurrencyChange
-				}, null, 8, [
-					"model-value",
-					"min",
-					"max",
-					"disabled"
-				])]),
+				}, null, 8, ["model-value", "disabled"])]),
 				_: 1
 			}, 8, ["label", "hint"])])]),
 			createBaseVNode("section", _hoisted_10$9, [createBaseVNode("header", _hoisted_11$9, [createBaseVNode("div", null, [createBaseVNode(
@@ -134899,17 +134892,11 @@ Expected function or array of functions, received type ${typeof value}.`
 					type: "number",
 					size: "sm",
 					"model-value": $setup.agentControl.maxSkillifyConcurrency.value,
-					min: $setup.agentControl.maxSkillifyConcurrencyLimits.min,
-					max: $setup.agentControl.maxSkillifyConcurrencyLimits.max,
+					min: 1,
 					step: 1,
 					disabled: !$setup.agentControl.isReady.value,
 					onChange: $setup.onMaxSkillifyConcurrencyChange
-				}, null, 8, [
-					"model-value",
-					"min",
-					"max",
-					"disabled"
-				])]),
+				}, null, 8, ["model-value", "disabled"])]),
 				_: 1
 			}, 8, ["label", "hint"])])]),
 			createBaseVNode("section", _hoisted_13$6, [
@@ -135075,7 +135062,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-5e915b32"]]);
+    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-9f89b5d2"]]);
 
     var _sfc_main$m = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentControlBar',
@@ -135442,36 +135429,34 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    const AGENT_DECISION_CONCURRENCY_LIMIT_ACU = { min: 1, max: 5 };
-    const MAX_SKILLIFY_CONCURRENCY_LIMIT_ACU = { min: 1, max: 5 };
     function getPromptFallback_ACU(kind) {
         return kind === 'decision' ? getDefaultAgentDecisionPromptSegments_ACU() : getDefaultAgentSkillifyPromptSegments_ACU();
     }
     function cloneContextSettings_ACU(value) {
         return { ...value };
     }
+    function parseFiniteIntegerInput_ACU(value) {
+        if (typeof value === 'string' && !value.trim())
+            return null;
+        const raw = Number(value);
+        return Number.isFinite(raw) ? Math.trunc(raw) : null;
+    }
     function normalizeContextPatch_ACU(current, key, rawValue) {
-        const raw = Number(rawValue);
-        if (!Number.isFinite(raw))
+        const raw = parseFiniteIntegerInput_ACU(rawValue);
+        if (raw === null)
             return null;
         return normalizeAgentContextSettings_ACU({
             ...current,
-            [key]: Math.trunc(raw),
+            [key]: raw,
         });
     }
     function normalizeAgentDecisionConcurrency_ACU(value) {
-        const raw = Number(value);
-        if (!Number.isFinite(raw))
-            return null;
-        const truncated = Math.trunc(raw);
-        return Math.max(AGENT_DECISION_CONCURRENCY_LIMIT_ACU.min, Math.min(AGENT_DECISION_CONCURRENCY_LIMIT_ACU.max, truncated));
+        const raw = parseFiniteIntegerInput_ACU(value);
+        return raw === null ? null : Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, raw));
     }
     function normalizeMaxSkillifyConcurrency_ACU(value) {
-        const raw = Number(value);
-        if (!Number.isFinite(raw))
-            return null;
-        const truncated = Math.trunc(raw);
-        return Math.max(MAX_SKILLIFY_CONCURRENCY_LIMIT_ACU.min, Math.min(MAX_SKILLIFY_CONCURRENCY_LIMIT_ACU.max, truncated));
+        const raw = parseFiniteIntegerInput_ACU(value);
+        return raw === null ? null : Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, raw));
     }
     function movePromptSegment_ACU(segments, index, delta) {
         const target = index + delta;
@@ -135990,8 +135975,6 @@ Expected function or array of functions, received type ${typeof value}.`
             configStatusText,
             contextSettings,
             contextSettingsLimits: AGENT_CONTEXT_SETTINGS_LIMITS_ACU,
-            agentDecisionConcurrencyLimits: AGENT_DECISION_CONCURRENCY_LIMIT_ACU,
-            maxSkillifyConcurrencyLimits: MAX_SKILLIFY_CONCURRENCY_LIMIT_ACU,
             agentDecisionPromptSegments,
             agentSkillifyPromptSegments,
             globalPromptTemplates,

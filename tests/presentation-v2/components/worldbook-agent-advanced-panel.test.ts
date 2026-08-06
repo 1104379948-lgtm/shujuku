@@ -19,9 +19,8 @@ function control() {
     getBuiltInPromptSegments: vi.fn((kind: string) => [segment(`built-in ${kind}`)]),
     savePromptSegmentsToCurrentWorldbook: vi.fn(async () => true), savePromptSegmentsAsGlobalTemplate: vi.fn(async () => true),
     agentPlotExecutionMode: ref('sequential'), contextSettings: ref({ decisionRecentContextCharLimit: 2, decisionWorldbookCandidateLimit: 10, skillifyMaxEntries: 10, plotWorldbookScanMessageLimit: 2, agentAiMaxRetries: 2, greenlightMinTkBudget: 0, greenlightMaxTkBudget: 1000 }),
-    contextSettingsLimits: Object.fromEntries(['decisionRecentContextCharLimit','decisionWorldbookCandidateLimit','skillifyMaxEntries','plotWorldbookScanMessageLimit','agentAiMaxRetries','greenlightMinTkBudget','greenlightMaxTkBudget'].map(key => [key, { min: 0, max: 200000 }])),
-    agentDecisionConcurrency: ref(1), agentDecisionConcurrencyLimits: { min: 1, max: 5 },
-    maxSkillifyConcurrency: ref(3), maxSkillifyConcurrencyLimits: { min: 1, max: 5 },
+    contextSettingsLimits: { decisionRecentContextCharLimit: { min: 1 }, decisionWorldbookCandidateLimit: { min: 1 }, skillifyMaxEntries: { min: 1 }, plotWorldbookScanMessageLimit: { min: 1 }, agentAiMaxRetries: { min: 1 }, greenlightMinTkBudget: { min: 0 }, greenlightMaxTkBudget: { min: 1 } },
+    agentDecisionConcurrency: ref(1), maxSkillifyConcurrency: ref(3),
     setAgentPlotExecutionMode: vi.fn(), setContextSetting: vi.fn(), resetContextSettings: vi.fn(), setAgentDecisionConcurrency: vi.fn(async () => true), setMaxSkillifyConcurrency: vi.fn(), retryInitialization: vi.fn(),
   };
 }
@@ -60,6 +59,15 @@ describe('WorldbookAgentAdvancedPanel', () => {
     await vi.waitFor(() => expect(x.closed).toHaveBeenCalledOnce());
     await nextTick();
     expect(saveButtons.every(button => button.disabled)).toBe(true);
+  });
+
+  it('所有 Agent 数字输入保留最小值但不渲染 max 属性', async () => {
+    const x = await mount();
+    const inputs = [...x.el.querySelectorAll<HTMLInputElement>('input[type="number"]')];
+    expect(inputs).toHaveLength(9);
+    expect(inputs.every(input => !input.hasAttribute('max'))).toBe(true);
+    expect(inputs.map(input => input.min)).toEqual(['1', '1', '1', '1', '1', '0', '1', '1', '1']);
+    expect(inputs.map(input => input.step)).toEqual(['1', '1', '1', '1', '1', '100', '100', '1', '1']);
   });
 
   it('Agent 决策并发输入调用独立 setter 并通知当前世界书变更', async () => {

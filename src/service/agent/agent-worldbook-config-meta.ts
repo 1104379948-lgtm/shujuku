@@ -149,10 +149,11 @@ function normalizeExecutionMode_ACU(value: unknown): AgentPlotExecutionMode_ACU 
   return value === 'sequential' ? 'sequential' : 'concurrent';
 }
 
-function normalizePositiveInt_ACU(value: unknown, fallback: number, min: number, max: number): number {
+function normalizePositiveInt_ACU(value: unknown, fallback: number, min: number, max?: number): number {
   const raw = Number(value);
   const base = Number.isFinite(raw) ? Math.trunc(raw) : fallback;
-  return Math.max(min, Math.min(max, base));
+  const bounded = max === undefined ? Math.min(Number.MAX_SAFE_INTEGER, base) : Math.min(max, base);
+  return Math.max(min, bounded);
 }
 
 function normalizeControlPatch_ACU(value: unknown): Record<string, any> {
@@ -215,8 +216,8 @@ function normalizeAgentWorldbookControlForCardConfig_ACU(value: unknown, promptT
       : defaults.managedEntryPrefix,
     finalInjectionMode: 'prompt_template',
     restoreOnDisable: source.restoreOnDisable !== false,
-    agentDecisionConcurrency: normalizePositiveInt_ACU(source.agentDecisionConcurrency, defaults.agentDecisionConcurrency, 1, 5),
-    maxSkillifyConcurrency: normalizePositiveInt_ACU(source.maxSkillifyConcurrency, defaults.maxSkillifyConcurrency, 1, 5),
+    agentDecisionConcurrency: normalizePositiveInt_ACU(source.agentDecisionConcurrency, defaults.agentDecisionConcurrency, 1),
+    maxSkillifyConcurrency: normalizePositiveInt_ACU(source.maxSkillifyConcurrency, defaults.maxSkillifyConcurrency, 1),
     contextSettings,
     contextSettingsConfigured: source.contextSettingsConfigured === true,
     agentDecisionPromptSegments: normalizeEditablePromptSegments_ACU(

@@ -279,29 +279,41 @@ describe('usePlotWorldbookAgentControl', () => {
     }));
   });
 
-  it('setAgentDecisionConcurrency 保存夹紧后的独立决策并发数', async () => {
+  it('setAgentDecisionConcurrency 保存高于旧上限的独立决策并发数', async () => {
     const c = await getComposable();
 
     await expect(c.setAgentDecisionConcurrency(9)).resolves.toBe(true);
 
-    expect(mockWriteControl).toHaveBeenCalledWith({ agentDecisionConcurrency: 5 });
-    expect(c.agentDecisionConcurrency.value).toBe(5);
+    expect(mockWriteControl).toHaveBeenCalledWith({ agentDecisionConcurrency: 9 });
+    expect(c.agentDecisionConcurrency.value).toBe(9);
 
     mockWriteControl.mockClear();
     await expect(c.setAgentDecisionConcurrency('not-a-number')).resolves.toBe(false);
+    await expect(c.setAgentDecisionConcurrency('')).resolves.toBe(false);
+    await expect(c.setAgentDecisionConcurrency('   ')).resolves.toBe(false);
     expect(mockWriteControl).not.toHaveBeenCalled();
   });
 
-  it('setMaxSkillifyConcurrency 保存夹紧后的并发数', async () => {
+  it('setMaxSkillifyConcurrency 保存高于旧上限的并发数', async () => {
     const c = await getComposable();
 
     await expect(c.setMaxSkillifyConcurrency(9)).resolves.toBe(true);
 
-    expect(mockWriteControl).toHaveBeenCalledWith({ maxSkillifyConcurrency: 5 });
-    expect(c.maxSkillifyConcurrency.value).toBe(5);
+    expect(mockWriteControl).toHaveBeenCalledWith({ maxSkillifyConcurrency: 9 });
+    expect(c.maxSkillifyConcurrency.value).toBe(9);
 
     mockWriteControl.mockClear();
     await expect(c.setMaxSkillifyConcurrency('not-a-number')).resolves.toBe(false);
+    await expect(c.setMaxSkillifyConcurrency('')).resolves.toBe(false);
+    await expect(c.setMaxSkillifyConcurrency('   ')).resolves.toBe(false);
+    expect(mockWriteControl).not.toHaveBeenCalled();
+  });
+
+  it('拒绝空白上下文数字输入而不写入配置', async () => {
+    const c = await getComposable();
+
+    await expect(c.setContextSetting('agentAiMaxRetries', '')).resolves.toBe(false);
+    await expect(c.setContextSetting('agentAiMaxRetries', '   ')).resolves.toBe(false);
     expect(mockWriteControl).not.toHaveBeenCalled();
   });
 

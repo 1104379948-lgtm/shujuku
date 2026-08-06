@@ -56,9 +56,6 @@ export type AgentPromptKind_ACU = 'decision' | 'skillify';
 export type AgentContextSettingKey_ACU = keyof AgentContextSettings_ACU;
 export type AgentPlotExecutionModeSetting_ACU = AgentPlotExecutionMode_ACU;
 
-const AGENT_DECISION_CONCURRENCY_LIMIT_ACU = { min: 1, max: 5 };
-const MAX_SKILLIFY_CONCURRENCY_LIMIT_ACU = { min: 1, max: 5 };
-
 function getPromptFallback_ACU(kind: AgentPromptKind_ACU): PromptSegment_ACU[] {
   return kind === 'decision' ? getDefaultAgentDecisionPromptSegments_ACU() : getDefaultAgentSkillifyPromptSegments_ACU();
 }
@@ -67,31 +64,33 @@ function cloneContextSettings_ACU(value: AgentContextSettings_ACU): AgentContext
   return { ...(value as unknown as Record<string, number>) } as unknown as AgentContextSettings_ACU;
 }
 
+function parseFiniteIntegerInput_ACU(value: unknown): number | null {
+  if (typeof value === 'string' && !value.trim()) return null;
+  const raw = Number(value);
+  return Number.isFinite(raw) ? Math.trunc(raw) : null;
+}
+
 function normalizeContextPatch_ACU(
   current: AgentContextSettings_ACU,
   key: AgentContextSettingKey_ACU,
   rawValue: unknown,
 ): AgentContextSettings_ACU | null {
-  const raw = Number(rawValue);
-  if (!Number.isFinite(raw)) return null;
+  const raw = parseFiniteIntegerInput_ACU(rawValue);
+  if (raw === null) return null;
   return normalizeAgentContextSettings_ACU({
     ...(current as unknown as Record<string, number>),
-    [key]: Math.trunc(raw),
+    [key]: raw,
   });
 }
 
 function normalizeAgentDecisionConcurrency_ACU(value: unknown): number | null {
-  const raw = Number(value);
-  if (!Number.isFinite(raw)) return null;
-  const truncated = Math.trunc(raw);
-  return Math.max(AGENT_DECISION_CONCURRENCY_LIMIT_ACU.min, Math.min(AGENT_DECISION_CONCURRENCY_LIMIT_ACU.max, truncated));
+  const raw = parseFiniteIntegerInput_ACU(value);
+  return raw === null ? null : Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, raw));
 }
 
 function normalizeMaxSkillifyConcurrency_ACU(value: unknown): number | null {
-  const raw = Number(value);
-  if (!Number.isFinite(raw)) return null;
-  const truncated = Math.trunc(raw);
-  return Math.max(MAX_SKILLIFY_CONCURRENCY_LIMIT_ACU.min, Math.min(MAX_SKILLIFY_CONCURRENCY_LIMIT_ACU.max, truncated));
+  const raw = parseFiniteIntegerInput_ACU(value);
+  return raw === null ? null : Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, raw));
 }
 
 function movePromptSegment_ACU(segments: PromptSegment_ACU[], index: number, delta: -1 | 1): PromptSegment_ACU[] {
@@ -630,8 +629,6 @@ export function usePlotWorldbookAgentControl() {
     configStatusText,
     contextSettings,
     contextSettingsLimits: AGENT_CONTEXT_SETTINGS_LIMITS_ACU,
-    agentDecisionConcurrencyLimits: AGENT_DECISION_CONCURRENCY_LIMIT_ACU,
-    maxSkillifyConcurrencyLimits: MAX_SKILLIFY_CONCURRENCY_LIMIT_ACU,
     agentDecisionPromptSegments,
     agentSkillifyPromptSegments,
     globalPromptTemplates,

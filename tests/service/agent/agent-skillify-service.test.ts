@@ -387,34 +387,37 @@ describe('agent worldbook skillify candidate filtering', () => {
     expect(result).toMatchObject({ totalCandidates: 1, updated: 1, skipped: 0, failed: 0 });
   });
 
-  it('retries AI skillify responses according to maxAiRetries before saving', async () => {
+  it('retries AI skillify responses beyond the former retry limit before saving', async () => {
     mockGetLorebookEntriesByNames.mockResolvedValueOnce({
       '剧情书': [{ uid: 'retry', comment: '地点Retry', content: 'R'.repeat(20), enabled: true, keys: [] }],
     });
-    mockCallAIWithPreset
-      .mockResolvedValueOnce('')
-      .mockResolvedValueOnce('{"description":"新描述","triggerWhen":"新触发","tk":9}');
+    let attempts = 0;
+    mockCallAIWithPreset.mockImplementation(async () => {
+      attempts += 1;
+      return attempts === 11 ? '{"description":"新描述","triggerWhen":"新触发","tk":9}' : '';
+    });
     mockSaveWorldbookEntrySkillMeta.mockResolvedValueOnce({ updated: true });
     const progress = vi.fn();
 
-    const result = await skillifyWorldbookEntries_ACU(['剧情书'], { maxAiRetries: 2, onProgress: progress });
+    const result = await skillifyWorldbookEntries_ACU(['剧情书'], { maxAiRetries: 11, onProgress: progress });
 
-    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(2);
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(11);
     expect(mockCallAIWithPreset.mock.calls[1][0]).toBe(mockCallAIWithPreset.mock.calls[0][0]);
     expect(mockSaveWorldbookEntrySkillMeta).toHaveBeenCalledWith('剧情书', 'retry', { description: '新描述', triggerWhen: '新触发', tk: 9 }, 'agent-skillify');
-    expect(progress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'retry', attempt: 1, maxAttempts: 2, uid: 'retry' }));
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({ phase: 'retry', attempt: 10, maxAttempts: 11, uid: 'retry' }));
     expect(result).toMatchObject({ totalCandidates: 1, updated: 1, skipped: 0, failed: 0 });
   });
 
-  it('runs skillify API calls with configured concurrency', async () => {
-    mockSettings.plotSettings.agentWorldbookControl.maxSkillifyConcurrency = 3;
+  it('runs skillify API calls above the former concurrency limit without exceeding candidates', async () => {
+    mockSettings.plotSettings.agentWorldbookControl.maxSkillifyConcurrency = 9;
     mockGetLorebookEntriesByNames.mockResolvedValueOnce({
-      '剧情书': [
-        { uid: 'a', comment: '地点A', content: 'A'.repeat(20), enabled: true, keys: ['A'] },
-        { uid: 'b', comment: '地点B', content: 'B'.repeat(20), enabled: true, keys: ['B'] },
-        { uid: 'c', comment: '地点C', content: 'C'.repeat(20), enabled: true, keys: ['C'] },
-        { uid: 'd', comment: '地点D', content: 'D'.repeat(20), enabled: true, keys: ['D'] },
-      ],
+      '剧情书': ['a', 'b', 'c', 'd', 'e', 'f'].map(uid => ({
+        uid,
+        comment: `地点${uid}`,
+        content: uid.repeat(20),
+        enabled: true,
+        keys: [uid],
+      })),
     });
     let active = 0;
     let maxActive = 0;
@@ -428,9 +431,9 @@ describe('agent worldbook skillify candidate filtering', () => {
 
     const result = await skillifyWorldbookEntries_ACU(['剧情书']);
 
-    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(4);
-    expect(maxActive).toBe(3);
-    expect(result).toMatchObject({ totalCandidates: 4, updated: 4, skipped: 0, failed: 0 });
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(6);
+    expect(maxActive).toBe(6);
+    expect(result).toMatchObject({ totalCandidates: 6, updated: 6, skipped: 0, failed: 0 });
   });
 
   it('falls back to summary tk when saving skillify response without tk', async () => {

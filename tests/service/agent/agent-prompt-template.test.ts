@@ -31,6 +31,7 @@ vi.mock('../../../src/service/runtime/template-vars/agent-read-only-template-ren
 }));
 
 import {
+  normalizeAgentContextSettings_ACU,
   normalizeEditablePromptSegments_ACU,
   normalizePromptSegments_ACU,
   renderAgentPromptSegments_ACU,
@@ -49,6 +50,32 @@ describe('agent prompt template normalization', () => {
   it('filters empty prompt segments in runtime normalization', () => {
     const result = normalizePromptSegments_ACU([{ role: 'USER', content: '', deletable: true }], fallback);
     expect(result).toEqual(fallback);
+  });
+
+  it('preserves context settings above the former UI upper limits while retaining lower bounds', () => {
+    const result = normalizeAgentContextSettings_ACU({
+      decisionRecentContextCharLimit: 21,
+      decisionWorldbookCandidateLimit: 301,
+      skillifyMaxEntries: 301,
+      plotWorldbookScanMessageLimit: 21,
+      agentAiMaxRetries: 11,
+      greenlightMinTkBudget: 200001,
+      greenlightMaxTkBudget: 200001,
+    });
+    const safeIntegerResult = normalizeAgentContextSettings_ACU({ decisionWorldbookCandidateLimit: Number.MAX_SAFE_INTEGER + 1 });
+
+    expect(result).toMatchObject({
+      decisionRecentContextCharLimit: 21,
+      decisionWorldbookCandidateLimit: 301,
+      skillifyMaxEntries: 301,
+      plotWorldbookScanMessageLimit: 21,
+      agentAiMaxRetries: 11,
+      greenlightMinTkBudget: 200001,
+      greenlightMaxTkBudget: 200001,
+    });
+    expect(normalizeAgentContextSettings_ACU({ greenlightMinTkBudget: -1, greenlightMaxTkBudget: 0 })).toMatchObject({ greenlightMinTkBudget: 0, greenlightMaxTkBudget: 1 });
+    expect(safeIntegerResult.decisionWorldbookCandidateLimit).toBe(Number.MAX_SAFE_INTEGER);
+    expect(normalizeAgentContextSettings_ACU({ decisionWorldbookCandidateLimit: Infinity }).decisionWorldbookCandidateLimit).toBe(100);
   });
 
   it('keeps SQL rendering disabled by default', () => {

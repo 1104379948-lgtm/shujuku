@@ -513,7 +513,7 @@ function createAgentDecisionShards_ACU(
 ): AgentDecisionShard_ACU[] {
   const candidates = summaries.slice(0, normalizePositiveInteger_ACU(candidateLimit, summaries.length || 1));
   if (candidates.length === 0) return [];
-  const shardCount = Math.min(candidates.length, Math.max(1, Math.min(5, Math.trunc(Number(configuredConcurrency) || 1))));
+  const shardCount = Math.min(candidates.length, Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(Number(configuredConcurrency) || 1))));
   const entriesPerShard = Math.floor(candidates.length / shardCount);
   const entryRemainder = candidates.length % shardCount;
   const totalMinBudget = normalizeTkBudgetNumber_ACU(minTkBudget, 0);
@@ -701,7 +701,7 @@ export async function runAgentDecisionForPlot_ACU(params: {
 
     const effectivePlotSettings = { ...params.plotSettings, agentWorldbookControl: control };
     const contextSettings = normalizeAgentContextSettings_ACU(control.contextSettings);
-    const maxAiAttempts = Math.max(1, Math.min(10, Math.trunc(Number(contextSettings.agentAiMaxRetries) || 1)));
+    const maxAiAttempts = Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(Number(contextSettings.agentAiMaxRetries) || 1)));
     const readContext = params.sharedContext?.worldbookReadContext as StrictLorebookReadContext_ACU | undefined;
     const { summaries } = await collectWorldbookSummariesFromSnapshot_ACU(contextSettings, readContext);
     const shards = createAgentDecisionShards_ACU(

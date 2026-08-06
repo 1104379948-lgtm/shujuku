@@ -224,7 +224,7 @@ function resolveAgentAiMaxAttempts_ACU(options: AgentSkillifyOptions_ACU = {}, c
   const raw = Number.isFinite(Number(options.maxAiRetries)) && Number(options.maxAiRetries) > 0
     ? Number(options.maxAiRetries)
     : contextSettings.agentAiMaxRetries;
-  return Math.max(1, Math.min(10, Math.trunc(raw)));
+  return Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(raw)));
 }
 
 async function skillifySingleEntry_ACU(
@@ -364,7 +364,7 @@ export async function skillifyWorldbookEntries_ACU(
   const configuredConcurrency = Number.isFinite(Number(options.maxConcurrency)) && Number(options.maxConcurrency) > 0
     ? Number(options.maxConcurrency)
     : (Number(control.maxSkillifyConcurrency) || buildDefaultAgentWorldbookControl_ACU().maxSkillifyConcurrency);
-  const concurrency = Math.max(1, Math.min(configuredConcurrency, 5));
+  const concurrency = Math.max(1, Math.min(configuredConcurrency, candidates.length, Number.MAX_SAFE_INTEGER));
   const progressState = { current: 0, total: candidates.length, updated: 0, skipped: 0, failed: 0 };
   options.onProgress?.({ phase: 'processing', ...progressState });
   const results = await runWithConcurrency_ACU(candidates, concurrency, async (summary, index) => {

@@ -23,10 +23,10 @@ export function normalizeAgentContextSettings_ACU(value: unknown): AgentContextS
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const result: Record<string, number> = {};
   for (const [key, fallback] of Object.entries(DEFAULT_AGENT_CONTEXT_SETTINGS_ACU)) {
-    const limits = (AGENT_CONTEXT_SETTINGS_LIMITS_ACU as Record<string, { min: number; max: number }>)[key];
+    const limits = (AGENT_CONTEXT_SETTINGS_LIMITS_ACU as Record<string, { min: number }>)[key];
     const raw = Number(source[key]);
     const base = Number.isFinite(raw) ? Math.trunc(raw) : fallback;
-    result[key] = Math.max(limits.min, Math.min(limits.max, base));
+    result[key] = Math.max(limits.min, Math.min(Number.MAX_SAFE_INTEGER, base));
   }
   return result as unknown as AgentContextSettings_ACU;
 }

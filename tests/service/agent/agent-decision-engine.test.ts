@@ -466,23 +466,25 @@ describe('runAgentDecisionForPlot_ACU', () => {
     expect(result.taskPlan).toEqual([]);
   });
 
-  it('retries empty Agent AI decision responses according to agentAiMaxRetries', async () => {
-    mockCallAIWithPreset
-      .mockResolvedValueOnce('')
-      .mockResolvedValueOnce(JSON.stringify({
+  it('retries empty Agent AI decision responses beyond the former retry limit', async () => {
+    let attempts = 0;
+    mockCallAIWithPreset.mockImplementation(async () => {
+      attempts += 1;
+      return attempts === 11 ? JSON.stringify({
         taskPlan: [{ taskId: 'task_id', run: true, effectiveStage: 1, effectiveOrder: 0 }],
         plotGreenlights: {},
         finalGenerationGreenlights: [],
         fallbackMode: false,
         reason: 'ok',
-      }));
+      }) : '';
+    });
 
     const result = await runAgentDecisionForPlot_ACU({
       plotSettings: {
         agentWorldbookControl: {
           enabled: true,
           mode: 'agent',
-          contextSettings: { agentAiMaxRetries: 2 },
+          contextSettings: { agentAiMaxRetries: 11 },
         },
       },
       userMessage: '敲门',
@@ -490,7 +492,7 @@ describe('runAgentDecisionForPlot_ACU', () => {
       enabledTasks: [{ id: 'task id', name: '默认任务', description: '需要判断的剧情任务', enabled: true, promptGroup: { messages: [] } }],
     });
 
-    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(2);
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(11);
     expect(result.active).toBe(true);
     expect(result.effectiveTasks[0].id).toBe('task_id');
   });
@@ -556,15 +558,15 @@ describe('runAgentDecisionForPlot_ACU', () => {
     expect(result.finalGenerationGreenlights.map(ref => ref.uid)).toEqual([1, 3]);
   });
 
-  it('splits max tk budget by actual non-empty shard count without sending empty requests', async () => {
+  it('uses configured concurrency above the former limit while avoiding empty decision shards', async () => {
     mockRefreshPlotAgentWorldbookSnapshot.mockResolvedValueOnce({
       active: true,
       selectionSignature: 'scope',
       createdAt: 1,
-      books: { '剧情书': [{ uid: 1 }, { uid: 2 }] },
+      books: { '剧情书': [1, 2, 3, 4, 5, 6].map(uid => ({ uid })) },
     });
     const skillMetaBlock = (description: string) => `<!-- ACU_SKILL_META_START\n${JSON.stringify({ version: 1, description, triggerWhen: '预算触发', updatedAt: 1, updatedBy: 'agent-skillify' })}\nACU_SKILL_META_END -->`;
-    mockGetLorebookEntries.mockResolvedValueOnce([1, 2].map(uid => ({
+    mockGetLorebookEntries.mockResolvedValueOnce([1, 2, 3, 4, 5, 6].map(uid => ({
       uid,
       comment: `条目${uid}\n\n${skillMetaBlock(`Skill${uid}`)}`,
       keys: [`关键词${uid}`],
@@ -583,7 +585,7 @@ describe('runAgentDecisionForPlot_ACU', () => {
         agentWorldbookControl: {
           enabled: true,
           mode: 'agent',
-          agentDecisionConcurrency: 5,
+          agentDecisionConcurrency: 9,
           contextSettings: { greenlightMinTkBudget: 3, greenlightMaxTkBudget: 11 },
           agentDecisionPromptSegments: [{ role: 'user', deletable: true, content: 'W={{agent.worldbookEntriesJson}}\nB={{agent.greenlightTkBudgetJson}}\nS={{agent.shard.index}}/{{agent.shard.count}}' }],
         },
@@ -593,14 +595,10 @@ describe('runAgentDecisionForPlot_ACU', () => {
       enabledTasks: [{ id: 'task id', name: '默认任务', description: '需要判断', enabled: true, promptGroup: { messages: [] } }],
     });
 
-    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(2);
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(6);
     const prompts = mockCallAIWithPreset.mock.calls.map(([messages]) => messages[0].content);
-    expect(prompts[0]).toContain('S=1/2');
-    expect(prompts[0]).toContain('"min": 2');
-    expect(prompts[0]).toContain('"max": 6');
-    expect(prompts[1]).toContain('S=2/2');
-    expect(prompts[1]).toContain('"min": 1');
-    expect(prompts[1]).toContain('"max": 5');
+    expect(prompts[0]).toContain('S=1/6');
+    expect(prompts[5]).toContain('S=6/6');
   });
 
   it('keeps the full min and max tk budgets when configured concurrency collapses to one non-empty shard', async () => {

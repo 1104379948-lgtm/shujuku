@@ -50,7 +50,6 @@
               size="sm"
               :model-value="agentControl.contextSettings.value[field.key]"
               :min="field.limits.min"
-              :max="field.limits.max"
               :step="field.step"
               :disabled="!agentControl.isReady.value"
               @change="onContextChange(field.key, $event)"
@@ -75,8 +74,7 @@
               type="number"
               size="sm"
               :model-value="agentControl.agentDecisionConcurrency.value"
-              :min="agentControl.agentDecisionConcurrencyLimits.min"
-              :max="agentControl.agentDecisionConcurrencyLimits.max"
+              :min="1"
               :step="1"
               :disabled="!agentControl.isReady.value"
               @change="onAgentDecisionConcurrencyChange"
@@ -101,8 +99,7 @@
               type="number"
               size="sm"
               :model-value="agentControl.maxSkillifyConcurrency.value"
-              :min="agentControl.maxSkillifyConcurrencyLimits.min"
-              :max="agentControl.maxSkillifyConcurrencyLimits.max"
+              :min="1"
               :step="1"
               :disabled="!agentControl.isReady.value"
               @change="onMaxSkillifyConcurrencyChange"
@@ -274,7 +271,7 @@ type ContextFieldMeta = {
   key: AgentContextSettingKey_ACU;
   step: number;
   copy: { label: string; hint: string };
-  limits: { min: number; max: number };
+  limits: { min: number };
 };
 
 type VisibleContextSettingKey_ACU = Exclude<AgentContextSettingKey_ACU, 'decisionWorldbookContentPreviewLimit' | 'decisionPreviousPlotCharLimit' | 'skillifyContentPreviewLimit'>;

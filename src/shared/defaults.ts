@@ -31,19 +31,19 @@ export const DEFAULT_AGENT_CONTEXT_SETTINGS_ACU = {
 
 export const AGENT_CONTEXT_SETTINGS_LIMITS_ACU = {
   // Compatibility field name: layer count, 1 layer = 1 AI reply plus its preceding user input.
-  decisionRecentContextCharLimit: { min: 1, max: 20 },
+  decisionRecentContextCharLimit: { min: 1 },
   // Deprecated compatibility field; no separate UI control or Agent decision layer source.
-  decisionPreviousPlotCharLimit: { min: 1, max: 20 },
+  decisionPreviousPlotCharLimit: { min: 1 },
   // Deprecated compatibility field; do not use it to reintroduce content previews.
-  decisionWorldbookContentPreviewLimit: { min: 200, max: 5000 },
-  decisionWorldbookCandidateLimit: { min: 1, max: 300 },
+  decisionWorldbookContentPreviewLimit: { min: 200 },
+  decisionWorldbookCandidateLimit: { min: 1 },
   // Deprecated compatibility field; do not use it to reintroduce content previews.
-  skillifyContentPreviewLimit: { min: 200, max: 5000 },
-  skillifyMaxEntries: { min: 1, max: 300 },
-  plotWorldbookScanMessageLimit: { min: 1, max: 20 },
-  agentAiMaxRetries: { min: 1, max: 10 },
-  greenlightMinTkBudget: { min: 0, max: 200000 },
-  greenlightMaxTkBudget: { min: 1, max: 200000 },
+  skillifyContentPreviewLimit: { min: 200 },
+  skillifyMaxEntries: { min: 1 },
+  plotWorldbookScanMessageLimit: { min: 1 },
+  agentAiMaxRetries: { min: 1 },
+  greenlightMinTkBudget: { min: 0 },
+  greenlightMaxTkBudget: { min: 1 },
 };
 
 export function buildDefaultAgentDecisionPromptSegments_ACU() {

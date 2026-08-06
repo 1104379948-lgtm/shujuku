@@ -109,7 +109,7 @@ export const plotCopy = {
       description: "将当前接管条目分片后并发分析。请求数和最坏重试数会随并发数放大，别把 API 当免费算力池。",
       concurrency: {
         label: "Agent 决策并发数",
-        hint: "默认 1，范围 1-5。条目按实际非空分片并发分析，绿灯最小与最大 TK 预算都会精确拆分并交给各分片辅助选择；合并后仍按完整最大预算做安全校验。",
+        hint: "默认 1，页面不设固定上限；实际并发不会超过可分析的条目数。条目按实际非空分片并发分析，绿灯最小与最大 TK 预算都会精确拆分并交给各分片辅助选择；合并后仍按完整最大预算做安全校验。",
       },
     },
     skillifySettings: {
@@ -117,7 +117,7 @@ export const plotCopy = {
       description: "控制一键 Skill 化的执行行为。并发数越高，请求压力越大；别把 API 当成无限吞吐的黑洞。",
       maxConcurrency: {
         label: "Skill 化 API 并发数",
-        hint: "一键 Skill 化同时调用 Agent Skill API 的条目数量。默认 3，范围 1-5。",
+        hint: "一键 Skill 化同时调用 Agent Skill API 的条目数量。默认 3，页面不设固定上限；实际并发不会超过待处理条目数。",
       },
     },
     executionMode: {
@@ -130,7 +130,7 @@ export const plotCopy = {
     },
     contextSettings: {
       title: "上下文参数",
-      description: "这些参数会影响 Agent 决策、世界书 Skill 化和剧情世界书扫描。输入会被硬上限夹紧，别指望把模型窗口当垃圾桶无限塞。",
+      description: "这些参数会影响 Agent 决策、世界书 Skill 化和剧情世界书扫描。页面不设固定上限；过大的候选数、上下文、重试次数或预算会放大 API 消耗，并可能超过模型与服务能力。",
       resetButton: "恢复默认上下文参数",
       resetSuccess: "已恢复默认上下文参数。",
       fields: {
