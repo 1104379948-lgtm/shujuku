@@ -4,11 +4,9 @@
  */
 
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
+import { getUiSurface_ACU } from '../../../shared/ui-surface-registry';
 import { settings_ACU, currentJsonTableData_ACU } from '../../../service/runtime/state-manager';
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
-import { openAutoCardPopup_ACU } from '../../pages/main-popup';
-import { openNewVisualizer_ACU } from '../../pages/visualizer';
-import { showToastr_ACU } from '../../theme/toast';
 import { handleManualUpdate_ACU } from '../../triggers/update-process';
 import { saveSettingsAndNotify_ACU } from '../../components/settings-ui-helpers';
 // deleteApiPreset_ACU / loadApiPreset_ACU 不再从公开 API 层直接导入；
@@ -99,22 +97,32 @@ async function writeAgentWorldbookControlPatchForSettingsApi_ACU(
 
 export function createSettingsConfigApi(_ctx: ApiGroupContext): Record<string, Function> {
     return {
-        // 打开可视化编辑器
-        openVisualizer: function() {
-            if (typeof openNewVisualizer_ACU === 'function') {
-                openNewVisualizer_ACU();
-            } else {
-                console.error('[ACU] openNewVisualizer_ACU is not defined inside closure.');
-                showToastr_ACU('error', '可视化编辑器加载失败。');
+        // 打开 V2 可视化编辑器
+        openVisualizer: async function() {
+            const surface = getUiSurface_ACU();
+            if (!surface) {
+                logError_ACU('openVisualizer failed: V2 UI surface is not registered.');
+                return false;
+            }
+            try {
+                return await surface.openVisualizer();
+            } catch (error) {
+                logError_ACU('openVisualizer failed:', error);
+                return false;
             }
         },
 
-        // 打开设置面板
+        // 打开 V2 设置面板
         openSettings: async function() {
+            const surface = getUiSurface_ACU();
+            if (!surface) {
+                logError_ACU('openSettings failed: V2 UI surface is not registered.');
+                return false;
+            }
             try {
-                return await openAutoCardPopup_ACU();
-            } catch (e) {
-                logError_ACU('openSettings failed:', e);
+                return await surface.openSettings();
+            } catch (error) {
+                logError_ACU('openSettings failed:', error);
                 return false;
             }
         },

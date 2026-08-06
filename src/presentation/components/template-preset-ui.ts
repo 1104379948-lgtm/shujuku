@@ -10,7 +10,7 @@ import { getCurrentIsolationKey_ACU, settings_ACU } from '../../service/runtime/
 import { $popupInstance_ACU } from '../state/ui-refs';
 import { getCurrentChatTemplateScopeState_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeMode_ACU } from '../../service/template/chat-scope';
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
-import { formatPlotScopeUpdatedAt_ACU } from '../pages/popup-helpers';
+import { formatPlotScopeUpdatedAt_ACU } from '../../shared/utils';
 import { getTemplatePresetDisplayName_ACU, getTemplatePreset_ACU, listTemplatePresetNames_ACU, resolveActiveTemplatePresetName_ACU } from '../../service/template/template-preset-service';
 
 // ═══ 纯 DOM 操作函数 ═══

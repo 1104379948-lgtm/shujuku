@@ -67,16 +67,6 @@ import './presentation/theme/toast';
 import './presentation/components/table-selector';
 import './presentation/components/plot-editors';
 import './presentation/components/status-display';
-import './presentation/bootstrap/startup';
-import './presentation/pages/main-popup';
-import './presentation/pages/popup-bindings';
-import './presentation/pages/popup-helpers';
-import './presentation/pages/visualizer';
-import './presentation/pages/visualizer-sidebar';
-import './presentation/pages/visualizer-main-render';
-import './presentation/pages/visualizer-main-config';
-import './presentation/pages/visualizer-main-save';
-import './presentation/bootstrap/visualizer-template-assistant-addon';
 import './presentation/components/template-preset-ui';
 import './presentation/components/optimization-ui';
 import './presentation/components/worldbook-selector';
@@ -90,7 +80,6 @@ import './presentation/triggers/settings-ui-sync';
 // 启动入口（酒馆插件模式）
 // ═══════════════════════════════════════════════════════════════
 import { mainInitialize_ACU } from './presentation/bootstrap/init';
-import { initVisualizerTemplateAssistantAddon_ACU } from './presentation/bootstrap/visualizer-template-assistant-addon';
 import { bootstrapAcuV2 } from './presentation-v2/bootstrap';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from './shared/utils';
 
@@ -176,7 +165,6 @@ async function extensionMain() {
 
     logDebug_ACU('[插件启动] TavernHelper 已就绪，开始初始化...');
     mainInitialize_ACU();
-    initVisualizerTemplateAssistantAddon_ACU();
     bootstrapAcuV2();
 }
 

@@ -24,8 +24,8 @@ async function importTrigger() {
     getChatArray_ACU: vi.fn(() => [{ is_user: false, mes: 'AI 1' }]),
     saveCurrentDataForTable_ACU: vi.fn(),
   }));
-  vi.doMock('../../../src/presentation/components/table-selector', () => ({
-    getManualSelectionFromUI_ACU: vi.fn(() => ['sheet_0']),
+  vi.doMock('../../../src/service/settings/settings-readers', () => ({
+    getSelectedManualTableKeys_ACU: vi.fn(() => ['sheet_0']),
   }));
   vi.doMock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU }));
   vi.doMock('../../../src/presentation/theme/custom-confirm', () => ({ showCustomConfirm_ACU }));

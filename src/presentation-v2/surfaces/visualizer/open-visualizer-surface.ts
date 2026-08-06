@@ -87,5 +87,3 @@ export function installAutoCardUpdaterV2Api_ACU(): void {
     installAutoCardUpdaterV2ApiOnTarget_ACU(hostWindow as any);
   }
 }
-
-installAutoCardUpdaterV2Api_ACU();

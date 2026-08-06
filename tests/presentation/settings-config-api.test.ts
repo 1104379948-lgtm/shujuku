@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { registerUiSurface_ACU, resetUiSurfaceRegistryForTests_ACU } from '../../src/shared/ui-surface-registry';
 
 const { mockGetPromptTemplates, mockReadControl, mockSetPromptTemplates, mockWriteControl, mockSaveSettings } = vi.hoisted(() => ({
   mockGetPromptTemplates: vi.fn(),
@@ -14,9 +15,6 @@ vi.mock('../../src/service/runtime/state-manager', () => ({
   currentJsonTableData_ACU: {},
 }));
 vi.mock('../../src/service/template/chat-scope', () => ({ getSortedSheetKeys_ACU: vi.fn(() => ['sheetA']) }));
-vi.mock('../../src/presentation/pages/main-popup', () => ({ openAutoCardPopup_ACU: vi.fn() }));
-vi.mock('../../src/presentation/pages/visualizer', () => ({ openNewVisualizer_ACU: vi.fn() }));
-vi.mock('../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
 vi.mock('../../src/presentation/triggers/update-process', () => ({ handleManualUpdate_ACU: vi.fn() }));
 vi.mock('../../src/presentation/triggers/settings-ui-sync', () => ({ deleteApiPreset_ACU: vi.fn(), loadApiPreset_ACU: vi.fn() }));
 vi.mock('../../src/presentation/components/settings-ui-helpers', () => ({ saveSettingsAndNotify_ACU: mockSaveSettings }));
@@ -49,6 +47,7 @@ const control = { contextSettings: context, agentDecisionPromptSegments: decisio
 describe('createSettingsConfigApi Agent config source', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetUiSurfaceRegistryForTests_ACU();
     (settings_ACU as any).plotSettings = { agentWorldbookControl: { contextSettings: { skillifyMaxEntries: 99 } } };
     mockReadControl.mockResolvedValue({ control, source: 'worldbook', writableBookName: '主世界书' });
     mockGetPromptTemplates.mockReturnValue({
@@ -57,6 +56,26 @@ describe('createSettingsConfigApi Agent config source', () => {
     });
     mockSetPromptTemplates.mockReturnValue(true);
     mockWriteControl.mockResolvedValue({ updated: true, control });
+  });
+
+  it('openSettings 与 openVisualizer 委派到已注册的 V2 surface', async () => {
+    const openSettings = vi.fn(async () => true);
+    const openVisualizer = vi.fn(async () => true);
+    registerUiSurface_ACU({ openSettings, openVisualizer, refreshVisualizer: vi.fn(async () => undefined) });
+    const api = createSettingsConfigApi({} as any);
+
+    await expect(api.openSettings()).resolves.toBe(true);
+    await expect(api.openVisualizer()).resolves.toBe(true);
+
+    expect(openSettings).toHaveBeenCalledTimes(1);
+    expect(openVisualizer).toHaveBeenCalledTimes(1);
+  });
+
+  it('V2 surface 未注册时公开 UI API 返回 false', async () => {
+    const api = createSettingsConfigApi({} as any);
+
+    await expect(api.openSettings()).resolves.toBe(false);
+    await expect(api.openVisualizer()).resolves.toBe(false);
   });
 
   it('getAgentPromptConfig 从世界书状态条目读取，不创建或改写 legacy settings', async () => {

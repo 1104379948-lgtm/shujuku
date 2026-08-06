@@ -2,7 +2,6 @@
 // 从 05_core_tail.js 迁入
 
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
-import { addAutoCardMenuItem_ACU } from './startup';
 import { chatMutationDebounceTimer_ACU, _set_chatMutationDebounceTimer_ACU } from '../../service/runtime/state-manager';
 import { showToastr_ACU } from '../theme/toast';
 import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync';
@@ -20,8 +19,7 @@ import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { shouldSkipPlotIntercept_ACU } from '../../service/plot/plot-logic';
 import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU, orchestrateAfterCommandsStrategy2_ACU } from '../../service/plot/plot-orchestrator';
-import { getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../components/status-display';
-import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-display';
+import { getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { handleNewMessageDebounced_ACU } from '../triggers/settings-ui-sync';
 import { enterLoopRetryFlow_ACU, onLoopGenerationEnded_ACU, stopAutoLoop_ACU } from '../triggers/auto-loop';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
@@ -59,7 +57,6 @@ function notifyRuntimeTableCleared_ACU(): void {
   try {
     (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
   } catch (_) {}
-  if (typeof updateCardUpdateStatusDisplay_ACU === 'function') updateCardUpdateStatusDisplay_ACU();
 }
 
 function clearDerivedRuntimeState_ACU(): void {
@@ -134,7 +131,6 @@ export   function mainInitialize_ACU() {
       logDebug_ACU('AutoCardUpdater Initialization successful! Core APIs loaded.');
       showToastr_ACU('success', '数据库自动更新脚本已加载！', '脚本启动');
 
-      addAutoCardMenuItem_ACU();
       loadSettings_ACU();
       if (
         SillyTavern_API_ACU &&
@@ -314,11 +310,6 @@ export   function mainInitialize_ACU() {
                 }
             } catch (restoreFlushError) {
                 logWarn_ACU('[交火向量索引] CHAT_CHANGED 恢复防抖归档队列失败:', restoreFlushError);
-            }
-            
-            // [新增] 再次强制刷新状态显示，确保UI同步
-            if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
-                updateCardUpdateStatusDisplay_ACU();
             }
             
             logDebug_ACU('ACU: Chat data reload and UI refresh triggered after chat change (Delayed).');
@@ -612,10 +603,6 @@ export   function mainInitialize_ACU() {
           }
 
           await refreshMergedDataAndNotifyWithUI_ACU();
-          
-          if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
-             updateCardUpdateStatusDisplay_ACU();
-          }
       };
 
       if (SillyTavern_API_ACU && SillyTavern_API_ACU.chatId) {

@@ -1,8 +1,5 @@
 /**
- * 在不改 plus 现有源码的前提下，把 template-assistant 作为包装层接入。
- *
- * 这个入口会先启动原始 plus 插件，再额外挂载 visualizer assistant 适配层。
+ * Plus 构建入口：V2 visualizer 内建模板助手，因此不再注入 V1 DOM 适配层。
  */
 
 import './entry-extension';
-import './presentation/bootstrap/visualizer-template-assistant-addon';

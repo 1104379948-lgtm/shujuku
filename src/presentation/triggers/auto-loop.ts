@@ -8,7 +8,7 @@ import { showToastr_ACU } from '../theme/toast';
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { loopState_ACU, settings_ACU } from '../../service/runtime/state-manager';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
-import { clickSendButton_ACU, setSendTextareaValue_ACU } from '../components/status-display';
+import { clickSendButton_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { updateLoopTimerDisplay_ACU, updateLoopUIStatus_ACU } from './settings-ui-sync';
 import {
     validateLoopStartParams_ACU,

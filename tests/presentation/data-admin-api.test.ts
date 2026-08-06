@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { registerUiSurface_ACU, resetUiSurfaceRegistryForTests_ACU } from '../../src/shared/ui-surface-registry';
 
-const { mockOpenVisualizer, mockHandleTxtImportAndSplit, mockImportTxtTextAndSplitCore, mockInjectImportedSelectedCore, mockDeleteImportedEntriesCore, mockPrepareV2Recovery, mockCommitV2Recovery } = vi.hoisted(() => ({
-  mockOpenVisualizer: vi.fn(),
+const { mockHandleTxtImportAndSplit, mockImportTxtTextAndSplitCore, mockInjectImportedSelectedCore, mockDeleteImportedEntriesCore, mockPrepareV2Recovery, mockCommitV2Recovery } = vi.hoisted(() => ({
   mockHandleTxtImportAndSplit: vi.fn(),
   mockImportTxtTextAndSplitCore: vi.fn(),
   mockInjectImportedSelectedCore: vi.fn(),
@@ -48,10 +48,6 @@ vi.mock('../../src/service/import/import-executor', () => ({
   deleteImportedEntriesCore_ACU: mockDeleteImportedEntriesCore,
 }));
 
-vi.mock('../../src/presentation/pages/visualizer', () => ({
-  openNewVisualizer_ACU: mockOpenVisualizer,
-}));
-
 vi.mock('../../src/service/table/table-v2-recovery-service', () => ({
   prepareV2Recovery_ACU: mockPrepareV2Recovery,
   commitPreparedV2Recovery_ACU: mockCommitV2Recovery,
@@ -62,7 +58,7 @@ import { createDataAdminApi } from '../../src/presentation/bootstrap/api-groups/
 describe('createDataAdminApi', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockOpenVisualizer.mockResolvedValue(undefined);
+    resetUiSurfaceRegistryForTests_ACU();
     mockHandleTxtImportAndSplit.mockResolvedValue(true);
     mockImportTxtTextAndSplitCore.mockResolvedValue({ success: true, chunksCount: 1, splitSize: 10000 });
     mockInjectImportedSelectedCore.mockResolvedValue({ success: true, processedChunks: 1 });
@@ -71,13 +67,25 @@ describe('createDataAdminApi', () => {
     mockCommitV2Recovery.mockResolvedValue({ status: 'committed', planId: 'plan-1' });
   });
 
-  it('暴露 openVisualizer 并调用 visualizer 入口', async () => {
+  it('通过注册的 V2 surface 打开 visualizer', async () => {
+    const openVisualizer = vi.fn(async () => true);
+    registerUiSurface_ACU({
+      openSettings: vi.fn(async () => true),
+      openVisualizer,
+      refreshVisualizer: vi.fn(async () => undefined),
+    });
     const api = createDataAdminApi({} as any);
 
     expect(typeof api.openVisualizer).toBe('function');
-    await api.openVisualizer();
+    await expect(api.openVisualizer()).resolves.toBe(true);
 
-    expect(mockOpenVisualizer).toHaveBeenCalledTimes(1);
+    expect(openVisualizer).toHaveBeenCalledTimes(1);
+  });
+
+  it('V2 surface 尚未注册时拒绝打开 visualizer', async () => {
+    const api = createDataAdminApi({} as any);
+
+    await expect(api.openVisualizer()).resolves.toBe(false);
   });
 
   it('保留旧 importTxtAndSplit UI 文件选择行为', async () => {

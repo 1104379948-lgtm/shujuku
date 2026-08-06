@@ -31,12 +31,15 @@ function setParent(parent: any): void {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetModules();
   setParent(window);
+  delete (window as any).AutoCardUpdaterV2API;
   document.body.innerHTML = '';
   document.head.innerHTML = '';
   localStorage.clear();
+  const bridge = await import('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surface');
+  bridge.installAutoCardUpdaterV2Api_ACU();
 });
 
 describe('openVisualizerSurface_ACU', () => {
@@ -118,8 +121,10 @@ describe('openVisualizerSurface_ACU', () => {
   it('全局 v2 接口会同步挂到宿主 window', async () => {
     const parentDom = new JSDOM('<!doctype html><html><head></head><body></body></html>');
     setParent(parentDom.window);
+    vi.resetModules();
     try {
-      await import('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surface');
+      const bridge = await import('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surface');
+      bridge.installAutoCardUpdaterV2Api_ACU();
 
       expect(typeof (window as any).AutoCardUpdaterV2API?.open).toBe('function');
       expect(typeof (parentDom.window as any).AutoCardUpdaterV2API?.open).toBe('function');
@@ -133,6 +138,7 @@ describe('openVisualizerSurface_ACU', () => {
       await resetMountedApp();
     } finally {
       parentDom.window.close();
+      delete (window as any).AutoCardUpdaterV2API;
       setParent(window);
     }
   });

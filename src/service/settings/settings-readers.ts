@@ -5,10 +5,11 @@
  * 不执行保存操作。其他子模块应优先从此文件 import，而非 settings-service.ts。
  */
 
-import { currentChatFileIdentifier_ACU, settings_ACU } from '../runtime/state-manager';
+import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, settings_ACU } from '../runtime/state-manager';
 import { globalMeta_ACU } from '../../data/repositories/profile-repo';
 import { defaultWorldbookConfig_ACU } from '../../shared/defaults';
-import { deepMerge_ACU, logDebug_ACU } from '../../shared/utils';
+import { deepMerge_ACU, logDebug_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
+import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 
 /**
  * 获取当前角色的专属设置。
@@ -54,4 +55,44 @@ export function getCurrentCharSettings_ACU() {
 /** 获取当前角色的世界书配置 */
 export function getCurrentWorldbookConfig_ACU() {
     return getCurrentCharSettings_ACU().worldbookConfig;
+}
+
+/**
+ * 读取手动填表的持久化选择。未曾显式选择时默认返回当前全部表；显式选择后
+ * 严格返回仍然存在的交集，避免新增表格被意外纳入破坏性手动重填。
+ */
+export function getSelectedManualTableKeys_ACU(): string[] {
+    if (!currentJsonTableData_ACU) return [];
+    const availableKeys = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
+    if (!settings_ACU.hasManualSelection) return availableKeys;
+
+    const saved = Array.isArray(settings_ACU.manualSelectedTables)
+        ? settings_ACU.manualSelectedTables
+        : [];
+    return saved.filter((key: string) => availableKeys.includes(key));
+}
+
+function getImportTableBaseData_ACU(): Record<string, any> | null {
+    try {
+        const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true });
+        if (templateData && typeof templateData === 'object') return templateData;
+    } catch {
+        // 模板无法解析时回退到当前聊天表格，保持旧选择器的语义。
+    }
+    return currentJsonTableData_ACU || null;
+}
+
+/**
+ * 读取导入流程的持久化表选择，完全不依赖 V1 checkbox DOM。
+ */
+export function getSelectedImportTableKeys_ACU(): string[] {
+    const baseData = getImportTableBaseData_ACU();
+    if (!baseData) return [];
+    const availableKeys = getSortedSheetKeys_ACU(baseData);
+    if (!settings_ACU.hasImportTableSelection) return availableKeys;
+
+    const saved = Array.isArray(settings_ACU.importSelectedTables)
+        ? settings_ACU.importSelectedTables
+        : [];
+    return saved.filter((key: string) => availableKeys.includes(key));
 }

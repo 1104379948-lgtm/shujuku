@@ -365,15 +365,6 @@ $select.append(renderOption_ACU(preset.name, preset.name));
       return normalizedPresetName || '默认预设';
     }
 
-    export function formatPlotScopeUpdatedAt_ACU(updatedAt: any) {
-      const ts = Number(updatedAt) || 0;
-      if (!ts) return '';
-      try {
-        return new Date(ts).toLocaleString('zh-CN', { hour12: false });
-      } catch (error) {
-        return '';
-      }
-    }
 
     function populatePlotPresetSelectOptions_ACU($select: any, presets: any[], { extraPresetName = '' } = {}) {
       if (!$select || !$select.length) return;

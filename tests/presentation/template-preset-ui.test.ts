@@ -46,10 +46,6 @@ vi.mock('../../src/service/template/template-preset-service', () => ({
   resolveActiveTemplatePresetName_ACU: () => mockState.activePresetName,
 }));
 
-vi.mock('../../src/presentation/pages/popup-helpers', () => ({
-  formatPlotScopeUpdatedAt_ACU: () => '',
-}));
-
 import { _set_jQuery_API_ACU } from '../../src/shared/host-api';
 import { _set_$popupInstance_ACU } from '../../src/presentation/state/ui-refs';
 import { loadTemplatePresetSelect_ACU } from '../../src/presentation/components/template-preset-ui';

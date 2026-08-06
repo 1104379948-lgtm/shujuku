@@ -38,7 +38,7 @@
                 vector.buildBusy.value ? "正在重建..." : "立即构建交火纪要索引"
               }}
             </AcuButton>
-            <AcuButton
+            <AcuButton v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
               :disabled="vector.maintenanceBusy.value || vector.buildBusy.value"
               @click="vector.migrateLegacyIndex"
             >
@@ -339,7 +339,7 @@
               "
             />
           </AcuFormRow>
-          <AcuFormRow
+          <AcuFormRow v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
             label="滚动增量"
             hint="当前因 V2 不可变发布生命周期要求而暂停。即使历史配置已开启，归档仍会安全地写入 V2 单文件快照。"
           >
@@ -349,7 +349,7 @@
               :disabled="true"
             />
           </AcuFormRow>
-          <AcuFormRow
+          <AcuFormRow v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
             label="折叠阈值 K"
             hint="仅保留历史配置兼容；滚动增量恢复 V2 安全发布语义前不生效。"
           >
@@ -363,6 +363,7 @@
           </AcuFormRow>
         </div>
         <AcuFormRow
+          v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
           label="V2 写入闸门"
           hint="默认开启（新装或未显式配置的用户默认走 V2 归档路径）。关闭只会阻止新的 V2 快照写入；已发布 V2 快照仍可读取，绝不会回退覆盖旧路径。"
         >
@@ -373,6 +374,7 @@
           />
         </AcuFormRow>
         <AcuFormRow
+          v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
           label="V2 写入 scope allowlist"
           hint="每行一个 canonical scope fingerprint。留空表示不额外限制已显式开启的 writer；错误 scope 不会写入。"
         >
@@ -431,6 +433,18 @@ import { useVectorApiConfig } from "../composables/useVectorApiConfig";
 import { useVectorIndexConfig } from "../composables/useVectorIndexConfig";
 import { vectorIndexCopy } from "../copy/vector-index-copy";
 import { useDialogStore } from "../stores/dialog-store";
+
+/**
+ * 交火索引页遗留维护入口的 UI 显示开关。
+ *
+ * V2 快照写入已经是默认行为，并由 settings-service 的一次性 marker 处理
+ * 旧配置迁移；这里仅停止暴露可关闭 writer、约束 scope 与已停用滚动增量的
+ * 页面控件。composable、配置字段和持久化逻辑不受影响，改为 true 即可恢复。
+ *
+ * 隐藏非破坏迁移按钮会使 legacy 索引不再有页面级主动迁移入口；其读取路径
+ * 与保留策略不变。
+ */
+const SHOW_LEGACY_VECTOR_MAINTENANCE_UI = false;
 
 const dialogStore = useDialogStore();
 const vector = useVectorIndexConfig();

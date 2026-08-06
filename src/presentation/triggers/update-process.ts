@@ -3,7 +3,7 @@
 
 import { _set_isAutoUpdatingCard_ACU, _set_wasStoppedByUser_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../../service/runtime/state-manager';
 import { getChatArray_ACU } from '../../service/chat/chat-service';
-import { getManualSelectionFromUI_ACU } from '../components/table-selector';
+import { getSelectedManualTableKeys_ACU } from '../../service/settings/settings-readers';
 import { showToastr_ACU } from '../theme/toast';
 import { showCustomConfirm_ACU } from '../theme/custom-confirm';
 import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
@@ -308,8 +308,8 @@ export async function handleManualUpdate_ACU() {
         // UI：收集手动额外提示
         collectManualExtraHint_ACU();
 
-        // UI：获取手动选择的表格
-        const targetKeys = getManualSelectionFromUI_ACU();
+        // 从持久化设置读取表格选择，不能依赖已移除的 V1 checkbox DOM。
+        const targetKeys = getSelectedManualTableKeys_ACU();
 
         // [前置校验] 在弹出确认框之前，先做基本有效性检查
         // 避免用户确认后又因为"没选表格"或"聊天为空"而报错

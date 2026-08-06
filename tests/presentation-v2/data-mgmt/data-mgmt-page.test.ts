@@ -340,19 +340,24 @@ async function clickDialogCheckbox(label: string): Promise<void> {
 }
 
 describe('DataMgmtPage', () => {
-  it('渲染数据管理页三个面板，不包含交火模式索引管理', async () => {
+  it('隐藏旧数据管理入口，仅保留备份 Checkpoint 与删除清理面板', async () => {
     const { mount } = await mountDataMgmtPage();
 
     const page = document.querySelector('.acu-v2-data-mgmt-page');
     expect(page).not.toBeNull();
     const text = page!.textContent || '';
     expect(document.querySelector('.acu-v2-app__page-title')?.textContent?.trim()).toBe('数据管理');
-    expect(text).toContain('数据隔离');
     expect(text).toContain('备份与恢复');
     expect(text).toContain('删除与清理');
-    expect(text).toContain('删除当前标识注入条目');
-    expect(text).toContain('SQLite 运行时诊断');
-    expect(text).toContain('加载序号');
+    expect(text).toContain('当前聊天 Checkpoint');
+    expect(text).not.toContain('数据隔离');
+    expect(text).not.toContain('删除当前标识注入条目');
+    expect(text).not.toContain('SQLite 运行时诊断');
+    expect(text).not.toContain('加载序号');
+    expect(text).not.toContain('删除当前标识本地数据');
+    expect(text).not.toContain('合并导入（模板+指令）');
+    expect(text).not.toContain('扫描全部 V2 隔离域');
+    expect(text).not.toContain('诊断 V2 数据恢复');
     expect(text).not.toContain('交火模式索引管理');
     expect(text).not.toContain('删除当前交火索引');
     expect(text).not.toContain('清空临时缓存');
@@ -360,96 +365,16 @@ describe('DataMgmtPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('数据隔离面板承载标识应用和当前标识注入条目清理', async () => {
-    const { mount } = await mountDataMgmtPage();
 
-    const isolationPanel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page .acu-panel'))
-      .find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('数据隔离'))!;
-    const labels = Array.from(isolationPanel.querySelectorAll<HTMLButtonElement>('.acu-v2-data-mgmt-page__actions button'))
-      .map(button => button.textContent?.trim() || '');
 
-    expect(labels).toEqual(['删除当前标识注入条目', '保存并应用']);
 
-    mount.__resetAcuV2MountForTests();
-  });
 
-  it('SQLite 模式下只在确认后重新初始化运行时，且状态卡不展示错误原文', async () => {
-    const { mount, reloadStorageProvider } = await mountDataMgmtPage('chat-data', null, true);
-    const section = document.querySelector<HTMLElement>('.acu-v2-data-mgmt-page__sqlite-runtime-section')!;
-    const button = Array.from(section.querySelectorAll<HTMLButtonElement>('button'))
-      .find(item => item.textContent?.includes('重新初始化当前聊天 SQLite 运行时'));
-
-    expect(section.textContent).toContain('状态');
-    expect(section.textContent).toContain('期望模式');
-    expect(section.textContent).toContain('实际模式');
-    expect(section.textContent).toContain('加载来源');
-    expect(section.textContent).toContain('加载序号');
-    expect(section.textContent).toContain('失败代码');
-    expect(button).toBeDefined();
-    button!.click();
-    await Promise.resolve();
-    expect(reloadStorageProvider).not.toHaveBeenCalled();
-    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('不会修改聊天正文、Checkpoint、模板或世界书');
-    await clickDialogButton('重新初始化运行时');
-
-    expect(reloadStorageProvider).toHaveBeenCalledTimes(1);
-    expect(document.querySelector('.acu-v2-toast--success')?.textContent).toContain('已重新初始化');
-    expect(section.textContent).not.toContain('token=secret');
-    expect(section.textContent).not.toContain('ddl=private');
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('native 模式保留脱敏状态卡但不提供 SQLite 重初始化按钮', async () => {
-    const { mount } = await mountDataMgmtPage();
-    const section = document.querySelector<HTMLElement>('.acu-v2-data-mgmt-page__sqlite-runtime-section')!;
-
-    expect(section).not.toBeNull();
-    expect(section.textContent).toContain('状态');
-    expect(section.querySelector('button')).toBeNull();
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('SQLite runtime 重初始化进行时会禁用同页持久化恢复操作', async () => {
-    const { mount, reloadStorageProvider } = await mountDataMgmtPage('chat-data', null, true, true);
-    const runtimeSection = document.querySelector<HTMLElement>('.acu-v2-data-mgmt-page__sqlite-runtime-section')!;
-    const reloadButton = Array.from(runtimeSection.querySelectorAll<HTMLButtonElement>('button'))
-      .find(item => item.textContent?.includes('重新初始化当前聊天 SQLite 运行时'))!;
-
-    reloadButton.click();
-    await clickDialogButton('重新初始化运行时');
-
-    expect(reloadStorageProvider).toHaveBeenCalledTimes(1);
-    expect(reloadButton.disabled).toBe(true);
-    expect(Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(item => item.textContent?.includes('删除所有本地数据'))?.disabled).toBe(true);
-    expect(Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(item => item.textContent?.includes('保存并应用'))?.disabled).toBe(true);
-    const retainInput = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="number"]'))
-      .find(input => input.closest('.acu-form-row')?.textContent?.includes('保留数据层数'));
-    expect(retainInput?.disabled).toBe(true);
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('聊天切换 tick 到达时立即刷新 SQLite runtime 健康快照', async () => {
-    const { mount, runtimeHealth } = await mountDataMgmtPage('chat-data', null, true);
-    const { useChatChangedTick } = await import('../../../src/presentation-v2/composables/useChatChangedListener');
-    const section = document.querySelector<HTMLElement>('.acu-v2-data-mgmt-page__sqlite-runtime-section')!;
-
-    expect(section.textContent).toContain('7');
-    runtimeHealth.loadToken = 8;
-    useChatChangedTick().value += 1;
-    await Promise.resolve();
-
-    expect(section.textContent).toContain('8');
-    expect(section.textContent).not.toContain('token=secret');
-    mount.__resetAcuV2MountForTests();
-  });
 
   it('每个面板都渲染常驻说明信息条', async () => {
     const { mount } = await mountDataMgmtPage();
 
     const panels = document.querySelectorAll('.acu-v2-data-mgmt-page .acu-panel');
-    expect(panels.length).toBe(3);
+    expect(panels.length).toBe(2);
     panels.forEach(panel => {
       expect(panel.querySelector('.acu-panel__description-region .acu-info-banner')).not.toBeNull();
       expect(panel.querySelector('.acu-panel__header .acu-info-banner')).toBeNull();
@@ -458,7 +383,7 @@ describe('DataMgmtPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('左列放数据隔离和备份恢复，右列放删除清理', async () => {
+  it('左列只保留备份恢复，右列保留删除清理', async () => {
     const { mount } = await mountDataMgmtPage();
 
     const columns = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page__panel-stack'));
@@ -469,7 +394,7 @@ describe('DataMgmtPage', () => {
     const rightTitles = Array.from(columns[1].querySelectorAll<HTMLElement>('.acu-panel__title'))
       .map(title => title.textContent?.trim() || '');
 
-    expect(leftTitles).toEqual(['数据隔离', '备份与恢复']);
+    expect(leftTitles).toEqual(['备份与恢复']);
     expect(rightTitles).toEqual(['删除与清理']);
 
     mount.__resetAcuV2MountForTests();
@@ -485,30 +410,12 @@ describe('DataMgmtPage', () => {
 
     expect(sectionTitles).toEqual(['自动清理', '手动删除']);
     expect(cleanupPanel.textContent || '').toContain('保留数据层数');
-    expect(cleanupPanel.textContent || '').toContain('删除当前标识本地数据');
+    expect(cleanupPanel.textContent || '').not.toContain('删除当前标识本地数据');
     expect(cleanupPanel.textContent || '').toContain('恢复默认配置');
 
     mount.__resetAcuV2MountForTests();
   });
 
-  it('数据隔离面板不再使用统计列表，历史标识收进折叠列表', async () => {
-    const { mount } = await mountDataMgmtPage();
-
-    const panels = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page .acu-panel'));
-    const isolationPanel = panels.find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('数据隔离'));
-    const backupPanel = panels.find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('备份与恢复'));
-    const cleanupPanel = panels.find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('删除与清理'));
-
-    expect(isolationPanel?.querySelector('.acu-stats')).toBeNull();
-    expect(isolationPanel?.querySelector('.acu-v2-data-mgmt-page__history')).not.toBeNull();
-    expect(isolationPanel?.textContent || '').toContain('当前正在使用：alpha');
-    expect(backupPanel?.querySelector('.acu-stats')).toBeNull();
-    expect(cleanupPanel?.querySelector('.acu-stats')).toBeNull();
-    expect(backupPanel?.querySelector('.acu-v2-data-mgmt-page__meta')?.textContent).toContain('脱敏健康快照');
-    expect(cleanupPanel?.querySelector('.acu-v2-data-mgmt-page__meta')?.textContent).toContain('当前聊天 2 个 AI 楼层');
-
-    mount.__resetAcuV2MountForTests();
-  });
 
   it('全局 header 展示当前页标题，页面内不再渲染重复 header', async () => {
     const { mount } = await mountDataMgmtPage();
@@ -520,122 +427,10 @@ describe('DataMgmtPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('历史标识选择后保存并应用会切换隔离 profile', async () => {
-    const { mount, switchIsolation } = await mountDataMgmtPage();
 
-    const historyToggle = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-v2-data-mgmt-page .acu-disclosure-group__header'))
-      .find(button => button.textContent?.includes('历史标识'))!;
-    historyToggle.click();
-    await new Promise(r => setTimeout(r, 0));
-    const beta = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-v2-data-mgmt-page__history-fill'))
-      .find(item => item.textContent?.includes('beta'));
-    expect(beta).not.toBeUndefined();
-    beta!.click();
-    await new Promise(r => setTimeout(r, 0));
 
-    const applyButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('保存并应用'));
-    expect(applyButton).not.toBeUndefined();
-    applyButton!.click();
-    await new Promise(r => setTimeout(r, 0));
 
-    expect(switchIsolation).toHaveBeenCalledWith('beta');
 
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('输入任意新标识后保存会刷新当前标识和历史列表', async () => {
-    const { mount, switchIsolation } = await mountDataMgmtPage();
-    const newCode = 'custom-profile';
-
-    const isolationPanel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page .acu-panel'))
-      .find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('数据隔离'))!;
-    const codeInput = isolationPanel.querySelector<HTMLInputElement>('input[type="text"]')!;
-    codeInput.value = newCode;
-    codeInput.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise(r => setTimeout(r, 0));
-
-    const applyButton = Array.from(isolationPanel.querySelectorAll<HTMLButtonElement>('.acu-v2-data-mgmt-page__actions button'))
-      .find(button => button.textContent?.includes('保存并应用'))!;
-    applyButton.click();
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(switchIsolation).toHaveBeenCalledWith(newCode);
-    expect(document.body.textContent || '').toContain(`已切换到 ${newCode}。`);
-    expect(isolationPanel.textContent || '').toContain(`当前正在使用：${newCode}`);
-
-    const historyToggle = isolationPanel.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!;
-    historyToggle.click();
-    await new Promise(r => setTimeout(r, 0));
-    const options = Array.from(isolationPanel.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page__history-fill'))
-      .map(item => item.textContent?.trim() || '');
-    expect(options.some(item => item.includes(newCode))).toBe(true);
-
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('历史标识行内可以删除选中的历史记录', async () => {
-    const { mount, removeHistory } = await mountDataMgmtPage();
-
-    const isolationPanel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page .acu-panel'))
-      .find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('数据隔离'))!;
-    const historyToggle = isolationPanel.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!;
-    historyToggle.click();
-    await new Promise(r => setTimeout(r, 0));
-
-    const removeButton = isolationPanel.querySelector<HTMLButtonElement>('button[aria-label="删除历史标识：beta"]');
-    expect(removeButton).not.toBeNull();
-    expect(removeButton!.disabled).toBe(false);
-    removeButton!.click();
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(removeHistory).toHaveBeenCalledWith('beta');
-    expect(document.body.textContent || '').toContain('已从历史记录移除标识：beta');
-
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('删除当前正在使用的历史标识会先切回默认再移除历史', async () => {
-    const { mount, switchIsolation, removeHistory } = await mountDataMgmtPage();
-
-    const isolationPanel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page .acu-panel'))
-      .find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('数据隔离'))!;
-    const historyToggle = isolationPanel.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!;
-    historyToggle.click();
-    await new Promise(r => setTimeout(r, 0));
-
-    const removeButton = isolationPanel.querySelector<HTMLButtonElement>('button[aria-label="删除历史标识：alpha"]')!;
-    removeButton.click();
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(switchIsolation).toHaveBeenCalledWith('');
-    expect(removeHistory).toHaveBeenCalledWith('alpha');
-    expect(document.body.textContent || '').toContain('已从历史记录移除标识：alpha；当前已切换到默认数据（未隔离）。');
-    expect(isolationPanel.textContent || '').toContain('当前正在使用：默认数据（未隔离）');
-
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('删除当前标识本地数据会保存范围并调用清理链路', async () => {
-    const { mount, deleteLocalDataWithScope, cleanupWorldbook, loadOrCreate, refreshMerged, saveSettings } = await mountDataMgmtPage();
-
-    const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('删除当前标识本地数据'));
-    expect(deleteButton).not.toBeUndefined();
-    deleteButton!.click();
-    await clickDialogButton('删除数据');
-    await new Promise(r => setTimeout(r, 0));
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(saveSettings).toHaveBeenCalled();
-    expect(deleteLocalDataWithScope).toHaveBeenCalledWith('current', 1, null, 'range');
-    expect(loadOrCreate).toHaveBeenCalled();
-    expect(refreshMerged).toHaveBeenCalled();
-    expect(cleanupWorldbook).toHaveBeenCalled();
-    expect(document.body.textContent || '').toContain('已删除 2 条消息中的本地数据');
-
-    mount.__resetAcuV2MountForTests();
-  });
 
   it('T5 范围留空点删除所有本地数据 → 走 purge 分支（两级确认后 deleteLocalDataWithScope 收到 all/null/null/purge）', async () => {
     const { mount, deleteLocalDataWithScope } = await mountDataMgmtPage();
@@ -827,32 +622,6 @@ describe('DataMgmtPage', () => {
   });
 
 
-  it('删除当前标识注入条目会调用世界书注入条目删除链路', async () => {
-    const { mount, deleteGenerated } = await mountDataMgmtPage();
-
-    const isolationPanel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page .acu-panel'))
-      .find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('数据隔离'))!;
-    const cleanupPanel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page .acu-panel'))
-      .find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('删除与清理'))!;
-    const isolationButtons = Array.from(isolationPanel.querySelectorAll<HTMLButtonElement>('.acu-v2-data-mgmt-page__actions button'));
-    const localDataButtons = Array.from(cleanupPanel.querySelectorAll<HTMLButtonElement>('.acu-v2-data-mgmt-page__command-grid--cleanup button'));
-    expect(localDataButtons.map(button => button.textContent?.trim() || '')).toEqual([
-      '删除当前标识本地数据',
-      '删除所有本地数据',
-      '恢复默认配置',
-    ]);
-    const button = isolationButtons
-      .find(item => item.textContent?.includes('删除当前标识注入条目'));
-    expect(button).not.toBeUndefined();
-    button!.click();
-    await clickDialogButton('删除注入条目');
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(deleteGenerated).toHaveBeenCalled();
-    expect(document.body.textContent || '').toContain('已删除当前标识对应的数据库注入条目。');
-
-    mount.__resetAcuV2MountForTests();
-  });
 
   it('删除与清理面板可以保存自动保留本地数据层数', async () => {
     const { mount, settings, saveSettings } = await mountDataMgmtPage();
@@ -985,59 +754,7 @@ describe('DataMgmtPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('模板覆盖最新层数据会先同步当前聊天生效模板再执行覆盖链路', async () => {
-    const { mount, applyTemplateScope, overrideLatest, loadOrCreate, refreshMerged } = await mountDataMgmtPage();
 
-    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(item => item.textContent?.includes('模板覆盖最新层数据'));
-    expect(button).not.toBeUndefined();
-    button!.click();
-    await clickDialogButton('覆盖数据');
-    await new Promise(r => setTimeout(r, 0));
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(applyTemplateScope).toHaveBeenCalledTimes(1);
-    expect(overrideLatest).toHaveBeenCalledTimes(1);
-    expect(applyTemplateScope.mock.invocationCallOrder[0]).toBeLessThan(overrideLatest.mock.invocationCallOrder[0]);
-    expect(loadOrCreate).toHaveBeenCalled();
-    expect(refreshMerged).toHaveBeenCalled();
-    expect(document.body.textContent || '').toContain('已使用当前生效模板覆盖最新 AI 楼层的 3 个表格。');
-
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('备份与恢复面板导出合并配置和 JSON 数据使用普通按钮', async () => {
-    const { mount } = await mountDataMgmtPage();
-
-    const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page .acu-panel'))
-      .find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('备份与恢复'));
-    expect(panel).not.toBeUndefined();
-
-    const commandGrid = panel!.querySelector('.acu-v2-data-mgmt-page__command-grid');
-    expect(commandGrid).not.toBeNull();
-    const buttons = Array.from(commandGrid!.querySelectorAll<HTMLButtonElement>('button'));
-    const labels = buttons.map(button => button.textContent?.trim() || '').filter(Boolean);
-    expect(labels).toEqual([
-      '合并导入（模板+指令）',
-      '合并导出（模板+指令）',
-      '特殊导出',
-      '模板覆盖最新层数据',
-    ]);
-    expect(buttons.find(button => button.textContent?.includes('特殊导出'))?.classList.contains('acu-btn--default')).toBe(true);
-    expect(buttons.find(button => button.textContent?.includes('模板覆盖最新层数据'))?.classList.contains('acu-btn--default')).toBe(true);
-    expect(buttons.find(button => button.textContent?.includes('合并导入（模板+指令）'))?.classList.contains('acu-btn--block')).toBe(true);
-
-    const checkpointSection = panel!.querySelector('.acu-v2-data-mgmt-page__checkpoint-section');
-    expect(checkpointSection).not.toBeNull();
-    expect(checkpointSection?.textContent).toContain('导出 Checkpoint');
-    expect(checkpointSection?.textContent).toContain('导入 Checkpoint');
-    expect(checkpointSection?.textContent).toContain('全部 AI 楼层、所有隔离标识');
-    expect(checkpointSection?.textContent).toContain('当前激活隔离键的最新 AI 楼层');
-    expect(checkpointSection?.textContent).toContain('后续更新将使用该模板');
-    expect(checkpointSection?.textContent).toContain('全局模板和聊天正文不变');
-
-    mount.__resetAcuV2MountForTests();
-  });
 
   it('导出 Checkpoint 文件名清洗非法字符并附加固定时间戳', async () => {
     const { mount, buildCheckpoint } = await mountDataMgmtPage('alpha/beta:*?gamma');
@@ -1260,184 +977,9 @@ describe('DataMgmtPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('扫描全部 V2 隔离域只展示诊断，不创建恢复计划或切换当前隔离域', async () => {
-    const { mount, settings, prepareV2Recovery, scanV2IsolationDiagnostics } = await mountDataMgmtPage('alpha');
-    const scanButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('扫描全部 V2 隔离域'))!;
 
-    scanButton.click();
-    await new Promise(r => setTimeout(r, 0));
 
-    expect(scanV2IsolationDiagnostics).toHaveBeenCalledTimes(1);
-    expect(prepareV2Recovery).not.toHaveBeenCalled();
-    expect(settings.dataIsolationCode).toBe('alpha');
-    const section = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page__checkpoint-section'))
-      .find(item => item.textContent?.includes('V2 隔离域恢复诊断'))!;
-    expect(section.textContent).toContain('alpha candidate');
-    expect(section.textContent).toContain('beta has no base');
-    expect(section.textContent).toContain('请切换到该隔离域后重新诊断；当前恢复提交不会跨隔离域执行。');
-    expect(section.textContent).toContain('当前隔离域存在可恢复候选，请使用下方“诊断 V2 数据恢复”生成可提交计划。');
-    mount.__resetAcuV2MountForTests();
-  });
 
-  it('V2 恢复备份只导出当前隔离域的 AI 楼层快照', async () => {
-    const { mount, chat, prepareV2Recovery } = await mountDataMgmtPage('alpha/beta:*?gamma');
-    const exportedBackup = {
-      version: 1,
-      createdAt: 1,
-      recoveryKind: 'repaired_full_checkpoint',
-      sourceMessageIndex: 1,
-      failedMessageIndex: 1,
-      storageFrame: { version: 2, checkpoint: { kind: 'full', data: { value: 'before-export' } }, logEntries: [] },
-    };
-    chat[0].TavernDB_ACU_IsolatedData = { alpha: { recoveryBackup: { ignored: 'user-message' } } };
-    chat[1].TavernDB_ACU_IsolatedData.alpha.recoveryBackup = exportedBackup;
-    chat[1].TavernDB_ACU_IsolatedData.beta = { recoveryBackup: { ignored: 'other-isolation' } };
-    chat[2].TavernDB_ACU_IsolatedData.alpha.recoveryBackup = { ...exportedBackup, sourceMessageIndex: 2 };
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 6, 12, 21, 18, 41));
-
-    const diagnosticButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('诊断 V2 数据恢复'))!;
-    diagnosticButton.click();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(prepareV2Recovery).toHaveBeenCalledTimes(1);
-    const section = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page__checkpoint-section'))
-      .find(item => item.textContent?.includes('V2 数据恢复诊断'))!;
-    const exportButton = Array.from(section.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('导出已保存的原始 frame 备份'))!;
-
-    exportButton.click();
-    exportedBackup.storageFrame.checkpoint.data.value = 'mutated-after-export';
-
-    expect(capturedDownloads).toEqual(['TavernDB_v2_recovery_backups_alpha_beta_gamma_20260712-211841.json']);
-    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
-    const blob = (URL.createObjectURL as any).mock.calls[0][0] as Blob;
-    const payload = JSON.parse(await blob.text());
-    expect(payload).toMatchObject({
-      version: 1,
-      isolationKey: 'alpha',
-      backups: [
-        { messageIndex: 1, backup: { sourceMessageIndex: 1 } },
-        { messageIndex: 2, backup: { sourceMessageIndex: 2 } },
-      ],
-    });
-    expect(payload.backups).toHaveLength(2);
-    expect(payload.backups[0].backup.storageFrame.checkpoint.data.value).toBe('before-export');
-    expect(payload.backups.some((item: any) => item.messageIndex === 0)).toBe(false);
-
-    vi.useRealTimers();
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('V2 恢复备份为空时不触发下载并提示原因', async () => {
-    const { mount, prepareV2Recovery } = await mountDataMgmtPage();
-    const diagnosticButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('诊断 V2 数据恢复'))!;
-    diagnosticButton.click();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(prepareV2Recovery).toHaveBeenCalledTimes(1);
-    const section = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page__checkpoint-section'))
-      .find(item => item.textContent?.includes('V2 数据恢复诊断'))!;
-    const exportButton = Array.from(section.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('导出已保存的原始 frame 备份'))!;
-
-    exportButton.click();
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(capturedDownloads).toEqual([]);
-    expect(URL.createObjectURL).not.toHaveBeenCalled();
-    const warningToasts = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-toast--warning'));
-    expect(warningToasts.at(-1)?.textContent).toContain('当前隔离标识没有可导出的 V2 恢复原始 frame 备份。');
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('temporary Sheet anchor 恢复诊断展示受影响 Sheet、位置与自动收敛入口', async () => {
-    const { mount, prepareV2Recovery } = await mountDataMgmtPage();
-    prepareV2Recovery.mockResolvedValueOnce({
-      planId: 'recovery-anchor-plan',
-      status: 'recoverable_temporary_sheet_anchor',
-      isolationKey: 'alpha',
-      sourceMessageIndex: 384,
-      affectedSheetKeys: ['sheet_global'],
-      compatibilityRepairs: [{
-        kind: 'temporary_sheet_anchor', sheetKey: 'sheet_global', messageIndex: 384, seq: 1, operationIndex: 0,
-        templateFingerprint: 'fingerprint', reason: 'missing_at_operation',
-      }],
-      requiresConfirmation: false,
-      message: '检测到历史回放依赖临时 Sheet 补锚（sheet_global，位置 #384/seq=1/op=0）；可通过 integrity_repair full checkpoint 自动收敛。',
-    });
-    const diagnosticButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('诊断 V2 数据恢复'))!;
-
-    diagnosticButton.click();
-    await new Promise(r => setTimeout(r, 0));
-    const section = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page__checkpoint-section'))
-      .find(item => item.textContent?.includes('V2 数据恢复诊断'))!;
-
-    expect(section.textContent).toContain('sheet_global');
-    expect(section.textContent).toContain('#384/seq=1/op=0');
-    expect(section.textContent).toContain('自动收敛');
-    expect(section.textContent).toContain('应用 Checkpoint 修复/收敛');
-    expect(section.textContent).not.toContain('确认无锚点 data_replace 恢复');
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('双 full checkpoint 收敛诊断渲染提交按钮与专属告警文案', async () => {
-    const { mount, prepareV2Recovery } = await mountDataMgmtPage();
-    prepareV2Recovery.mockResolvedValueOnce({
-      planId: 'recovery-redundant-full-plan',
-      status: 'recoverable_redundant_full_checkpoint',
-      isolationKey: 'alpha',
-      sourceMessageIndex: 0,
-      affectedSheetKeys: ['sheet_global'],
-      requiresConfirmation: false,
-      message: '检测到多个整层 full checkpoint (0, 10)；将保留末位 full 并无损降级其余。',
-    });
-    const diagnosticButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('诊断 V2 数据恢复'))!;
-
-    diagnosticButton.click();
-    await new Promise(r => setTimeout(r, 0));
-    const section = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page__checkpoint-section'))
-      .find(item => item.textContent?.includes('V2 数据恢复诊断'))!;
-
-    // P4 的恢复出口必须在 UI 可点击；否则服务层诊断出的收敛计划永远无法提交。
-    expect(section.textContent).toContain('应用 Checkpoint 修复/收敛');
-    expect(section.textContent).not.toContain('确认无锚点 data_replace 恢复');
-    const warningToasts = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-toast--warning'));
-    expect(warningToasts.at(-1)?.textContent).toContain('回放只认最后一个');
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('V2 orphan 恢复需两次确认，页面仅向服务传递冻结 planId 与确认布尔值', async () => {
-    const { mount, prepareV2Recovery, commitV2Recovery } = await mountDataMgmtPage();
-    const diagnosticButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('诊断 V2 数据恢复'))!;
-
-    diagnosticButton.click();
-    await new Promise(r => setTimeout(r, 0));
-    expect(prepareV2Recovery).toHaveBeenCalledTimes(1);
-    const section = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page__checkpoint-section'))
-      .find(item => item.textContent?.includes('V2 数据恢复诊断'))!;
-    const commitButton = Array.from(section.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('确认无锚点 data_replace 恢复'))!;
-
-    commitButton.click();
-    await new Promise(r => setTimeout(r, 0));
-    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('确认无锚点 data_replace 恢复');
-    expect(commitV2Recovery).not.toHaveBeenCalled();
-    await clickDialogButton('继续恢复');
-    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('再次确认无锚点恢复');
-    expect(commitV2Recovery).not.toHaveBeenCalled();
-    await clickDialogButton('确认提交恢复');
-
-    expect(commitV2Recovery).toHaveBeenCalledWith('recovery-plan', { confirmOrphanDataReplace: true });
-    expect(commitV2Recovery.mock.calls[0]).toHaveLength(2);
-    mount.__resetAcuV2MountForTests();
-  });
 
 
   it('全页只保留删除所有本地数据为红色危险按钮', async () => {

@@ -10,6 +10,7 @@ import { $manualTableSelector_ACU, $importTableSelector_ACU } from '../state/ui-
 import { renderManualTableSelector_ACU, renderImportTableSelector_ACU } from './table-selector';
 import { updateCardUpdateStatusDisplay_ACU } from './update-status-display';
 import { topLevelWindow_ACU } from '../../shared/env';
+import { getUiSurface_ACU } from '../../shared/ui-surface-registry';
 import { logDebug_ACU } from '../../shared/utils';
 import { loadTemplatePresetSelect_ACU } from './template-preset-ui';
 import { loadPlotSettingsToUI_ACU } from '../pages/popup-helpers';
@@ -33,14 +34,14 @@ export async function refreshMergedDataAndNotifyWithUI_ACU(
         }
     } catch (_) {}
 
-    // 2. 刷新可视化编辑器
+    // 2. 刷新已注册的 V2 可视化界面
     setTimeout(() => {
         try {
-            if (typeof (window as any).ACU_Visualizer_Refresh === 'function') {
-                (window as any).ACU_Visualizer_Refresh();
-                logDebug_ACU('Triggered global visualizer refresh.');
-            }
-        } catch (_) {}
+            const surface = getUiSurface_ACU();
+            if (surface) void surface.refreshVisualizer();
+        } catch (error) {
+            logDebug_ACU('Failed to request V2 visualizer refresh:', error);
+        }
     }, 200);
 
     // 3. UI 选择器刷新
@@ -103,12 +104,11 @@ export function refreshPresetUIAfterSwitch_ACU(
         logDebug_ACU('[refreshPresetUI] 数据库状态卡片刷新失败:', e);
     }
 
-    // 4. 独立数据库编辑器窗口：顶部模板标识
+    // 4. V2 数据库编辑器
     try {
-        if (typeof (window as any).ACU_Visualizer_Refresh === 'function') {
-            (window as any).ACU_Visualizer_Refresh();
-        }
-    } catch (e) {
-        logDebug_ACU('[refreshPresetUI] 可视化编辑器刷新失败:', e);
+        const surface = getUiSurface_ACU();
+        if (surface) void surface.refreshVisualizer();
+    } catch (error) {
+        logDebug_ACU('[refreshPresetUI] V2 可视化编辑器刷新失败:', error);
     }
 }

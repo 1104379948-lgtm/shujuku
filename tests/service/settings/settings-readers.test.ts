@@ -11,10 +11,13 @@ const { mockSettings } = vi.hoisted(() => {
   };
   return { mockSettings };
 });
+let currentTables: any = {};
+const parseTableTemplate = vi.fn();
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: mockSettings,
   currentChatFileIdentifier_ACU: 'test-char',
+  get currentJsonTableData_ACU() { return currentTables; },
 }));
 
 vi.mock('../../../src/data/repositories/profile-repo', () => ({
@@ -33,16 +36,29 @@ vi.mock('../../../src/shared/defaults', () => ({
 vi.mock('../../../src/shared/utils', () => ({
   logDebug_ACU: vi.fn(),
   deepMerge_ACU: vi.fn((target: any, source: any) => ({ ...target, ...source })),
+  parseTableTemplateJson_ACU: (...args: any[]) => parseTableTemplate(...args),
+}));
+vi.mock('../../../src/service/template/chat-scope', () => ({
+  getSortedSheetKeys_ACU: (tables: Record<string, unknown> | null | undefined) => Object.keys(tables || {}).sort(),
 }));
 
 import {
   getCurrentCharSettings_ACU,
   getCurrentWorldbookConfig_ACU,
+  getSelectedImportTableKeys_ACU,
+  getSelectedManualTableKeys_ACU,
 } from '../../../src/service/settings/settings-readers';
 
 beforeEach(() => {
   mockSettings.characterSettings = {};
   mockSettings.zeroTkOccupyModeDefault = false;
+  mockSettings.manualSelectedTables = [];
+  mockSettings.hasManualSelection = false;
+  mockSettings.importSelectedTables = [];
+  mockSettings.hasImportTableSelection = false;
+  currentTables = { sheet_b: {}, sheet_a: {} };
+  parseTableTemplate.mockReset();
+  parseTableTemplate.mockReturnValue(null);
 });
 
 describe('getCurrentCharSettings_ACU', () => {
@@ -99,5 +115,36 @@ describe('getCurrentWorldbookConfig_ACU', () => {
     const charSettings = getCurrentCharSettings_ACU();
     const config = getCurrentWorldbookConfig_ACU();
     expect(config).toBe(charSettings.worldbookConfig);
+  });
+});
+
+
+describe('持久化表格选择读取器', () => {
+  it('未曾手动选择时返回当前全部表，显式选择后严格返回仍存在的交集', () => {
+    expect(getSelectedManualTableKeys_ACU()).toEqual(['sheet_a', 'sheet_b']);
+
+    mockSettings.hasManualSelection = true;
+    mockSettings.manualSelectedTables = ['sheet_b', 'deleted', 'sheet_b'];
+
+    expect(getSelectedManualTableKeys_ACU()).toEqual(['sheet_b', 'sheet_b']);
+  });
+
+  it('导入选择优先使用无种子行模板；显式空选择不回退为全选', () => {
+    parseTableTemplate.mockReturnValue({ template_b: {}, template_a: {} });
+    expect(getSelectedImportTableKeys_ACU()).toEqual(['template_a', 'template_b']);
+
+    mockSettings.hasImportTableSelection = true;
+    mockSettings.importSelectedTables = [];
+
+    expect(getSelectedImportTableKeys_ACU()).toEqual([]);
+    expect(parseTableTemplate).toHaveBeenCalledWith({ stripSeedRows: true });
+  });
+
+  it('模板不可用时导入选择回退到当前聊天表格', () => {
+    parseTableTemplate.mockImplementation(() => { throw new Error('invalid template'); });
+    mockSettings.hasImportTableSelection = true;
+    mockSettings.importSelectedTables = ['sheet_b', 'deleted'];
+
+    expect(getSelectedImportTableKeys_ACU()).toEqual(['sheet_b']);
   });
 });

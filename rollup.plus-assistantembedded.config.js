@@ -1,12 +1,18 @@
 import typescript from '@rollup/plugin-typescript';
 import commonjs from '@rollup/plugin-commonjs';
 import nodeResolve from '@rollup/plugin-node-resolve';
-import { copyFileSync, mkdirSync } from 'fs';
+import replace from '@rollup/plugin-replace';
+import vuePlugin from 'unplugin-vue/rollup';
+import sfcStyleInjector from './src/presentation-v2/build/rollup-sfc-style-injector.js';
+import vueScriptTranspiler from './src/presentation-v2/build/rollup-vue-script-transpiler.js';
+import { copyFileSync, mkdirSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const PACKAGE_VERSION = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8')).version;
+const ACU_BUILD_VERSION = process.env.ACU_BUILD_VERSION || PACKAGE_VERSION;
 
 function createTsPlugin() {
   return typescript({
@@ -19,6 +25,28 @@ function createTsPlugin() {
       outDir: 'dist/plus-assistantembedded',
     },
     include: ['src/**/*.ts', 'src/**/*.js'],
+  });
+}
+
+function createVuePlugin() {
+  return vuePlugin({
+    isProduction: true,
+    root: process.cwd(),
+    sourceMap: false,
+    inlineTemplate: false,
+  });
+}
+
+function createReplacePlugin() {
+  return replace({
+    preventAssignment: true,
+    values: {
+      'process.env.NODE_ENV': JSON.stringify('production'),
+      'globalThis.__ACU_BUILD_VERSION__': JSON.stringify(ACU_BUILD_VERSION),
+      __VUE_OPTIONS_API__: 'true',
+      __VUE_PROD_DEVTOOLS__: 'false',
+      __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false',
+    },
   });
 }
 
@@ -52,12 +80,17 @@ const config = {
         return null;
       },
     },
+    createVuePlugin(),
+    vueScriptTranspiler(),
+    sfcStyleInjector(),
     nodeResolve({
       browser: true,
       preferBuiltins: false,
+      extensions: ['.mjs', '.js', '.json', '.ts', '.vue'],
     }),
     commonjs(),
     createTsPlugin(),
+    createReplacePlugin(),
     {
       name: 'copy-plus-assistantembedded-manifest',
       writeBundle() {

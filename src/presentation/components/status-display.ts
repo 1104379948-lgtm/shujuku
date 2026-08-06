@@ -93,19 +93,6 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
     return !!$popupInstance_ACU;
   }
 
-  // [T177] 读取酒馆发送输入框的值
-  export function getSendTextareaValue_ACU() {
-    try { return jQuery_API_ACU('#send_textarea').val() || ''; } catch(e) { return ''; }
-  }
-
-  // [T177] 设置酒馆发送输入框的值并触发 input 事件
-  export function setSendTextareaValue_ACU(text: string) {
-    try {
-      jQuery_API_ACU('#send_textarea').val(text);
-      jQuery_API_ACU('#send_textarea').trigger('input');
-    } catch(e) {}
-  }
-
   // [T178] 将删除设置同步到 UI。合并总结 UI 已停用，不再同步 merge/auto-merge 控件。
   export function syncMergeSettingsToUI_ACU(s: any) {
     if (!$popupInstance_ACU) return;
@@ -227,9 +214,4 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
       if ($importTableSelector_ACU && typeof renderImportTableSelector_ACU === 'function') renderImportTableSelector_ACU();
       $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-api-mode"][value="${s.apiMode}"]`).prop('checked', true);
       if (typeof updateApiModeView_ACU === 'function') updateApiModeView_ACU(s.apiMode);
-  }
-
-  // [T180] 模拟点击酒馆发送按钮
-  export function clickSendButton_ACU() {
-    try { jQuery_API_ACU('#send_but').click(); } catch(e) {}
   }

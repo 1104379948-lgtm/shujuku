@@ -5,9 +5,9 @@ import { STORAGE_KEY_IMPORTED_ENTRIES_ACU, STORAGE_KEY_IMPORTED_STATUS_ACU, STOR
 
 import { importTempGet_ACU, importTempRemove_ACU, importTempSet_ACU } from '../../shared/idb-import-temp';
 import { getImportWorldbookTarget_ACU, updateImportStatusUI_ACU } from '../components/import-status-ui';
-import { getImportSelectionFromUI_ACU } from '../components/table-selector';
 import { showToastr_ACU } from '../theme/toast';
 import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
+import { getSelectedImportTableKeys_ACU } from '../../service/settings/settings-readers';
 import { getCurrentCharPrimaryLorebook_ACU, isWorldbookApiAvailable_ACU, loadImportedJsonDataFromLorebook_ACU, saveImportedJsonDataToLorebook_ACU, deleteImportedJsonDataFromLorebook_ACU } from '../../service/worldbook/worldbook-service';
 // re-export 从 service 层搬迁的业务逻辑函数，保持外部调用方兼容
 export { loadImportedJsonDataFromLorebook_ACU, saveImportedJsonDataToLorebook_ACU, deleteImportedJsonDataFromLorebook_ACU } from '../../service/worldbook/worldbook-service';
@@ -58,7 +58,7 @@ export   async function processImportedTxtAsUpdates_ACU() {
       }
 
       // 读取当前表选择（空且曾选择过 => 不允许执行）
-      const selectedSheetKeys = getImportSelectionFromUI_ACU();
+      const selectedSheetKeys = getSelectedImportTableKeys_ACU();
       if (settings_ACU.hasImportTableSelection && (!selectedSheetKeys || selectedSheetKeys.length === 0)) {
           showToastr_ACU('error', '未选择任何表格，无法注入。请先在"注入表选择"中勾选至少一个表。');
           return;

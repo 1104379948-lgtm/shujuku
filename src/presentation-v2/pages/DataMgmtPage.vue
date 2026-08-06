@@ -6,7 +6,7 @@
 
     <AcuPanelGrid class="acu-v2-data-mgmt-page__layout">
       <div class="acu-v2-data-mgmt-page__panel-stack">
-        <AcuPanel
+        <AcuPanel v-if="SHOW_LEGACY_DATA_MGMT_UI"
           :title="dataMgmtCopy.panels.isolation.title"
           :description="dataMgmtCopy.panels.isolation.description"
         >
@@ -94,7 +94,7 @@
           :title="dataMgmtCopy.panels.backup.title"
           :description="dataMgmtCopy.panels.backup.description"
         >
-          <div class="acu-v2-data-mgmt-page__command-grid">
+          <div v-if="SHOW_LEGACY_DATA_MGMT_UI" class="acu-v2-data-mgmt-page__command-grid">
             <AcuFileButton
               variant="primary"
               block
@@ -240,6 +240,7 @@
             </div>
           </section>
           <section
+            v-if="SHOW_LEGACY_DATA_MGMT_UI"
             class="acu-v2-data-mgmt-page__checkpoint-section acu-v2-data-mgmt-page__sqlite-runtime-section"
             aria-labelledby="acu-sqlite-runtime-title"
           >
@@ -267,7 +268,7 @@
               </AcuButton>
             </div>
           </section>
-          <div class="acu-v2-data-mgmt-page__checkpoint-actions">
+          <div v-if="SHOW_LEGACY_DATA_MGMT_UI" class="acu-v2-data-mgmt-page__checkpoint-actions">
             <AcuButton block :disabled="runtimeDiagnostic.busy.value" :loading="flow.busyAction.value === 'scan-v2-isolation-diagnostics'" @click="flow.scanV2IsolationDiagnostics">
               扫描全部 V2 隔离域
             </AcuButton>
@@ -361,7 +362,7 @@
           <div
             class="acu-v2-data-mgmt-page__command-grid acu-v2-data-mgmt-page__command-grid--cleanup"
           >
-            <AcuButton
+            <AcuButton v-if="SHOW_LEGACY_DATA_MGMT_UI"
               block
               :disabled="runtimeDiagnostic.busy.value"
               :loading="flow.busyAction.value === 'delete-current-local'"
@@ -414,6 +415,19 @@ import {
 import { dataMgmtCopy } from "../copy/data-mgmt-copy";
 import { useDialogStore } from "../stores/dialog-store";
 import type { MixedStorageCommitAction_ACU } from "../../shared/models/mixed-storage-commit-action";
+
+/**
+ * 旧数据管理入口的 UI 显示开关。
+ *
+ * 本次仅隐藏 UI，不改变业务逻辑：useDataManagement、SQLite 运行时诊断、
+ * busy 联动和全部 service 链路仍会初始化并随聊天切换刷新。改为 true 即可
+ * 恢复以下区块：数据隔离、备份四按钮、当前标识本地数据删除、SQLite 诊断和
+ * V2 隔离域/恢复诊断触发按钮。
+ *
+ * 隐藏这些入口意味着隔离标识切换及手工 V2 恢复诊断不再能从页面触达；已持久化
+ * 的隔离逻辑不受影响。
+ */
+const SHOW_LEGACY_DATA_MGMT_UI = false;
 
 const resetDefaultsCleanupOptions: Array<{
   value: ResetDefaultsCleanupKey;

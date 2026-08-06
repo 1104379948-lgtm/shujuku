@@ -4,12 +4,12 @@
  */
 
 import { logError_ACU } from '../../../shared/utils';
+import { getUiSurface_ACU } from '../../../shared/ui-surface-registry';
 import { exportCurrentJsonData_ACU, exportTableTemplate_ACU, importTableTemplate_ACU, migrateLegacySummaryVectorIndex_ACU, overrideLatestLayerWithTemplate_ACU, resetAllToDefaults_ACU, resetTableTemplate_ACU } from '../../triggers/data-admin-ui';
 import { importCombinedSettings_ACU } from '../../triggers/admin-ui';
 import { exportCombinedSettings_ACU, handleManualMergeSummary_ACU } from '../../triggers/update-trigger';
 import { clearImportLocalStorage_ACU, clearImportedEntries_ACU, deleteImportedEntries_ACU } from '../../triggers/import-process';
 import { handleTxtImportAndSplit_ACU, handleInjectSplitEntriesFull_ACU, handleInjectSplitEntriesStandard_ACU, handleInjectSplitEntriesSummary_ACU } from '../../components/import-status-ui';
-import { openNewVisualizer_ACU } from '../../pages/visualizer';
 import { deleteImportedEntriesCore_ACU, importTxtTextAndSplitCore_ACU, injectImportedSelectedCore_ACU } from '../../../service/import/import-executor';
 import { commitPreparedV2Recovery_ACU, prepareV2Recovery_ACU } from '../../../service/table/table-v2-recovery-service';
 import type { ApiGroupContext } from './callback-api';
@@ -111,7 +111,19 @@ export function createDataAdminApi(_ctx: ApiGroupContext): Record<string, Functi
         exportCombinedSettings: async function() { try { return await exportCombinedSettings_ACU(); } catch (e) { logError_ACU('exportCombinedSettings failed:', e); return false; } },
         overrideWithTemplate: async function() { try { return await overrideLatestLayerWithTemplate_ACU(); } catch (e) { logError_ACU('overrideWithTemplate failed:', e); return false; } },
         migrateLegacyVectorIndex: async function() { try { return await migrateLegacySummaryVectorIndex_ACU(); } catch (e) { logError_ACU('migrateLegacyVectorIndex failed:', e); return false; } },
-        openVisualizer: async function() { try { return await openNewVisualizer_ACU(); } catch (e) { logError_ACU('openVisualizer failed:', e); return false; } },
+        openVisualizer: async function() {
+            const surface = getUiSurface_ACU();
+            if (!surface) {
+                logError_ACU('openVisualizer failed: V2 UI surface is not registered.');
+                return false;
+            }
+            try {
+                return await surface.openVisualizer();
+            } catch (error) {
+                logError_ACU('openVisualizer failed:', error);
+                return false;
+            }
+        },
 
         // 导入TXT链路
         importTxtAndSplit: async function() { try { return await handleTxtImportAndSplit_ACU(); } catch (e) { logError_ACU('importTxtAndSplit failed:', e); return false; } },

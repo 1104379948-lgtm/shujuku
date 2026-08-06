@@ -8,35 +8,35 @@ const h = vi.hoisted(() => ({
   registry: [] as any[], reads: vi.fn(), validate: vi.fn(), assign: vi.fn(), write: vi.fn(), save: vi.fn(), saveStrict: vi.fn(),
 }));
 
-vi.mock('../../src/service/runtime/state-manager', () => ({
+vi.mock('../../../src/service/runtime/state-manager', () => ({
   currentChatFileIdentifier_ACU: h.chatKey,
   getCurrentIsolationKey_ACU: () => h.isolationKey,
   get currentJsonTableData_ACU() { return h.tables; },
   settings_ACU: {},
 }));
-vi.mock('../../src/shared/utils', () => ({ isSummaryOrOutlineTable_ACU: () => true, logDebug_ACU: vi.fn(), logError_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
-vi.mock('../../src/shared/template-preset-utils', () => ({ getCurrentCharacterCardName_ACU: () => 'char' }));
-vi.mock('../../src/data/storage/vector-index-st-files-storage', () => ({
+vi.mock('../../../src/shared/utils', () => ({ isSummaryOrOutlineTable_ACU: () => true, logDebug_ACU: vi.fn(), logError_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
+vi.mock('../../../src/shared/template-preset-utils', () => ({ getCurrentCharacterCardName_ACU: () => 'char' }));
+vi.mock('../../../src/data/storage/vector-index-st-files-storage', () => ({
   buildVectorIndexSingleSnapshotFilePath_ACU: (p: any) => p.chatName ? `named-${p.sourceTableKey}` : `unnamed-${p.sourceTableKey}`,
   buildLegacyVectorIndexSingleSnapshotFilePath_ACU: (p: any) => `legacy-${p.sourceTableKey}`,
   buildVectorIndexSingleSnapshotV2ScopeToken_ACU: (p: any) => `scope-${p.chatKey}-${p.isolationKey}-${p.sourceTableKey}`,
   loadVectorIndexRegistry_ACU: async () => ({ files: h.registry }),
   readVectorIndexJsonFile_ACU: (...args: any[]) => h.reads(...args),
 }));
-vi.mock('../../src/service/vector/summary-vector-index-storage-service', () => ({ validateSingleFileSnapshotIdentity_ACU: (...args: any[]) => h.validate(...args) }));
-vi.mock('../../src/service/vector/summary-vector-index-state-service', () => ({ assignSummaryVectorIndexStateToTagData_ACU: (...args: any[]) => h.assign(...args) }));
-vi.mock('../../src/service/chat/chat-service', () => ({
+vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({ validateSingleFileSnapshotIdentity_ACU: (...args: any[]) => h.validate(...args) }));
+vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({ assignSummaryVectorIndexStateToTagData_ACU: (...args: any[]) => h.assign(...args) }));
+vi.mock('../../../src/service/chat/chat-service', () => ({
   getChatArray_ACU: () => h.chat,
   saveChatToHost_ACU: (...args: any[]) => h.save(...args),
   saveChatToHostStrict_ACU: (...args: any[]) => h.saveStrict(...args),
 }));
-vi.mock('../../src/data/repositories/chat-message-data-repo', () => ({
+vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   cloneIsolatedData_ACU: (message: any) => structuredClone(message.TavernDB_ACU_IsolatedData || {}),
   readIsolatedTagData_ACU: () => h.tagData,
   writeIsolatedTagData_ACU: (...args: any[]) => h.write(...args),
 }));
 
-import { tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU } from '../../src/presentation/pages/popup-bindings-data';
+import { tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU } from '../../../src/service/vector/summary-vector-index-chat-service';
 
 function blob(overrides: any = {}) {
   const manifest = { indexId: 'idx-1', status: 'ready', chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary', sourceTableName: '纪要表', storageIdentity: { revision: 1 }, snapshot: { revision: 1 }, ...overrides };
@@ -57,7 +57,7 @@ beforeEach(() => {
   h.saveStrict.mockResolvedValue(undefined);
 });
 
-describe('popup external vector snapshot recovery', () => {
+describe('summary vector external snapshot recovery', () => {
   it('优先读取当前 canonical scope 的 V2 registry 候选并恢复合法快照', async () => {
     h.registry = [{ path: 'TavernDB_ACU_vector_v2_scope-chat-a-iso-a-summary_idx-1_write_snapshot', publicationState: 'published' }];
     h.reads.mockResolvedValue({ ok: true, data: blob() });
