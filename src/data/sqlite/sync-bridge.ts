@@ -15,6 +15,7 @@ import { hashUserInput_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../.
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU, repairLegacyAutoMergedRowTails_ACU } from '../../shared/canonical-row-normalizer';
 import { validateCanonicalCheckpointSheet_ACU } from '../../shared/canonical-checkpoint-validator';
 import { resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
+import { downgradeRowIdPrimaryKeyForLegacyReplay_ACU } from '../../shared/ddl-utils';
 
 /** 同步桥的元数据表名（内部使用，对用户和 AI 不可见） */
 const META_TABLE_NAME = '_acu_sheet_meta';
@@ -90,7 +91,26 @@ export class SyncBridge {
    *
    * @param data 完整的表格数据对象（通常来自 mergeAllIndependentTables_ACU 的结果）
    */
-  loadFromTableData(data: TableDataObject_ACU, options: { strict?: boolean; allowRuntimeDdlFallback?: boolean } = {}): void {
+  loadFromTableData(data: TableDataObject_ACU, options: {
+    strict?: boolean;
+    allowRuntimeDdlFallback?: boolean;
+  } = {}): void {
+    this._loadFromTableData(data, options, false);
+  }
+
+  /**
+   * SPv7.9 迁移专用入口。它不是普通 runtime 的可选模式：调用者只能明确选择
+   * 这条受限历史 hydrate 路径，导出后必须立即由迁移器统一重编号。
+   */
+  loadSpv79LegacyDuplicateRowIdHistory(data: TableDataObject_ACU): void {
+    this._loadFromTableData(data, { strict: true }, true);
+  }
+
+  private _loadFromTableData(
+    data: TableDataObject_ACU,
+    options: { strict?: boolean; allowRuntimeDdlFallback?: boolean },
+    legacyDuplicateRowIds: boolean,
+  ): void {
     if (!data || typeof data !== 'object') return;
     if (!this.engine.isReady) {
       throw new Error('SyncBridge: SqliteEngine 未初始化');
@@ -100,16 +120,18 @@ export class SyncBridge {
     const workingData = options.strict ? JSON.parse(JSON.stringify(data)) as TableDataObject_ACU : data;
     // 仅兼容历史版本错误追加的精确尾标记，其他宽度异常仍由后续 strict 校验拒绝。
     repairLegacyAutoMergedRowTails_ACU(workingData);
-    const normalization = normalizeCanonicalTableRows_ACU(workingData);
-    const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
-    if (canonicalIssues.length > 0) {
-      const message = `[SyncBridge] snapshot 行标识不合法：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
-      if (options.strict) {
-        throw new Error(message);
+    if (!legacyDuplicateRowIds) {
+      const normalization = normalizeCanonicalTableRows_ACU(workingData);
+      const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
+      if (canonicalIssues.length > 0) {
+        const message = `[SyncBridge] snapshot 行标识不合法：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
+        if (options.strict) {
+          throw new Error(message);
+        }
+        logWarn_ACU(message);
       }
-      logWarn_ACU(message);
     }
-    if (options.strict) {
+    if (options.strict && !legacyDuplicateRowIds) {
       const canonicalIssues = Object.entries(workingData)
         .filter(([sheetKey, sheet]) => sheetKey.startsWith('sheet_') && Array.isArray((sheet as any)?.content))
         .flatMap(([sheetKey, sheet]) => validateCanonicalCheckpointSheet_ACU(sheet, sheetKey, 'data').issues);
@@ -129,7 +151,13 @@ export class SyncBridge {
       if (!sheet || !Array.isArray(sheet.content)) continue;
 
       try {
-        this._loadSheet(key, sheet, options.allowRuntimeDdlFallback === true, physicalTableNames.get(key));
+        this._loadSheet(
+          key,
+          sheet,
+          options.allowRuntimeDdlFallback === true,
+          physicalTableNames.get(key),
+          legacyDuplicateRowIds,
+        );
       } catch (e: any) {
         const errorMessage = e?.message || String(e);
         const message = `[SyncBridge] 加载表 ${key} (${sheet.name}) 失败: ${formatSqliteLoadFailure_ACU(errorMessage)}`;
@@ -151,7 +179,22 @@ export class SyncBridge {
    */
   exportToTableData(
     originalMate: Mate_ACU,
-    options: { strict?: boolean } = {},
+    options: {
+      strict?: boolean;
+    } = {},
+  ): TableDataObject_ACU {
+    return this._exportToTableData(originalMate, options, false);
+  }
+
+  /** 与 loadSpv79LegacyDuplicateRowIdHistory 成对使用的迁移专用导出入口。 */
+  exportSpv79LegacyDuplicateRowIdHistory(originalMate: Mate_ACU): TableDataObject_ACU {
+    return this._exportToTableData(originalMate, { strict: true }, true);
+  }
+
+  private _exportToTableData(
+    originalMate: Mate_ACU,
+    options: { strict?: boolean },
+    legacyDuplicateRowIds: boolean,
   ): TableDataObject_ACU {
     if (!this.engine.isReady) {
       throw new Error('SyncBridge: SqliteEngine 未初始化');
@@ -184,12 +227,14 @@ export class SyncBridge {
       }
     }
 
-    const normalization = normalizeCanonicalTableRows_ACU(result);
-    const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
-    if (canonicalIssues.length > 0) {
-      const message = `[SyncBridge] 导出结果存在行标识问题：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
-      if (options.strict) throw new Error(message);
-      logWarn_ACU(message);
+    if (!legacyDuplicateRowIds) {
+      const normalization = normalizeCanonicalTableRows_ACU(result);
+      const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
+      if (canonicalIssues.length > 0) {
+        const message = `[SyncBridge] 导出结果存在行标识问题：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
+        if (options.strict) throw new Error(message);
+        logWarn_ACU(message);
+      }
     }
     return result;
   }
@@ -210,7 +255,13 @@ export class SyncBridge {
   // ═══════════════════════════════════════════════════════════════
 
   /** 加载单张 sheet 到 SQLite */
-  private _loadSheet(sheetKey: string, sheet: Sheet_ACU, allowRuntimeDdlFallback: boolean, runtimeTableName?: string): void {
+  private _loadSheet(
+    sheetKey: string,
+    sheet: Sheet_ACU,
+    allowRuntimeDdlFallback: boolean,
+    runtimeTableName?: string,
+    legacyDuplicateRowIds = false,
+  ): void {
     const resolvedDDL = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, runtimeTableName);
     if (resolvedDDL.source === 'fallback_invalid' && !allowRuntimeDdlFallback) {
       throw new Error(resolvedDDL.diagnostics[0]);
@@ -218,14 +269,19 @@ export class SyncBridge {
 
     const metaSql = `INSERT OR REPLACE INTO ${META_TABLE_NAME} (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json, physical_table_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?);`;
     const executeResolvedDDL = (candidate: typeof resolvedDDL) => {
-      const tableName = parseDDLTableName(candidate.effectiveDDL);
-      if (!tableName) throw new Error(`无法从 DDL 中解析表名: ${candidate.effectiveDDL.substring(0, 100)}`);
+      // SQLite 的 row_id PRIMARY KEY 无法表示历史重复身份。SPv7.9 迁移只在内存中
+      // 暂时移除这一唯一约束，让旧 SQL 仍按旧 row_id 值作用；导出后立即统一重编号。
+      const effectiveDDL = legacyDuplicateRowIds
+        ? downgradeRowIdPrimaryKeyForLegacyReplay_ACU(candidate.effectiveDDL)
+        : candidate.effectiveDDL;
+      const tableName = parseDDLTableName(effectiveDDL);
+      if (!tableName) throw new Error(`无法从 DDL 中解析表名: ${effectiveDDL.substring(0, 100)}`);
 
       // 映射或行数据错误必须在执行 DDL 前失败，绝不能被 runtime schema fallback 掩盖。
       const plan = createSheetInsertPlan(sheet, candidate.columnMap);
       const inserts = generateInserts(sheet, tableName, plan);
       this.engine.runBatch(
-        [candidate.effectiveDDL, ...inserts, metaSql],
+        [effectiveDDL, ...inserts, metaSql],
         [
           undefined,
           ...new Array<undefined>(inserts.length).fill(undefined),

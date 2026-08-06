@@ -588,6 +588,41 @@ function purgePatchArrayV2_ACU(patches: any, sheetKeys: Set<string>, targetSqlTa
     return { value: next, changed };
 }
 
+function purgeTransitionDataReplacePayloads_ACU(frame: any, sheetKeys: Set<string>): boolean {
+    if (!Array.isArray(frame?.logEntries)) return false;
+    let changed = false;
+    for (const entry of frame.logEntries) {
+        if (!isObjectRecord_ACU(entry)) continue;
+        for (const field of ['operations', 'patches']) {
+            const artifacts = entry[field];
+            if (!Array.isArray(artifacts)) continue;
+            for (const artifact of artifacts) {
+                if (!isObjectRecord_ACU(artifact) || artifact.kind !== 'data_replace') continue;
+                if (deleteSheetKeysFromRecord_ACU(artifact.data, sheetKeys)) changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+/**
+ * 私有过渡根是已经 canonical 的完整状态。单表删除直接裁剪它及所有整库替换
+ * payload，不再要求 cutoff artifact 仍存在，也不把删除操作变成新的准入门禁。
+ */
+function purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData: any, sheetKeys: Set<string>): boolean {
+    const checkpoint = tagData?.spv79TransitionCheckpoint;
+    if (!isObjectRecord_ACU(checkpoint)) return false;
+    let changed = false;
+    if (deleteSheetKeysFromRecord_ACU(checkpoint.data, sheetKeys)) changed = true;
+    if (deleteSheetKeysFromRecord_ACU(checkpoint.scheduleSummary, sheetKeys)) changed = true;
+    if (purgeTransitionDataReplacePayloads_ACU(tagData.storageFrame, sheetKeys)) changed = true;
+    if (changed && !hasSheetKeyInRecord_ACU(checkpoint.data)) {
+        delete tagData.spv79TransitionCheckpoint;
+        changed = true;
+    }
+    return changed;
+}
+
 function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>): boolean {
     if (!isObjectRecord_ACU(frame)) return false;
     let changed = false;
@@ -780,7 +815,11 @@ export function purgeManualRefillIncrementalSheetKeysFromMessage_ACU(msg: any, i
     return msgChanged;
 }
 
-export function purgeSheetKeysFromMessageForIsolation_ACU(msg: any, isolationKey: string, sheetKeys: string[]): boolean {
+export function purgeSheetKeysFromMessageForIsolation_ACU(
+    msg: any,
+    isolationKey: string,
+    sheetKeys: string[],
+): boolean {
     if (!msg || !Array.isArray(sheetKeys) || sheetKeys.length === 0) return false;
 
     let msgChanged = false;
@@ -822,6 +861,9 @@ export function purgeSheetKeysFromMessageForIsolation_ACU(msg: any, isolationKey
         });
     }
 
+    if (purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData, sheetKeySet)) {
+        msgChanged = true;
+    }
     if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet)) msgChanged = true;
 
     if (msgChanged) msg.TavernDB_ACU_IsolatedData = nextIsolated;
@@ -1094,9 +1136,10 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
                 });
             }
 
-            if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet)) {
+            if (purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData, sheetKeySet)) {
                 msgChanged = true;
             }
+            if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet)) msgChanged = true;
         });
         if (msgChanged) {
             msg.TavernDB_ACU_IsolatedData = nextIsolated;

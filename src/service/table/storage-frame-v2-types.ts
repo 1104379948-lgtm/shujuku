@@ -135,6 +135,24 @@ export interface ManualRefillTemplateRootProvenanceV1_ACU {
   createdAt: number;
 }
 
+/**
+ * SPv7.9 duplicate-row-id 过渡根。它存放在 isolation tag 的私有字段，
+ * 旧版只读取 storageFrame，因此不会把该根误当成普通 V2 checkpoint。
+ */
+export interface Spv79TransitionCheckpointV1_ACU {
+  version: 1;
+  kind: 'spv79_duplicate_row_id_transition';
+  createdAt: number;
+  data: TableDataObject_ACU;
+  /** 该快照已经吸收的最后一个旧历史 operation。 */
+  cutoff: {
+    messageIndex: number;
+    seq: number;
+    operationIndex: number;
+  };
+  scheduleSummary?: Record<string, TableCheckpointScheduleSummaryV2_ACU>;
+}
+
 export interface TableCheckpointV2_ACU {
   kind: 'full';
   createdAt: number;

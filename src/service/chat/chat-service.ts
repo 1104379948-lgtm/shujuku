@@ -38,6 +38,7 @@ import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/stora
 import { collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { assertSingleActiveFullCheckpointV2_ACU, frameHasSuffixReplayArtifact_ACU } from '../table/storage-frame-v2-persist';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
+import { findLatestSpv79TransitionCheckpoint_ACU } from '../table/spv79-transition-checkpoint';
 import { hasActiveProvisionalBridgeAnywhere_ACU, recoverProvisionalBridgeSession_ACU } from '../table/manual-catch-up-provisional-bridge';
 import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../table/storage-frame-v2-types';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
@@ -540,7 +541,14 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
                 && typeof isolatedData === 'object'
                 && !Array.isArray(isolatedData)
                 && Object.values(isolatedData).some(tagData => isV2TagData_ACU(tagData));
-            if (messageIndex === anchorIndex || hasV2Frame) {
+            const hasSpv79TransitionCheckpoint = isolatedData
+                && typeof isolatedData === 'object'
+                && !Array.isArray(isolatedData)
+                && Object.values(isolatedData).some(tagData => (
+                    !!tagData && typeof tagData === 'object'
+                    && (tagData as any).spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition'
+                ));
+            if (messageIndex === anchorIndex || hasV2Frame || hasSpv79TransitionCheckpoint) {
                 snapshots.set(messageIndex, messageFieldSnapshot_ACU(message));
             }
         });
@@ -775,15 +783,80 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
         bufferLayers: RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU,
     };
 
-    const isolationKeys = collectIsolationKeysWithV2Frames_ACU(chat, { maxMessageIndex: boundaryAnchorIndex });
+    // 普通 V2 frame 只需在边界及之前收集；但 SPv7.9 私有过渡根即使位于边界之后，
+    // 也必须纳入检查，否则本轮会在完全不知道该根存在的情况下 purge 它之前的历史。
+    const isolationKeys = new Set(collectIsolationKeysWithV2Frames_ACU(chat, { maxMessageIndex: boundaryAnchorIndex }));
+    for (const message of chat) {
+        if (!message || message.is_user) continue;
+        const isolatedData = message.TavernDB_ACU_IsolatedData;
+        if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData)) continue;
+        for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
+            if (tagData && typeof tagData === 'object'
+                && (tagData as any).spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition') {
+                isolationKeys.add(isolationKey);
+            }
+        }
+    }
     for (const isolationKey of isolationKeys) {
         const strategy = resolveTableStorageStrategy_ACU(chat, isolationKey, isolationConfig);
         if (strategy.mode !== 'v2') continue;
 
+        const transitionRef = findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey);
+        if (transitionRef && boundaryAnchorIndex < transitionRef.messageIndex) {
+            // 私有根已经是完整 canonical 状态，且位于本轮保留边界之后；旧历史即使被
+            // purge 也不能再反向决定该根是否有效。此轮无需为该隔离域另写更早的 full，
+            // 直接保留私有根，避免把原本可读取的旧聊天挡在 compaction 准入之外。
+            logDebug_ACU(`[V2 Compaction] isolationKey=[${isolationKey || '无标签'}] 的 SPv7.9 过渡根位于保留边界之后，跳过本轮边界 full。`);
+            continue;
+        }
+
         const pointerRelocated = relocateLatestSummaryVectorPointerToBoundary_ACU(chat, boundaryAnchorIndex, isolationKey);
         if (pointerRelocated) changed = true;
-        if (hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, boundaryAnchorIndex)) {
+        const hasExistingBoundaryCheckpoint = hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, boundaryAnchorIndex);
+        if (hasExistingBoundaryCheckpoint && !transitionRef) {
             logDebug_ACU(`[V2 Compaction] AI 保留边界楼层 #${boundaryAnchorIndex} 已存在 isolationKey=[${isolationKey || '无标签'}] 的 compaction full checkpoint，跳过 frame 重建。`);
+            continue;
+        }
+
+        // 已有边界 full 不能让 active transition 直接短路：同一楼层时 transition
+        // 仍优先于 full 作为 replay root；不同楼层时陈旧私有根也可能在后续拓扑变化后复活。
+        // 只有证明现存 full 严格等价于 transition replay，才能在同一次提交中移除私有根。
+        if (hasExistingBoundaryCheckpoint && transitionRef) {
+            const transitionReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                maxMessageIndex: boundaryAnchorIndex,
+                updateRuntimeState: false,
+            });
+            if (!transitionReplay) {
+                const error = new Error(`边界 checkpoint 收敛失败：无法读取 isolationKey=[${isolationKey || '无标签'}] 的过渡根状态。`) as Error & { failedIsolationKey?: string };
+                error.failedIsolationKey = isolationKey;
+                throw error;
+            }
+            const candidateChat = structuredClone(chat);
+            const candidateTransitionTagData = candidateChat[transitionRef.messageIndex]
+                ?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            if (candidateTransitionTagData && typeof candidateTransitionTagData === 'object') {
+                delete candidateTransitionTagData.spv79TransitionCheckpoint;
+            }
+            const strictReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+                maxMessageIndex: boundaryAnchorIndex,
+                updateRuntimeState: false,
+                compatibilityMode: 'disabled',
+            });
+            if (!strictReplay
+                || strictReplay.requiresCheckpointConvergence
+                || strictReplay.compatibilityRepairs?.length
+                || getTableDataFingerprint_ACU(strictReplay.data) !== getTableDataFingerprint_ACU(transitionReplay.data)) {
+                const error = new Error(`边界 checkpoint 收敛失败：已有 compaction full 无法严格替代 SPv7.9 过渡根（isolationKey=[${isolationKey || '无标签'}]）。`) as Error & { failedIsolationKey?: string };
+                error.failedIsolationKey = isolationKey;
+                throw error;
+            }
+            const transitionMessage = chat[transitionRef.messageIndex];
+            const transitionTagData = transitionMessage?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            if (transitionTagData && typeof transitionTagData === 'object') {
+                delete transitionTagData.spv79TransitionCheckpoint;
+            }
+            changed = true;
+            logDebug_ACU(`[V2 Compaction] 已验证既有边界 full 并移除 isolationKey=[${isolationKey || '无标签'}] 的 SPv7.9 过渡根。`);
             continue;
         }
 
@@ -883,7 +956,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
                 : {}),
         };
 
-        if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+        if (transitionRef || replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
             const candidateChat = structuredClone(chat);
             const candidateAnchor = candidateChat[boundaryAnchorIndex];
             const candidateExistingTagData = candidateAnchor?.TavernDB_ACU_IsolatedData?.[isolationKey];
@@ -895,6 +968,13 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
                     _acu_storage_version: 2,
                 },
             };
+            if (transitionRef) {
+                const candidateTransitionTagData = candidateChat[transitionRef.messageIndex]
+                    ?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                if (candidateTransitionTagData && typeof candidateTransitionTagData === 'object') {
+                    delete candidateTransitionTagData.spv79TransitionCheckpoint;
+                }
+            }
             const strictReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
                 maxMessageIndex: boundaryAnchorIndex,
                 updateRuntimeState: false,
@@ -915,6 +995,13 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
             storageFrame: frame,
             _acu_storage_version: 2,
         };
+        if (transitionRef) {
+            const transitionMessage = chat[transitionRef.messageIndex];
+            const transitionTagData = transitionMessage?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            if (transitionTagData && typeof transitionTagData === 'object') {
+                delete transitionTagData.spv79TransitionCheckpoint;
+            }
+        }
         changed = true;
         logDebug_ACU(`[V2 Compaction] 已在 AI 保留边界楼层 #${boundaryAnchorIndex} 写入 isolationKey=[${isolationKey || '无标签'}] 的 full checkpoint。`);
     }
@@ -2041,7 +2128,7 @@ async function clearTableDataAtFloorsCore_ACU(targetMessageIndices: number[], ta
         if (!msg || msg.is_user) continue;
 
         const changed = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
-            ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
+            ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys, idx)
             : clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
         if (clearsSummaryOrOutline) {
             const tagData = readIsolatedTagData_ACU(msg, isolationKey);
@@ -2743,6 +2830,6 @@ export async function clearManualRefillSheetDataInRange_ACU(targetMessageIndices
     }, () => clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices, targetSheetKeys));
 }
 
-function purgeTargetSheetKeysFromMessage_ACU(msg: any, targetSheetKeys: string[]): boolean {
+function purgeTargetSheetKeysFromMessage_ACU(msg: any, targetSheetKeys: string[], _messageIndex: number): boolean {
     return purgeSheetKeysFromMessage_ACU(msg, targetSheetKeys);
 }

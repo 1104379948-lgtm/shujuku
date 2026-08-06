@@ -715,6 +715,113 @@ describe('purgeSheetKeysFromMessage_ACU', () => {
     expect(msg.TavernDB_ACU_IsolatedData.tag1.storageFrame.perSheetCheckpoints.sheet_1).toEqual(keepShard);
   });
 
+  it('删除私有 SPv7.9 过渡根中的目标表，并同步裁剪 operations/patches 的 data_replace 防止回放复活', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 1,
+            data: {
+              sheet_0: { name: '被删表', content: [['row_id'], ['1']] },
+              sheet_1: { name: '保留表', content: [['row_id'], ['2']] },
+            },
+            cutoff: { messageIndex: 99, seq: 88, operationIndex: 77 },
+            scheduleSummary: {
+              sheet_0: { lastFilledAiFloor: 1 },
+              sheet_1: { lastFilledAiFloor: 2 },
+            },
+          },
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              operations: [{
+                kind: 'data_replace',
+                data: {
+                  sheet_0: { name: '旧整库替换中的被删表' },
+                  sheet_1: { name: '旧整库替换中的保留表' },
+                },
+              }],
+              patches: [{
+                kind: 'data_replace',
+                data: {
+                  sheet_0: { name: '旧 patch 中的被删表' },
+                  sheet_2: { name: '旧 patch 中的保留表' },
+                },
+              }],
+            }],
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
+
+    const tagData = msg.TavernDB_ACU_IsolatedData.tag1;
+    expect(tagData.spv79TransitionCheckpoint.data).toEqual({
+      sheet_1: { name: '保留表', content: [['row_id'], ['2']] },
+    });
+    expect(tagData.spv79TransitionCheckpoint.scheduleSummary).toEqual({
+      sheet_1: { lastFilledAiFloor: 2 },
+    });
+    expect(tagData.spv79TransitionCheckpoint.cutoff).toEqual({ messageIndex: 99, seq: 88, operationIndex: 77 });
+    expect(tagData.storageFrame.logEntries[0].operations[0].data).toEqual({
+      sheet_1: { name: '旧整库替换中的保留表' },
+    });
+    expect(tagData.storageFrame.logEntries[0].patches[0].data).toEqual({
+      sheet_2: { name: '旧 patch 中的保留表' },
+    });
+  });
+
+  it('删除私有 SPv7.9 过渡根中的最后一张表后移除该根，不依赖 cutoff artifact 或消息索引', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 1,
+            data: { sheet_0: { name: '最后一张表' } },
+            cutoff: { messageIndex: 9999, seq: 9999, operationIndex: 9999 },
+            scheduleSummary: { sheet_0: { lastFilledAiFloor: 1 } },
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
+    expect(msg.TavernDB_ACU_IsolatedData.tag1.spv79TransitionCheckpoint).toBeUndefined();
+  });
+
+  it('裁剪私有 SPv7.9 过渡根时允许 storageFrame 缺失或 logEntries 不是数组', () => {
+    const createMessage = (storageFrame?: any): any => ({
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 1,
+            data: {
+              sheet_0: { name: '被删表' },
+              sheet_1: { name: '保留表' },
+            },
+            cutoff: { messageIndex: 500, seq: 1, operationIndex: 0 },
+            scheduleSummary: {},
+          },
+          ...(storageFrame === undefined ? {} : { storageFrame }),
+        },
+      },
+    });
+    const withoutFrame = createMessage();
+    const malformedLogEntries = createMessage({ version: 2, logEntries: { legacy: true } });
+
+    expect(() => purgeSheetKeysFromMessage_ACU(withoutFrame, ['sheet_0'])).not.toThrow();
+    expect(() => purgeSheetKeysFromMessage_ACU(malformedLogEntries, ['sheet_0'])).not.toThrow();
+    expect(withoutFrame.TavernDB_ACU_IsolatedData.tag1.spv79TransitionCheckpoint.data.sheet_0).toBeUndefined();
+    expect(malformedLogEntries.TavernDB_ACU_IsolatedData.tag1.spv79TransitionCheckpoint.data.sheet_0).toBeUndefined();
+  });
+
 });
 
   it('Task5：checkpoint.data 无任何 sheet 键且无 manualRefillProgress 时移除 checkpoint（frame 退回无锚点形态）', () => {

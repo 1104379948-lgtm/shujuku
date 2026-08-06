@@ -758,6 +758,248 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
   });
 
+  it('过渡根晚于保留边界时跳过本轮 compaction，不以兼容根阻断旧聊天继续使用', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            ...(index === 0 ? {
+              checkpoint: {
+                kind: 'full', createdAt: 1, reason: 'init',
+                data: { sheet_0: { name: '物品表', content: [['row_id', '名称'], ['1', '旧物']] } },
+              },
+            } : {}),
+            ...(index === 24 ? {
+              checkpoint: { kind: 'full', createdAt: 24, reason: 'init', data: { sheet_0: { name: '物品表', content: [['row_id', '名称'], ['1', '过渡态']] } } },
+            } : {}),
+            logEntries: [],
+          },
+          ...(index === 24 ? {
+            spv79TransitionCheckpoint: {
+              version: 1,
+              kind: 'spv79_duplicate_row_id_transition',
+              createdAt: 24,
+              data: { sheet_0: { name: '物品表', content: [['row_id', '名称'], ['1', '过渡态']] } },
+              cutoff: { messageIndex: 24, seq: 0, operationIndex: -1 },
+            },
+          } : {}),
+        },
+      },
+    }));
+    const before = JSON.parse(JSON.stringify(chat));
+    mockGetChatArray.mockReturnValue(chat);
+
+    await purgeOldLayerData_ACU();
+
+    expect(chat).toEqual(before);
+    expect(mockLoadTableStateFromFramesV2Detailed).not.toHaveBeenCalled();
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
+  it('边界到达过渡根后以 strict full checkpoint 收敛并删除私有根', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const data = { sheet_0: { name: '物品表', content: [['row_id', '名称'], ['1', '收敛态']] } };
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            ...(index === 0 ? {
+              checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: structuredClone(data) },
+            } : {}),
+            ...(index === 10 ? {
+              checkpoint: { kind: 'full', createdAt: 10, reason: 'init', data: structuredClone(data) },
+            } : {}),
+            logEntries: [],
+          },
+          ...(index === 10 ? {
+            spv79TransitionCheckpoint: {
+              version: 1,
+              kind: 'spv79_duplicate_row_id_transition',
+              createdAt: 10,
+              data: structuredClone(data),
+              cutoff: { messageIndex: 10, seq: 0, operationIndex: -1 },
+            },
+          } : {}),
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+    mockLoadTableStateFromFramesV2Detailed
+      .mockResolvedValueOnce({ baseKind: 'spv79_transition_checkpoint', data: structuredClone(data) })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: structuredClone(data) });
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
+    expect(chat[10].TavernDB_ACU_IsolatedData[''].spv79TransitionCheckpoint).toBeUndefined();
+    expect(chat[23].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toEqual(expect.objectContaining({
+      kind: 'full', reason: 'compaction', data,
+    }));
+    expect(mockLoadTableStateFromFramesV2Detailed).toHaveBeenNthCalledWith(2, expect.any(Array), '', {
+      maxMessageIndex: 23,
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    });
+    const activeFullCheckpoints = chat.flatMap(message => {
+      const checkpoint = message.TavernDB_ACU_IsolatedData?.['']?.storageFrame?.checkpoint;
+      return checkpoint?.kind === 'full' ? [checkpoint] : [];
+    });
+    expect(activeFullCheckpoints).toHaveLength(1);
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+  });
+
+  it('边界已有同楼层 compaction full 时，验证等价后仍移除过渡根', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const data = { sheet_0: { name: '物品表', content: [['row_id', '名称'], ['1', '既有边界']] } };
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            ...(index === 0 ? { checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: structuredClone(data) } } : {}),
+            ...(index === 23 ? { checkpoint: { kind: 'full', createdAt: 23, reason: 'compaction', data: structuredClone(data) } } : {}),
+            logEntries: [],
+          },
+          ...(index === 23 ? {
+            spv79TransitionCheckpoint: {
+              version: 1, kind: 'spv79_duplicate_row_id_transition', createdAt: 23,
+              data: structuredClone(data), cutoff: { messageIndex: 23, seq: 0, operationIndex: -1 },
+            },
+          } : {}),
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+    mockLoadTableStateFromFramesV2Detailed
+      .mockResolvedValueOnce({ baseKind: 'spv79_transition_checkpoint', data: structuredClone(data) })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: structuredClone(data) });
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
+    expect(chat[23].TavernDB_ACU_IsolatedData[''].spv79TransitionCheckpoint).toBeUndefined();
+    expect(chat[23].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toEqual(expect.objectContaining({
+      kind: 'full', reason: 'compaction', data,
+    }));
+    expect(mockLoadTableStateFromFramesV2Detailed).toHaveBeenNthCalledWith(2, expect.any(Array), '', {
+      maxMessageIndex: 23,
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    });
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+  });
+
+  it('已有同楼层 compaction full 收敛后 strict save 失败时恢复私有过渡根', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const data = { sheet_0: { name: '物品表', content: [['row_id', '名称'], ['1', '既有边界']] } };
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            ...(index === 23 ? { checkpoint: { kind: 'full', createdAt: 23, reason: 'compaction', data: structuredClone(data) } } : {}),
+            logEntries: [],
+          },
+          ...(index === 23 ? {
+            spv79TransitionCheckpoint: {
+              version: 1, kind: 'spv79_duplicate_row_id_transition', createdAt: 23,
+              data: structuredClone(data), cutoff: { messageIndex: 23, seq: 0, operationIndex: -1 },
+            },
+          } : {}),
+        },
+      },
+    }));
+    const before = JSON.parse(JSON.stringify(chat));
+    mockGetChatArray.mockReturnValue(chat);
+    mockLoadTableStateFromFramesV2Detailed
+      .mockResolvedValueOnce({ baseKind: 'spv79_transition_checkpoint', data: structuredClone(data) })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: structuredClone(data) });
+    mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('existing boundary transition save failed'));
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({
+      success: false, changed: false, anchorIndex: 23, error: 'existing boundary transition save failed',
+    }));
+    expect(chat).toEqual(before);
+  });
+
+  it('边界已有 compaction full 但无法严格替代过渡根时保留私有根', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const transitionData = { sheet_0: { name: '物品表', content: [['row_id', '名称'], ['1', '过渡态']] } };
+    const inconsistentData = { sheet_0: { name: '物品表', content: [['row_id', '名称'], ['1', '不一致']] } };
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: { version: 2, ...(index === 23 ? { checkpoint: { kind: 'full', createdAt: 23, reason: 'compaction', data: structuredClone(inconsistentData) } } : {}), logEntries: [] },
+          ...(index === 23 ? { spv79TransitionCheckpoint: { version: 1, kind: 'spv79_duplicate_row_id_transition', createdAt: 23, data: structuredClone(transitionData), cutoff: { messageIndex: 23, seq: 0, operationIndex: -1 } } } : {}),
+        },
+      },
+    }));
+    const before = JSON.parse(JSON.stringify(chat));
+    mockGetChatArray.mockReturnValue(chat);
+    mockLoadTableStateFromFramesV2Detailed
+      .mockResolvedValueOnce({ baseKind: 'spv79_transition_checkpoint', data: structuredClone(transitionData) })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: structuredClone(inconsistentData) });
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: false, changed: false, anchorIndex: 23, error: expect.stringContaining('无法严格替代') }));
+    expect(chat).toEqual(before);
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
+  it('过渡根收敛的严格保存失败时恢复私有根与所有消息字段', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const data = { sheet_0: { name: '物品表', content: [['row_id', '名称'], ['1', '过渡态']] } };
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            ...(index === 0 ? { checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: structuredClone(data) } } : {}),
+            ...(index === 10 ? {
+              checkpoint: { kind: 'full', createdAt: 10, reason: 'init', data: structuredClone(data) },
+            } : {}),
+            logEntries: [],
+          },
+          ...(index === 10 ? {
+            spv79TransitionCheckpoint: {
+              version: 1, kind: 'spv79_duplicate_row_id_transition', createdAt: 10,
+              data: structuredClone(data), cutoff: { messageIndex: 10, seq: 0, operationIndex: -1 },
+            },
+          } : {}),
+        },
+      },
+    }));
+    const before = JSON.parse(JSON.stringify(chat));
+    mockGetChatArray.mockReturnValue(chat);
+    mockLoadTableStateFromFramesV2Detailed
+      .mockResolvedValueOnce({ baseKind: 'spv79_transition_checkpoint', data: structuredClone(data) })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: structuredClone(data) });
+    mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('transition compaction save failed'));
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: false, changed: false, anchorIndex: 23, error: 'transition compaction save failed' }));
+    expect(chat).toEqual(before);
+  });
+
   it('compaction 固化模板临时根后将其降级为 data_replace，避免留下多个 full checkpoint', async () => {
     mockSettings.retainRecentLayers = 2;
     const templateData = {
@@ -1989,6 +2231,35 @@ describe('deleteLocalDataInChatCore_ACU', () => {
     expect(chat[1].TavernDB_ACU_IsolatedData.tag_B).toBeDefined();
   });
 
+  it('mode=current 删除过渡根承载槽，后续读取不再有可复活的私有 checkpoint', async () => {
+    mockSettings.dataIsolationEnabled = true;
+    mockSettings.dataIsolationCode = 'tag_A';
+    mockGetCurrentIsolationKey.mockReturnValue('tag_A');
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        tag_A: {
+          _acu_storage_version: 2,
+          storageFrame: { version: 2, logEntries: [] },
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 1,
+            data: { sheet_0: { content: [['row_id'], ['1']] } },
+            cutoff: { messageIndex: 0, seq: 0, operationIndex: -1 },
+          },
+        },
+        tag_B: { independentData: {} },
+      },
+    }];
+    mockGetChatArray.mockReturnValue(chat);
+
+    await deleteLocalDataInChatCore_ACU('current');
+
+    expect(chat[0].TavernDB_ACU_IsolatedData.tag_A).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData.tag_B).toBeDefined();
+  });
+
   it('指定楼层范围', async () => {
     const chat = [
       { is_user: false, TavernDB_ACU_Data: {} }, // AI楼层1
@@ -2311,6 +2582,17 @@ describe('clearTableDataAtFloors_ACU', () => {
                 },
               ],
             },
+            spv79TransitionCheckpoint: {
+              version: 1,
+              kind: 'spv79_duplicate_row_id_transition',
+              createdAt: 2,
+              data: {
+                sheet_0: { name: '旧目标表', content: [['row_id'], ['legacy-target']] },
+                sheet_1: { name: '保留表', content: [['row_id'], ['legacy-keep']] },
+              },
+              cutoff: { messageIndex: 2, seq: 0, operationIndex: -1 },
+              scheduleSummary: { sheet_0: { lastFilledAiFloor: 1 }, sheet_1: { lastFilledAiFloor: 1 } },
+            },
           },
         },
       },
@@ -2327,13 +2609,47 @@ describe('clearTableDataAtFloors_ACU', () => {
     expect(targetTag.independentData.sheet_1).toEqual({ name: '保留表' });
     expect(targetTag.modifiedKeys).toEqual(['sheet_1']);
     expect(targetTag.updateGroupKeys).toEqual(['sheet_1']);
+    // 私有根本身就是 canonical 完整状态；删除只裁剪目标表，不再要求 cutoff artifact
+    // 仍存在，也不通过“先收敛成功才允许删除”的门禁阻断旧聊天。
+    expect(targetTag.spv79TransitionCheckpoint).toEqual(expect.objectContaining({
+      kind: 'spv79_duplicate_row_id_transition',
+      data: { sheet_1: { name: '保留表', content: [['row_id'], ['legacy-keep']] } },
+      scheduleSummary: { sheet_1: { lastFilledAiFloor: 1 } },
+    }));
     expect(targetTag.storageFrame.checkpoint.data.sheet_0).toBeUndefined();
-    expect(targetTag.storageFrame.checkpoint.data.sheet_1.content[1][0]).toBe('keep');
-    expect(targetTag.storageFrame.checkpoint.scheduleSummary.sheet_0).toBeUndefined();
-    expect(targetTag.storageFrame.checkpoint.scheduleSummary.sheet_1).toEqual({ lastFilledAiFloor: 1 });
-    expect(targetTag.storageFrame.checkpoint.event.filledSheetKeys).toEqual(['sheet_1']);
-    expect(targetTag.storageFrame.logEntries[0].operations[0].data).toEqual({ sheet_0: { name: '旧目标表' }, sheet_1: { name: '保留表' } });
-    expect(targetTag.storageFrame.logEntries[0].filledSheetKeys).toEqual(['sheet_1']);
+    expect(targetTag.storageFrame.logEntries).toEqual([expect.objectContaining({
+      seq: 1,
+      operations: [{ kind: 'data_replace', data: { sheet_1: { name: '保留表' } } }],
+      filledSheetKeys: ['sheet_1'],
+      changedSheetKeys: ['sheet_1'],
+      groupKeys: ['sheet_1'],
+    })]);
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+  });
+
+  it('清空过渡根仅剩的表时删除私有 root，避免后续 replay 从已删除表复活', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: { version: 2, logEntries: [] },
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 1,
+            data: { sheet_0: { name: '唯一表', content: [['row_id'], ['1']] } },
+            cutoff: { messageIndex: 0, seq: 0, operationIndex: -1 },
+          },
+        },
+      },
+    }];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const count = await clearTableDataAtFloors_ACU([0], ['sheet_0']);
+
+    expect(count).toBe(1);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].spv79TransitionCheckpoint).toBeUndefined();
     expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
   });
 });

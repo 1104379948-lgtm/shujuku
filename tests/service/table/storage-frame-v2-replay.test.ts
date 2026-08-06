@@ -18,6 +18,7 @@ import { applySqlEditsToTableDataSnapshot_ACU } from '../../../src/service/table
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
 import { _set_SillyTavern_API_ACU, SillyTavern_API_ACU } from '../../../src/shared/host-api';
 import { persistTableMutationLogV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
+import { reindexSpv79TransitionState_ACU } from '../../../src/service/table/spv79-transition-checkpoint';
 
 function makeCheckpointData() {
   return {
@@ -4067,6 +4068,556 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '跨改名写入']]);
   });
 
+});
+
+describe('SPv7.9 duplicate row_id transition checkpoint', () => {
+  it('重编号保留行序和业务值，并让 seedRows 接续 content 身份空间', () => {
+    const source = makeCheckpointData();
+    source.sheet_0.content = [
+      ['row_id', 'name'],
+      [' 7 ', '旧剑'],
+      ['7', '重复剑'],
+    ];
+    source.sheet_0.seedRows = [['7', '种子药水'], ['8', '种子绷带']];
+
+    const result = reindexSpv79TransitionState_ACU(source);
+
+    expect(result.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '旧剑'],
+      ['2', '重复剑'],
+    ]);
+    expect(result.sheet_0.seedRows).toEqual([['3', '种子药水'], ['4', '种子绷带']]);
+    expect(source.sheet_0.content[1][0]).toBe(' 7 ');
+  });
+
+  it('私有过渡根硬截断旧 full、同帧旧 operation 和 patch，仅回放 cutoff 后增量', async () => {
+    const transitionData = makeCheckpointData();
+    transitionData.sheet_0.content = [['row_id', 'name'], ['1', '过渡快照']];
+    const oldData = makeCheckpointData();
+    oldData.sheet_0.content = [['row_id', 'name'], ['99', '不应复活']];
+    const chat = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            spv79TransitionCheckpoint: {
+              version: 1,
+              kind: 'spv79_duplicate_row_id_transition',
+              createdAt: 1,
+              data: transitionData,
+              cutoff: { messageIndex: 0, seq: 1, operationIndex: 0 },
+              scheduleSummary: { sheet_0: { lastChangedAiFloor: 1 } },
+            },
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: oldData },
+              perSheetCheckpoints: {
+                sheet_old: {
+                  kind: 'sheet_full', createdAt: 1, reason: 'schema_change', sheetKey: 'sheet_old',
+                  data: { ...makeCheckpointData().sheet_0, uid: 'old', name: '旧表' },
+                },
+              },
+              logEntries: [{
+                seq: 1, entryId: 'transition-cutoff', createdAt: 1, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+                filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+                operations: [
+                  { kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: oldData.sheet_0, reason: 'system' },
+                  { kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '同 seq 后增量'] },
+                ],
+              }, {
+                seq: 2, entryId: 'old-patch', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+                filledSheetKeys: [], changedSheetKeys: [], groupKeys: [], patches: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '3', cells: ['3', '后续 patch'] }], operations: [],
+              }],
+            },
+          },
+        },
+      },
+    ];
+
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const summary = collectScheduleSummaryFromFramesV2_ACU(chat, '');
+
+    expect(replay?.baseKind).toBe('spv79_transition_checkpoint');
+    expect(replay?.data.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '过渡快照'],
+      ['2', '同 seq 后增量'],
+      ['3', '后续 patch'],
+    ]);
+    expect(replay?.data.sheet_old).toBeUndefined();
+    expect(summary.sheet_0).toEqual({ lastChangedAiFloor: 1 });
+  });
+
+  it('结构损坏的私有根不会替代正常 full checkpoint 或截断其后的日志', async () => {
+    const fullData = makeCheckpointData();
+    fullData.sheet_0.content[1] = ['1', '正常基底'];
+    const invalidTransitionData = makeCheckpointData();
+    invalidTransitionData.sheet_0.content[1] = ['1', '不得采用'];
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          spv79TransitionCheckpoint: {
+            version: 1, kind: 'spv79_duplicate_row_id_transition', createdAt: 1,
+            data: invalidTransitionData,
+            cutoff: { messageIndex: 1, seq: -1, operationIndex: -1 },
+          },
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: fullData },
+            logEntries: [{
+              seq: 1, entryId: 'normal-suffix', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '正常后缀'] }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(replay?.baseKind).toBe('full_checkpoint');
+    expect(replay?.data.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '正常基底'],
+      ['2', '正常后缀'],
+    ]);
+  });
+
+  it.each([
+    ['seq 不存在', { messageIndex: 0, seq: 0, operationIndex: 0 }, true],
+    ['operationIndex 越过 operations', { messageIndex: 0, seq: 1, operationIndex: 1 }, false],
+    ['非空 operations 使用根游标', { messageIndex: 0, seq: 1, operationIndex: -1 }, true],
+  ])('cutoff artifact 已被历史清理（%s）时仍采用私有完整根，不回退旧 full', async (_label, cutoff, appliesSuffix) => {
+    const fullData = makeCheckpointData();
+    fullData.sheet_0.content[1] = ['1', '正常基底'];
+    const invalidTransitionData = makeCheckpointData();
+    invalidTransitionData.sheet_0.content[1] = ['1', '不得采用'];
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          spv79TransitionCheckpoint: {
+            version: 1, kind: 'spv79_duplicate_row_id_transition', createdAt: 1,
+            data: invalidTransitionData, cutoff,
+          },
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: fullData },
+            logEntries: [{
+              seq: 1, entryId: 'normal-suffix', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '正常后缀'] }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(replay?.baseKind).toBe('spv79_transition_checkpoint');
+    expect(replay?.data.sheet_0.content).toEqual(appliesSuffix
+      ? [['row_id', 'name'], ['1', '不得采用'], ['2', '正常后缀']]
+      : [['row_id', 'name'], ['1', '不得采用']]);
+  });
+
+  it('cutoff 对应 artifact 已不存在时仍采用私有完整根，不要求旁路标签提供证明', async () => {
+    const fullData = makeCheckpointData();
+    fullData.sheet_0.content[1] = ['1', '当前标签基底'];
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          spv79TransitionCheckpoint: {
+            version: 1, kind: 'spv79_duplicate_row_id_transition', createdAt: 1,
+            data: makeCheckpointData(), cutoff: { messageIndex: 0, seq: 1, operationIndex: 0 },
+          },
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: fullData },
+            logEntries: [],
+          },
+        },
+        other: {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1, entryId: 'other-isolation-entry', createdAt: 1, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '不属于当前标签'] }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(replay?.baseKind).toBe('spv79_transition_checkpoint');
+    expect(replay?.data).toEqual(makeCheckpointData());
+  });
+
+  it('cutoff 消息索引晚于私有根承载楼层时仍采用 canonical 私有根，不新增位置门禁', async () => {
+    const transitionData = makeCheckpointData();
+    transitionData.sheet_0.content[1] = ['1', '私有根状态'];
+    const fullData = makeCheckpointData();
+    fullData.sheet_0.content[1] = ['1', '旧 full 状态'];
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 1,
+            data: transitionData,
+            cutoff: { messageIndex: 9, seq: 3, operationIndex: 0 },
+            scheduleSummary: {},
+          },
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: fullData },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(replay?.baseKind).toBe('spv79_transition_checkpoint');
+    expect(replay?.data.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '私有根状态'],
+    ]);
+  });
+
+  it('cutoff 跨越后续楼层时统一吸收中间 full、per-sheet、timeline、schedule，仅应用真正后缀', async () => {
+    const transitionData = makeCheckpointData();
+    transitionData.sheet_0.content = [['row_id', 'name'], ['1', '私有根状态']];
+    const absorbedFull = makeCheckpointData();
+    absorbedFull.sheet_0.content = [['row_id', 'name'], ['90', '不得覆盖私有根']];
+    const absorbedSheet = {
+      ...makeCheckpointData().sheet_0,
+      uid: 'absorbed',
+      name: 'absorbed',
+      content: [['row_id', 'name'], ['91', '不得复活']],
+    };
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 1,
+            data: transitionData,
+            cutoff: { messageIndex: 1, seq: 1, operationIndex: 0 },
+            scheduleSummary: { sheet_0: { lastChangedAiFloor: 1 } },
+          },
+          storageFrame: { version: 2, logEntries: [] },
+        },
+      },
+    }, {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 2, reason: 'manual', data: absorbedFull },
+            perSheetCheckpoints: {
+              sheet_0: {
+                kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_0',
+                data: absorbedFull.sheet_0,
+                timeline: { kind: 'sheet_hide', activateAtMessageIndex: 1, afterSeq: 0 },
+                scheduleSummary: { lastFilledAiFloor: 2 },
+              },
+              sheet_absorbed: {
+                kind: 'sheet_full', createdAt: 2, reason: 'manual', sheetKey: 'sheet_absorbed',
+                data: absorbedSheet,
+                scheduleSummary: { lastChangedAiFloor: 2 },
+              },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'absorbed-cutoff', createdAt: 2, source: 'system', targetMessageIndex: 1, aiFloor: 2,
+              filledSheetKeys: ['sheet_absorbed'], changedSheetKeys: ['sheet_middle'], groupKeys: [],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '已被吸收'] }],
+            }],
+          },
+        },
+      },
+    }, {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1, entryId: 'real-suffix', createdAt: 3, source: 'system', targetMessageIndex: 2, aiFloor: 3,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_suffix'], groupKeys: [],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '真正后缀'] }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const summary = collectScheduleSummaryFromFramesV2_ACU(chat, '');
+    const lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, '');
+
+    expect(replay?.baseKind).toBe('spv79_transition_checkpoint');
+    expect(replay?.data.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '私有根状态'],
+      ['2', '真正后缀'],
+    ]);
+    expect(replay?.data.sheet_absorbed).toBeUndefined();
+    expect(summary).toEqual({
+      sheet_0: { lastChangedAiFloor: 1 },
+      sheet_suffix: { lastChangedAiFloor: 3 },
+    });
+    expect(lifecycle.activeSheetKeys).toEqual(['sheet_0']);
+    expect(lifecycle.hiddenSheetKeys).toEqual([]);
+    expect(lifecycle.statusBySheetKey.sheet_absorbed).toBeUndefined();
+  });
+
+  it('cutoff 后的普通 full 在 replay、schedule、lifecycle 三路径共同取代旧私有根', async () => {
+    const transitionData = makeCheckpointData();
+    transitionData.sheet_0.content = [['row_id', 'name'], ['1', '旧私有根']];
+    const newerFullData = makeCheckpointData();
+    newerFullData.sheet_0.content = [['row_id', 'name'], ['1', '新 full 基底']];
+    const newerSheet = {
+      ...makeCheckpointData().sheet_0,
+      uid: 'newer',
+      name: 'newer',
+      content: [['row_id', 'name'], ['1', '新 full 表']],
+    };
+    newerFullData.sheet_newer = newerSheet;
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 1,
+            data: transitionData,
+            cutoff: { messageIndex: 0, seq: 1, operationIndex: 0 },
+            scheduleSummary: { sheet_0: { lastChangedAiFloor: 1 } },
+          },
+          storageFrame: { version: 2, logEntries: [] },
+        },
+      },
+    }, {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 2, reason: 'compaction', data: newerFullData,
+              scheduleSummary: { sheet_newer: { lastFilledAiFloor: 2 } },
+              event: { filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [] },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    }, {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1, entryId: 'after-new-full', createdAt: 3, source: 'system', targetMessageIndex: 2, aiFloor: 3,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_suffix'], groupKeys: [],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '新 full 后缀'] }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const summary = collectScheduleSummaryFromFramesV2_ACU(chat, '');
+    const lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, '');
+
+    expect(replay?.baseKind).toBe('full_checkpoint');
+    expect(replay?.data.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '新 full 基底'],
+      ['2', '新 full 后缀'],
+    ]);
+    expect(replay?.data.sheet_newer.content).toEqual(newerSheet.content);
+    expect(summary).toEqual({
+      sheet_newer: { lastFilledAiFloor: 2 },
+      sheet_0: { lastChangedAiFloor: 2 },
+      sheet_suffix: { lastChangedAiFloor: 3 },
+    });
+    expect(lifecycle.activeSheetKeys).toEqual(['sheet_0', 'sheet_newer']);
+    expect(lifecycle.hiddenSheetKeys).toEqual([]);
+  });
+
+  it('schedule summary 忽略过渡承载帧 cutoff 前 artifact，但累计 cutoff 后日志事件', () => {
+    const data = makeCheckpointData();
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 1,
+            data,
+            cutoff: { messageIndex: 0, seq: 1, operationIndex: 0 },
+            scheduleSummary: { sheet_transition: { lastFilledAiFloor: 1 } },
+          },
+          storageFrame: {
+            version: 2,
+            perSheetCheckpoints: {
+              sheet_pre_cutoff: {
+                kind: 'sheet_full', createdAt: 1, reason: 'manual', sheetKey: 'sheet_pre_cutoff',
+                data: makeCheckpointData().sheet_0,
+                scheduleSummary: { lastChangedAiFloor: 1 },
+              },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'cutoff-entry', createdAt: 1, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: ['sheet_after_cutoff'], changedSheetKeys: [], groupKeys: [],
+              operations: [
+                { kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', '已吸收'] },
+                { kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '后缀'] },
+              ],
+            }, {
+              seq: 2, entryId: 'later-entry', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_later'], groupKeys: [], operations: [],
+            }],
+          },
+        },
+      },
+    }];
+
+    const summary = collectScheduleSummaryFromFramesV2_ACU(chat, '');
+
+    expect(summary).toEqual({
+      sheet_transition: { lastFilledAiFloor: 1 },
+      sheet_later: { lastChangedAiFloor: 1 },
+    });
+  });
+
+  it('宿主真实加载遇到 duplicate_row_id 后接 SQL 时仍写入私有根，不改写原 storageFrame', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.content = [['row_id', 'name'], ['1', '原始行']];
+    const duplicateSheet = structuredClone(checkpointData.sheet_0);
+    duplicateSheet.content.push([' 1 ', '重复行']);
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [{
+              seq: 1, entryId: 'legacy-duplicate-replace', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+              operations: [
+                { kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: duplicateSheet, reason: 'system' },
+                { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system', statements: ["UPDATE inventory SET name = 'SQL 后缀' WHERE row_id = 1"] },
+              ],
+            }],
+          },
+        },
+      },
+    }];
+    const storageFrameBefore = structuredClone(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame);
+    const saveChat = vi.fn(async () => undefined);
+    const previousHostApi = SillyTavern_API_ACU;
+    try {
+      _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+
+      const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+      expect(replay?.baseKind).toBe('spv79_transition_checkpoint');
+      expect(replay?.data.sheet_0.content).toEqual([
+        ['row_id', 'name'],
+        ['1', 'SQL 后缀'],
+        ['2', 'SQL 后缀'],
+      ]);
+      expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame).toEqual(storageFrameBefore);
+      expect(chat[0].TavernDB_ACU_IsolatedData[''].spv79TransitionCheckpoint).toEqual(expect.objectContaining({
+        kind: 'spv79_duplicate_row_id_transition',
+        cutoff: { messageIndex: 0, seq: 1, operationIndex: 1 },
+      }));
+      expect(saveChat).toHaveBeenCalledTimes(1);
+    } finally {
+      _set_SillyTavern_API_ACU(previousHostApi);
+    }
+  });
+
+  it('旧重复行 SQL 回放保留 SQL INSERT/DELETE/params 语义，随后非 SQL operation 仍在重编号前执行', async () => {
+    const checkpointData = makeCheckpointData();
+    const duplicateSheet = structuredClone(checkpointData.sheet_0);
+    duplicateSheet.content.push(['1', '重复行']);
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [{
+              seq: 1, entryId: 'legacy-duplicate-sql-lifecycle', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+              operations: [
+                { kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: duplicateSheet, reason: 'system' },
+                { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system', statements: ['UPDATE inventory SET name = ? WHERE row_id = ?'], params: [['SQL 更新', 1]] },
+                { kind: 'sql_batch', statements: ['INSERT INTO inventory (row_id, name) VALUES (?, ?)'], params: [[2, 'SQL 新行']] },
+                { kind: 'sql_batch', statements: ['DELETE FROM inventory WHERE row_id = ?'], params: [[1]] },
+                { kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '非 SQL 后缀'], reason: 'system' },
+              ],
+            }],
+          },
+        },
+      },
+    }];
+    const previousHostApi = SillyTavern_API_ACU;
+    try {
+      _set_SillyTavern_API_ACU({ chat, saveChat: vi.fn(async () => undefined) } as any);
+
+      const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+      expect(replay?.baseKind).toBe('spv79_transition_checkpoint');
+      expect(replay?.data.sheet_0.content).toEqual([
+        ['row_id', 'name'],
+        ['1', '非 SQL 后缀'],
+      ]);
+      expect(chat[0].TavernDB_ACU_IsolatedData[''].spv79TransitionCheckpoint?.cutoff).toEqual({
+        messageIndex: 0, seq: 1, operationIndex: 4,
+      });
+    } finally {
+      _set_SillyTavern_API_ACU(previousHostApi);
+    }
+  });
 });
 
 describe('deriveSheetLifecycleFromFramesV2_ACU', () => {

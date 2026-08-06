@@ -280,6 +280,52 @@ export function projectSheetDDLForVisibleColumns_ACU(sheet: Sheet_ACU, ddlOverri
   return `${ddl.slice(0, bounds.openingIndex + 1)}\n${body}\n${ddl.slice(bounds.closingIndex)}`;
 }
 
+/**
+ * Builds a runtime-only DDL variant for SPv7.9 duplicate-row migration.
+ * The persisted DDL is never modified. The normal schema contract already
+ * requires an inline first `row_id INTEGER PRIMARY KEY` column.
+ */
+export function downgradeRowIdPrimaryKeyForLegacyReplay_ACU(ddl: string): string {
+  const value = String(ddl || '');
+  const bounds = findCreateTableDefinitionBounds_ACU(value);
+  if (!bounds) throw new Error('无法解析 CREATE TABLE 语句，不能降级 row_id 主键。');
+  if (/\bWITHOUT\s+ROWID\b/i.test(parseDDLTableSuffix_ACU(value))) {
+    throw new Error('SPv7.9 旧语义 SQL 回放不支持 WITHOUT ROWID 表。');
+  }
+  const body = value.slice(bounds.openingIndex + 1, bounds.closingIndex);
+  const definitions = splitColumnDefinitions(body);
+  if (definitions.length === 0) throw new Error('DDL 缺少可降级的 row_id 列。');
+
+  const first = definitions[0];
+  const commentIndex = findSqlLineCommentStart_ACU(first);
+  const definition = (commentIndex < 0 ? first : first.slice(0, commentIndex));
+  const comment = commentIndex < 0 ? '' : first.slice(commentIndex);
+  const match = definition.match(/^(\s*)((?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]|[A-Za-z_][A-Za-z0-9_]*))(\s+INTEGER\b)([\s\S]*)$/i);
+  if (!match || canonicalSqlIdentifier_ACU(match[2]) !== 'row_id') {
+    throw new Error('SPv7.9 旧语义 SQL 回放缺少首列 row_id INTEGER PRIMARY KEY。');
+  }
+  const tail = match[4];
+  if (!/\bPRIMARY\s+KEY\b/i.test(tail)) {
+    throw new Error('SPv7.9 旧语义 SQL 回放缺少可降级的 row_id PRIMARY KEY 约束。');
+  }
+  const downgradedTail = tail
+    .replace(/\s+PRIMARY\s+KEY\b/i, '')
+    .replace(/\s+AUTOINCREMENT\b/i, '');
+  if (/\b(?:PRIMARY\s+KEY|AUTOINCREMENT)\b/i.test(downgradedTail)) {
+    throw new Error('SPv7.9 旧语义 SQL 回放无法安全降级 row_id 约束。');
+  }
+  definitions[0] = `${match[1]}${match[2]}${match[3]}${downgradedTail}${comment}`;
+  const next = `${value.slice(0, bounds.openingIndex + 1)}${definitions.join(',')}${value.slice(bounds.closingIndex)}`;
+  const columns = parseDDLColumnInfos_ACU(next);
+  const firstColumn = columns[0];
+  if (!firstColumn || canonicalSqlIdentifier_ACU(firstColumn.sqlName) !== 'row_id'
+    || firstColumn.declaredType !== 'INTEGER' || firstColumn.isPrimaryKey
+    || parseDDLTableName(next) !== bounds.tableName) {
+    throw new Error('SPv7.9 旧语义 SQL 回放生成的降级 DDL 未通过结构校验。');
+  }
+  return next;
+}
+
 export function projectSheetRowToVisibleColumns_ACU(sheet: Sheet_ACU, row: readonly unknown[]): unknown[] {
   return getSheetColumnProjection_ACU(sheet).visibleColumns.map(column => row[column.sourceIndex]);
 }
@@ -830,6 +876,23 @@ export function updateDDLColumnComment(ddl: string, columnName: string, newComme
 // ═══════════════════════════════════════════════════════════════
 // 内部工具函数
 // ═══════════════════════════════════════════════════════════════
+
+function findSqlLineCommentStart_ACU(value: string): number {
+  let quote: "'" | '"' | '`' | '[' | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (quote) {
+      if (quote === '[' ? char === ']' : char === quote) {
+        if (quote !== '[' && value[index + 1] === quote) index += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`' || char === '[') quote = char;
+    else if (char === '-' && value[index + 1] === '-') return index;
+  }
+  return -1;
+}
 
 /**
  * 分割 DDL 括号内的列定义（处理嵌套括号）

@@ -1021,6 +1021,40 @@ describe('persistTableSheetCheckpointV2_ACU', () => {
     expect(mocks.saveChat).not.toHaveBeenCalled();
   });
 
+  it('过渡根承载帧继续允许既有 shard 写入，不新增兼容期准入门禁', async () => {
+    const root = seedFrame({ logEntries: [] });
+    const transitionTarget = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 2, reason: 'compaction', data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } },
+            logEntries: [],
+          },
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 2,
+            data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+            cutoff: { messageIndex: 1, seq: 0, operationIndex: -1 },
+          },
+        },
+      },
+    };
+    mocks.chat.splice(0, mocks.chat.length, root, transitionTarget);
+
+    const result = await persistTableSheetCheckpointV2_ACU({
+      targetMessageIndex: 1, sheetKey: 'sheet_a', sheetData: sheetA, reason: 'manual', transactionContext: makeTransaction(),
+    });
+
+    expect(result).toMatchObject({ saved: true, messageIndex: 1 });
+    expect(result.checkpoint).toMatchObject({ kind: 'sheet_full', sheetKey: 'sheet_a', reason: 'manual' });
+    expect(mocks.saveChat).toHaveBeenCalledOnce();
+    expect(transitionTarget.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_a).toEqual(result.checkpoint);
+  });
+
   it('没有根 full checkpoint 时拒绝仅写 shard', async () => {
     seedFrame({ checkpoint: undefined });
     const result = await persistTableSheetCheckpointV2_ACU({ sheetKey: 'sheet_a', sheetData: sheetA, reason: 'manual', transactionContext: makeTransaction() });
@@ -1079,6 +1113,38 @@ describe('persistNullRowCleanupShards_ACU', () => {
     expect(mocks.saveChatStrict).not.toHaveBeenCalled();
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_a).toBeUndefined();
+  });
+
+  it('过渡根承载帧继续允许 null-row cleanup shard 写入，不新增兼容期准入门禁', async () => {
+    const root = seedFrame({ logEntries: [] });
+    const transitionTarget = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 2, reason: 'compaction', data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } },
+            logEntries: [],
+          },
+          spv79TransitionCheckpoint: {
+            version: 1,
+            kind: 'spv79_duplicate_row_id_transition',
+            createdAt: 2,
+            data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+            cutoff: { messageIndex: 1, seq: 0, operationIndex: -1 },
+          },
+        },
+      },
+    };
+    mocks.chat.splice(0, mocks.chat.length, root, transitionTarget);
+
+    const result = await persistNullRowCleanupShards_ACU({ sheetDataByKey: { sheet_a: sheetA } });
+
+    expect(result).toMatchObject({ status: 'persisted', messageIndex: 1 });
+    expect(result.checkpoints).toEqual([expect.objectContaining({ kind: 'sheet_full', sheetKey: 'sheet_a', reason: 'integrity_repair' })]);
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    expect(transitionTarget.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_a).toEqual(result.checkpoints?.[0]);
   });
 
   it('最新 AI 楼层不是 V2 frame 时跳过，不把 legacy 目标隐式迁移为 V2', async () => {

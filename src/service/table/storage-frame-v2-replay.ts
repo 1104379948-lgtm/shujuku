@@ -1,4 +1,4 @@
-import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
+import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getCurrentIsolationKey_ACU, independentTableStates_ACU, settings_ACU } from '../runtime/state-manager';
 import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../shared/models/table-data';
 import { logError_ACU, logWarn_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
@@ -8,6 +8,7 @@ import { SyncBridge } from '../../data/sqlite/sync-bridge';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
 import type { TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TablePatchV2_ACU, TableSheetCheckpointV2_ACU, TableSheetLifecycleEntryV2_ACU, TableSheetLifecycleProjectionV2_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
+import { writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { ensureStableRowIdsForSeedRows_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, getSortedSheetKeys_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
 import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU, restoreLegacyRowIdentity_ACU } from '../../shared/canonical-row-normalizer';
@@ -19,6 +20,8 @@ import { decodeSqlIdentifier_ACU, rebindSqlMutationColumnReferences_ACU, rebindS
 import { buildSheetColumnAliasMap_ACU, buildSheetTableAliasMap_ACU, type SheetColumnAliasEvidence_ACU } from '../../shared/sql-read-resolver';
 import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { repairTableDataFromAudit_ACU } from './table-data-repair';
+import { cloneSpv79TransitionData_ACU, findLatestSpv79TransitionCheckpoint_ACU, isAfterSpv79TransitionCutoff_ACU, isEntryAfterSpv79TransitionCutoff_ACU, isFrameArtifactAfterSpv79TransitionCutoff_ACU, reindexSpv79TransitionState_ACU } from './spv79-transition-checkpoint';
+import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
 interface V2FrameRef_ACU {
   messageIndex: number;
@@ -28,7 +31,7 @@ interface V2FrameRef_ACU {
 
 export type TableScheduleSummaryV2_ACU = NonNullable<TableCheckpointV2_ACU['scheduleSummary']>;
 
-export type TableReplayBaseKindV2_ACU = 'full_checkpoint' | 'replacement_anchor' | 'temporary_template_baseline';
+export type TableReplayBaseKindV2_ACU = 'full_checkpoint' | 'replacement_anchor' | 'temporary_template_baseline' | 'spv79_transition_checkpoint';
 
 export interface TableReplayCompatibilityRepairV2_ACU {
   kind: 'temporary_sheet_anchor';
@@ -154,13 +157,34 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
     .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
   const statusBySheetKey: Record<string, TableSheetLifecycleEntryV2_ACU> = {};
   let sawIndeterminateFrame = false;
+  const lifecycleFullCheckpoint = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+  const lifecycleTransitionCandidate = findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, options.maxMessageIndex);
+  const transitionRef = lifecycleTransitionCandidate && (!lifecycleFullCheckpoint || lifecycleFullCheckpoint.messageIndex <= lifecycleTransitionCandidate.checkpoint.cutoff.messageIndex)
+    ? lifecycleTransitionCandidate : null;
+
+  // 私有过渡根的语义是硬截断，而不是又一种可与旧 full checkpoint 合并的补丁。
+  // 因此根之前的所有 lifecycle 证据（包括 hide checkpoint）都必须被忽略。
+  if (transitionRef) {
+    for (const sheetKey of Object.keys(transitionRef.checkpoint.data)) {
+      if (!sheetKey.startsWith('sheet_')) continue;
+      statusBySheetKey[sheetKey] = {
+        status: 'active',
+        lastTimelineKind: 'sheet_introduction',
+        lastTimelineMessageIndex: transitionRef.messageIndex,
+      };
+    }
+  }
 
   // 起算点必须与 replay 对齐：回放以最后一个 full checkpoint 为基底，更早帧的
   // per-sheet checkpoint 一律不再应用。若这里仍从全历史累积 active，早已被后续 full
   // 快照淘汰的表会永久停留在 active，与同一时点的 replay 基线互相矛盾，使模板协调层
   // 拿到「lifecycle=active 但基线不含该表」的不可自救状态。
-  const baseFrameIndex = findLastFullCheckpointFrameIndex_ACU(frameRefs);
-  if (baseFrameIndex > 0) {
+  const fullCheckpointBaseIndex = findLastFullCheckpointFrameIndex_ACU(frameRefs);
+  const transitionBaseIndex = transitionRef
+    ? frameRefs.findIndex(ref => ref.messageIndex === transitionRef.messageIndex)
+    : -1;
+  const baseFrameIndex = transitionBaseIndex >= 0 ? transitionBaseIndex : fullCheckpointBaseIndex;
+  if (!transitionRef && baseFrameIndex > 0) {
     // full 快照对 active 集合权威，对 hidden 集合不权威：hide 的数据按设计只存在于
     // hide checkpoint，不进 full checkpoint.data。基底之前因此只回收 hide 证据
     // （含 restoreSourceData，compaction 迁移隐藏表依赖它），其余历史痕迹一律丢弃。
@@ -174,6 +198,9 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
       sawIndeterminateFrame = true;
       continue;
     }
+    // frame/checkpoint/timeline 没有 operationIndex；cutoff 消息及之前的 artifact
+    // 都已被私有根吸收，不能仅跳过承载帧而让中间历史重新改变 lifecycle。
+    if (transitionRef && !isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint)) continue;
 
     // 全量 checkpoint = 该时点完整数据库快照：它列出的表为 active；它未列出的 active 表
     // 已被该快照淘汰，必须撤销结论（hidden 保留可恢复数据，indeterminate 保留 fail-closed）。
@@ -862,31 +889,51 @@ function normalizeLegacyDuplicateCheckpointState_ACU(state: TableDataObject_ACU)
   );
 }
 
-async function ensureSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): Promise<void> {
+async function ensureSqlReplayRuntime_ACU(
+  runtime: SqlReplayRuntime_ACU,
+  state: TableDataObject_ACU,
+  options: { legacyDuplicateRowIds?: boolean } = {},
+): Promise<void> {
   if (runtime.loaded) return;
   // The snapshot handed to SQLite comes from persisted history, so legacy
   // identity must be restored before strict hydrate. The export path below
   // stays strict: by then every row has an identity, and a defect there would
   // be ours, not the historical data's.
-  normalizeHistoricalReplayState_ACU(state, 'snapshot');
+  if (!options.legacyDuplicateRowIds) normalizeHistoricalReplayState_ACU(state, 'snapshot');
   await runtime.engine.init();
-  runtime.syncBridge.loadFromTableData(state, { strict: true });
+  if (options.legacyDuplicateRowIds) runtime.syncBridge.loadSpv79LegacyDuplicateRowIdHistory(state);
+  else runtime.syncBridge.loadFromTableData(state, { strict: true });
   runtime.loaded = true;
 }
 
-function getExportedSqlReplayRuntimeState_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): TableDataObject_ACU {
+function getExportedSqlReplayRuntimeState_ACU(
+  runtime: SqlReplayRuntime_ACU,
+  state: TableDataObject_ACU,
+  options: { legacyDuplicateRowIds?: boolean } = {},
+): TableDataObject_ACU {
   if (!runtime.loaded) return deepClone_ACU(state);
-  const next = runtime.syncBridge.exportToTableData((state.mate || { type: 'acu', version: 1 }) as Mate_ACU, { strict: true });
-  normalizeReplayState_ACU(next, 'SQL 导出结果');
+  const mate = (state.mate || { type: 'acu', version: 1 }) as Mate_ACU;
+  const next = options.legacyDuplicateRowIds
+    ? runtime.syncBridge.exportSpv79LegacyDuplicateRowIdHistory(mate)
+    : runtime.syncBridge.exportToTableData(mate, { strict: true });
+  if (!options.legacyDuplicateRowIds) normalizeReplayState_ACU(next, 'SQL 导出结果');
   return next;
 }
 
-function exportSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): void {
+function exportSqlReplayRuntime_ACU(
+  runtime: SqlReplayRuntime_ACU,
+  state: TableDataObject_ACU,
+  options: { legacyDuplicateRowIds?: boolean } = {},
+): void {
   if (!runtime.loaded) return;
-  replaceState_ACU(state, getExportedSqlReplayRuntimeState_ACU(runtime, state));
+  replaceState_ACU(state, getExportedSqlReplayRuntimeState_ACU(runtime, state, options));
 }
 
-async function reloadSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): Promise<void> {
+async function reloadSqlReplayRuntime_ACU(
+  runtime: SqlReplayRuntime_ACU,
+  state: TableDataObject_ACU,
+  options: { legacyDuplicateRowIds?: boolean } = {},
+): Promise<void> {
   if (!runtime.loaded) return;
   const nextEngine = new SqliteEngine();
   const nextRuntime: SqlReplayRuntime_ACU = {
@@ -895,7 +942,7 @@ async function reloadSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: 
     loaded: false,
   };
   try {
-    await ensureSqlReplayRuntime_ACU(nextRuntime, state);
+    await ensureSqlReplayRuntime_ACU(nextRuntime, state, options);
   } catch (error) {
     nextEngine.dispose();
     throw error;
@@ -911,9 +958,10 @@ async function reloadSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: 
 function buildReplayCandidate_ACU(
   runtime: SqlReplayRuntime_ACU | null,
   state: TableDataObject_ACU,
+  options: { legacyDuplicateRowIds?: boolean } = {},
 ): TableDataObject_ACU {
   return runtime?.loaded
-    ? getExportedSqlReplayRuntimeState_ACU(runtime, state)
+    ? getExportedSqlReplayRuntimeState_ACU(runtime, state, options)
     : deepClone_ACU(state);
 }
 
@@ -922,15 +970,18 @@ async function commitReplayCandidate_ACU(
   state: TableDataObject_ACU,
   candidate: TableDataObject_ACU,
   context: string,
-  options: { historical?: boolean } = {},
+  options: { historical?: boolean; legacyDuplicateRowIds?: boolean } = {},
 ): Promise<void> {
   // Every operation funnels through here, so this is the single place where the
   // historical/strict split is decided. Candidates derived from persisted
   // operations get legacy identity restored; candidates we construct ourselves
   // (template baselines) stay strict so new writes cannot regress the format.
-  if (options.historical) normalizeHistoricalReplayState_ACU(candidate, context);
+  if (options.legacyDuplicateRowIds) {
+    // SPv7.9 过渡回放必须逐项保留旧状态；此阶段的重复身份会在快照一次性重编号。
+    // 这里绝不能调用 restore/normalize，否则会在旧 operation 的中途改变匹配语义。
+  } else if (options.historical) normalizeHistoricalReplayState_ACU(candidate, context);
   else normalizeReplayState_ACU(candidate, context);
-  if (runtime?.loaded) await reloadSqlReplayRuntime_ACU(runtime, candidate);
+  if (runtime?.loaded) await reloadSqlReplayRuntime_ACU(runtime, candidate, options);
   replaceState_ACU(state, candidate);
 }
 
@@ -1013,10 +1064,11 @@ async function applySqlBatchOperationV2_ACU(
   operation: Extract<TableMutationOperationV2_ACU, { kind: 'sql_batch' | 'sql_sheet_batch' }>,
   runtime: SqlReplayRuntime_ACU,
   supplementalTemplate: TableDataObject_ACU | null | undefined,
+  options: { legacyDuplicateRowIds?: boolean } = {},
 ): Promise<void> {
   const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
   if (statements.length === 0) return;
-  await ensureSqlReplayRuntime_ACU(runtime, state);
+  await ensureSqlReplayRuntime_ACU(runtime, state, options);
   const { aliases, conflicts } = buildReplaySqlTableAliases_ACU(state, operation);
   const replayStatements = rebindSqlMutationTableReferences_ACU(statements, aliases, {
     lenient: true,
@@ -1072,6 +1124,41 @@ function assertMetaUpdateDoesNotChangeDdl_ACU(patch: Extract<TablePatchV2_ACU, {
       '[V2 Replay] legacy meta_update.sourceData.ddl 无法安全回放；该结构变更需要迁移为 sheet_schema_migrate 或 sheet_replace。',
     );
   }
+}
+
+function applyTablePatchLegacyDuplicateRowIds_ACU(state: TableDataObject_ACU, patch: TablePatchV2_ACU): void {
+  if (patch.kind === 'sheet_replace') {
+    state[patch.sheetKey] = deepClone_ACU(patch.sheet);
+    return;
+  }
+  const sheet = state[patch.sheetKey] as Sheet_ACU | undefined;
+  if (!sheet || !Array.isArray(sheet.content)) {
+    logWarn_ACU(`[V2 Replay] SPv7.9 兼容回放跳过缺少表或 content 的 patch: ${patch.sheetKey}`);
+    return;
+  }
+  if (patch.kind === 'row_upsert') {
+    if (!Array.isArray(patch.cells)) throw new Error(`[V2 Replay] legacy row_upsert cells 必须是数组：sheetKey=${patch.sheetKey}。`);
+    const rowId = String(patch.rowId ?? patch.cells[0] ?? '').trim();
+    if (!rowId) throw new Error(`[V2 Replay] legacy row_upsert 缺少 row_id：sheetKey=${patch.sheetKey}。`);
+    const rowIndex = sheet.content.findIndex((row, index) => index > 0 && Array.isArray(row) && String(row[0] ?? '').trim() === rowId);
+    const row = deepClone_ACU(patch.cells);
+    if (row.length > 0) row[0] = rowId;
+    if (rowIndex >= 0) sheet.content[rowIndex] = row;
+    else sheet.content.push(row);
+    return;
+  }
+  if (patch.kind === 'row_delete') {
+    const rowId = String(patch.rowId ?? '').trim();
+    sheet.content = sheet.content.filter((row, index) => index === 0 || !Array.isArray(row) || String(row[0] ?? '').trim() !== rowId);
+    return;
+  }
+  assertMetaUpdateDoesNotChangeDdl_ACU(patch);
+  const meta = deepClone_ACU(patch.meta || {});
+  if (meta.name !== undefined) sheet.name = meta.name;
+  if (meta.orderNo !== undefined) sheet.orderNo = meta.orderNo;
+  if (meta.updateConfig !== undefined) sheet.updateConfig = meta.updateConfig;
+  if (meta.exportConfig !== undefined) sheet.exportConfig = meta.exportConfig;
+  if (meta.sourceData !== undefined) sheet.sourceData = { ...sheet.sourceData, ...(meta.sourceData as Record<string, unknown>) };
 }
 
 export function applyTablePatchV2_ACU(state: TableDataObject_ACU, patch: TablePatchV2_ACU): void {
@@ -1308,6 +1395,16 @@ export async function applyTableOperationV2_ACU(
   runtime?: SqlReplayRuntime_ACU,
   supplementalTemplate?: TableDataObject_ACU | null,
 ): Promise<void> {
+  await applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate);
+}
+
+async function applyTableOperationV2Core_ACU(
+  state: TableDataObject_ACU,
+  operation: TableMutationOperationV2_ACU,
+  runtime?: SqlReplayRuntime_ACU,
+  supplementalTemplate?: TableDataObject_ACU | null,
+  options: { legacyDuplicateRowIds?: boolean } = {},
+): Promise<void> {
   if (!operation || typeof operation !== 'object' || typeof (operation as any).kind !== 'string') {
     throw new Error('[V2 Replay] operation 缺少有效 kind。');
   }
@@ -1320,40 +1417,41 @@ export async function applyTableOperationV2_ACU(
   try {
     if (operation.kind === 'data_replace') {
       const candidate = deepClone_ACU(operation.data);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace', { historical: true });
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace', { historical: true, ...options });
       return;
     }
     if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
       if (!effectiveRuntime) throw new Error(`${operation.kind} replay requires runtime`);
-      await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime, supplementalTemplate);
-      if (ownedRuntime) exportSqlReplayRuntime_ACU(ownedRuntime, state);
+      await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime, supplementalTemplate, options);
+      if (ownedRuntime) exportSqlReplayRuntime_ACU(ownedRuntime, state, options);
       return;
     }
     if (operation.kind === 'sheet_schema_migrate') {
-      const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state);
+      const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       const candidate = await applySheetSchemaMigrationOperation_ACU(sourceState, operation);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate', { historical: true });
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate', { historical: true, ...options });
       return;
     }
     if (operation.kind === 'sheet_replace') {
-      const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
+      const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       candidate[operation.sheetKey] = deepClone_ACU(operation.sheet);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace', { historical: true });
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace', { historical: true, ...options });
       return;
     }
     if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
       if (operation.kind === 'meta_update') {
         assertMetaUpdateDoesNotChangeDdl_ACU(operation);
       }
-      const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
-      applyTablePatchV2_ACU(candidate, operation);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind, { historical: true });
+      const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
+      if (options.legacyDuplicateRowIds) applyTablePatchLegacyDuplicateRowIds_ACU(candidate, operation);
+      else applyTablePatchV2_ACU(candidate, operation);
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind, { historical: true, ...options });
       return;
     }
     if (operation.kind === 'table_edit_dsl') {
-      const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
+      const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       applyTableEditDslOperationV2_ACU(candidate, operation.text);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl', { historical: true });
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl', { historical: true, ...options });
       return;
     }
 
@@ -1374,17 +1472,27 @@ export function collectScheduleSummaryFromFramesV2_ACU(
   const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
     .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
   const checkpointRef = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+  const transitionCandidate = findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, options.maxMessageIndex);
+  const transitionRef = transitionCandidate && (!checkpointRef || checkpointRef.messageIndex <= transitionCandidate.checkpoint.cutoff.messageIndex)
+    ? transitionCandidate : null;
 
-  const summary: TableScheduleSummaryV2_ACU = checkpointRef?.frame.checkpoint
-    ? deepClone_ACU(checkpointRef.frame.checkpoint.scheduleSummary || {})
-    : {};
-  if (checkpointRef?.frame.checkpoint) {
+  const summary: TableScheduleSummaryV2_ACU = transitionRef
+    ? deepClone_ACU(transitionRef.checkpoint.scheduleSummary || {})
+    : (checkpointRef?.frame.checkpoint
+      ? deepClone_ACU(checkpointRef.frame.checkpoint.scheduleSummary || {})
+      : {});
+  if (!transitionRef && checkpointRef?.frame.checkpoint) {
     applyEventToScheduleSummary_ACU(summary, checkpointRef.frame.checkpoint.event, checkpointRef.aiFloor);
   }
 
   for (const ref of frameRefs) {
-    if (checkpointRef && ref.messageIndex < checkpointRef.messageIndex) continue;
-    const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
+    if (!transitionRef && checkpointRef && ref.messageIndex < checkpointRef.messageIndex) continue;
+    const frameArtifactsAfterCutoff = !transitionRef
+      || isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint);
+    // per-sheet artifact 没有 operationIndex；cutoff 消息及之前均由私有根的 summary 覆盖。
+    const checkpoints = frameArtifactsAfterCutoff
+      ? getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex)
+      : [];
     const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
     for (const sheetCheckpoint of checkpoints.filter(checkpoint => checkpoint.timeline === undefined)) {
       summary[sheetCheckpoint.sheetKey] = deepClone_ACU(sheetCheckpoint.scheduleSummary || {});
@@ -1405,6 +1513,10 @@ export function collectScheduleSummaryFromFramesV2_ACU(
       }
     };
     for (const entry of entries) {
+      // schedule event 是 entry 级事实，没有 operationIndex；cutoff entry 及之前均已吸收。
+      if (transitionRef && !isEntryAfterSpv79TransitionCutoff_ACU(
+        ref.messageIndex, entry.seq, transitionRef.checkpoint,
+      )) continue;
       applyDueIntroductions(entry.seq);
       applyEventToScheduleSummary_ACU(summary, entry, ref.aiFloor);
     }
@@ -1426,13 +1538,20 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
   const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
     .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
   const checkpointRef = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+  const transitionCandidate = findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, options.maxMessageIndex);
+  const transitionRef = transitionCandidate && (!checkpointRef || checkpointRef.messageIndex <= transitionCandidate.checkpoint.cutoff.messageIndex)
+    ? transitionCandidate : null;
   const hasUnanchoredArtifacts = hasUnanchoredReplayArtifacts_ACU(frameRefs);
   let baseKind: TableReplayBaseKindV2_ACU = 'full_checkpoint';
   let state: TableDataObject_ACU;
   let replayStartMessageIndex: number;
   let replacementAnchorCursor: ReplacementAnchor_ACU | null = null;
 
-  if (!checkpointRef?.frame.checkpoint) {
+  if (transitionRef) {
+    state = cloneSpv79TransitionData_ACU(transitionRef.checkpoint);
+    baseKind = 'spv79_transition_checkpoint';
+    replayStartMessageIndex = transitionRef.messageIndex;
+  } else if (!checkpointRef?.frame.checkpoint) {
     if (!hasUnanchoredArtifacts) return null;
     // A replacement anchor supersedes everything before it, so it is a valid
     // base on its own and needs no template baseline or user confirmation.
@@ -1489,7 +1608,10 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
     if (headerOnlyTemplate) headerOnlyTemplateFingerprint = getTableDataFingerprint_ACU(headerOnlyTemplate);
     for (const ref of frameRefs) {
       if (ref.messageIndex < replayStartMessageIndex) continue;
-      const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
+      const frameArtifactsAfterCutoff = !transitionRef
+        || isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint);
+      const checkpoints = frameArtifactsAfterCutoff
+        ? getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex) : [];
       const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
       const isAnchorFrame = replacementAnchorCursor?.messageIndex === ref.messageIndex;
       await applySheetCheckpointsForReplay_ACU(
@@ -1522,6 +1644,12 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
           await applyDueIntroductions(entry.seq);
           if (Array.isArray(entry.operations) && entry.operations.length > 0) {
             for (const [operationIndex, operation] of entry.operations.entries()) {
+              if (transitionRef && !isAfterSpv79TransitionCutoff_ACU(
+                ref.messageIndex,
+                entry.seq,
+                operationIndex,
+                transitionRef.checkpoint,
+              )) continue;
               if (isAnchorFrame
                 && entry.seq === replacementAnchorCursor!.seq
                 && operationIndex <= replacementAnchorCursor!.operationIndex) {
@@ -1565,6 +1693,9 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
               }
             }
           } else {
+            if (transitionRef && !isEntryAfterSpv79TransitionCutoff_ACU(
+              ref.messageIndex, entry.seq, transitionRef.checkpoint,
+            )) continue;
             const candidate = buildReplayCandidate_ACU(runtime, state);
             // 兼容旧版 derived patch log；新 V2 不再写 patches。
             for (const patch of entry.patches || []) {
@@ -1572,7 +1703,10 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
             }
             await commitReplayCandidate_ACU(runtime, state, candidate, 'legacy patches', { historical: true });
           }
-          if (options.updateRuntimeState !== false) {
+          const shouldReplayEntryEvent = !transitionRef || isEntryAfterSpv79TransitionCutoff_ACU(
+            ref.messageIndex, entry.seq, transitionRef.checkpoint,
+          );
+          if (shouldReplayEntryEvent && options.updateRuntimeState !== false) {
             replayEventForState_ACU(entry, ref.aiFloor);
           }
         } catch (error) {
@@ -1601,6 +1735,11 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
   options: LoadTableStateFromFramesV2Options_ACU = {},
 ): Promise<TableReplayResultV2_ACU | null> {
   const chat = chatArg || getChatArray_ACU();
+  const isolationKey = isolationKeyArg ?? getCurrentIsolationKey_ACU();
+  // 候选回放、bounded 验证和导入诊断必须保持纯函数性质；只有宿主当前聊天的
+  // 首次真实加载才允许把 duplicate_row_id 升级为持久化过渡根。
+  const mayCreateTransition = chat === getChatArray_ACU()
+    && findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey) === null;
   const performanceSpan = startRuntimePerformanceSpan_ACU('v2-replay', {
     runId: options.performanceRunId,
     parentSpanId: options.performanceParentSpanId,
@@ -1621,6 +1760,18 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
     });
     return result;
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (mayCreateTransition && message.includes('duplicate_row_id')) {
+      try {
+        await createSpv79TransitionCheckpointForDuplicateRowId_ACU(chat, isolationKey);
+        const recovered = await loadTableStateFromFramesV2DetailedCore_ACU(chat, isolationKey, options);
+        performanceSpan.end({ success: recovered !== null, baseKind: recovered?.baseKind || 'none', recoveredFromDuplicateRowId: true });
+        return recovered;
+      } catch (transitionError) {
+        performanceSpan.end({ success: false, recoveredFromDuplicateRowId: false });
+        throw transitionError;
+      }
+    }
     performanceSpan.end({ success: false });
     throw error;
   }
@@ -1633,6 +1784,131 @@ export async function loadTableStateFromFramesV2_ACU(
 ): Promise<TableDataObject_ACU | null> {
   const result = await loadTableStateFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, options);
   return result?.data ?? null;
+}
+
+/**
+ * SPv7.9 的一次性恢复回放。它只在严格 replay 明确报出 duplicate_row_id 后由
+ * 过渡写入服务调用；不会修改 storageFrame，也不会成为新写入路径。
+ */
+export async function replaySpv79DuplicateRowIdHistory_ACU(
+  chatArg: any[] | null | undefined,
+  isolationKey: string,
+): Promise<{ data: TableDataObject_ACU; cutoff: { messageIndex: number; seq: number; operationIndex: number } }> {
+  const chat = Array.isArray(chatArg) ? chatArg : [];
+  const frameRefs = getV2FrameRefs_ACU(chat, isolationKey);
+  if (frameRefs.length === 0) throw new Error('SPv7.9 兼容回放缺少 V2 storage frame。');
+
+  const baseIndex = findLastFullCheckpointFrameIndex_ACU(frameRefs);
+  if (baseIndex < 0) throw new Error('SPv7.9 兼容回放缺少 full checkpoint 基底。');
+  const baseRef = frameRefs[baseIndex];
+  const checkpoint = baseRef.frame.checkpoint;
+  if (!checkpoint || checkpoint.kind !== 'full') throw new Error('SPv7.9 兼容回放基底不是有效 full checkpoint。');
+
+  const state = deepClone_ACU(checkpoint.data);
+  let cutoff = { messageIndex: baseRef.messageIndex, seq: 0, operationIndex: -1 };
+  for (let frameIndex = baseIndex; frameIndex < frameRefs.length; frameIndex += 1) {
+    const ref = frameRefs[frameIndex];
+    const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
+    // 根帧自身的 checkpoint 已作为 base；其余未排序单表快照遵循现有 replay 的帧首语义。
+    for (const sheetCheckpoint of checkpoints.filter(item => item.timeline === undefined)) {
+      state[sheetCheckpoint.sheetKey] = deepClone_ACU(sheetCheckpoint.data);
+    }
+    const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
+    const pendingTimelineCheckpoints = checkpoints.filter(item => item.timeline !== undefined);
+    const applyDueTimelineCheckpoints = (nextSeq: number): void => {
+      const due = pendingTimelineCheckpoints.filter(item => item.timeline!.afterSeq < nextSeq);
+      for (const sheetCheckpoint of due) {
+        if (sheetCheckpoint.timeline?.kind === 'sheet_hide') delete state[sheetCheckpoint.sheetKey];
+        else state[sheetCheckpoint.sheetKey] = deepClone_ACU(sheetCheckpoint.data);
+        pendingTimelineCheckpoints.splice(pendingTimelineCheckpoints.indexOf(sheetCheckpoint), 1);
+      }
+    };
+    for (const entry of entries) {
+      applyDueTimelineCheckpoints(entry.seq);
+      if (Array.isArray(entry.operations) && entry.operations.length > 0) {
+        for (const [operationIndex, operation] of entry.operations.entries()) {
+          await applyTableOperationV2Core_ACU(state, operation, undefined, undefined, { legacyDuplicateRowIds: true });
+          cutoff = { messageIndex: ref.messageIndex, seq: entry.seq, operationIndex };
+        }
+      } else {
+        for (const [operationIndex, patch] of (entry.patches || []).entries()) {
+          applyTablePatchLegacyDuplicateRowIds_ACU(state, patch);
+          cutoff = { messageIndex: ref.messageIndex, seq: entry.seq, operationIndex };
+        }
+        if (!entry.patches?.length) cutoff = { messageIndex: ref.messageIndex, seq: entry.seq, operationIndex: -1 };
+      }
+    }
+    applyDueTimelineCheckpoints(Number.POSITIVE_INFINITY);
+  }
+  return { data: state, cutoff };
+}
+
+async function createSpv79TransitionCheckpointForDuplicateRowId_ACU(
+  chat: any[],
+  isolationKey: string,
+): Promise<void> {
+  if (findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey)) return;
+  const targetMessageIndex = (() => {
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+      if (chat[index] && !chat[index].is_user) return index;
+    }
+    return -1;
+  })();
+  if (targetMessageIndex < 0) throw new Error('SPv7.9 过渡 checkpoint 缺少可写入的 AI 楼层。');
+
+  const legacyReplay = await replaySpv79DuplicateRowIdHistory_ACU(chat, isolationKey);
+  const data = reindexSpv79TransitionState_ACU(legacyReplay.data);
+  const normalization = normalizeCanonicalTableRows_ACU(data);
+  const issues = [...normalization.errors, ...normalization.removedRows];
+  if (issues.length > 0) {
+    throw new Error(`[V2 Replay] SPv7.9 过渡重编号结果不满足 canonical 行身份契约：${formatCanonicalRowIssues_ACU(issues)}`);
+  }
+
+  await runTableWriteTransaction_ACU({
+    source: 'system_cleanup',
+    reason: 'createSpv79TransitionCheckpointForDuplicateRowId',
+    isolationKey,
+    writeSet: [{ kind: 'all' }],
+    maintenanceMode: 'exclusive',
+    workingDataMode: 'none',
+  }, async ctx => ctx.runCommit(async () => {
+    const target = chat[targetMessageIndex];
+    if (!target || target.is_user) throw new Error('SPv7.9 过渡 checkpoint 的目标 AI 楼层在提交前已变化。');
+    if (findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey)) return;
+    const hadIsolatedData = Object.prototype.hasOwnProperty.call(target, 'TavernDB_ACU_IsolatedData');
+    const previousIsolatedData = target.TavernDB_ACU_IsolatedData;
+    const hadIdentity = Object.prototype.hasOwnProperty.call(target, 'TavernDB_ACU_Identity');
+    const previousIdentity = target.TavernDB_ACU_Identity;
+    try {
+      const isolatedData = previousIsolatedData && typeof previousIsolatedData === 'object' && !Array.isArray(previousIsolatedData)
+        ? deepClone_ACU(previousIsolatedData)
+        : {};
+      const tagData = isolatedData[isolationKey] && typeof isolatedData[isolationKey] === 'object' && !Array.isArray(isolatedData[isolationKey])
+        ? isolatedData[isolationKey]
+        : {};
+      tagData.spv79TransitionCheckpoint = {
+        version: 1,
+        kind: 'spv79_duplicate_row_id_transition',
+        createdAt: Date.now(),
+        data: deepClone_ACU(data),
+        cutoff: legacyReplay.cutoff,
+        scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey),
+      };
+      isolatedData[isolationKey] = tagData;
+      target.TavernDB_ACU_IsolatedData = isolatedData;
+      writeMessageIdentity_ACU(target, {
+        enabled: settings_ACU.dataIsolationEnabled,
+        code: settings_ACU.dataIsolationCode,
+      });
+      await saveChatToHostStrict_ACU();
+    } catch (error) {
+      if (hadIsolatedData) target.TavernDB_ACU_IsolatedData = previousIsolatedData;
+      else delete target.TavernDB_ACU_IsolatedData;
+      if (hadIdentity) target.TavernDB_ACU_Identity = previousIdentity;
+      else delete target.TavernDB_ACU_Identity;
+      throw error;
+    }
+  }));
 }
 
 export async function validateCurrentChatTableRecovery_ACU(

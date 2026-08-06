@@ -320,8 +320,7 @@ import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../agent/agent-world
           // ignore
       }
 
-      for (let i = 0; i < chat.length; i++) {
-          const msg = chat[i];
+      for (const msg of chat) {
           if (!msg || msg.is_user) continue;
 
           // 委托给 data 层的 repository 处理单条消息的字段删除

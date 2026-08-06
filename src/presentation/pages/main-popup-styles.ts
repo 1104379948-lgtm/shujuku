@@ -10,7 +10,7 @@ export const MAIN_POPUP_CSS_ACU = `
                        星·数据库 UI 设计系统（仅影响插件自身）
                        目标：大气、简约、高级；超窄屏也能舒服用
                        ═══════════════════════════════════════════════════════════════ */
-                    
+
                     /* 基础隔离：尽量不吃外部样式（但不使用 all: initial，避免破坏第三方组件） */
                     #${POPUP_ID_ACU}, #${POPUP_ID_ACU} * { box-sizing: border-box; }
                     #${POPUP_ID_ACU} { color-scheme: light; }
@@ -42,7 +42,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         --acu-radius-sm: 6px;
 
                         --acu-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-                        
+
                         /* 兼容旧 inline style 里使用的变量名（避免依赖外部主题） */
                         --bg-primary: var(--acu-bg-0);
                         --bg-secondary: var(--acu-bg-1);
@@ -68,7 +68,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         --orange: var(--acu-warning);
                         --red: var(--acu-danger);
                         --accent-primary: var(--acu-accent);
-                        
+
                         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "HarmonyOS Sans SC", "MiSans", Roboto, Helvetica, Arial, sans-serif;
                         font-size: 14px;
                         line-height: 1.6;
@@ -122,7 +122,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         text-align: center;
                         width: 100%;
                     }
-                    
+
                     #${POPUP_ID_ACU} .acu-header-sub {
                         margin-top: 4px;
                         font-size: 12px;
@@ -164,7 +164,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         user-select: none;
                         font-weight: 600;
                     }
-                    
+
                     #${POPUP_ID_ACU} .acu-tab-button {
                         width: 100%;
                         display: flex;
@@ -234,11 +234,11 @@ export const MAIN_POPUP_CSS_ACU = `
                         font-weight: 600;
                         color: var(--acu-text-1);
                     }
-                    
+
                     /* 网格 */
                     #${POPUP_ID_ACU} .acu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
                     #${POPUP_ID_ACU} .acu-grid-2x2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-                    
+
                     /* 表单 */
                     #${POPUP_ID_ACU} label {
                         display: block;
@@ -276,8 +276,8 @@ export const MAIN_POPUP_CSS_ACU = `
                         background-repeat: no-repeat !important;
                         padding-right: 34px !important;
                     }
-                    #${POPUP_ID_ACU} input:focus, 
-                    #${POPUP_ID_ACU} select:focus, 
+                    #${POPUP_ID_ACU} input:focus,
+                    #${POPUP_ID_ACU} select:focus,
                     #${POPUP_ID_ACU} textarea:focus {
                         border-color: var(--acu-accent) !important;
                         box-shadow: 0 0 0 3px var(--acu-accent-glow) !important;
@@ -340,7 +340,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         border-color: var(--acu-accent) !important;
                         color: var(--acu-checkbox-checked-icon, #ffffff) !important;
                     }
-                    
+
                     /* 警告/危险 */
                     #${POPUP_ID_ACU} .btn-warning {
                         background: rgba(245, 158, 11, 0.08);
@@ -352,7 +352,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         border-color: rgba(239, 68, 68, 0.25);
                         color: #dc2626;
                     }
-                    
+
                     /* 小按钮样式 - 用于全选/全不选等辅助按钮 */
                     #${POPUP_ID_ACU} .acu-btn-small, #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-manual-table-select-all, #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-manual-table-select-none {
                         padding: 4px 8px;
@@ -492,12 +492,12 @@ export const MAIN_POPUP_CSS_ACU = `
                         border-top: 1px solid var(--acu-border);
                         margin: 14px 0;
                     }
-                    
+
                     /* 通用布局小组件 */
                     #${POPUP_ID_ACU} .flex-center { display: flex; justify-content: center; align-items: center; }
                     #${POPUP_ID_ACU} .input-group { display: flex; gap: 10px; align-items: center; }
                     #${POPUP_ID_ACU} .input-group input { flex: 1; min-width: 0; }
-                    
+
                     #${POPUP_ID_ACU} .checkbox-group {
                         display: flex;
                         align-items: flex-start;
@@ -508,7 +508,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         background: var(--acu-bg-2);
                         margin-bottom: 6px;
                     }
-                    
+
                     /* ═══ 复选框：精致典雅风格 ═══ */
                     #${POPUP_ID_ACU} input[type="checkbox"] {
                         -webkit-appearance: none !important;
@@ -618,8 +618,8 @@ export const MAIN_POPUP_CSS_ACU = `
                     #${POPUP_ID_ACU} .toggle-switch input:checked + .slider:before { transform: translateY(-50%) translateX(20px); }
 
                     /* 提示词编辑器 */
-                    #${POPUP_ID_ACU} .prompt-segment { 
-                        margin-bottom: 12px; 
+                    #${POPUP_ID_ACU} .prompt-segment {
+                        margin-bottom: 12px;
                         border: 1px solid var(--acu-border);
                         background: var(--acu-bg-2);
                         padding: 12px;
@@ -627,7 +627,7 @@ export const MAIN_POPUP_CSS_ACU = `
                     }
                     #${POPUP_ID_ACU} .prompt-segment-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
                     #${POPUP_ID_ACU} .prompt-segment-role { width: 120px !important; flex-grow: 0; }
-                    #${POPUP_ID_ACU} .prompt-segment-delete-btn { 
+                    #${POPUP_ID_ACU} .prompt-segment-delete-btn {
                         width: 28px; height: 28px; padding: 0;
                         border-radius: 999px;
                         border: 1px solid rgba(255, 107, 107, 0.35);
@@ -636,7 +636,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn { 
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn {
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -672,7 +672,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn { 
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn {
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -708,7 +708,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         max-height: 220px;
                         overflow: auto;
                     }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item { 
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item {
                         padding: 8px 10px;
                         border-radius: 6px;
                         cursor: pointer;
@@ -719,7 +719,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         border: 1px solid transparent;
                     }
                     #${POPUP_ID_ACU} .qrf_worldbook_list_item:hover { background: var(--acu-bg-2); color: var(--acu-text-1); }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected { 
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected {
                         background: rgba(37, 99, 235, 0.08);
                         border-color: rgba(37, 99, 235, 0.25);
                         color: var(--acu-accent);
@@ -737,7 +737,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         color: var(--acu-text-3);
                         text-align: left;
                     }
-                    
+
                     /* 底部状态栏：独立成条，居中不“歪” */
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-status-message {
                         margin: 12px 0 0 0;
@@ -749,7 +749,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         background: var(--acu-bg-2);
                         color: var(--acu-text-2);
                         }
-                        
+
                     /* 状态显示 */
                         #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-card-update-status-display {
                         padding: 10px 12px;
@@ -759,7 +759,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         color: var(--acu-text-2);
                         }
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-total-messages-display { color: var(--acu-text-3); font-size: 12px; }
-                        
+
                     /* 表格 */
                     #${POPUP_ID_ACU} table { width: 100%; border-collapse: collapse; }
                     #${POPUP_ID_ACU} table th { color: var(--acu-text-3); font-weight: 600; font-size: 12px; }
@@ -771,7 +771,7 @@ export const MAIN_POPUP_CSS_ACU = `
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-track { background: transparent; border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb { background: var(--acu-border-2); border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb:hover { background: var(--acu-text-3); }
-                        
+
                     /* Toast 终止按钮（剧情推进） */
                     #toast-container .qrf-abort-btn {
                         margin-left: 8px;
@@ -1006,7 +1006,7 @@ export const MAIN_POPUP_CSS_ACU = `
                             line-height: 1.35 !important;
                         }
                     }
-                    
+
                     /* ═══ 手机横屏/小平板 (≤768px) ═══ */
                     @media screen and (max-width: 768px) {
                         #${POPUP_ID_ACU} {
@@ -1060,7 +1060,7 @@ export const MAIN_POPUP_CSS_ACU = `
                             justify-content: flex-start !important;
                         }
                     }
-                    
+
                     /* ═══ 手机竖屏 (≤520px) ═══ */
                     @media screen and (max-width: 520px) {
                         #${POPUP_ID_ACU} {
@@ -1138,7 +1138,7 @@ export const MAIN_POPUP_CSS_ACU = `
                             font-size: 0.9em;
                             height: 36px;
                         }
-                        
+
                         /* 移动端：按钮自然宽度flex-wrap */
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
@@ -1147,11 +1147,11 @@ export const MAIN_POPUP_CSS_ACU = `
                             padding: 6px 12px !important;
                         }
                     }
-                    
+
                     /* ═══ 极窄屏 (≤420px) ═══ */
                     @media screen and (max-width: 420px) {
-                        #${POPUP_ID_ACU} { 
-                            padding: 4px; 
+                        #${POPUP_ID_ACU} {
+                            padding: 4px;
                             padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 4px; margin-top: 4px; min-height: 0; }
@@ -1163,12 +1163,12 @@ export const MAIN_POPUP_CSS_ACU = `
                         #${POPUP_ID_ACU} .acu-tabs-nav { padding: 3px; gap: 2px; flex-shrink: 0; border-radius: 16px; }
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 4px 8px !important; font-size: 10px !important; }
                         #${POPUP_ID_ACU} label { font-size: 10px; margin-bottom: 3px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
-                            padding: 6px 8px !important; 
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
+                            padding: 6px 8px !important;
                             border-radius: 6px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
-                            padding: 5px 8px !important; 
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
+                            padding: 5px 8px !important;
                             min-height: 28px !important;
                             font-size: 11px !important;
                             border-radius: 6px !important;
@@ -1186,11 +1186,11 @@ export const MAIN_POPUP_CSS_ACU = `
                             border-radius: 6px !important;
                         }
                     }
-                    
+
                     /* ═══ 超小屏 (≤360px) ═══ */
                     @media screen and (max-width: 360px) {
-                        #${POPUP_ID_ACU} { 
-                            padding: 3px; 
+                        #${POPUP_ID_ACU} {
+                            padding: 3px;
                             padding-bottom: calc(3px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 3px; margin-top: 3px; min-height: 0; }
@@ -1204,13 +1204,13 @@ export const MAIN_POPUP_CSS_ACU = `
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 3px 6px !important; font-size: 10px !important; border-radius: 12px !important; }
                         #${POPUP_ID_ACU} .acu-tab-button::after { display: none !important; }
                         #${POPUP_ID_ACU} label { font-size: 9px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
-                            padding: 5px 6px !important; 
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
+                            padding: 5px 6px !important;
                             font-size: 14px !important;
                             border-radius: 5px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
-                            padding: 4px 6px !important; 
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
+                            padding: 4px 6px !important;
                             min-height: 26px !important;
                             font-size: 10px !important;
                             border-radius: 5px !important;
@@ -1220,8 +1220,8 @@ export const MAIN_POPUP_CSS_ACU = `
                             gap: 3px !important;
                         }
                         #${POPUP_ID_ACU} .checkbox-group label { font-size: 9px !important; line-height: 1.2 !important; }
-                        #${POPUP_ID_ACU} input[type="checkbox"] { 
-                            width: 15px !important; 
+                        #${POPUP_ID_ACU} input[type="checkbox"] {
+                            width: 15px !important;
                             height: 15px !important;
                             min-width: 15px !important;
                             min-height: 15px !important;
@@ -1301,7 +1301,7 @@ export const MAIN_POPUP_CSS_ACU = `
                         color: #dc2626;
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn .fa-solid { opacity: 0.92; }
-                    
+
                     /* 超极小屏幕 (≤320px) */
                     @media screen and (max-width: 320px) {
                         #${POPUP_ID_ACU} {

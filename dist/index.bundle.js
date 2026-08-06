@@ -7140,6 +7140,48 @@ $CONTENT
         });
         return { value: next, changed };
     }
+    function purgeTransitionDataReplacePayloads_ACU(frame, sheetKeys) {
+        if (!Array.isArray(frame?.logEntries))
+            return false;
+        let changed = false;
+        for (const entry of frame.logEntries) {
+            if (!isObjectRecord_ACU$4(entry))
+                continue;
+            for (const field of ['operations', 'patches']) {
+                const artifacts = entry[field];
+                if (!Array.isArray(artifacts))
+                    continue;
+                for (const artifact of artifacts) {
+                    if (!isObjectRecord_ACU$4(artifact) || artifact.kind !== 'data_replace')
+                        continue;
+                    if (deleteSheetKeysFromRecord_ACU(artifact.data, sheetKeys))
+                        changed = true;
+                }
+            }
+        }
+        return changed;
+    }
+    /**
+     * 私有过渡根是已经 canonical 的完整状态。单表删除直接裁剪它及所有整库替换
+     * payload，不再要求 cutoff artifact 仍存在，也不把删除操作变成新的准入门禁。
+     */
+    function purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData, sheetKeys) {
+        const checkpoint = tagData?.spv79TransitionCheckpoint;
+        if (!isObjectRecord_ACU$4(checkpoint))
+            return false;
+        let changed = false;
+        if (deleteSheetKeysFromRecord_ACU(checkpoint.data, sheetKeys))
+            changed = true;
+        if (deleteSheetKeysFromRecord_ACU(checkpoint.scheduleSummary, sheetKeys))
+            changed = true;
+        if (purgeTransitionDataReplacePayloads_ACU(tagData.storageFrame, sheetKeys))
+            changed = true;
+        if (changed && !hasSheetKeyInRecord_ACU(checkpoint.data)) {
+            delete tagData.spv79TransitionCheckpoint;
+            changed = true;
+        }
+        return changed;
+    }
     function purgeSheetKeysFromStorageFrameV2_ACU(frame, sheetKeys) {
         if (!isObjectRecord_ACU$4(frame))
             return false;
@@ -7380,6 +7422,9 @@ $CONTENT
                     msgChanged = true;
                 }
             });
+        }
+        if (purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData, sheetKeySet)) {
+            msgChanged = true;
         }
         if (purgeSheetKeysFromStorageFrameV2_ACU(tagData.storageFrame, sheetKeySet))
             msgChanged = true;
@@ -7640,9 +7685,11 @@ $CONTENT
                         }
                     });
                 }
-                if (purgeSheetKeysFromStorageFrameV2_ACU(tagData.storageFrame, sheetKeySet)) {
+                if (purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData, sheetKeySet)) {
                     msgChanged = true;
                 }
+                if (purgeSheetKeysFromStorageFrameV2_ACU(tagData.storageFrame, sheetKeySet))
+                    msgChanged = true;
             });
             if (msgChanged) {
                 msg.TavernDB_ACU_IsolatedData = nextIsolated;
@@ -35006,6 +35053,52 @@ $CONTENT
             .join('\n');
         return `${ddl.slice(0, bounds.openingIndex + 1)}\n${body}\n${ddl.slice(bounds.closingIndex)}`;
     }
+    /**
+     * Builds a runtime-only DDL variant for SPv7.9 duplicate-row migration.
+     * The persisted DDL is never modified. The normal schema contract already
+     * requires an inline first `row_id INTEGER PRIMARY KEY` column.
+     */
+    function downgradeRowIdPrimaryKeyForLegacyReplay_ACU(ddl) {
+        const value = String(ddl || '');
+        const bounds = findCreateTableDefinitionBounds_ACU(value);
+        if (!bounds)
+            throw new Error('无法解析 CREATE TABLE 语句，不能降级 row_id 主键。');
+        if (/\bWITHOUT\s+ROWID\b/i.test(parseDDLTableSuffix_ACU(value))) {
+            throw new Error('SPv7.9 旧语义 SQL 回放不支持 WITHOUT ROWID 表。');
+        }
+        const body = value.slice(bounds.openingIndex + 1, bounds.closingIndex);
+        const definitions = splitColumnDefinitions(body);
+        if (definitions.length === 0)
+            throw new Error('DDL 缺少可降级的 row_id 列。');
+        const first = definitions[0];
+        const commentIndex = findSqlLineCommentStart_ACU(first);
+        const definition = (commentIndex < 0 ? first : first.slice(0, commentIndex));
+        const comment = commentIndex < 0 ? '' : first.slice(commentIndex);
+        const match = definition.match(/^(\s*)((?:"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]|[A-Za-z_][A-Za-z0-9_]*))(\s+INTEGER\b)([\s\S]*)$/i);
+        if (!match || canonicalSqlIdentifier_ACU(match[2]) !== 'row_id') {
+            throw new Error('SPv7.9 旧语义 SQL 回放缺少首列 row_id INTEGER PRIMARY KEY。');
+        }
+        const tail = match[4];
+        if (!/\bPRIMARY\s+KEY\b/i.test(tail)) {
+            throw new Error('SPv7.9 旧语义 SQL 回放缺少可降级的 row_id PRIMARY KEY 约束。');
+        }
+        const downgradedTail = tail
+            .replace(/\s+PRIMARY\s+KEY\b/i, '')
+            .replace(/\s+AUTOINCREMENT\b/i, '');
+        if (/\b(?:PRIMARY\s+KEY|AUTOINCREMENT)\b/i.test(downgradedTail)) {
+            throw new Error('SPv7.9 旧语义 SQL 回放无法安全降级 row_id 约束。');
+        }
+        definitions[0] = `${match[1]}${match[2]}${match[3]}${downgradedTail}${comment}`;
+        const next = `${value.slice(0, bounds.openingIndex + 1)}${definitions.join(',')}${value.slice(bounds.closingIndex)}`;
+        const columns = parseDDLColumnInfos_ACU(next);
+        const firstColumn = columns[0];
+        if (!firstColumn || canonicalSqlIdentifier_ACU(firstColumn.sqlName) !== 'row_id'
+            || firstColumn.declaredType !== 'INTEGER' || firstColumn.isPrimaryKey
+            || parseDDLTableName(next) !== bounds.tableName) {
+            throw new Error('SPv7.9 旧语义 SQL 回放生成的降级 DDL 未通过结构校验。');
+        }
+        return next;
+    }
     function projectSheetRowToVisibleColumns_ACU(sheet, row) {
         return getSheetColumnProjection_ACU(sheet).visibleColumns.map(column => row[column.sourceIndex]);
     }
@@ -35566,6 +35659,26 @@ $CONTENT
     // ═══════════════════════════════════════════════════════════════
     // 内部工具函数
     // ═══════════════════════════════════════════════════════════════
+    function findSqlLineCommentStart_ACU(value) {
+        let quote = null;
+        for (let index = 0; index < value.length; index += 1) {
+            const char = value[index];
+            if (quote) {
+                if (quote === '[' ? char === ']' : char === quote) {
+                    if (quote !== '[' && value[index + 1] === quote)
+                        index += 1;
+                    else
+                        quote = null;
+                }
+                continue;
+            }
+            if (char === "'" || char === '"' || char === '`' || char === '[')
+                quote = char;
+            else if (char === '-' && value[index + 1] === '-')
+                return index;
+        }
+        return -1;
+    }
     /**
      * 分割 DDL 括号内的列定义（处理嵌套括号）
      */
@@ -36504,6 +36617,16 @@ $CONTENT
          * @param data 完整的表格数据对象（通常来自 mergeAllIndependentTables_ACU 的结果）
          */
         loadFromTableData(data, options = {}) {
+            this._loadFromTableData(data, options, false);
+        }
+        /**
+         * SPv7.9 迁移专用入口。它不是普通 runtime 的可选模式：调用者只能明确选择
+         * 这条受限历史 hydrate 路径，导出后必须立即由迁移器统一重编号。
+         */
+        loadSpv79LegacyDuplicateRowIdHistory(data) {
+            this._loadFromTableData(data, { strict: true }, true);
+        }
+        _loadFromTableData(data, options, legacyDuplicateRowIds) {
             if (!data || typeof data !== 'object')
                 return;
             if (!this.engine.isReady) {
@@ -36513,16 +36636,18 @@ $CONTENT
             const workingData = options.strict ? JSON.parse(JSON.stringify(data)) : data;
             // 仅兼容历史版本错误追加的精确尾标记，其他宽度异常仍由后续 strict 校验拒绝。
             repairLegacyAutoMergedRowTails_ACU(workingData);
-            const normalization = normalizeCanonicalTableRows_ACU(workingData);
-            const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
-            if (canonicalIssues.length > 0) {
-                const message = `[SyncBridge] snapshot 行标识不合法：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
-                if (options.strict) {
-                    throw new Error(message);
+            if (!legacyDuplicateRowIds) {
+                const normalization = normalizeCanonicalTableRows_ACU(workingData);
+                const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
+                if (canonicalIssues.length > 0) {
+                    const message = `[SyncBridge] snapshot 行标识不合法：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
+                    if (options.strict) {
+                        throw new Error(message);
+                    }
+                    logWarn_ACU(message);
                 }
-                logWarn_ACU(message);
             }
-            if (options.strict) {
+            if (options.strict && !legacyDuplicateRowIds) {
                 const canonicalIssues = Object.entries(workingData)
                     .filter(([sheetKey, sheet]) => sheetKey.startsWith('sheet_') && Array.isArray(sheet?.content))
                     .flatMap(([sheetKey, sheet]) => validateCanonicalCheckpointSheet_ACU(sheet, sheetKey, 'data').issues);
@@ -36541,7 +36666,7 @@ $CONTENT
                 if (!sheet || !Array.isArray(sheet.content))
                     continue;
                 try {
-                    this._loadSheet(key, sheet, options.allowRuntimeDdlFallback === true, physicalTableNames.get(key));
+                    this._loadSheet(key, sheet, options.allowRuntimeDdlFallback === true, physicalTableNames.get(key), legacyDuplicateRowIds);
                 }
                 catch (e) {
                     const errorMessage = e?.message || String(e);
@@ -36562,6 +36687,13 @@ $CONTENT
          * @returns 完整的 TableDataObject
          */
         exportToTableData(originalMate, options = {}) {
+            return this._exportToTableData(originalMate, options, false);
+        }
+        /** 与 loadSpv79LegacyDuplicateRowIdHistory 成对使用的迁移专用导出入口。 */
+        exportSpv79LegacyDuplicateRowIdHistory(originalMate) {
+            return this._exportToTableData(originalMate, { strict: true }, true);
+        }
+        _exportToTableData(originalMate, options, legacyDuplicateRowIds) {
             if (!this.engine.isReady) {
                 throw new Error('SyncBridge: SqliteEngine 未初始化');
             }
@@ -36590,13 +36722,15 @@ $CONTENT
                     logError_ACU(`[SyncBridge] 导出表 ${tableName} 失败:`, e?.message || e);
                 }
             }
-            const normalization = normalizeCanonicalTableRows_ACU(result);
-            const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
-            if (canonicalIssues.length > 0) {
-                const message = `[SyncBridge] 导出结果存在行标识问题：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
-                if (options.strict)
-                    throw new Error(message);
-                logWarn_ACU(message);
+            if (!legacyDuplicateRowIds) {
+                const normalization = normalizeCanonicalTableRows_ACU(result);
+                const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
+                if (canonicalIssues.length > 0) {
+                    const message = `[SyncBridge] 导出结果存在行标识问题：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
+                    if (options.strict)
+                        throw new Error(message);
+                    logWarn_ACU(message);
+                }
             }
             return result;
         }
@@ -36614,20 +36748,25 @@ $CONTENT
         // 内部方法
         // ═══════════════════════════════════════════════════════════════
         /** 加载单张 sheet 到 SQLite */
-        _loadSheet(sheetKey, sheet, allowRuntimeDdlFallback, runtimeTableName) {
+        _loadSheet(sheetKey, sheet, allowRuntimeDdlFallback, runtimeTableName, legacyDuplicateRowIds = false) {
             const resolvedDDL = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, runtimeTableName);
             if (resolvedDDL.source === 'fallback_invalid' && !allowRuntimeDdlFallback) {
                 throw new Error(resolvedDDL.diagnostics[0]);
             }
             const metaSql = `INSERT OR REPLACE INTO ${META_TABLE_NAME} (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json, physical_table_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?);`;
             const executeResolvedDDL = (candidate) => {
-                const tableName = parseDDLTableName(candidate.effectiveDDL);
+                // SQLite 的 row_id PRIMARY KEY 无法表示历史重复身份。SPv7.9 迁移只在内存中
+                // 暂时移除这一唯一约束，让旧 SQL 仍按旧 row_id 值作用；导出后立即统一重编号。
+                const effectiveDDL = legacyDuplicateRowIds
+                    ? downgradeRowIdPrimaryKeyForLegacyReplay_ACU(candidate.effectiveDDL)
+                    : candidate.effectiveDDL;
+                const tableName = parseDDLTableName(effectiveDDL);
                 if (!tableName)
-                    throw new Error(`无法从 DDL 中解析表名: ${candidate.effectiveDDL.substring(0, 100)}`);
+                    throw new Error(`无法从 DDL 中解析表名: ${effectiveDDL.substring(0, 100)}`);
                 // 映射或行数据错误必须在执行 DDL 前失败，绝不能被 runtime schema fallback 掩盖。
                 const plan = createSheetInsertPlan(sheet, candidate.columnMap);
                 const inserts = generateInserts(sheet, tableName, plan);
-                this.engine.runBatch([candidate.effectiveDDL, ...inserts, metaSql], [
+                this.engine.runBatch([effectiveDDL, ...inserts, metaSql], [
                     undefined,
                     ...new Array(inserts.length).fill(undefined),
                     [
@@ -39181,10 +39320,441 @@ $CONTENT
         };
     }
 
+    function hasValidScheduleSummary_ACU(value) {
+        return value === undefined || (!!value && typeof value === 'object' && !Array.isArray(value)
+            && Object.values(value).every(summary => !!summary
+                && typeof summary === 'object' && !Array.isArray(summary)
+                && (summary.lastFilledAiFloor === undefined
+                    || (Number.isFinite(summary.lastFilledAiFloor)
+                        && Number(summary.lastFilledAiFloor) >= 0))
+                && (summary.lastChangedAiFloor === undefined
+                    || (Number.isFinite(summary.lastChangedAiFloor)
+                        && Number(summary.lastChangedAiFloor) >= 0))));
+    }
+    function isCheckpoint_ACU(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value))
+            return false;
+        const checkpoint = value;
+        const cutoff = checkpoint.cutoff;
+        const canonicalData = validateCanonicalCheckpointData_ACU(checkpoint.data);
+        return checkpoint.kind === 'spv79_duplicate_row_id_transition'
+            && checkpoint.version === 1
+            && Number.isFinite(checkpoint.createdAt) && Number(checkpoint.createdAt) >= 0
+            && canonicalData.valid
+            && !!cutoff
+            && Number.isInteger(cutoff.messageIndex) && Number(cutoff.messageIndex) >= 0
+            && Number.isInteger(cutoff.seq) && Number(cutoff.seq) >= 0
+            && Number.isInteger(cutoff.operationIndex) && Number(cutoff.operationIndex) >= -1
+            && hasValidScheduleSummary_ACU(checkpoint.scheduleSummary);
+    }
+    function findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, maxMessageIndex) {
+        if (!Array.isArray(chat))
+            return null;
+        const upperBound = maxMessageIndex === undefined
+            ? chat.length - 1
+            : Math.min(chat.length - 1, Math.max(-1, Math.floor(maxMessageIndex)));
+        let aiFloor = 0;
+        let latest = null;
+        for (let messageIndex = 0; messageIndex <= upperBound; messageIndex += 1) {
+            const message = chat[messageIndex];
+            if (!message || message.is_user)
+                continue;
+            aiFloor += 1;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            const checkpoint = tagData?.spv79TransitionCheckpoint;
+            if (isCheckpoint_ACU(checkpoint))
+                latest = { messageIndex, aiFloor, checkpoint };
+        }
+        return latest;
+    }
+    /**
+     * Frame-level artifacts (full/per-sheet checkpoints and timelines) have no
+     * operation cursor. A transition root therefore owns every such artifact up
+     * to and including the cutoff message.
+     */
+    function isFrameArtifactAfterSpv79TransitionCutoff_ACU(messageIndex, checkpoint) {
+        return messageIndex > checkpoint.cutoff.messageIndex;
+    }
+    /** Entry-level events have a seq but no operationIndex, so the cutoff entry is absorbed whole. */
+    function isEntryAfterSpv79TransitionCutoff_ACU(messageIndex, seq, checkpoint) {
+        if (messageIndex !== checkpoint.cutoff.messageIndex)
+            return messageIndex > checkpoint.cutoff.messageIndex;
+        return seq > checkpoint.cutoff.seq;
+    }
+    function isAfterSpv79TransitionCutoff_ACU(messageIndex, seq, operationIndex, checkpoint) {
+        const cutoff = checkpoint.cutoff;
+        if (messageIndex !== cutoff.messageIndex)
+            return messageIndex > cutoff.messageIndex;
+        if (seq !== cutoff.seq)
+            return seq > cutoff.seq;
+        return operationIndex > cutoff.operationIndex;
+    }
+    function cloneSpv79TransitionData_ACU(checkpoint) {
+        return JSON.parse(JSON.stringify(checkpoint.data));
+    }
+    /**
+     * 将旧回放的最终可见状态转为新版行身份。旧身份不再参与后续普通 V2 增量，
+     * 因此按每张表的物理行序统一重编号，而不是猜测 duplicate row_id 的历史归属。
+     */
+    function reindexSpv79TransitionState_ACU(source) {
+        const data = JSON.parse(JSON.stringify(source));
+        restoreLegacyRowIdentity_ACU(data);
+        Object.entries(data).forEach(([sheetKey, value]) => {
+            if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object')
+                return;
+            const sheet = value;
+            if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0]))
+                return;
+            sheet.content[0][0] = 'row_id';
+            let nextId = 1;
+            for (let index = 1; index < sheet.content.length; index += 1) {
+                if (!Array.isArray(sheet.content[index]))
+                    continue;
+                sheet.content[index][0] = String(nextId++);
+            }
+            if (Array.isArray(sheet.seedRows)) {
+                sheet.seedRows.forEach((row) => {
+                    if (Array.isArray(row))
+                        row[0] = String(nextId++);
+                });
+            }
+        });
+        return data;
+    }
+
+    class ReadWriteLock_ACU {
+        constructor() {
+            this.activeReaders = 0;
+            this.activeWriter = false;
+            this.queue = [];
+        }
+        acquireRead() {
+            return this.enqueue('read');
+        }
+        acquireWrite() {
+            return this.enqueue('write');
+        }
+        enqueue(mode) {
+            return new Promise((resolve) => {
+                this.queue.push({ mode, resolve });
+                this.drain();
+            });
+        }
+        drain() {
+            if (this.activeWriter || this.queue.length === 0)
+                return;
+            const first = this.queue[0];
+            if (first.mode === 'write') {
+                if (this.activeReaders > 0)
+                    return;
+                this.queue.shift();
+                this.activeWriter = true;
+                first.resolve(() => {
+                    this.activeWriter = false;
+                    this.drain();
+                });
+                return;
+            }
+            while (this.queue.length > 0 && this.queue[0].mode === 'read' && !this.activeWriter) {
+                const request = this.queue.shift();
+                this.activeReaders += 1;
+                request.resolve(() => {
+                    this.activeReaders = Math.max(0, this.activeReaders - 1);
+                    if (this.activeReaders === 0)
+                        this.drain();
+                });
+            }
+        }
+    }
+    const keyedLocks_ACU = new Map();
+    const runtimeRevisions_ACU = new Map();
+    function getRuntimeRevisionState_ACU(scopeKey) {
+        let state = runtimeRevisions_ACU.get(scopeKey);
+        if (!state) {
+            state = { global: 0, allRevision: 0, sheets: new Map() };
+            runtimeRevisions_ACU.set(scopeKey, state);
+        }
+        return state;
+    }
+    function getRuntimeScopeKey_ACU(parts) {
+        return [
+            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
+            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
+            'runtime',
+        ].join('::');
+    }
+    function encodeRuntimeRevisionSnapshot_ACU(snapshot) {
+        return `runtime-v1:${JSON.stringify(snapshot)}`;
+    }
+    function captureRuntimeRevisionSnapshotForScope_ACU(scopeKey, writeSet) {
+        const state = getRuntimeRevisionState_ACU(scopeKey);
+        const normalized = normalizeTableWriteSet_ACU(writeSet);
+        const sheetKeys = [...new Set(normalized
+                .filter(unit => unit.kind !== 'all')
+                .map(unit => unit.sheetKey)
+                .filter(Boolean))].sort();
+        return encodeRuntimeRevisionSnapshot_ACU({
+            scopeKey,
+            all: normalized.some(unit => unit.kind === 'all'),
+            global: state.global,
+            allRevision: state.allRevision,
+            sheets: Object.fromEntries(sheetKeys.map(sheetKey => [sheetKey, state.sheets.get(sheetKey) || 0])),
+        });
+    }
+    function normalizeRevisionBumpWriteSet_ACU(revisionWriteSet, fallbackWriteSet) {
+        if (revisionWriteSet === undefined)
+            return normalizeTableWriteSet_ACU(fallbackWriteSet);
+        if (!Array.isArray(revisionWriteSet) || revisionWriteSet.length === 0)
+            return [];
+        return normalizeTableWriteSet_ACU(revisionWriteSet);
+    }
+    function bumpRuntimeRevision_ACU(scopeKey, writeSet) {
+        const state = getRuntimeRevisionState_ACU(scopeKey);
+        const normalized = Array.isArray(writeSet) ? writeSet : [];
+        if (normalized.length === 0)
+            return `runtime:${state.global}`;
+        state.global += 1;
+        const revision = state.global;
+        if (normalized.some(unit => unit.kind === 'all')) {
+            state.allRevision = revision;
+        }
+        else {
+            for (const unit of normalized) {
+                const sheetKey = unit.sheetKey;
+                if (sheetKey)
+                    state.sheets.set(sheetKey, revision);
+            }
+        }
+        return `runtime:${revision}`;
+    }
+    function invalidateTableRuntimeRevision_ACU(parts = {}) {
+        const chatKey = normalizeScopePart_ACU$1(parts.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
+        const isolationKey = normalizeScopePart_ACU$1(parts.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
+        const scopeKey = getRuntimeScopeKey_ACU({ chatKey, isolationKey });
+        return bumpRuntimeRevision_ACU(scopeKey, [{ kind: 'all' }]);
+    }
+    function getLock_ACU(scopeKey) {
+        let lock = keyedLocks_ACU.get(scopeKey);
+        if (!lock) {
+            lock = new ReadWriteLock_ACU();
+            keyedLocks_ACU.set(scopeKey, lock);
+        }
+        return lock;
+    }
+    async function acquireRead_ACU(scopeKey) {
+        return getLock_ACU(scopeKey).acquireRead();
+    }
+    async function acquireWrite_ACU(scopeKey) {
+        return getLock_ACU(scopeKey).acquireWrite();
+    }
+    function normalizeScopePart_ACU$1(value, fallback) {
+        const normalized = String(value || fallback).trim();
+        return normalized || fallback;
+    }
+    function deepClone_ACU$4(value) {
+        return value == null ? value : JSON.parse(JSON.stringify(value));
+    }
+    function buildTableMaintenanceScopeKey_ACU(parts) {
+        return [
+            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
+            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
+            'maintenance',
+        ].join('::');
+    }
+    function buildTableSheetMutationScopeKey_ACU(parts) {
+        return [
+            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
+            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
+            'sheet',
+            parts.sheetKey || '*',
+        ].join('::');
+    }
+    function buildTableCommitScopeKey_ACU(parts) {
+        return [
+            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
+            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
+            'commit',
+        ].join('::');
+    }
+    function captureTableRuntimeRevisionForWriteSet_ACU(writeSet, parts = {}) {
+        const chatKey = normalizeScopePart_ACU$1(parts.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
+        const isolationKey = normalizeScopePart_ACU$1(parts.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
+        return captureRuntimeRevisionSnapshotForScope_ACU(getRuntimeScopeKey_ACU({ chatKey, isolationKey }), normalizeTableWriteSet_ACU(writeSet));
+    }
+    function resolveTableWriteTargetMessageIndex_ACU(chat, requestedTargetMessageIndex) {
+        if (!Array.isArray(chat) || chat.length === 0)
+            return -1;
+        if (Number.isInteger(requestedTargetMessageIndex) && requestedTargetMessageIndex !== -1) {
+            const index = requestedTargetMessageIndex;
+            return chat[index] && !chat[index].is_user ? index : -1;
+        }
+        for (let i = chat.length - 1; i >= 0; i -= 1) {
+            if (chat[i] && !chat[i].is_user)
+                return i;
+        }
+        return -1;
+    }
+    function generateTransactionId_ACU() {
+        return `twtx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    }
+    function normalizeTableWriteSet_ACU(writeSet) {
+        if (!Array.isArray(writeSet) || writeSet.length === 0) {
+            return [{ kind: 'all' }];
+        }
+        if (writeSet.some(unit => unit?.kind === 'all')) {
+            return [{ kind: 'all' }];
+        }
+        const seen = new Set();
+        const normalized = [];
+        for (const unit of writeSet) {
+            if (!unit || unit.kind === 'all')
+                continue;
+            const sheetKey = String(unit.sheetKey || '').trim();
+            if (!sheetKey)
+                return [{ kind: 'all' }];
+            let key = '';
+            let next;
+            if (unit.kind === 'row') {
+                const rowId = String(unit.rowId || '').trim();
+                if (!rowId)
+                    return [{ kind: 'sheet', sheetKey }];
+                next = { kind: 'row', sheetKey, rowId };
+                key = `row:${sheetKey}:${rowId}`;
+            }
+            else if (unit.kind === 'cell') {
+                const rowId = String(unit.rowId || '').trim();
+                const columnKey = String(unit.columnKey || '').trim();
+                if (!rowId || !columnKey)
+                    return [{ kind: 'sheet', sheetKey }];
+                next = { kind: 'cell', sheetKey, rowId, columnKey };
+                key = `cell:${sheetKey}:${rowId}:${columnKey}`;
+            }
+            else if (unit.kind === 'schema') {
+                next = { kind: 'schema', sheetKey };
+                key = `schema:${sheetKey}`;
+            }
+            else {
+                next = { kind: 'sheet', sheetKey };
+                key = `sheet:${sheetKey}`;
+            }
+            if (!seen.has(key)) {
+                seen.add(key);
+                normalized.push(next);
+            }
+        }
+        return normalized.length > 0 ? normalized : [{ kind: 'all' }];
+    }
+    function extractSheetKeysForLocks_ACU(writeSet) {
+        if (writeSet.some(unit => unit.kind === 'all'))
+            return '*';
+        return [...new Set(writeSet.map(unit => unit.sheetKey).filter(Boolean))].sort();
+    }
+    function getConflictSheetKey_ACU(unit) {
+        return unit.kind === 'all' ? null : unit.sheetKey;
+    }
+    function tableWriteUnitsConflict_ACU(a, b) {
+        if (a.kind === 'all' || b.kind === 'all')
+            return true;
+        const sheetA = getConflictSheetKey_ACU(a);
+        const sheetB = getConflictSheetKey_ACU(b);
+        if (!sheetA || !sheetB || sheetA !== sheetB)
+            return false;
+        if (a.kind === 'sheet' || b.kind === 'sheet')
+            return true;
+        if (a.kind === 'schema' || b.kind === 'schema')
+            return true;
+        if (a.kind === 'row' && b.kind === 'row')
+            return a.rowId === b.rowId;
+        if (a.kind === 'row' && b.kind === 'cell')
+            return a.rowId === b.rowId;
+        if (a.kind === 'cell' && b.kind === 'row')
+            return a.rowId === b.rowId;
+        if (a.kind === 'cell' && b.kind === 'cell')
+            return a.rowId === b.rowId && a.columnKey === b.columnKey;
+        return true;
+    }
+    function tableWriteSetsConflict_ACU(left, right) {
+        const normalizedLeft = normalizeTableWriteSet_ACU(left);
+        const normalizedRight = normalizeTableWriteSet_ACU(right);
+        return normalizedLeft.some(a => normalizedRight.some(b => tableWriteUnitsConflict_ACU(a, b)));
+    }
+    async function acquireTransactionLocks_ACU(options) {
+        const releases = [];
+        try {
+            const maintenanceKey = buildTableMaintenanceScopeKey_ACU(options);
+            releases.push(options.maintenanceMode === 'exclusive'
+                ? await acquireWrite_ACU(maintenanceKey)
+                : await acquireRead_ACU(maintenanceKey));
+            const sheetLockTarget = extractSheetKeysForLocks_ACU(options.writeSet);
+            const wildcardKey = buildTableSheetMutationScopeKey_ACU({ ...options, sheetKey: '*' });
+            if (sheetLockTarget === '*') {
+                releases.push(await acquireWrite_ACU(wildcardKey));
+                return releases;
+            }
+            releases.push(await acquireRead_ACU(wildcardKey));
+            for (const sheetKey of sheetLockTarget) {
+                releases.push(await acquireWrite_ACU(buildTableSheetMutationScopeKey_ACU({ ...options, sheetKey })));
+            }
+            return releases;
+        }
+        catch (error) {
+            for (const release of releases.reverse())
+                release();
+            throw error;
+        }
+    }
+    async function runTableWriteTransaction_ACU(options, task) {
+        const chatKey = normalizeScopePart_ACU$1(options.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
+        const isolationKey = normalizeScopePart_ACU$1(options.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
+        const writeSet = normalizeTableWriteSet_ACU(options.writeSet);
+        const maintenanceMode = options.maintenanceMode || 'shared';
+        const releases = await acquireTransactionLocks_ACU({ chatKey, isolationKey, writeSet, maintenanceMode });
+        const transactionId = generateTransactionId_ACU();
+        const runtimeScopeKey = getRuntimeScopeKey_ACU({ chatKey, isolationKey });
+        const baseRevision = options.baseRevision ?? captureRuntimeRevisionSnapshotForScope_ACU(runtimeScopeKey, writeSet);
+        try {
+            const ctx = {
+                transactionId,
+                chatKey,
+                isolationKey,
+                source: options.source,
+                baseRevision,
+                writeSet,
+                assertFresh: (reason) => {
+                    void reason;
+                },
+                runCommit: async (commitTask, revisionWriteSet) => {
+                    const releaseCommit = await acquireWrite_ACU(buildTableCommitScopeKey_ACU({ chatKey, isolationKey }));
+                    try {
+                        const result = await commitTask();
+                        const resolvedRevisionWriteSet = typeof revisionWriteSet === 'function' ? revisionWriteSet(result) : revisionWriteSet;
+                        bumpRuntimeRevision_ACU(runtimeScopeKey, normalizeRevisionBumpWriteSet_ACU(resolvedRevisionWriteSet, writeSet));
+                        return result;
+                    }
+                    finally {
+                        releaseCommit();
+                    }
+                },
+            };
+            const workingData = options.workingDataMode === 'none'
+                ? null
+                : deepClone_ACU$4(options.initialData !== undefined ? options.initialData : currentJsonTableData_ACU);
+            return await task(ctx, workingData);
+        }
+        finally {
+            for (const release of releases.reverse())
+                release();
+        }
+    }
+    function _resetTableWriteTransactionLocksForTest_ACU() {
+        keyedLocks_ACU.clear();
+        runtimeRevisions_ACU.clear();
+    }
+
     function hasStructuralReplayCompatibilityRepairs_ACU(repairs) {
         return Boolean(repairs?.some(repair => repair.severity !== 'provisional'));
     }
-    function deepClone_ACU$4(value) {
+    function deepClone_ACU$3(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function isReplayableV2TagData_ACU(tagData) {
@@ -39238,12 +39808,33 @@ $CONTENT
             .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
         const statusBySheetKey = {};
         let sawIndeterminateFrame = false;
+        const lifecycleFullCheckpoint = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+        const lifecycleTransitionCandidate = findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, options.maxMessageIndex);
+        const transitionRef = lifecycleTransitionCandidate && (!lifecycleFullCheckpoint || lifecycleFullCheckpoint.messageIndex <= lifecycleTransitionCandidate.checkpoint.cutoff.messageIndex)
+            ? lifecycleTransitionCandidate : null;
+        // 私有过渡根的语义是硬截断，而不是又一种可与旧 full checkpoint 合并的补丁。
+        // 因此根之前的所有 lifecycle 证据（包括 hide checkpoint）都必须被忽略。
+        if (transitionRef) {
+            for (const sheetKey of Object.keys(transitionRef.checkpoint.data)) {
+                if (!sheetKey.startsWith('sheet_'))
+                    continue;
+                statusBySheetKey[sheetKey] = {
+                    status: 'active',
+                    lastTimelineKind: 'sheet_introduction',
+                    lastTimelineMessageIndex: transitionRef.messageIndex,
+                };
+            }
+        }
         // 起算点必须与 replay 对齐：回放以最后一个 full checkpoint 为基底，更早帧的
         // per-sheet checkpoint 一律不再应用。若这里仍从全历史累积 active，早已被后续 full
         // 快照淘汰的表会永久停留在 active，与同一时点的 replay 基线互相矛盾，使模板协调层
         // 拿到「lifecycle=active 但基线不含该表」的不可自救状态。
-        const baseFrameIndex = findLastFullCheckpointFrameIndex_ACU(frameRefs);
-        if (baseFrameIndex > 0) {
+        const fullCheckpointBaseIndex = findLastFullCheckpointFrameIndex_ACU(frameRefs);
+        const transitionBaseIndex = transitionRef
+            ? frameRefs.findIndex(ref => ref.messageIndex === transitionRef.messageIndex)
+            : -1;
+        const baseFrameIndex = transitionBaseIndex >= 0 ? transitionBaseIndex : fullCheckpointBaseIndex;
+        if (!transitionRef && baseFrameIndex > 0) {
             // full 快照对 active 集合权威，对 hidden 集合不权威：hide 的数据按设计只存在于
             // hide checkpoint，不进 full checkpoint.data。基底之前因此只回收 hide 证据
             // （含 restoreSourceData，compaction 迁移隐藏表依赖它），其余历史痕迹一律丢弃。
@@ -39256,6 +39847,10 @@ $CONTENT
                 sawIndeterminateFrame = true;
                 continue;
             }
+            // frame/checkpoint/timeline 没有 operationIndex；cutoff 消息及之前的 artifact
+            // 都已被私有根吸收，不能仅跳过承载帧而让中间历史重新改变 lifecycle。
+            if (transitionRef && !isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint))
+                continue;
             // 全量 checkpoint = 该时点完整数据库快照：它列出的表为 active；它未列出的 active 表
             // 已被该快照淘汰，必须撤销结论（hidden 保留可恢复数据，indeterminate 保留 fail-closed）。
             const frameCheckpoint = frame.checkpoint;
@@ -39335,7 +39930,7 @@ $CONTENT
                     lastTimelineAfterSeq: timeline.afterSeq,
                 };
                 if (kind === 'sheet_hide' && checkpoint.data && typeof checkpoint.data === 'object' && !Array.isArray(checkpoint.data)) {
-                    entry.restoreSourceData = deepClone_ACU$4(checkpoint.data);
+                    entry.restoreSourceData = deepClone_ACU$3(checkpoint.data);
                 }
                 statusBySheetKey[sheetKey] = entry;
             }
@@ -39407,7 +40002,7 @@ $CONTENT
                     lastTimelineAfterSeq: timeline.afterSeq,
                 };
                 if (checkpoint.data && typeof checkpoint.data === 'object' && !Array.isArray(checkpoint.data)) {
-                    entry.restoreSourceData = deepClone_ACU$4(checkpoint.data);
+                    entry.restoreSourceData = deepClone_ACU$3(checkpoint.data);
                 }
                 statusBySheetKey[sheetKey] = entry;
             }
@@ -39511,7 +40106,7 @@ $CONTENT
         const snapshot = sanitizeTemplateSnapshotForChat_ACU(effectiveTemplate || null);
         if (!snapshot?.templateObj)
             return null;
-        const headerOnly = stripSeedRowsFromTemplate_ACU(deepClone_ACU$4(snapshot.templateObj));
+        const headerOnly = stripSeedRowsFromTemplate_ACU(deepClone_ACU$3(snapshot.templateObj));
         if (!headerOnly || typeof headerOnly !== 'object' || Array.isArray(headerOnly))
             return null;
         if (!Object.keys(headerOnly).some(key => key.startsWith('sheet_')))
@@ -39558,7 +40153,7 @@ $CONTENT
     }
     function replaceState_ACU(state, next) {
         Object.keys(state).forEach(key => delete state[key]);
-        Object.assign(state, deepClone_ACU$4(next));
+        Object.assign(state, deepClone_ACU$3(next));
     }
     /**
      * Repairs ordering metadata of a legacy timeline shard for this replay only.
@@ -39747,7 +40342,7 @@ $CONTENT
             .filter(Boolean);
     }
     function normalizeReplayState_ACU(state, context) {
-        const candidate = deepClone_ACU$4(state);
+        const candidate = deepClone_ACU$3(state);
         const normalization = normalizeCanonicalTableRows_ACU(candidate);
         const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
         if (canonicalIssues.length > 0) {
@@ -39768,7 +40363,7 @@ $CONTENT
      * must keep using normalizeReplayState_ACU so new writes stay strict.
      */
     function normalizeHistoricalReplayState_ACU(state, context) {
-        const candidate = deepClone_ACU$4(state);
+        const candidate = deepClone_ACU$3(state);
         const identity = restoreLegacyRowIdentity_ACU(candidate);
         // A repair that loses a row or a business cell is an implementation defect,
         // not a data defect. Fail loudly instead of persisting a lossy candidate.
@@ -39825,7 +40420,7 @@ $CONTENT
         // is a legacy format trait, not a duplicate, and leaving it here would send
         // the whole checkpoint down the strict reject path below.
         restoreLegacyRowIdentity_ACU(state);
-        const probe = deepClone_ACU$4(state);
+        const probe = deepClone_ACU$3(state);
         const normalization = normalizeCanonicalTableRows_ACU(probe);
         const nonDuplicateErrors = normalization.errors.filter(issue => issue.reason !== 'duplicate_row_id');
         if (normalization.removedRows.length > 0 || nonDuplicateErrors.length > 0) {
@@ -39880,31 +40475,39 @@ $CONTENT
         const affectedSheetKeys = [...new Set(repair.idRemap.map(remap => remap.sheetKey))];
         logWarn_ACU(`[V2 Replay] 旧 full checkpoint 含重复 row_id，已在内存副本中保留全部行并重映射 ${repair.idRemap.length} 行：${affectedSheetKeys.join(', ')}。原 storage frame 未修改。`);
     }
-    async function ensureSqlReplayRuntime_ACU(runtime, state) {
+    async function ensureSqlReplayRuntime_ACU(runtime, state, options = {}) {
         if (runtime.loaded)
             return;
         // The snapshot handed to SQLite comes from persisted history, so legacy
         // identity must be restored before strict hydrate. The export path below
         // stays strict: by then every row has an identity, and a defect there would
         // be ours, not the historical data's.
-        normalizeHistoricalReplayState_ACU(state, 'snapshot');
+        if (!options.legacyDuplicateRowIds)
+            normalizeHistoricalReplayState_ACU(state, 'snapshot');
         await runtime.engine.init();
-        runtime.syncBridge.loadFromTableData(state, { strict: true });
+        if (options.legacyDuplicateRowIds)
+            runtime.syncBridge.loadSpv79LegacyDuplicateRowIdHistory(state);
+        else
+            runtime.syncBridge.loadFromTableData(state, { strict: true });
         runtime.loaded = true;
     }
-    function getExportedSqlReplayRuntimeState_ACU(runtime, state) {
+    function getExportedSqlReplayRuntimeState_ACU(runtime, state, options = {}) {
         if (!runtime.loaded)
-            return deepClone_ACU$4(state);
-        const next = runtime.syncBridge.exportToTableData((state.mate || { type: 'acu', version: 1 }), { strict: true });
-        normalizeReplayState_ACU(next, 'SQL 导出结果');
+            return deepClone_ACU$3(state);
+        const mate = (state.mate || { type: 'acu', version: 1 });
+        const next = options.legacyDuplicateRowIds
+            ? runtime.syncBridge.exportSpv79LegacyDuplicateRowIdHistory(mate)
+            : runtime.syncBridge.exportToTableData(mate, { strict: true });
+        if (!options.legacyDuplicateRowIds)
+            normalizeReplayState_ACU(next, 'SQL 导出结果');
         return next;
     }
-    function exportSqlReplayRuntime_ACU(runtime, state) {
+    function exportSqlReplayRuntime_ACU(runtime, state, options = {}) {
         if (!runtime.loaded)
             return;
-        replaceState_ACU(state, getExportedSqlReplayRuntimeState_ACU(runtime, state));
+        replaceState_ACU(state, getExportedSqlReplayRuntimeState_ACU(runtime, state, options));
     }
-    async function reloadSqlReplayRuntime_ACU(runtime, state) {
+    async function reloadSqlReplayRuntime_ACU(runtime, state, options = {}) {
         if (!runtime.loaded)
             return;
         const nextEngine = new SqliteEngine();
@@ -39914,7 +40517,7 @@ $CONTENT
             loaded: false,
         };
         try {
-            await ensureSqlReplayRuntime_ACU(nextRuntime, state);
+            await ensureSqlReplayRuntime_ACU(nextRuntime, state, options);
         }
         catch (error) {
             nextEngine.dispose();
@@ -39926,22 +40529,26 @@ $CONTENT
         runtime.loaded = true;
         previousEngine.dispose();
     }
-    function buildReplayCandidate_ACU(runtime, state) {
+    function buildReplayCandidate_ACU(runtime, state, options = {}) {
         return runtime?.loaded
-            ? getExportedSqlReplayRuntimeState_ACU(runtime, state)
-            : deepClone_ACU$4(state);
+            ? getExportedSqlReplayRuntimeState_ACU(runtime, state, options)
+            : deepClone_ACU$3(state);
     }
     async function commitReplayCandidate_ACU(runtime, state, candidate, context, options = {}) {
         // Every operation funnels through here, so this is the single place where the
         // historical/strict split is decided. Candidates derived from persisted
         // operations get legacy identity restored; candidates we construct ourselves
         // (template baselines) stay strict so new writes cannot regress the format.
-        if (options.historical)
+        if (options.legacyDuplicateRowIds) {
+            // SPv7.9 过渡回放必须逐项保留旧状态；此阶段的重复身份会在快照一次性重编号。
+            // 这里绝不能调用 restore/normalize，否则会在旧 operation 的中途改变匹配语义。
+        }
+        else if (options.historical)
             normalizeHistoricalReplayState_ACU(candidate, context);
         else
             normalizeReplayState_ACU(candidate, context);
         if (runtime?.loaded)
-            await reloadSqlReplayRuntime_ACU(runtime, candidate);
+            await reloadSqlReplayRuntime_ACU(runtime, candidate, options);
         replaceState_ACU(state, candidate);
     }
     async function applySheetCheckpointsForReplay_ACU(state, checkpoints, runtime) {
@@ -39955,7 +40562,7 @@ $CONTENT
             }
             else {
                 // introduction / rebase / reveal：用 checkpoint.data 整表写入 replay state。
-                candidate[checkpoint.sheetKey] = deepClone_ACU$4(checkpoint.data);
+                candidate[checkpoint.sheetKey] = deepClone_ACU$3(checkpoint.data);
             }
         }
         await commitReplayCandidate_ACU(runtime, state, candidate, '单表 checkpoint', { historical: true });
@@ -40012,11 +40619,11 @@ $CONTENT
         }
         return { aliases, conflicts };
     }
-    async function applySqlBatchOperationV2_ACU(state, operation, runtime, supplementalTemplate) {
+    async function applySqlBatchOperationV2_ACU(state, operation, runtime, supplementalTemplate, options = {}) {
         const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
         if (statements.length === 0)
             return;
-        await ensureSqlReplayRuntime_ACU(runtime, state);
+        await ensureSqlReplayRuntime_ACU(runtime, state, options);
         const { aliases, conflicts } = buildReplaySqlTableAliases_ACU(state, operation);
         const replayStatements = rebindSqlMutationTableReferences_ACU(statements, aliases, {
             lenient: true,
@@ -40062,9 +40669,53 @@ $CONTENT
             throw new Error('[V2 Replay] legacy meta_update.sourceData.ddl 无法安全回放；该结构变更需要迁移为 sheet_schema_migrate 或 sheet_replace。');
         }
     }
+    function applyTablePatchLegacyDuplicateRowIds_ACU(state, patch) {
+        if (patch.kind === 'sheet_replace') {
+            state[patch.sheetKey] = deepClone_ACU$3(patch.sheet);
+            return;
+        }
+        const sheet = state[patch.sheetKey];
+        if (!sheet || !Array.isArray(sheet.content)) {
+            logWarn_ACU(`[V2 Replay] SPv7.9 兼容回放跳过缺少表或 content 的 patch: ${patch.sheetKey}`);
+            return;
+        }
+        if (patch.kind === 'row_upsert') {
+            if (!Array.isArray(patch.cells))
+                throw new Error(`[V2 Replay] legacy row_upsert cells 必须是数组：sheetKey=${patch.sheetKey}。`);
+            const rowId = String(patch.rowId ?? patch.cells[0] ?? '').trim();
+            if (!rowId)
+                throw new Error(`[V2 Replay] legacy row_upsert 缺少 row_id：sheetKey=${patch.sheetKey}。`);
+            const rowIndex = sheet.content.findIndex((row, index) => index > 0 && Array.isArray(row) && String(row[0] ?? '').trim() === rowId);
+            const row = deepClone_ACU$3(patch.cells);
+            if (row.length > 0)
+                row[0] = rowId;
+            if (rowIndex >= 0)
+                sheet.content[rowIndex] = row;
+            else
+                sheet.content.push(row);
+            return;
+        }
+        if (patch.kind === 'row_delete') {
+            const rowId = String(patch.rowId ?? '').trim();
+            sheet.content = sheet.content.filter((row, index) => index === 0 || !Array.isArray(row) || String(row[0] ?? '').trim() !== rowId);
+            return;
+        }
+        assertMetaUpdateDoesNotChangeDdl_ACU(patch);
+        const meta = deepClone_ACU$3(patch.meta || {});
+        if (meta.name !== undefined)
+            sheet.name = meta.name;
+        if (meta.orderNo !== undefined)
+            sheet.orderNo = meta.orderNo;
+        if (meta.updateConfig !== undefined)
+            sheet.updateConfig = meta.updateConfig;
+        if (meta.exportConfig !== undefined)
+            sheet.exportConfig = meta.exportConfig;
+        if (meta.sourceData !== undefined)
+            sheet.sourceData = { ...sheet.sourceData, ...meta.sourceData };
+    }
     function applyTablePatchV2_ACU(state, patch) {
         if (patch.kind === 'sheet_replace') {
-            state[patch.sheetKey] = deepClone_ACU$4(patch.sheet);
+            state[patch.sheetKey] = deepClone_ACU$3(patch.sheet);
             return;
         }
         const sheet = state[patch.sheetKey];
@@ -40082,7 +40733,7 @@ $CONTENT
             if (!Array.isArray(patch.cells)) {
                 throw new Error(`[V2 Replay] row_upsert cells 必须是数组：sheetKey=${patch.sheetKey}。`);
             }
-            const nextCells = deepClone_ACU$4(patch.cells);
+            const nextCells = deepClone_ACU$3(patch.cells);
             const header = sheet.content[0];
             if (isEmptyCanonicalRowId_ACU(nextCells[0])) {
                 const targetRowId = String(patch.rowId ?? '').trim();
@@ -40142,7 +40793,7 @@ $CONTENT
             return;
         }
         if (patch.kind === 'meta_update') {
-            const meta = deepClone_ACU$4(patch.meta || {});
+            const meta = deepClone_ACU$3(patch.meta || {});
             assertMetaUpdateDoesNotChangeDdl_ACU(patch);
             const sourceData = meta.sourceData;
             if (meta.name !== undefined)
@@ -40246,11 +40897,11 @@ $CONTENT
                 allowTemplateFallback: true,
             });
             if (Array.isArray(seedRows) && seedRows.length > 0)
-                sheet.seedRows = deepClone_ACU$4(seedRows);
+                sheet.seedRows = deepClone_ACU$3(seedRows);
         }
         if (!Array.isArray(seedRows) || seedRows.length === 0)
             return;
-        const headerRow = Array.isArray(sheet.content[0]) ? deepClone_ACU$4(sheet.content[0]) : ['row_id'];
+        const headerRow = Array.isArray(sheet.content[0]) ? deepClone_ACU$3(sheet.content[0]) : ['row_id'];
         // 与实时 DSL 路径保持同一身份契约：只有明确的 seedRows 新行能在物化时补 row_id。
         sheet.content = [headerRow, ...ensureStableRowIdsForSeedRows_ACU(seedRows)];
     }
@@ -40299,6 +40950,9 @@ $CONTENT
         }
     }
     async function applyTableOperationV2_ACU(state, operation, runtime, supplementalTemplate) {
+        await applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate);
+    }
+    async function applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate, options = {}) {
         if (!operation || typeof operation !== 'object' || typeof operation.kind !== 'string') {
             throw new Error('[V2 Replay] operation 缺少有效 kind。');
         }
@@ -40310,43 +40964,46 @@ $CONTENT
         const effectiveRuntime = runtime || ownedRuntime || null;
         try {
             if (operation.kind === 'data_replace') {
-                const candidate = deepClone_ACU$4(operation.data);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace', { historical: true });
+                const candidate = deepClone_ACU$3(operation.data);
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace', { historical: true, ...options });
                 return;
             }
             if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
                 if (!effectiveRuntime)
                     throw new Error(`${operation.kind} replay requires runtime`);
-                await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime, supplementalTemplate);
+                await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime, supplementalTemplate, options);
                 if (ownedRuntime)
-                    exportSqlReplayRuntime_ACU(ownedRuntime, state);
+                    exportSqlReplayRuntime_ACU(ownedRuntime, state, options);
                 return;
             }
             if (operation.kind === 'sheet_schema_migrate') {
-                const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state);
+                const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 const candidate = await applySheetSchemaMigrationOperation_ACU(sourceState, operation);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate', { historical: true });
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate', { historical: true, ...options });
                 return;
             }
             if (operation.kind === 'sheet_replace') {
-                const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
-                candidate[operation.sheetKey] = deepClone_ACU$4(operation.sheet);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace', { historical: true });
+                const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
+                candidate[operation.sheetKey] = deepClone_ACU$3(operation.sheet);
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace', { historical: true, ...options });
                 return;
             }
             if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
                 if (operation.kind === 'meta_update') {
                     assertMetaUpdateDoesNotChangeDdl_ACU(operation);
                 }
-                const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
-                applyTablePatchV2_ACU(candidate, operation);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind, { historical: true });
+                const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
+                if (options.legacyDuplicateRowIds)
+                    applyTablePatchLegacyDuplicateRowIds_ACU(candidate, operation);
+                else
+                    applyTablePatchV2_ACU(candidate, operation);
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind, { historical: true, ...options });
                 return;
             }
             if (operation.kind === 'table_edit_dsl') {
-                const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
+                const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 applyTableEditDslOperationV2_ACU(candidate, operation.text);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl', { historical: true });
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl', { historical: true, ...options });
                 return;
             }
             throw new Error(`[V2 Replay] 不支持的 operation kind: ${operation.kind}`);
@@ -40363,19 +41020,29 @@ $CONTENT
         const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
             .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
         const checkpointRef = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
-        const summary = checkpointRef?.frame.checkpoint
-            ? deepClone_ACU$4(checkpointRef.frame.checkpoint.scheduleSummary || {})
-            : {};
-        if (checkpointRef?.frame.checkpoint) {
+        const transitionCandidate = findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, options.maxMessageIndex);
+        const transitionRef = transitionCandidate && (!checkpointRef || checkpointRef.messageIndex <= transitionCandidate.checkpoint.cutoff.messageIndex)
+            ? transitionCandidate : null;
+        const summary = transitionRef
+            ? deepClone_ACU$3(transitionRef.checkpoint.scheduleSummary || {})
+            : (checkpointRef?.frame.checkpoint
+                ? deepClone_ACU$3(checkpointRef.frame.checkpoint.scheduleSummary || {})
+                : {});
+        if (!transitionRef && checkpointRef?.frame.checkpoint) {
             applyEventToScheduleSummary_ACU(summary, checkpointRef.frame.checkpoint.event, checkpointRef.aiFloor);
         }
         for (const ref of frameRefs) {
-            if (checkpointRef && ref.messageIndex < checkpointRef.messageIndex)
+            if (!transitionRef && checkpointRef && ref.messageIndex < checkpointRef.messageIndex)
                 continue;
-            const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
+            const frameArtifactsAfterCutoff = !transitionRef
+                || isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint);
+            // per-sheet artifact 没有 operationIndex；cutoff 消息及之前均由私有根的 summary 覆盖。
+            const checkpoints = frameArtifactsAfterCutoff
+                ? getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex)
+                : [];
             const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
             for (const sheetCheckpoint of checkpoints.filter(checkpoint => checkpoint.timeline === undefined)) {
-                summary[sheetCheckpoint.sheetKey] = deepClone_ACU$4(sheetCheckpoint.scheduleSummary || {});
+                summary[sheetCheckpoint.sheetKey] = deepClone_ACU$3(sheetCheckpoint.scheduleSummary || {});
                 applyEventToScheduleSummary_ACU(summary, sheetCheckpoint.event, ref.aiFloor);
             }
             const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
@@ -40383,12 +41050,15 @@ $CONTENT
             const applyDueIntroductions = (nextSeq) => {
                 const due = pendingIntroductions.filter(checkpoint => checkpoint.timeline.afterSeq < nextSeq);
                 for (const checkpoint of due) {
-                    summary[checkpoint.sheetKey] = deepClone_ACU$4(checkpoint.scheduleSummary || {});
+                    summary[checkpoint.sheetKey] = deepClone_ACU$3(checkpoint.scheduleSummary || {});
                     applyEventToScheduleSummary_ACU(summary, checkpoint.event, ref.aiFloor);
                     pendingIntroductions.splice(pendingIntroductions.indexOf(checkpoint), 1);
                 }
             };
             for (const entry of entries) {
+                // schedule event 是 entry 级事实，没有 operationIndex；cutoff entry 及之前均已吸收。
+                if (transitionRef && !isEntryAfterSpv79TransitionCutoff_ACU(ref.messageIndex, entry.seq, transitionRef.checkpoint))
+                    continue;
                 applyDueIntroductions(entry.seq);
                 applyEventToScheduleSummary_ACU(summary, entry, ref.aiFloor);
             }
@@ -40404,19 +41074,27 @@ $CONTENT
         const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
             .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
         const checkpointRef = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+        const transitionCandidate = findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, options.maxMessageIndex);
+        const transitionRef = transitionCandidate && (!checkpointRef || checkpointRef.messageIndex <= transitionCandidate.checkpoint.cutoff.messageIndex)
+            ? transitionCandidate : null;
         const hasUnanchoredArtifacts = hasUnanchoredReplayArtifacts_ACU(frameRefs);
         let baseKind = 'full_checkpoint';
         let state;
         let replayStartMessageIndex;
         let replacementAnchorCursor = null;
-        if (!checkpointRef?.frame.checkpoint) {
+        if (transitionRef) {
+            state = cloneSpv79TransitionData_ACU(transitionRef.checkpoint);
+            baseKind = 'spv79_transition_checkpoint';
+            replayStartMessageIndex = transitionRef.messageIndex;
+        }
+        else if (!checkpointRef?.frame.checkpoint) {
             if (!hasUnanchoredArtifacts)
                 return null;
             // A replacement anchor supersedes everything before it, so it is a valid
             // base on its own and needs no template baseline or user confirmation.
             const replacementAnchor = findLastUsableReplacementAnchor_ACU(frameRefs);
             if (replacementAnchor) {
-                state = deepClone_ACU$4(replacementAnchor.data);
+                state = deepClone_ACU$3(replacementAnchor.data);
                 normalizeLegacyDuplicateCheckpointState_ACU(state);
                 baseKind = 'replacement_anchor';
                 replayStartMessageIndex = replacementAnchor.messageIndex;
@@ -40443,7 +41121,7 @@ $CONTENT
         }
         else {
             const checkpoint = checkpointRef.frame.checkpoint;
-            state = deepClone_ACU$4(checkpoint.data);
+            state = deepClone_ACU$3(checkpoint.data);
             normalizeLegacyDuplicateCheckpointState_ACU(state);
             replayStartMessageIndex = checkpointRef.messageIndex;
             if (options.updateRuntimeState !== false)
@@ -40468,10 +41146,13 @@ $CONTENT
             for (const ref of frameRefs) {
                 if (ref.messageIndex < replayStartMessageIndex)
                     continue;
-                const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
+                const frameArtifactsAfterCutoff = !transitionRef
+                    || isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint);
+                const checkpoints = frameArtifactsAfterCutoff
+                    ? getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex) : [];
                 const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
                 const isAnchorFrame = replacementAnchorCursor?.messageIndex === ref.messageIndex;
-                await applySheetCheckpointsForReplay_ACU(state, 
+                await applySheetCheckpointsForReplay_ACU(state,
                 // A replacement anchor is a complete state. Untimed checkpoints in
                 // that same frame have no ordering marker proving they occurred after
                 // it, so replaying them would resurrect superseded data. Timeline
@@ -40500,6 +41181,8 @@ $CONTENT
                         await applyDueIntroductions(entry.seq);
                         if (Array.isArray(entry.operations) && entry.operations.length > 0) {
                             for (const [operationIndex, operation] of entry.operations.entries()) {
+                                if (transitionRef && !isAfterSpv79TransitionCutoff_ACU(ref.messageIndex, entry.seq, operationIndex, transitionRef.checkpoint))
+                                    continue;
                                 if (isAnchorFrame
                                     && entry.seq === replacementAnchorCursor.seq
                                     && operationIndex <= replacementAnchorCursor.operationIndex) {
@@ -40514,7 +41197,7 @@ $CONTENT
                                         const templateSheet = headerOnlyTemplate?.[operation.sheetKey];
                                         if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
                                             const candidate = buildReplayCandidate_ACU(runtime, state);
-                                            candidate[operation.sheetKey] = deepClone_ACU$4(templateSheet);
+                                            candidate[operation.sheetKey] = deepClone_ACU$3(templateSheet);
                                             await commitReplayCandidate_ACU(runtime, state, candidate, 'temporary sheet anchor');
                                             compatibilityRepairs.push({
                                                 kind: 'temporary_sheet_anchor',
@@ -40538,6 +41221,8 @@ $CONTENT
                             }
                         }
                         else {
+                            if (transitionRef && !isEntryAfterSpv79TransitionCutoff_ACU(ref.messageIndex, entry.seq, transitionRef.checkpoint))
+                                continue;
                             const candidate = buildReplayCandidate_ACU(runtime, state);
                             // 兼容旧版 derived patch log；新 V2 不再写 patches。
                             for (const patch of entry.patches || []) {
@@ -40545,7 +41230,8 @@ $CONTENT
                             }
                             await commitReplayCandidate_ACU(runtime, state, candidate, 'legacy patches', { historical: true });
                         }
-                        if (options.updateRuntimeState !== false) {
+                        const shouldReplayEntryEvent = !transitionRef || isEntryAfterSpv79TransitionCutoff_ACU(ref.messageIndex, entry.seq, transitionRef.checkpoint);
+                        if (shouldReplayEntryEvent && options.updateRuntimeState !== false) {
                             replayEventForState_ACU(entry, ref.aiFloor);
                         }
                     }
@@ -40571,6 +41257,11 @@ $CONTENT
     }
     async function loadTableStateFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, options = {}) {
         const chat = chatArg || getChatArray_ACU();
+        const isolationKey = isolationKeyArg ?? getCurrentIsolationKey_ACU();
+        // 候选回放、bounded 验证和导入诊断必须保持纯函数性质；只有宿主当前聊天的
+        // 首次真实加载才允许把 duplicate_row_id 升级为持久化过渡根。
+        const mayCreateTransition = chat === getChatArray_ACU()
+            && findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey) === null;
         const performanceSpan = startRuntimePerformanceSpan_ACU('v2-replay', {
             runId: options.performanceRunId,
             parentSpanId: options.performanceParentSpanId,
@@ -40592,6 +41283,19 @@ $CONTENT
             return result;
         }
         catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (mayCreateTransition && message.includes('duplicate_row_id')) {
+                try {
+                    await createSpv79TransitionCheckpointForDuplicateRowId_ACU(chat, isolationKey);
+                    const recovered = await loadTableStateFromFramesV2DetailedCore_ACU(chat, isolationKey, options);
+                    performanceSpan.end({ success: recovered !== null, baseKind: recovered?.baseKind || 'none', recoveredFromDuplicateRowId: true });
+                    return recovered;
+                }
+                catch (transitionError) {
+                    performanceSpan.end({ success: false, recoveredFromDuplicateRowId: false });
+                    throw transitionError;
+                }
+            }
             performanceSpan.end({ success: false });
             throw error;
         }
@@ -40599,6 +41303,136 @@ $CONTENT
     async function loadTableStateFromFramesV2_ACU(chatArg, isolationKeyArg, options = {}) {
         const result = await loadTableStateFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, options);
         return result?.data ?? null;
+    }
+    /**
+     * SPv7.9 的一次性恢复回放。它只在严格 replay 明确报出 duplicate_row_id 后由
+     * 过渡写入服务调用；不会修改 storageFrame，也不会成为新写入路径。
+     */
+    async function replaySpv79DuplicateRowIdHistory_ACU(chatArg, isolationKey) {
+        const chat = Array.isArray(chatArg) ? chatArg : [];
+        const frameRefs = getV2FrameRefs_ACU(chat, isolationKey);
+        if (frameRefs.length === 0)
+            throw new Error('SPv7.9 兼容回放缺少 V2 storage frame。');
+        const baseIndex = findLastFullCheckpointFrameIndex_ACU(frameRefs);
+        if (baseIndex < 0)
+            throw new Error('SPv7.9 兼容回放缺少 full checkpoint 基底。');
+        const baseRef = frameRefs[baseIndex];
+        const checkpoint = baseRef.frame.checkpoint;
+        if (!checkpoint || checkpoint.kind !== 'full')
+            throw new Error('SPv7.9 兼容回放基底不是有效 full checkpoint。');
+        const state = deepClone_ACU$3(checkpoint.data);
+        let cutoff = { messageIndex: baseRef.messageIndex, seq: 0, operationIndex: -1 };
+        for (let frameIndex = baseIndex; frameIndex < frameRefs.length; frameIndex += 1) {
+            const ref = frameRefs[frameIndex];
+            const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
+            // 根帧自身的 checkpoint 已作为 base；其余未排序单表快照遵循现有 replay 的帧首语义。
+            for (const sheetCheckpoint of checkpoints.filter(item => item.timeline === undefined)) {
+                state[sheetCheckpoint.sheetKey] = deepClone_ACU$3(sheetCheckpoint.data);
+            }
+            const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
+            const pendingTimelineCheckpoints = checkpoints.filter(item => item.timeline !== undefined);
+            const applyDueTimelineCheckpoints = (nextSeq) => {
+                const due = pendingTimelineCheckpoints.filter(item => item.timeline.afterSeq < nextSeq);
+                for (const sheetCheckpoint of due) {
+                    if (sheetCheckpoint.timeline?.kind === 'sheet_hide')
+                        delete state[sheetCheckpoint.sheetKey];
+                    else
+                        state[sheetCheckpoint.sheetKey] = deepClone_ACU$3(sheetCheckpoint.data);
+                    pendingTimelineCheckpoints.splice(pendingTimelineCheckpoints.indexOf(sheetCheckpoint), 1);
+                }
+            };
+            for (const entry of entries) {
+                applyDueTimelineCheckpoints(entry.seq);
+                if (Array.isArray(entry.operations) && entry.operations.length > 0) {
+                    for (const [operationIndex, operation] of entry.operations.entries()) {
+                        await applyTableOperationV2Core_ACU(state, operation, undefined, undefined, { legacyDuplicateRowIds: true });
+                        cutoff = { messageIndex: ref.messageIndex, seq: entry.seq, operationIndex };
+                    }
+                }
+                else {
+                    for (const [operationIndex, patch] of (entry.patches || []).entries()) {
+                        applyTablePatchLegacyDuplicateRowIds_ACU(state, patch);
+                        cutoff = { messageIndex: ref.messageIndex, seq: entry.seq, operationIndex };
+                    }
+                    if (!entry.patches?.length)
+                        cutoff = { messageIndex: ref.messageIndex, seq: entry.seq, operationIndex: -1 };
+                }
+            }
+            applyDueTimelineCheckpoints(Number.POSITIVE_INFINITY);
+        }
+        return { data: state, cutoff };
+    }
+    async function createSpv79TransitionCheckpointForDuplicateRowId_ACU(chat, isolationKey) {
+        if (findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey))
+            return;
+        const targetMessageIndex = (() => {
+            for (let index = chat.length - 1; index >= 0; index -= 1) {
+                if (chat[index] && !chat[index].is_user)
+                    return index;
+            }
+            return -1;
+        })();
+        if (targetMessageIndex < 0)
+            throw new Error('SPv7.9 过渡 checkpoint 缺少可写入的 AI 楼层。');
+        const legacyReplay = await replaySpv79DuplicateRowIdHistory_ACU(chat, isolationKey);
+        const data = reindexSpv79TransitionState_ACU(legacyReplay.data);
+        const normalization = normalizeCanonicalTableRows_ACU(data);
+        const issues = [...normalization.errors, ...normalization.removedRows];
+        if (issues.length > 0) {
+            throw new Error(`[V2 Replay] SPv7.9 过渡重编号结果不满足 canonical 行身份契约：${formatCanonicalRowIssues_ACU(issues)}`);
+        }
+        await runTableWriteTransaction_ACU({
+            source: 'system_cleanup',
+            reason: 'createSpv79TransitionCheckpointForDuplicateRowId',
+            isolationKey,
+            writeSet: [{ kind: 'all' }],
+            maintenanceMode: 'exclusive',
+            workingDataMode: 'none',
+        }, async (ctx) => ctx.runCommit(async () => {
+            const target = chat[targetMessageIndex];
+            if (!target || target.is_user)
+                throw new Error('SPv7.9 过渡 checkpoint 的目标 AI 楼层在提交前已变化。');
+            if (findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey))
+                return;
+            const hadIsolatedData = Object.prototype.hasOwnProperty.call(target, 'TavernDB_ACU_IsolatedData');
+            const previousIsolatedData = target.TavernDB_ACU_IsolatedData;
+            const hadIdentity = Object.prototype.hasOwnProperty.call(target, 'TavernDB_ACU_Identity');
+            const previousIdentity = target.TavernDB_ACU_Identity;
+            try {
+                const isolatedData = previousIsolatedData && typeof previousIsolatedData === 'object' && !Array.isArray(previousIsolatedData)
+                    ? deepClone_ACU$3(previousIsolatedData)
+                    : {};
+                const tagData = isolatedData[isolationKey] && typeof isolatedData[isolationKey] === 'object' && !Array.isArray(isolatedData[isolationKey])
+                    ? isolatedData[isolationKey]
+                    : {};
+                tagData.spv79TransitionCheckpoint = {
+                    version: 1,
+                    kind: 'spv79_duplicate_row_id_transition',
+                    createdAt: Date.now(),
+                    data: deepClone_ACU$3(data),
+                    cutoff: legacyReplay.cutoff,
+                    scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey),
+                };
+                isolatedData[isolationKey] = tagData;
+                target.TavernDB_ACU_IsolatedData = isolatedData;
+                writeMessageIdentity_ACU(target, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+                await saveChatToHostStrict_ACU();
+            }
+            catch (error) {
+                if (hadIsolatedData)
+                    target.TavernDB_ACU_IsolatedData = previousIsolatedData;
+                else
+                    delete target.TavernDB_ACU_IsolatedData;
+                if (hadIdentity)
+                    target.TavernDB_ACU_Identity = previousIdentity;
+                else
+                    delete target.TavernDB_ACU_Identity;
+                throw error;
+            }
+        }));
     }
     async function validateCurrentChatTableRecovery_ACU(options = {}) {
         const chat = options.chat || getChatArray_ACU();
@@ -40625,7 +41459,7 @@ $CONTENT
         }
     }
 
-    function deepClone_ACU$3(value) {
+    function deepClone_ACU$2(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function formatIssues_ACU(issues) {
@@ -40648,12 +41482,12 @@ $CONTENT
             kind: 'full',
             createdAt: options.createdAt,
             reason: options.reason,
-            data: deepClone_ACU$3(options.data),
-            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$3(options.scheduleSummary) } : {}),
-            ...(options.event ? { event: deepClone_ACU$3(options.event) } : {}),
-            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$3(options.manualRefillProgress) } : {}),
-            ...(options.migrationProvenance ? { migrationProvenance: deepClone_ACU$3(options.migrationProvenance) } : {}),
-            ...(options.fallbackProvenance ? { fallbackProvenance: deepClone_ACU$3(options.fallbackProvenance) } : {}),
+            data: deepClone_ACU$2(options.data),
+            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$2(options.scheduleSummary) } : {}),
+            ...(options.event ? { event: deepClone_ACU$2(options.event) } : {}),
+            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$2(options.manualRefillProgress) } : {}),
+            ...(options.migrationProvenance ? { migrationProvenance: deepClone_ACU$2(options.migrationProvenance) } : {}),
+            ...(options.fallbackProvenance ? { fallbackProvenance: deepClone_ACU$2(options.fallbackProvenance) } : {}),
         };
         return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
     }
@@ -40663,342 +41497,13 @@ $CONTENT
             createdAt: options.createdAt,
             reason: options.reason,
             sheetKey: options.sheetKey,
-            data: deepClone_ACU$3(options.data),
-            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$3(options.scheduleSummary) } : {}),
-            ...(options.event ? { event: deepClone_ACU$3(options.event) } : {}),
-            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$3(options.manualRefillProgress) } : {}),
+            data: deepClone_ACU$2(options.data),
+            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$2(options.scheduleSummary) } : {}),
+            ...(options.event ? { event: deepClone_ACU$2(options.event) } : {}),
+            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$2(options.manualRefillProgress) } : {}),
             ...(options.baseRevision !== undefined ? { baseRevision: options.baseRevision } : {}),
         };
         return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
-    }
-
-    class ReadWriteLock_ACU {
-        constructor() {
-            this.activeReaders = 0;
-            this.activeWriter = false;
-            this.queue = [];
-        }
-        acquireRead() {
-            return this.enqueue('read');
-        }
-        acquireWrite() {
-            return this.enqueue('write');
-        }
-        enqueue(mode) {
-            return new Promise((resolve) => {
-                this.queue.push({ mode, resolve });
-                this.drain();
-            });
-        }
-        drain() {
-            if (this.activeWriter || this.queue.length === 0)
-                return;
-            const first = this.queue[0];
-            if (first.mode === 'write') {
-                if (this.activeReaders > 0)
-                    return;
-                this.queue.shift();
-                this.activeWriter = true;
-                first.resolve(() => {
-                    this.activeWriter = false;
-                    this.drain();
-                });
-                return;
-            }
-            while (this.queue.length > 0 && this.queue[0].mode === 'read' && !this.activeWriter) {
-                const request = this.queue.shift();
-                this.activeReaders += 1;
-                request.resolve(() => {
-                    this.activeReaders = Math.max(0, this.activeReaders - 1);
-                    if (this.activeReaders === 0)
-                        this.drain();
-                });
-            }
-        }
-    }
-    const keyedLocks_ACU = new Map();
-    const runtimeRevisions_ACU = new Map();
-    function getRuntimeRevisionState_ACU(scopeKey) {
-        let state = runtimeRevisions_ACU.get(scopeKey);
-        if (!state) {
-            state = { global: 0, allRevision: 0, sheets: new Map() };
-            runtimeRevisions_ACU.set(scopeKey, state);
-        }
-        return state;
-    }
-    function getRuntimeScopeKey_ACU(parts) {
-        return [
-            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
-            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
-            'runtime',
-        ].join('::');
-    }
-    function encodeRuntimeRevisionSnapshot_ACU(snapshot) {
-        return `runtime-v1:${JSON.stringify(snapshot)}`;
-    }
-    function captureRuntimeRevisionSnapshotForScope_ACU(scopeKey, writeSet) {
-        const state = getRuntimeRevisionState_ACU(scopeKey);
-        const normalized = normalizeTableWriteSet_ACU(writeSet);
-        const sheetKeys = [...new Set(normalized
-                .filter(unit => unit.kind !== 'all')
-                .map(unit => unit.sheetKey)
-                .filter(Boolean))].sort();
-        return encodeRuntimeRevisionSnapshot_ACU({
-            scopeKey,
-            all: normalized.some(unit => unit.kind === 'all'),
-            global: state.global,
-            allRevision: state.allRevision,
-            sheets: Object.fromEntries(sheetKeys.map(sheetKey => [sheetKey, state.sheets.get(sheetKey) || 0])),
-        });
-    }
-    function normalizeRevisionBumpWriteSet_ACU(revisionWriteSet, fallbackWriteSet) {
-        if (revisionWriteSet === undefined)
-            return normalizeTableWriteSet_ACU(fallbackWriteSet);
-        if (!Array.isArray(revisionWriteSet) || revisionWriteSet.length === 0)
-            return [];
-        return normalizeTableWriteSet_ACU(revisionWriteSet);
-    }
-    function bumpRuntimeRevision_ACU(scopeKey, writeSet) {
-        const state = getRuntimeRevisionState_ACU(scopeKey);
-        const normalized = Array.isArray(writeSet) ? writeSet : [];
-        if (normalized.length === 0)
-            return `runtime:${state.global}`;
-        state.global += 1;
-        const revision = state.global;
-        if (normalized.some(unit => unit.kind === 'all')) {
-            state.allRevision = revision;
-        }
-        else {
-            for (const unit of normalized) {
-                const sheetKey = unit.sheetKey;
-                if (sheetKey)
-                    state.sheets.set(sheetKey, revision);
-            }
-        }
-        return `runtime:${revision}`;
-    }
-    function invalidateTableRuntimeRevision_ACU(parts = {}) {
-        const chatKey = normalizeScopePart_ACU$1(parts.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
-        const isolationKey = normalizeScopePart_ACU$1(parts.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
-        const scopeKey = getRuntimeScopeKey_ACU({ chatKey, isolationKey });
-        return bumpRuntimeRevision_ACU(scopeKey, [{ kind: 'all' }]);
-    }
-    function getLock_ACU(scopeKey) {
-        let lock = keyedLocks_ACU.get(scopeKey);
-        if (!lock) {
-            lock = new ReadWriteLock_ACU();
-            keyedLocks_ACU.set(scopeKey, lock);
-        }
-        return lock;
-    }
-    async function acquireRead_ACU(scopeKey) {
-        return getLock_ACU(scopeKey).acquireRead();
-    }
-    async function acquireWrite_ACU(scopeKey) {
-        return getLock_ACU(scopeKey).acquireWrite();
-    }
-    function normalizeScopePart_ACU$1(value, fallback) {
-        const normalized = String(value || fallback).trim();
-        return normalized || fallback;
-    }
-    function deepClone_ACU$2(value) {
-        return value == null ? value : JSON.parse(JSON.stringify(value));
-    }
-    function buildTableMaintenanceScopeKey_ACU(parts) {
-        return [
-            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
-            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
-            'maintenance',
-        ].join('::');
-    }
-    function buildTableSheetMutationScopeKey_ACU(parts) {
-        return [
-            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
-            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
-            'sheet',
-            parts.sheetKey || '*',
-        ].join('::');
-    }
-    function buildTableCommitScopeKey_ACU(parts) {
-        return [
-            normalizeScopePart_ACU$1(parts.chatKey, 'current-chat'),
-            normalizeScopePart_ACU$1(parts.isolationKey, 'default'),
-            'commit',
-        ].join('::');
-    }
-    function captureTableRuntimeRevisionForWriteSet_ACU(writeSet, parts = {}) {
-        const chatKey = normalizeScopePart_ACU$1(parts.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
-        const isolationKey = normalizeScopePart_ACU$1(parts.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
-        return captureRuntimeRevisionSnapshotForScope_ACU(getRuntimeScopeKey_ACU({ chatKey, isolationKey }), normalizeTableWriteSet_ACU(writeSet));
-    }
-    function resolveTableWriteTargetMessageIndex_ACU(chat, requestedTargetMessageIndex) {
-        if (!Array.isArray(chat) || chat.length === 0)
-            return -1;
-        if (Number.isInteger(requestedTargetMessageIndex) && requestedTargetMessageIndex !== -1) {
-            const index = requestedTargetMessageIndex;
-            return chat[index] && !chat[index].is_user ? index : -1;
-        }
-        for (let i = chat.length - 1; i >= 0; i -= 1) {
-            if (chat[i] && !chat[i].is_user)
-                return i;
-        }
-        return -1;
-    }
-    function generateTransactionId_ACU() {
-        return `twtx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-    }
-    function normalizeTableWriteSet_ACU(writeSet) {
-        if (!Array.isArray(writeSet) || writeSet.length === 0) {
-            return [{ kind: 'all' }];
-        }
-        if (writeSet.some(unit => unit?.kind === 'all')) {
-            return [{ kind: 'all' }];
-        }
-        const seen = new Set();
-        const normalized = [];
-        for (const unit of writeSet) {
-            if (!unit || unit.kind === 'all')
-                continue;
-            const sheetKey = String(unit.sheetKey || '').trim();
-            if (!sheetKey)
-                return [{ kind: 'all' }];
-            let key = '';
-            let next;
-            if (unit.kind === 'row') {
-                const rowId = String(unit.rowId || '').trim();
-                if (!rowId)
-                    return [{ kind: 'sheet', sheetKey }];
-                next = { kind: 'row', sheetKey, rowId };
-                key = `row:${sheetKey}:${rowId}`;
-            }
-            else if (unit.kind === 'cell') {
-                const rowId = String(unit.rowId || '').trim();
-                const columnKey = String(unit.columnKey || '').trim();
-                if (!rowId || !columnKey)
-                    return [{ kind: 'sheet', sheetKey }];
-                next = { kind: 'cell', sheetKey, rowId, columnKey };
-                key = `cell:${sheetKey}:${rowId}:${columnKey}`;
-            }
-            else if (unit.kind === 'schema') {
-                next = { kind: 'schema', sheetKey };
-                key = `schema:${sheetKey}`;
-            }
-            else {
-                next = { kind: 'sheet', sheetKey };
-                key = `sheet:${sheetKey}`;
-            }
-            if (!seen.has(key)) {
-                seen.add(key);
-                normalized.push(next);
-            }
-        }
-        return normalized.length > 0 ? normalized : [{ kind: 'all' }];
-    }
-    function extractSheetKeysForLocks_ACU(writeSet) {
-        if (writeSet.some(unit => unit.kind === 'all'))
-            return '*';
-        return [...new Set(writeSet.map(unit => unit.sheetKey).filter(Boolean))].sort();
-    }
-    function getConflictSheetKey_ACU(unit) {
-        return unit.kind === 'all' ? null : unit.sheetKey;
-    }
-    function tableWriteUnitsConflict_ACU(a, b) {
-        if (a.kind === 'all' || b.kind === 'all')
-            return true;
-        const sheetA = getConflictSheetKey_ACU(a);
-        const sheetB = getConflictSheetKey_ACU(b);
-        if (!sheetA || !sheetB || sheetA !== sheetB)
-            return false;
-        if (a.kind === 'sheet' || b.kind === 'sheet')
-            return true;
-        if (a.kind === 'schema' || b.kind === 'schema')
-            return true;
-        if (a.kind === 'row' && b.kind === 'row')
-            return a.rowId === b.rowId;
-        if (a.kind === 'row' && b.kind === 'cell')
-            return a.rowId === b.rowId;
-        if (a.kind === 'cell' && b.kind === 'row')
-            return a.rowId === b.rowId;
-        if (a.kind === 'cell' && b.kind === 'cell')
-            return a.rowId === b.rowId && a.columnKey === b.columnKey;
-        return true;
-    }
-    function tableWriteSetsConflict_ACU(left, right) {
-        const normalizedLeft = normalizeTableWriteSet_ACU(left);
-        const normalizedRight = normalizeTableWriteSet_ACU(right);
-        return normalizedLeft.some(a => normalizedRight.some(b => tableWriteUnitsConflict_ACU(a, b)));
-    }
-    async function acquireTransactionLocks_ACU(options) {
-        const releases = [];
-        try {
-            const maintenanceKey = buildTableMaintenanceScopeKey_ACU(options);
-            releases.push(options.maintenanceMode === 'exclusive'
-                ? await acquireWrite_ACU(maintenanceKey)
-                : await acquireRead_ACU(maintenanceKey));
-            const sheetLockTarget = extractSheetKeysForLocks_ACU(options.writeSet);
-            const wildcardKey = buildTableSheetMutationScopeKey_ACU({ ...options, sheetKey: '*' });
-            if (sheetLockTarget === '*') {
-                releases.push(await acquireWrite_ACU(wildcardKey));
-                return releases;
-            }
-            releases.push(await acquireRead_ACU(wildcardKey));
-            for (const sheetKey of sheetLockTarget) {
-                releases.push(await acquireWrite_ACU(buildTableSheetMutationScopeKey_ACU({ ...options, sheetKey })));
-            }
-            return releases;
-        }
-        catch (error) {
-            for (const release of releases.reverse())
-                release();
-            throw error;
-        }
-    }
-    async function runTableWriteTransaction_ACU(options, task) {
-        const chatKey = normalizeScopePart_ACU$1(options.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
-        const isolationKey = normalizeScopePart_ACU$1(options.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
-        const writeSet = normalizeTableWriteSet_ACU(options.writeSet);
-        const maintenanceMode = options.maintenanceMode || 'shared';
-        const releases = await acquireTransactionLocks_ACU({ chatKey, isolationKey, writeSet, maintenanceMode });
-        const transactionId = generateTransactionId_ACU();
-        const runtimeScopeKey = getRuntimeScopeKey_ACU({ chatKey, isolationKey });
-        const baseRevision = options.baseRevision ?? captureRuntimeRevisionSnapshotForScope_ACU(runtimeScopeKey, writeSet);
-        try {
-            const ctx = {
-                transactionId,
-                chatKey,
-                isolationKey,
-                source: options.source,
-                baseRevision,
-                writeSet,
-                assertFresh: (reason) => {
-                    void reason;
-                },
-                runCommit: async (commitTask, revisionWriteSet) => {
-                    const releaseCommit = await acquireWrite_ACU(buildTableCommitScopeKey_ACU({ chatKey, isolationKey }));
-                    try {
-                        const result = await commitTask();
-                        const resolvedRevisionWriteSet = typeof revisionWriteSet === 'function' ? revisionWriteSet(result) : revisionWriteSet;
-                        bumpRuntimeRevision_ACU(runtimeScopeKey, normalizeRevisionBumpWriteSet_ACU(resolvedRevisionWriteSet, writeSet));
-                        return result;
-                    }
-                    finally {
-                        releaseCommit();
-                    }
-                },
-            };
-            const workingData = options.workingDataMode === 'none'
-                ? null
-                : deepClone_ACU$2(options.initialData !== undefined ? options.initialData : currentJsonTableData_ACU);
-            return await task(ctx, workingData);
-        }
-        finally {
-            for (const release of releases.reverse())
-                release();
-        }
-    }
-    function _resetTableWriteTransactionLocksForTest_ACU() {
-        keyedLocks_ACU.clear();
-        runtimeRevisions_ACU.clear();
     }
 
     /**
@@ -42032,10 +42537,11 @@ $CONTENT
      * 调用方必须只提交 afterData 快照、不得附带 operations。
      */
     function hasAnyV2Checkpoint_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1) {
-        return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
+        const hasFullCheckpoint = chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
             const tagData = readIsolatedTagData_ACU(message, isolationKey);
             return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
         });
+        return hasFullCheckpoint || findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, maxMessageIndex) !== null;
     }
     function hasAnyV2Frame_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1) {
         return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
@@ -42280,6 +42786,10 @@ $CONTENT
         const tagData = readIsolatedTagData_ACU(chat[index], isolationKey);
         return { message: chat[index], index, checkpoint: tagData.storageFrame.checkpoint };
     }
+    function findLatestReplayRootMessageIndex_ACU(chat, isolationKey) {
+        const fullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
+        return fullCheckpoint?.index ?? null;
+    }
     /**
      * 统一「bounded 与 unbounded」两种视角的写目标回放根准入检查。
      *
@@ -42306,10 +42816,10 @@ $CONTENT
             return { allow: true };
         if (!Number.isInteger(targetMessageIndex) || targetMessageIndex < 0)
             return { allow: true };
-        const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
-        if (!latestFullCheckpoint)
+        const latestRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
+        if (latestRootIndex === null)
             return { allow: true };
-        if (targetMessageIndex >= latestFullCheckpoint.index)
+        if (targetMessageIndex >= latestRootIndex)
             return { allow: true };
         // provisional bridge 例外：active bridge 且 runId 匹配 → 放行
         if (manualCatchUpRunId && readActiveProvisionalBridge_ACU(chat, isolationKey)?.runId === manualCatchUpRunId) {
@@ -42317,9 +42827,9 @@ $CONTENT
         }
         return {
             allow: false,
-            reason: `写目标早于 V2 回放根且无有效 provisional bridge：targetMessageIndex=${targetMessageIndex}, latestFullCheckpointIndex=${latestFullCheckpoint.index}。`,
+            reason: `写目标早于 V2 回放根且无有效 provisional bridge：targetMessageIndex=${targetMessageIndex}, latestReplayRootIndex=${latestRootIndex}。`,
             targetMessageIndex,
-            latestFullCheckpointIndex: latestFullCheckpoint.index,
+            latestFullCheckpointIndex: latestRootIndex,
         };
     }
     function getLogEntriesAfterLatestCheckpoint_ACU(chat, isolationKey) {
@@ -43406,14 +43916,15 @@ $CONTENT
         const hasManualRefillProgress = !!options.manualRefillProgress;
         const isManualRefillProgressOnly = operations.length === 0 && !hasMetadataOnlyFillEvent && hasManualRefillProgress;
         const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
+        const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
         const writesReplayArtifact = operations.length > 0 || hasMetadataOnlyFillEvent || hasManualRefillProgress || replacement !== null;
         // V2 replay 只从最后一个 full checkpoint 开始。向该 checkpoint 之前写入任何
         // operation、填表事件或追平进度都会制造“保存成功但永远无法回放”的伪提交；不能等到
         // terminal progress-only 写入时才暴露问题。
-        if (writesReplayArtifact && latestFullCheckpoint && latestFullCheckpoint.index > target.index) {
+        if (writesReplayArtifact && latestReplayRootIndex !== null && latestReplayRootIndex > target.index) {
             return {
                 saved: false,
-                error: `V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestFullCheckpoint.index}.`,
+                error: `V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestReplayRootIndex}.`,
             };
         }
         const hasUnanchoredArtifacts = !hasCheckpointAnywhere
@@ -43935,8 +44446,9 @@ $CONTENT
             return { saved: false, error: 'V2 batch write requires at least one target.' };
         const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
         const latestCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
-        if (!latestCheckpoint)
-            return { saved: false, error: 'V2 batch write requires an existing full checkpoint anchor.' };
+        const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
+        if (latestReplayRootIndex === null)
+            return { saved: false, error: 'V2 batch write requires an existing replay checkpoint anchor.' };
         options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_persist');
         const mergedTargets = mergeBatchTargetsByMessageIndex_ACU(options.targets, options.afterData);
         if ('error' in mergedTargets)
@@ -43944,7 +44456,7 @@ $CONTENT
         const targetByIndex = mergedTargets;
         const changedSheetKeys = new Set();
         for (const [targetIndex, target] of targetByIndex) {
-            if (!Number.isInteger(targetIndex) || targetIndex < latestCheckpoint.index || !chat[targetIndex] || chat[targetIndex].is_user) {
+            if (!Number.isInteger(targetIndex) || targetIndex < latestReplayRootIndex || !chat[targetIndex] || chat[targetIndex].is_user) {
                 return { saved: false, error: `V2 batch write target is invalid or precedes replay checkpoint: ${targetIndex}.` };
             }
             target.changedSheetKeys.forEach(sheetKey => changedSheetKeys.add(sheetKey));
@@ -44119,15 +44631,16 @@ $CONTENT
         }
         const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
         const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
-        if (!latestFullCheckpoint) {
+        const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
+        if (latestReplayRootIndex === null) {
             return { saved: false, error: 'V2 sheet checkpoint requires an existing full checkpoint anchor.' };
         }
         const target = findTargetAiMessage_ACU(chat, options.targetMessageIndex);
         if (!target) {
             return { saved: false, error: 'no AI message found' };
         }
-        if (target.index < latestFullCheckpoint.index) {
-            return { saved: false, error: `V2 sheet checkpoint target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestFullCheckpoint.index}.` };
+        if (target.index < latestReplayRootIndex) {
+            return { saved: false, error: `V2 sheet checkpoint target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestReplayRootIndex}.` };
         }
         options.transactionContext?.assertFresh?.('persistTableSheetCheckpointV2:before_persist');
         if (!chat[target.index] || chat[target.index] !== target.message || target.message.is_user) {
@@ -44230,10 +44743,14 @@ $CONTENT
                 if (!target)
                     return { status: 'skipped_no_target' };
                 const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
-                if (!latestFullCheckpoint)
+                const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
+                if (latestReplayRootIndex === null)
                     return { status: 'skipped_no_anchor' };
-                if (target.index < latestFullCheckpoint.index) {
-                    return { status: 'failed', error: `null-row cleanup target precedes full checkpoint: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestFullCheckpoint.index}.` };
+                if (target.index < latestReplayRootIndex) {
+                    return {
+                        status: 'failed',
+                        error: `null-row cleanup target precedes full checkpoint: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestReplayRootIndex}.`,
+                    };
                 }
                 transactionContext.assertFresh?.('persistNullRowCleanupShards:before_commit');
                 if (chat[target.index] !== target.message || target.message.is_user) {
@@ -44531,15 +45048,20 @@ $CONTENT
         return keys;
     }
     function snapshotTemplateDeleteMessages_ACU(chat, deepCloneValues) {
-        return chat
-            .filter((message) => message && !message.is_user && typeof message === 'object')
-            .map((message) => ({
-            message,
-            fields: new Map(TEMPLATE_DELETE_MESSAGE_FIELDS_ACU.map(field => [field, {
-                    hadValue: Object.prototype.hasOwnProperty.call(message, field),
-                    value: deepCloneValues ? cloneOptionalJson_ACU(message[field]) : message[field],
-                }])),
-        }));
+        const snapshots = [];
+        for (const message of chat) {
+            if (!message || message.is_user || typeof message !== 'object')
+                continue;
+            const messageRecord = message;
+            snapshots.push({
+                message: messageRecord,
+                fields: new Map(TEMPLATE_DELETE_MESSAGE_FIELDS_ACU.map(field => [field, {
+                        hadValue: Object.prototype.hasOwnProperty.call(messageRecord, field),
+                        value: deepCloneValues ? cloneOptionalJson_ACU(messageRecord[field]) : messageRecord[field],
+                    }])),
+            });
+        }
+        return snapshots;
     }
     function restoreTemplateDeleteMessageSnapshots_ACU(snapshots) {
         for (const snapshot of snapshots) {
@@ -66414,8 +66936,7 @@ $CONTENT
         catch (e) {
             // ignore
         }
-        for (let i = 0; i < chat.length; i++) {
-            const msg = chat[i];
+        for (const msg of chat) {
             if (!msg || msg.is_user)
                 continue;
             // 委托给 data 层的 repository 处理单条消息的字段删除
@@ -72795,7 +73316,12 @@ $CONTENT
                     && typeof isolatedData === 'object'
                     && !Array.isArray(isolatedData)
                     && Object.values(isolatedData).some(tagData => isV2TagData_ACU(tagData));
-                if (messageIndex === anchorIndex || hasV2Frame) {
+                const hasSpv79TransitionCheckpoint = isolatedData
+                    && typeof isolatedData === 'object'
+                    && !Array.isArray(isolatedData)
+                    && Object.values(isolatedData).some(tagData => (!!tagData && typeof tagData === 'object'
+                        && tagData.spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition'));
+                if (messageIndex === anchorIndex || hasV2Frame || hasSpv79TransitionCheckpoint) {
                     snapshots.set(messageIndex, messageFieldSnapshot_ACU(message));
                 }
             });
@@ -73003,16 +73529,81 @@ $CONTENT
             retainCount,
             bufferLayers: RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU,
         };
-        const isolationKeys = collectIsolationKeysWithV2Frames_ACU(chat, { maxMessageIndex: boundaryAnchorIndex });
+        // 普通 V2 frame 只需在边界及之前收集；但 SPv7.9 私有过渡根即使位于边界之后，
+        // 也必须纳入检查，否则本轮会在完全不知道该根存在的情况下 purge 它之前的历史。
+        const isolationKeys = new Set(collectIsolationKeysWithV2Frames_ACU(chat, { maxMessageIndex: boundaryAnchorIndex }));
+        for (const message of chat) {
+            if (!message || message.is_user)
+                continue;
+            const isolatedData = message.TavernDB_ACU_IsolatedData;
+            if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData))
+                continue;
+            for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
+                if (tagData && typeof tagData === 'object'
+                    && tagData.spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition') {
+                    isolationKeys.add(isolationKey);
+                }
+            }
+        }
         for (const isolationKey of isolationKeys) {
             const strategy = resolveTableStorageStrategy_ACU(chat, isolationKey, isolationConfig);
             if (strategy.mode !== 'v2')
                 continue;
+            const transitionRef = findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey);
+            if (transitionRef && boundaryAnchorIndex < transitionRef.messageIndex) {
+                // 私有根已经是完整 canonical 状态，且位于本轮保留边界之后；旧历史即使被
+                // purge 也不能再反向决定该根是否有效。此轮无需为该隔离域另写更早的 full，
+                // 直接保留私有根，避免把原本可读取的旧聊天挡在 compaction 准入之外。
+                logDebug_ACU(`[V2 Compaction] isolationKey=[${isolationKey || '无标签'}] 的 SPv7.9 过渡根位于保留边界之后，跳过本轮边界 full。`);
+                continue;
+            }
             const pointerRelocated = relocateLatestSummaryVectorPointerToBoundary_ACU(chat, boundaryAnchorIndex, isolationKey);
             if (pointerRelocated)
                 changed = true;
-            if (hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, boundaryAnchorIndex)) {
+            const hasExistingBoundaryCheckpoint = hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, boundaryAnchorIndex);
+            if (hasExistingBoundaryCheckpoint && !transitionRef) {
                 logDebug_ACU(`[V2 Compaction] AI 保留边界楼层 #${boundaryAnchorIndex} 已存在 isolationKey=[${isolationKey || '无标签'}] 的 compaction full checkpoint，跳过 frame 重建。`);
+                continue;
+            }
+            // 已有边界 full 不能让 active transition 直接短路：同一楼层时 transition
+            // 仍优先于 full 作为 replay root；不同楼层时陈旧私有根也可能在后续拓扑变化后复活。
+            // 只有证明现存 full 严格等价于 transition replay，才能在同一次提交中移除私有根。
+            if (hasExistingBoundaryCheckpoint && transitionRef) {
+                const transitionReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                    maxMessageIndex: boundaryAnchorIndex,
+                    updateRuntimeState: false,
+                });
+                if (!transitionReplay) {
+                    const error = new Error(`边界 checkpoint 收敛失败：无法读取 isolationKey=[${isolationKey || '无标签'}] 的过渡根状态。`);
+                    error.failedIsolationKey = isolationKey;
+                    throw error;
+                }
+                const candidateChat = structuredClone(chat);
+                const candidateTransitionTagData = candidateChat[transitionRef.messageIndex]
+                    ?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                if (candidateTransitionTagData && typeof candidateTransitionTagData === 'object') {
+                    delete candidateTransitionTagData.spv79TransitionCheckpoint;
+                }
+                const strictReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+                    maxMessageIndex: boundaryAnchorIndex,
+                    updateRuntimeState: false,
+                    compatibilityMode: 'disabled',
+                });
+                if (!strictReplay
+                    || strictReplay.requiresCheckpointConvergence
+                    || strictReplay.compatibilityRepairs?.length
+                    || getTableDataFingerprint_ACU(strictReplay.data) !== getTableDataFingerprint_ACU(transitionReplay.data)) {
+                    const error = new Error(`边界 checkpoint 收敛失败：已有 compaction full 无法严格替代 SPv7.9 过渡根（isolationKey=[${isolationKey || '无标签'}]）。`);
+                    error.failedIsolationKey = isolationKey;
+                    throw error;
+                }
+                const transitionMessage = chat[transitionRef.messageIndex];
+                const transitionTagData = transitionMessage?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                if (transitionTagData && typeof transitionTagData === 'object') {
+                    delete transitionTagData.spv79TransitionCheckpoint;
+                }
+                changed = true;
+                logDebug_ACU(`[V2 Compaction] 已验证既有边界 full 并移除 isolationKey=[${isolationKey || '无标签'}] 的 SPv7.9 过渡根。`);
                 continue;
             }
             let replay;
@@ -73103,7 +73694,7 @@ $CONTENT
                     ? { perSheetCheckpoints: migratedHiddenCheckpoints }
                     : {}),
             };
-            if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+            if (transitionRef || replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
                 const candidateChat = structuredClone(chat);
                 const candidateAnchor = candidateChat[boundaryAnchorIndex];
                 const candidateExistingTagData = candidateAnchor?.TavernDB_ACU_IsolatedData?.[isolationKey];
@@ -73115,6 +73706,13 @@ $CONTENT
                         _acu_storage_version: 2,
                     },
                 };
+                if (transitionRef) {
+                    const candidateTransitionTagData = candidateChat[transitionRef.messageIndex]
+                        ?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                    if (candidateTransitionTagData && typeof candidateTransitionTagData === 'object') {
+                        delete candidateTransitionTagData.spv79TransitionCheckpoint;
+                    }
+                }
                 const strictReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
                     maxMessageIndex: boundaryAnchorIndex,
                     updateRuntimeState: false,
@@ -73134,6 +73732,13 @@ $CONTENT
                 storageFrame: frame,
                 _acu_storage_version: 2,
             };
+            if (transitionRef) {
+                const transitionMessage = chat[transitionRef.messageIndex];
+                const transitionTagData = transitionMessage?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                if (transitionTagData && typeof transitionTagData === 'object') {
+                    delete transitionTagData.spv79TransitionCheckpoint;
+                }
+            }
             changed = true;
             logDebug_ACU(`[V2 Compaction] 已在 AI 保留边界楼层 #${boundaryAnchorIndex} 写入 isolationKey=[${isolationKey || '无标签'}] 的 full checkpoint。`);
         }
@@ -74163,7 +74768,7 @@ $CONTENT
             if (!msg || msg.is_user)
                 continue;
             const changed = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
-                ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
+                ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys, idx)
                 : clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
             if (clearsSummaryOrOutline) {
                 const tagData = readIsolatedTagData_ACU(msg, isolationKey);
@@ -74821,7 +75426,7 @@ $CONTENT
             maintenanceMode: 'exclusive',
         }, () => clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices, targetSheetKeys));
     }
-    function purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys) {
+    function purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys, _messageIndex) {
         return purgeSheetKeysFromMessage_ACU(msg, targetSheetKeys);
     }
 
@@ -97259,7 +97864,7 @@ $CONTENT
         font-family: var(--vis-font-serif);
         color: var(--vis-text-main);
     }
-    
+
     /* ✅ 可视化编辑器复选框：古典风格（仅限 #acu-visualizer-content 作用域） */
     #acu-visualizer-content input[type="checkbox"] {
         -webkit-appearance: none;
@@ -97299,7 +97904,7 @@ $CONTENT
         outline: 2px solid var(--vis-accent-glow);
         outline-offset: 2px;
     }
-    
+
     /* ═══ 顶部标题栏 ═══ */
     .acu-vis-header {
         flex: 0 0 56px;
@@ -97310,7 +97915,7 @@ $CONTENT
         align-items: center;
         padding: 0 24px;
     }
-    
+
     .acu-vis-title {
         font-family: var(--vis-font-serif);
         font-size: 16px;
@@ -97322,7 +97927,7 @@ $CONTENT
         color: var(--vis-accent);
         margin-right: 12px;
     }
-    
+
     .acu-vis-actions { display: flex; gap: 10px; }
     .acu-vis-content { flex: 1; display: flex; overflow: hidden; min-width: 0; }
     .acu-vis-workspace {
@@ -97363,7 +97968,7 @@ $CONTENT
     #acu-visualizer-content[data-assistant-layout="default"] .acu-vis-assistant-dock {
         display: none;
     }
-    
+
     /* ═══ 侧边栏 ═══ */
     .acu-vis-sidebar {
         flex: 0 0 340px; /* 增大侧边栏宽度以显示更长的表格名 */
@@ -97377,7 +97982,7 @@ $CONTENT
         flex-direction: column;
         gap: 6px;
     }
-    
+
     .acu-vis-sidebar::before {
         content: '表格列表';
         display: block;
@@ -97388,7 +97993,7 @@ $CONTENT
         border-bottom: 1px solid var(--vis-border-color);
         margin-bottom: 8px;
     }
-    
+
     /* ═══ 主内容区 ═══ */
     .acu-vis-main {
         flex: 1;
@@ -97400,7 +98005,7 @@ $CONTENT
         overflow-y: auto;
         padding: 24px;
     }
-    
+
     /* ═══ AI 改表助手面板宿主 ═══ */
     #acu-vis-assistant-host {
         position: relative;
@@ -97412,7 +98017,7 @@ $CONTENT
         z-index: 1;
         pointer-events: none;
     }
-    
+
     /* ═══ 表格导航项 ═══ */
     .acu-table-nav-item {
         padding: 10px 12px;
@@ -97428,7 +98033,7 @@ $CONTENT
         position: relative;
         padding-left: 20px;
     }
-    
+
     /* 古典竖线装饰 */
     .acu-table-nav-item::before {
         content: '';
@@ -97441,25 +98046,25 @@ $CONTENT
         background-color: var(--vis-border-color);
         transition: background-color 0.2s ease;
     }
-    
+
     .acu-table-nav-item:hover {
         background: var(--vis-bg-hover);
         color: var(--vis-text-main);
     }
-    
+
     .acu-table-nav-item:hover::before {
         background-color: var(--vis-accent);
     }
-    
+
     .acu-table-nav-item.active {
         background: color-mix(in srgb, var(--vis-accent) 10%, transparent);
         color: var(--vis-accent);
     }
-    
+
     .acu-table-nav-item.active::before {
         background-color: var(--vis-accent);
     }
-    
+
     .acu-table-nav-item i { width: 20px; text-align: center; color: var(--vis-text-mute); }
     .acu-table-nav-item.active i { color: var(--vis-accent); }
 
@@ -97471,7 +98076,7 @@ $CONTENT
         min-width: 0; /* 允许 flex 子项收缩 */
         width: 0; /* 配合 flex: 1 确保能正确计算宽度 */
     }
-    
+
     .acu-table-index {
         flex-shrink: 0;
         min-width: 28px;
@@ -97481,7 +98086,7 @@ $CONTENT
         font-family: var(--vis-font-serif);
         letter-spacing: 1px;
     }
-    
+
     .acu-table-name {
         /* 表格名称：优先完整显示，超长时省略 */
         flex: 1 1 0; /* 使用 flex-basis: 0 确保正确伸展 */
@@ -97492,7 +98097,7 @@ $CONTENT
         white-space: nowrap;
         line-height: 1.4;
     }
-    
+
     .acu-table-nav-actions {
         display: flex;
         gap: 2px;
@@ -97502,15 +98107,15 @@ $CONTENT
         margin-left: auto; /* 使用 auto margin 将按钮推到最右边 */
         padding-left: 6px; /* 与内容保持间距 */
     }
-    
+
     .acu-table-nav-item:hover .acu-table-nav-actions {
         opacity: 1;
     }
-    
+
     .acu-table-nav-item.active .acu-table-nav-actions {
         opacity: 0.7; /* 选中项也显示操作按钮 */
     }
-    
+
     .acu-table-order-btn {
         background: transparent;
         border: 1px solid var(--vis-border-color);
@@ -97525,13 +98130,13 @@ $CONTENT
         transition: all 0.15s;
         font-size: 10px;
     }
-    
+
     .acu-table-order-btn:hover {
         background: color-mix(in srgb, var(--vis-accent) 12%, transparent);
         border-color: var(--vis-accent);
         color: var(--vis-accent);
     }
-    
+
     .acu-table-order-btn:disabled {
         opacity: 0.25;
         cursor: not-allowed;
@@ -97563,7 +98168,7 @@ $CONTENT
         height: 32px;
         letter-spacing: 1px;
     }
-    
+
     .acu-btn-secondary {
         background: transparent;
         color: var(--vis-text-dim);
@@ -97589,7 +98194,7 @@ $CONTENT
         gap: 16px;
         align-content: flex-start;
     }
-    
+
     .acu-data-card {
         background: var(--vis-bg-light);
         border-radius: 2px;
@@ -97601,11 +98206,11 @@ $CONTENT
         border: 1px solid var(--vis-border-color);
         transition: border-color 0.2s ease;
     }
-    
+
     .acu-data-card:hover {
         border-color: var(--vis-accent);
     }
-    
+
     .acu-card-header {
         padding: 12px 16px;
         background: var(--vis-bg-stats);
@@ -97618,7 +98223,7 @@ $CONTENT
         color: var(--vis-text-main);
         letter-spacing: 1px;
     }
-    
+
     .acu-card-body {
         padding: 14px 16px;
         font-size: 13px;
@@ -97628,16 +98233,16 @@ $CONTENT
         line-height: 1.8;
         color: var(--vis-text-dim);
     }
-    
+
     .acu-field-row { display: flex; flex-direction: column; gap: 4px; }
-    
+
     .acu-field-label {
         font-size: 10px;
         color: var(--vis-text-mute);
         font-weight: normal;
         letter-spacing: 1px;
     }
-    
+
     .acu-field-value {
         padding: 8px 10px;
         border: 1px solid transparent;
@@ -97670,19 +98275,19 @@ $CONTENT
         margin: 0 auto;
         border: 1px solid var(--vis-border-color);
     }
-    
+
     .acu-config-section {
         margin-bottom: 24px;
         padding-bottom: 24px;
         border-bottom: 1px solid var(--vis-border-color);
     }
-    
+
     .acu-config-section:last-child {
         border-bottom: none;
         margin-bottom: 0;
         padding-bottom: 0;
     }
-    
+
     .acu-config-section h4 {
         margin: 0 0 16px 0;
         color: var(--vis-text-main);
@@ -97691,9 +98296,9 @@ $CONTENT
         font-weight: normal;
         letter-spacing: 2px;
     }
-    
+
     .acu-form-group { margin-bottom: 16px; }
-    
+
     .acu-form-group label {
         display: block;
         margin-bottom: 6px;
@@ -97702,7 +98307,7 @@ $CONTENT
         font-size: 12px;
         letter-spacing: 1px;
     }
-    
+
     .acu-form-input {
         width: 100%;
         padding: 10px 12px;
@@ -97715,13 +98320,13 @@ $CONTENT
         color: var(--vis-text-main);
         transition: border-color 0.15s, box-shadow 0.15s;
     }
-    
+
     .acu-form-input:focus {
         outline: none;
         border-color: var(--vis-accent);
         box-shadow: 0 0 0 2px var(--vis-accent-glow);
     }
-    
+
     .acu-form-textarea {
         width: 100%;
         padding: 10px 12px;
@@ -97736,20 +98341,20 @@ $CONTENT
         color: var(--vis-text-main);
         line-height: 1.8;
     }
-    
+
     .acu-form-textarea:focus {
         outline: none;
         border-color: var(--vis-accent);
         box-shadow: 0 0 0 2px var(--vis-accent-glow);
     }
-    
+
     .acu-hint {
         font-size: 11px;
         color: var(--vis-text-mute);
         margin-top: 4px;
         letter-spacing: 0.5px;
     }
-    
+
     /* ═══ 模式切换 ═══ */
     .acu-mode-switch {
         display: flex;
@@ -97759,7 +98364,7 @@ $CONTENT
         margin-right: 12px;
         border: 1px solid var(--vis-border-color);
     }
-    
+
     .acu-mode-btn {
         padding: 6px 16px;
         border-radius: 1px;
@@ -97820,7 +98425,7 @@ $CONTENT
         border-color: color-mix(in srgb, var(--vis-accent) 20%, var(--vis-border-color));
         opacity: 0.85;
     }
-    
+
     .acu-col-item {
         display: flex;
         gap: 8px;
@@ -97830,7 +98435,7 @@ $CONTENT
         border-radius: 1px;
         border: 1px solid var(--vis-border-color);
     }
-    
+
     .acu-col-input {
         flex: 1;
         padding: 8px 10px;
@@ -97842,13 +98447,13 @@ $CONTENT
         color: var(--vis-text-main);
         transition: border-color 0.15s ease;
     }
-    
+
     .acu-col-input:focus {
         outline: none;
         border-color: var(--vis-accent);
         box-shadow: 0 0 0 2px var(--vis-accent-glow);
     }
-    
+
     .acu-col-btn {
         padding: 6px 10px;
         cursor: pointer;
@@ -97860,35 +98465,35 @@ $CONTENT
         font-size: 11px;
         font-family: var(--vis-font-serif);
     }
-    
+
     .acu-col-btn:hover {
         background: color-mix(in srgb, var(--vis-accent) 12%, transparent);
         border-color: var(--vis-accent);
         color: var(--vis-accent);
     }
-    
+
     /* ═══ 滚动条 ═══ */
     .acu-vis-sidebar::-webkit-scrollbar,
     .acu-vis-main::-webkit-scrollbar {
         width: 4px;
     }
-    
+
     .acu-vis-sidebar::-webkit-scrollbar-track,
     .acu-vis-main::-webkit-scrollbar-track {
         background: transparent;
     }
-    
+
     .acu-vis-sidebar::-webkit-scrollbar-thumb,
     .acu-vis-main::-webkit-scrollbar-thumb {
         background: var(--vis-border-color);
         border-radius: 1px;
     }
-    
+
     .acu-vis-sidebar::-webkit-scrollbar-thumb:hover,
     .acu-vis-main::-webkit-scrollbar-thumb:hover {
         background: var(--vis-text-mute);
     }
-    
+
     /* ═══ 新增表格按钮 ═══ */
     .acu-add-table-btn {
         padding: 10px 12px;
@@ -97907,14 +98512,14 @@ $CONTENT
         margin-top: 8px;
         letter-spacing: 1px;
     }
-    
+
     .acu-add-table-btn:hover {
         background: var(--vis-bg-hover);
         border-color: var(--vis-accent);
         border-style: solid;
         color: var(--vis-accent);
     }
-    
+
     /* ═══ 删除表格按钮 ═══ */
     .acu-vis-del-table-btn {
         background: transparent;
@@ -97926,28 +98531,28 @@ $CONTENT
         transition: all 0.15s ease;
         font-size: 12px;
     }
-    
+
     .acu-vis-del-table-btn:hover {
         opacity: 1;
         color: var(--vis-accent);
     }
-    
+
     /* ═══════════════════════════════════════════════════════════════
        响应式布局 - 可视化编辑器
        ═══════════════════════════════════════════════════════════════ */
-    
+
     /* 宽屏优化 (≥1400px) - 适度增大侧边栏显示更完整的表格名 */
     @media screen and (min-width: 1400px) {
         .acu-vis-sidebar {
             flex: 0 0 320px; /* 从380px拉窄到320px，避免占用过多空间 */
             max-width: 380px;
         }
-        
+
         .acu-table-nav-item {
             padding: 10px 12px;
             width: 100%; /* 确保占满侧边栏宽度 */
         }
-        
+
         .acu-table-name {
             /* 宽屏时允许表格名换行显示 */
             white-space: normal;
@@ -97956,25 +98561,25 @@ $CONTENT
             width: 0;
         }
     }
-    
+
     /* 超宽屏 (≥1800px) */
     @media screen and (min-width: 1800px) {
         .acu-vis-sidebar {
             flex: 0 0 360px; /* 从420px拉窄到360px */
             max-width: 420px;
         }
-        
+
         .acu-table-name {
             font-size: 14px;
         }
     }
-    
+
     /* 平板及以下 (≤768px) */
     @media screen and (max-width: 768px) {
         #acu-visualizer-content {
             font-size: 13px;
         }
-        
+
         /* 顶部栏 */
         .acu-vis-header {
             flex: 0 0 auto;
@@ -97983,7 +98588,7 @@ $CONTENT
             flex-wrap: wrap;
             gap: 10px;
         }
-        
+
         .acu-vis-title {
             font-size: 14px;
             letter-spacing: 2px;
@@ -97991,25 +98596,25 @@ $CONTENT
             text-align: center;
             order: 1;
         }
-        
+
         .acu-mode-switch {
             order: 2;
             margin-right: 0;
         }
-        
+
         .acu-vis-actions {
             order: 3;
             width: 100%;
             justify-content: center;
         }
-        
+
         /* 内容区域 - 垂直布局 */
         .acu-vis-content {
             flex-direction: column;
             min-height: 0;
             overflow: hidden;
         }
-        
+
         /* 侧边栏变为顶部横向滚动 */
         .acu-vis-sidebar {
             flex: 0 0 auto;
@@ -98033,16 +98638,16 @@ $CONTENT
             justify-content: flex-start !important;
             align-items: stretch;
         }
-        
+
         .acu-vis-sidebar::before {
             display: none;
         }
-        
+
         .acu-vis-sidebar::-webkit-scrollbar {
             height: 4px;
             width: auto;
         }
-        
+
         /* 表格导航项 - 横向布局 */
         .acu-table-nav-item {
             /* 显式禁用 grow/shrink，保证按内容紧凑排列；超出则横向滚动 */
@@ -98052,13 +98657,13 @@ $CONTENT
             min-width: fit-content; /* 确保最小宽度包裹内容 */
             display: inline-flex;
         }
-        
+
         .acu-table-nav-content {
             gap: 6px;
             flex: 0 0 auto; /* 横向滚动时不伸缩，保持内容宽度 */
             width: auto; /* 重置宽度 */
         }
-        
+
         .acu-table-name {
             white-space: nowrap; /* 确保表格名不换行 */
             overflow: visible; /* 窄屏下不截断，完整显示 */
@@ -98066,11 +98671,11 @@ $CONTENT
             flex: 0 0 auto; /* 不伸缩，宽度由内容决定 */
             width: auto; /* 重置宽度 */
         }
-        
+
         .acu-table-index {
             display: none; /* 隐藏序号 */
         }
-        
+
         .acu-table-nav-actions {
             opacity: 1;
             gap: 2px;
@@ -98079,20 +98684,20 @@ $CONTENT
             margin-left: 6px !important;
             padding-left: 0;
         }
-        
+
         .acu-table-order-btn {
             width: 20px;
             height: 20px;
             font-size: 9px;
         }
-        
+
         /* 新增表格按钮 */
         .acu-add-table-btn {
             flex-shrink: 0;
             padding: 8px 12px;
             margin-top: 0;
         }
-        
+
         .acu-vis-workspace {
             flex: 1 1 auto;
             min-width: 0;
@@ -98111,7 +98716,7 @@ $CONTENT
             overflow-y: auto;
             -webkit-overflow-scrolling: touch;
         }
-        
+
         /* 数据卡片 */
         .acu-card-grid {
             display: flex;
@@ -98120,106 +98725,106 @@ $CONTENT
             gap: 12px;
             align-content: stretch;
         }
-        
+
         .acu-data-card {
             width: 100%;
             min-width: 0;
         }
-        
+
         .acu-card-header {
             padding: 10px 12px;
             font-size: 13px;
         }
-        
+
         .acu-card-body {
             padding: 10px 12px;
             font-size: 12px;
         }
-        
+
         /* 配置面板 */
         .acu-config-panel {
             padding: 16px;
         }
-        
+
         .acu-config-section {
             margin-bottom: 16px;
             padding-bottom: 16px;
         }
-        
+
         .acu-config-section h4 {
             font-size: 14px;
         }
-        
+
         .acu-form-group {
             margin-bottom: 12px;
         }
-        
+
         .acu-form-input,
         .acu-form-textarea {
             font-size: 14px; /* 防止iOS缩放 */
             padding: 10px;
         }
-        
+
         /* 列编辑器 */
         .acu-col-item {
             flex-wrap: wrap;
             gap: 6px;
         }
-        
+
         .acu-col-input {
             width: 100%;
             flex: none;
         }
-        
+
         /* 按钮 */
         .acu-btn-primary,
         .acu-btn-secondary {
             padding: 10px 16px;
             font-size: 12px;
         }
-        
+
     }
-    
+
     /* 手机 (≤480px) */
     @media screen and (max-width: 480px) {
         #acu-visualizer-content {
             font-size: 12px;
         }
-        
+
         .acu-vis-header {
             padding: 8px 12px;
         }
-        
+
         .acu-vis-title {
             font-size: 13px;
             letter-spacing: 1px;
         }
-        
+
         .acu-vis-title i {
             display: none;
         }
-        
+
         .acu-mode-switch {
             padding: 2px;
         }
-        
+
         .acu-mode-btn {
             padding: 5px 10px;
             font-size: 11px;
         }
-        
+
         .acu-btn-primary,
         .acu-btn-secondary {
             padding: 8px 12px;
             font-size: 11px;
         }
-        
+
         .acu-vis-sidebar {
             max-height: 100px;
             padding: 8px;
             gap: 6px;
         }
-        
+
         .acu-table-nav-item {
             padding: 6px 10px;
             font-size: 11px;
@@ -98228,271 +98833,271 @@ $CONTENT
             flex: 0 0 auto;
             display: inline-flex;
         }
-        
+
         .acu-table-name {
             white-space: nowrap;
             overflow: visible;
             text-overflow: clip;
             width: auto;
         }
-        
+
         .acu-table-order-btn {
             width: 18px;
             height: 18px;
         }
-        
+
         .acu-vis-main {
             padding: 12px;
         }
-        
+
         .acu-data-card {
             border-radius: 3px;
         }
-        
+
         .acu-card-header {
             padding: 8px 10px;
             font-size: 12px;
         }
-        
+
         .acu-card-body {
             padding: 8px 10px;
             gap: 8px;
         }
-        
+
         .acu-field-label {
             font-size: 9px;
         }
-        
+
         .acu-field-value {
             padding: 5px 6px;
             font-size: 12px;
             min-height: 16px;
         }
-        
+
         .acu-config-panel {
             padding: 12px;
             border-radius: 3px;
         }
-        
+
         .acu-config-section h4 {
             font-size: 13px;
             margin-bottom: 12px;
         }
-        
+
         .acu-form-group label {
             font-size: 11px;
         }
-        
+
         .acu-hint {
             font-size: 10px;
         }
-        
+
         .acu-col-item {
             padding: 6px 8px;
         }
-        
+
         .acu-col-input {
             padding: 6px 8px;
             font-size: 13px;
         }
-        
+
         .acu-col-btn {
             padding: 5px 8px;
             font-size: 11px;
         }
     }
-    
+
     /* 超小屏幕 (≤360px) */
     @media screen and (max-width: 360px) {
         #acu-visualizer-content {
             font-size: 11px;
         }
-        
+
         .acu-vis-header {
             padding: 4px 8px;
             min-height: 40px;
             gap: 6px;
         }
-        
+
         .acu-vis-title {
             font-size: 11px;
             letter-spacing: 0.5px;
         }
-        
+
         .acu-mode-switch {
             padding: 1px;
         }
-        
+
         .acu-mode-btn {
             padding: 4px 8px;
             font-size: 10px;
         }
-        
+
         .acu-vis-actions {
             gap: 4px;
         }
-        
+
         .acu-btn-primary,
         .acu-btn-secondary {
             padding: 5px 8px;
             font-size: 10px;
         }
-        
+
         .acu-vis-sidebar {
             max-height: 75px;
             padding: 4px;
             gap: 4px;
         }
-        
+
         .acu-table-nav-item {
             padding: 4px 6px;
             font-size: 10px;
         }
-        
+
         .acu-table-order-btn {
             width: 16px;
             height: 16px;
             font-size: 8px;
         }
-        
+
         .acu-add-table-btn {
             padding: 4px 8px;
             font-size: 10px;
         }
-        
+
         .acu-vis-main {
             padding: 8px;
         }
-        
+
         .acu-card-grid {
             gap: 8px;
         }
-        
+
         .acu-data-card {
             border-radius: 4px;
         }
-        
+
         .acu-card-header {
             padding: 6px 8px;
             font-size: 11px;
         }
-        
+
         .acu-card-body {
             padding: 6px 8px;
             gap: 6px;
         }
-        
+
         .acu-field-label {
             font-size: 8px;
         }
-        
+
         .acu-field-value {
             padding: 4px 5px;
             font-size: 11px;
             min-height: 14px;
         }
-        
+
         .acu-config-panel {
             padding: 8px;
             border-radius: 4px;
         }
-        
+
         .acu-config-section {
             margin-bottom: 12px;
             padding-bottom: 12px;
         }
-        
+
         .acu-config-section h4 {
             font-size: 12px;
             margin-bottom: 10px;
         }
-        
+
         .acu-form-group {
             margin-bottom: 10px;
         }
-        
+
         .acu-form-group label {
             font-size: 10px;
         }
-        
+
         .acu-form-input,
         .acu-form-textarea {
             padding: 8px;
             font-size: 14px; /* 防止iOS缩放 */
         }
-        
+
         .acu-hint {
             font-size: 9px;
         }
-        
+
         .acu-col-item {
             padding: 5px 6px;
         }
-        
+
         .acu-col-input {
             padding: 5px 6px;
             font-size: 12px;
         }
-        
+
         .acu-col-btn {
             padding: 4px 6px;
             font-size: 10px;
         }
     }
-    
+
     /* 超极小屏幕 (≤320px) */
     @media screen and (max-width: 320px) {
         #acu-visualizer-content {
             font-size: 10px;
         }
-        
+
         .acu-vis-header {
             padding: 3px 6px;
             min-height: 36px;
         }
-        
+
         .acu-vis-title {
             font-size: 10px;
         }
-        
+
         .acu-mode-btn {
             padding: 3px 6px;
             font-size: 9px;
         }
-        
+
         .acu-btn-primary,
         .acu-btn-secondary {
             padding: 4px 6px;
             font-size: 9px;
         }
-        
+
         .acu-vis-sidebar {
             max-height: 65px;
             padding: 3px;
         }
-        
+
         .acu-table-nav-item {
             padding: 3px 5px;
             font-size: 9px;
         }
-        
+
         .acu-vis-main {
             padding: 6px;
         }
-        
+
         .acu-card-header {
             padding: 5px 6px;
             font-size: 10px;
         }
-        
+
         .acu-card-body {
             padding: 5px 6px;
         }
-        
+
         .acu-config-panel {
             padding: 6px;
         }
-        
+
         .acu-config-section h4 {
             font-size: 11px;
         }
@@ -105262,7 +105867,7 @@ $CONTENT
                        星·数据库 UI 设计系统（仅影响插件自身）
                        目标：大气、简约、高级；超窄屏也能舒服用
                        ═══════════════════════════════════════════════════════════════ */
-                    
+
                     /* 基础隔离：尽量不吃外部样式（但不使用 all: initial，避免破坏第三方组件） */
                     #${POPUP_ID_ACU}, #${POPUP_ID_ACU} * { box-sizing: border-box; }
                     #${POPUP_ID_ACU} { color-scheme: light; }
@@ -105294,7 +105899,7 @@ $CONTENT
                         --acu-radius-sm: 6px;
 
                         --acu-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-                        
+
                         /* 兼容旧 inline style 里使用的变量名（避免依赖外部主题） */
                         --bg-primary: var(--acu-bg-0);
                         --bg-secondary: var(--acu-bg-1);
@@ -105320,7 +105925,7 @@ $CONTENT
                         --orange: var(--acu-warning);
                         --red: var(--acu-danger);
                         --accent-primary: var(--acu-accent);
-                        
+
                         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "HarmonyOS Sans SC", "MiSans", Roboto, Helvetica, Arial, sans-serif;
                         font-size: 14px;
                         line-height: 1.6;
@@ -105374,7 +105979,7 @@ $CONTENT
                         text-align: center;
                         width: 100%;
                     }
-                    
+
                     #${POPUP_ID_ACU} .acu-header-sub {
                         margin-top: 4px;
                         font-size: 12px;
@@ -105416,7 +106021,7 @@ $CONTENT
                         user-select: none;
                         font-weight: 600;
                     }
-                    
+
                     #${POPUP_ID_ACU} .acu-tab-button {
                         width: 100%;
                         display: flex;
@@ -105486,11 +106091,11 @@ $CONTENT
                         font-weight: 600;
                         color: var(--acu-text-1);
                     }
-                    
+
                     /* 网格 */
                     #${POPUP_ID_ACU} .acu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
                     #${POPUP_ID_ACU} .acu-grid-2x2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-                    
+
                     /* 表单 */
                     #${POPUP_ID_ACU} label {
                         display: block;
@@ -105528,8 +106133,8 @@ $CONTENT
                         background-repeat: no-repeat !important;
                         padding-right: 34px !important;
                     }
-                    #${POPUP_ID_ACU} input:focus, 
-                    #${POPUP_ID_ACU} select:focus, 
+                    #${POPUP_ID_ACU} input:focus,
+                    #${POPUP_ID_ACU} select:focus,
                     #${POPUP_ID_ACU} textarea:focus {
                         border-color: var(--acu-accent) !important;
                         box-shadow: 0 0 0 3px var(--acu-accent-glow) !important;
@@ -105592,7 +106197,7 @@ $CONTENT
                         border-color: var(--acu-accent) !important;
                         color: var(--acu-checkbox-checked-icon, #ffffff) !important;
                     }
-                    
+
                     /* 警告/危险 */
                     #${POPUP_ID_ACU} .btn-warning {
                         background: rgba(245, 158, 11, 0.08);
@@ -105604,7 +106209,7 @@ $CONTENT
                         border-color: rgba(239, 68, 68, 0.25);
                         color: #dc2626;
                     }
-                    
+
                     /* 小按钮样式 - 用于全选/全不选等辅助按钮 */
                     #${POPUP_ID_ACU} .acu-btn-small, #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-manual-table-select-all, #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-manual-table-select-none {
                         padding: 4px 8px;
@@ -105744,12 +106349,12 @@ $CONTENT
                         border-top: 1px solid var(--acu-border);
                         margin: 14px 0;
                     }
-                    
+
                     /* 通用布局小组件 */
                     #${POPUP_ID_ACU} .flex-center { display: flex; justify-content: center; align-items: center; }
                     #${POPUP_ID_ACU} .input-group { display: flex; gap: 10px; align-items: center; }
                     #${POPUP_ID_ACU} .input-group input { flex: 1; min-width: 0; }
-                    
+
                     #${POPUP_ID_ACU} .checkbox-group {
                         display: flex;
                         align-items: flex-start;
@@ -105760,7 +106365,7 @@ $CONTENT
                         background: var(--acu-bg-2);
                         margin-bottom: 6px;
                     }
-                    
+
                     /* ═══ 复选框：精致典雅风格 ═══ */
                     #${POPUP_ID_ACU} input[type="checkbox"] {
                         -webkit-appearance: none !important;

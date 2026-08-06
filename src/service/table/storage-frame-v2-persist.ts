@@ -19,6 +19,7 @@ import { hydrateTableDataStrict_ACU } from './sqlite-template-validation';
 import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from './canonical-checkpoint-builder';
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
+import { findLatestSpv79TransitionCheckpoint_ACU } from './spv79-transition-checkpoint';
 
 export interface TableCheckpointGenerationConfig_ACU {
   maxEntriesAfterCheckpoint: number;
@@ -420,10 +421,11 @@ function countAiFloor_ACU(chat: any[], messageIndex: number): number {
  * 调用方必须只提交 afterData 快照、不得附带 operations。
  */
 export function hasAnyV2Checkpoint_ACU(chat: any[], isolationKey: string, maxMessageIndex = chat.length - 1): boolean {
-  return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
+  const hasFullCheckpoint = chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
     const tagData = readIsolatedTagData_ACU(message, isolationKey);
     return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
   });
+  return hasFullCheckpoint || findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, maxMessageIndex) !== null;
 }
 
 function hasAnyV2Frame_ACU(chat: any[], isolationKey: string, maxMessageIndex = chat.length - 1): boolean {
@@ -720,6 +722,14 @@ function findLatestFullCheckpoint_ACU(
   return { message: chat[index], index, checkpoint: tagData.storageFrame.checkpoint };
 }
 
+function findLatestReplayRootMessageIndex_ACU(
+  chat: any[] | null | undefined,
+  isolationKey: string,
+): number | null {
+  const fullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
+  return fullCheckpoint?.index ?? null;
+}
+
 /**
  * 统一「bounded 与 unbounded」两种视角的写目标回放根准入检查。
  *
@@ -750,18 +760,18 @@ export function assertWriteTargetNotBeforeReplayRoot_ACU(options: {
   const { chat, isolationKey, targetMessageIndex, manualCatchUpRunId } = options;
   if (!Array.isArray(chat) || chat.length === 0) return { allow: true };
   if (!Number.isInteger(targetMessageIndex) || targetMessageIndex < 0) return { allow: true };
-  const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
-  if (!latestFullCheckpoint) return { allow: true };
-  if (targetMessageIndex >= latestFullCheckpoint.index) return { allow: true };
+  const latestRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
+  if (latestRootIndex === null) return { allow: true };
+  if (targetMessageIndex >= latestRootIndex) return { allow: true };
   // provisional bridge 例外：active bridge 且 runId 匹配 → 放行
   if (manualCatchUpRunId && readActiveProvisionalBridge_ACU(chat, isolationKey)?.runId === manualCatchUpRunId) {
     return { allow: true };
   }
   return {
     allow: false,
-    reason: `写目标早于 V2 回放根且无有效 provisional bridge：targetMessageIndex=${targetMessageIndex}, latestFullCheckpointIndex=${latestFullCheckpoint.index}。`,
+    reason: `写目标早于 V2 回放根且无有效 provisional bridge：targetMessageIndex=${targetMessageIndex}, latestReplayRootIndex=${latestRootIndex}。`,
     targetMessageIndex,
-    latestFullCheckpointIndex: latestFullCheckpoint.index,
+    latestFullCheckpointIndex: latestRootIndex,
   };
 }
 
@@ -1983,14 +1993,15 @@ async function persistTableMutationLogV2Core_ACU(
   const hasManualRefillProgress = !!options.manualRefillProgress;
   const isManualRefillProgressOnly = operations.length === 0 && !hasMetadataOnlyFillEvent && hasManualRefillProgress;
   const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
+  const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
   const writesReplayArtifact = operations.length > 0 || hasMetadataOnlyFillEvent || hasManualRefillProgress || replacement !== null;
   // V2 replay 只从最后一个 full checkpoint 开始。向该 checkpoint 之前写入任何
   // operation、填表事件或追平进度都会制造“保存成功但永远无法回放”的伪提交；不能等到
   // terminal progress-only 写入时才暴露问题。
-  if (writesReplayArtifact && latestFullCheckpoint && latestFullCheckpoint.index > target.index) {
+  if (writesReplayArtifact && latestReplayRootIndex !== null && latestReplayRootIndex > target.index) {
     return {
       saved: false,
-      error: `V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestFullCheckpoint.index}.`,
+      error: `V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestReplayRootIndex}.`,
     };
   }
   const hasUnanchoredArtifacts = !hasCheckpointAnywhere
@@ -2566,7 +2577,8 @@ async function persistTableMutationLogBatchV2Core_ACU(
 
   const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
   const latestCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
-  if (!latestCheckpoint) return { saved: false, error: 'V2 batch write requires an existing full checkpoint anchor.' };
+  const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
+  if (latestReplayRootIndex === null) return { saved: false, error: 'V2 batch write requires an existing replay checkpoint anchor.' };
   options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_persist');
 
   const mergedTargets = mergeBatchTargetsByMessageIndex_ACU(options.targets, options.afterData);
@@ -2574,7 +2586,7 @@ async function persistTableMutationLogBatchV2Core_ACU(
   const targetByIndex = mergedTargets;
   const changedSheetKeys = new Set<string>();
   for (const [targetIndex, target] of targetByIndex) {
-    if (!Number.isInteger(targetIndex) || targetIndex < latestCheckpoint.index || !chat[targetIndex] || chat[targetIndex].is_user) {
+    if (!Number.isInteger(targetIndex) || targetIndex < latestReplayRootIndex || !chat[targetIndex] || chat[targetIndex].is_user) {
       return { saved: false, error: `V2 batch write target is invalid or precedes replay checkpoint: ${targetIndex}.` };
     }
     target.changedSheetKeys.forEach(sheetKey => changedSheetKeys.add(sheetKey));
@@ -2772,7 +2784,8 @@ async function persistTableSheetCheckpointV2Core_ACU(
   }
   const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
   const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
-  if (!latestFullCheckpoint) {
+  const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
+  if (latestReplayRootIndex === null) {
     return { saved: false, error: 'V2 sheet checkpoint requires an existing full checkpoint anchor.' };
   }
 
@@ -2780,8 +2793,8 @@ async function persistTableSheetCheckpointV2Core_ACU(
   if (!target) {
     return { saved: false, error: 'no AI message found' };
   }
-  if (target.index < latestFullCheckpoint.index) {
-    return { saved: false, error: `V2 sheet checkpoint target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestFullCheckpoint.index}.` };
+  if (target.index < latestReplayRootIndex) {
+    return { saved: false, error: `V2 sheet checkpoint target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestReplayRootIndex}.` };
   }
 
   options.transactionContext?.assertFresh?.('persistTableSheetCheckpointV2:before_persist');
@@ -2890,9 +2903,13 @@ export async function persistNullRowCleanupShards_ACU(
       if (!target) return { status: 'skipped_no_target' };
 
       const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
-      if (!latestFullCheckpoint) return { status: 'skipped_no_anchor' };
-      if (target.index < latestFullCheckpoint.index) {
-        return { status: 'failed', error: `null-row cleanup target precedes full checkpoint: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestFullCheckpoint.index}.` };
+      const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
+      if (latestReplayRootIndex === null) return { status: 'skipped_no_anchor' };
+      if (target.index < latestReplayRootIndex) {
+        return {
+          status: 'failed',
+          error: `null-row cleanup target precedes full checkpoint: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestReplayRootIndex}.`,
+        };
       }
 
       transactionContext.assertFresh?.('persistNullRowCleanupShards:before_commit');
@@ -3202,15 +3219,19 @@ function normalizeDeletedTemplateSheetKeys_ACU(value: unknown): string[] {
 }
 
 function snapshotTemplateDeleteMessages_ACU(chat: unknown[], deepCloneValues: boolean): TemplateDeleteMessageSnapshot_ACU[] {
-  return chat
-    .filter((message: any) => message && !message.is_user && typeof message === 'object')
-    .map((message: Record<string, any>) => ({
-      message,
+  const snapshots: TemplateDeleteMessageSnapshot_ACU[] = [];
+  for (const message of chat) {
+    if (!message || (message as any).is_user || typeof message !== 'object') continue;
+    const messageRecord = message as Record<string, any>;
+    snapshots.push({
+      message: messageRecord,
       fields: new Map(TEMPLATE_DELETE_MESSAGE_FIELDS_ACU.map(field => [field, {
-        hadValue: Object.prototype.hasOwnProperty.call(message, field),
-        value: deepCloneValues ? cloneOptionalJson_ACU(message[field]) : message[field],
+        hadValue: Object.prototype.hasOwnProperty.call(messageRecord, field),
+        value: deepCloneValues ? cloneOptionalJson_ACU(messageRecord[field]) : messageRecord[field],
       }])),
-    }));
+    });
+  }
+  return snapshots;
 }
 
 function restoreTemplateDeleteMessageSnapshots_ACU(snapshots: TemplateDeleteMessageSnapshot_ACU[]): void {

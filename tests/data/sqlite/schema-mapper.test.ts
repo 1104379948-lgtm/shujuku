@@ -24,6 +24,7 @@ import {
   projectSheetDDLForVisibleColumns_ACU,
   projectSheetRowToVisibleColumns_ACU,
   removeDDLColumnAtIndex_ACU,
+  downgradeRowIdPrimaryKeyForLegacyReplay_ACU,
 } from '../../../src/shared/ddl-utils';
 import type { Sheet_ACU } from '../../../src/shared/models/table-data';
 
@@ -256,6 +257,37 @@ describe('parseDDLColumnInfos_ACU', () => {
   it('DEFAULT 后的约束不属于 defaultExpression', () => {
     const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, score INTEGER DEFAULT 0 NOT NULL CHECK(score >= 0));';
     expect(parseDDLColumnInfos_ACU(ddl)[1]).toMatchObject({ hasDefault: true, defaultExpression: '0' });
+  });
+});
+
+describe('downgradeRowIdPrimaryKeyForLegacyReplay_ACU', () => {
+  it.each([
+    ['plain', 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT NOT NULL);'],
+    ['autoincrement', 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);'],
+    ['check retained', 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY CHECK (row_id > 0), name TEXT NOT NULL);'],
+  ])('仅移除 %s DDL 的 row_id 主键约束', (_label, ddl) => {
+    const downgraded = downgradeRowIdPrimaryKeyForLegacyReplay_ACU(ddl);
+
+    expect(downgraded).not.toMatch(/\bPRIMARY\s+KEY\b/i);
+    expect(downgraded).not.toMatch(/\bAUTOINCREMENT\b/i);
+    expect(downgraded).toContain('name TEXT NOT NULL');
+  });
+
+  it('保留与 row_id 唯一性无关的列级和表级约束', () => {
+    const ddl = "CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT UNIQUE CHECK(name <> ''), owner_id INTEGER REFERENCES owners(id), CONSTRAINT inventory_name_unique UNIQUE (name));";
+
+    const downgraded = downgradeRowIdPrimaryKeyForLegacyReplay_ACU(ddl);
+
+    expect(downgraded).not.toMatch(/row_id\s+INTEGER\s+PRIMARY\s+KEY/i);
+    expect(downgraded).toContain("name TEXT UNIQUE CHECK(name <> '')");
+    expect(downgraded).toContain('REFERENCES owners(id)');
+    expect(downgraded).toContain('CONSTRAINT inventory_name_unique UNIQUE (name)');
+  });
+
+  it('拒绝移除 row_id 主键后会失效的 WITHOUT ROWID 表', () => {
+    expect(() => downgradeRowIdPrimaryKeyForLegacyReplay_ACU(
+      'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID;',
+    )).toThrow('不支持 WITHOUT ROWID 表');
   });
 });
 
