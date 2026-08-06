@@ -6,7 +6,6 @@ import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { jQuery_API_ACU } from '../dom-utils';
 import { getCharLorebooks_ACU, getLorebookEntries_ACU, setLorebookEntries_ACU, isWorldbookApiAvailable_ACU } from '../../service/worldbook/worldbook-service';
-import { globalMeta_ACU, saveGlobalMeta_ACU } from '../../data/repositories/profile-repo';
 import { settings_ACU, currentJsonTableData_ACU } from '../../service/runtime/state-manager';
 import { $popupInstance_ACU } from '../state/ui-refs';
 import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
@@ -17,7 +16,7 @@ import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
 import { setSummaryVectorIndexMode_ACU, setZeroTkOccupyMode_ACU } from '../../service/settings/settings-service';
 import { formatJsonToReadable_ACU } from '../../service/runtime/helpers-remaining';
-import { getCurrentVectorMemoryConfig_ACU, getDefaultVectorMemoryConfig_ACU } from '../../service/vector/vector-memory-config';
+import { getCurrentVectorMemoryConfig_ACU, getDefaultVectorMemoryConfig_ACU, updateGlobalVectorMemoryConfigFields_ACU } from '../../service/vector/vector-memory-config';
 import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../../service/vector/summary-vector-index-state-service';
 import { defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { syncManualUpdateButtonAvailability_ACU } from '../components/status-display';
@@ -106,29 +105,23 @@ export function readSummaryPromptGroupFromUI_ACU(): any[] {
 export async function bindWorldbookEvents_ACU(): Promise<void> {
       // [向量记忆] 配置已迁移到全局 settings_ACU.vectorMemoryConfig，
       // 不再跟随世界书配置（角色级），而是跟随数据库全局设置。
-      const ensureVectorMemoryConfig_ACU = () => {
-          return getCurrentVectorMemoryConfig_ACU();
-      };
       const toggleVectorMemoryConfigBlock_ACU = () => {
           const worldbookConfig = getCurrentWorldbookConfig_ACU();
           const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
           $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`).prop('checked', summaryVectorIndexEnabled);
           $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).toggle(summaryVectorIndexEnabled);
       };
-      const logVectorMemorySaveResult_ACU = (fieldNames: string[], result: ReturnType<typeof saveSettingsAndNotify_ACU>) => {
+      const logVectorMemorySaveResult_ACU = (fieldNames: string[], result: { ok: boolean; message?: string }) => {
           const safeFieldNames = fieldNames.map(field => /key/i.test(field) ? `${field}(redacted)` : field).join(',');
-          logDebug_ACU(`[交火模式配置] 已保存字段: ${safeFieldNames}; storage=${result.storageType}${result.warning ? `; warning=${result.warning}` : ''}${result.error ? `; error=${result.error}` : ''}`);
+          logDebug_ACU(`[交火模式配置] 已保存字段: ${safeFieldNames}; ok=${result.ok}${result.message ? `; message=${result.message}` : ''}`);
       };
       const updateVectorMemoryFields_ACU = (patch: Record<string, any>) => {
-          const vectorMemoryConfig = ensureVectorMemoryConfig_ACU();
-          globalMeta_ACU.vectorMemoryConfigGlobal = vectorMemoryConfig;
-          settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
-          Object.keys(patch).forEach((field) => {
-              (globalMeta_ACU.vectorMemoryConfigGlobal as any)[field] = patch[field];
-          });
-          settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
-          saveGlobalMeta_ACU();
-          const result = saveSettingsAndNotify_ACU();
+          // [V1 收敛] 委托 service 事务式更新（快照 → 修改 → 保存 → 失败回滚）。
+          const result = updateGlobalVectorMemoryConfigFields_ACU(patch);
+          if (!result.ok) {
+              showToastr_ACU('error', result.message || '保存向量记忆配置失败，已回滚。');
+              return;
+          }
           logVectorMemorySaveResult_ACU(Object.keys(patch), result);
       };
       const updateVectorMemoryField_ACU = (field: string, value: any) => {

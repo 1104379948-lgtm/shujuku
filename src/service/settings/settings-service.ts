@@ -20,6 +20,7 @@ import { ensureTagRulesCompat_ACU } from '../plot/plot-logic';
 import { getDefaultTemplateSnapshot_ACU, getTemplatePreset_ACU } from '../template/template-preset-service';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_settings_ACU} from '../runtime/state-manager';
 import { getCurrentCharSettings_ACU, getCurrentWorldbookConfig_ACU } from './settings-readers';
+import { reconcileApiBindingForCurrentChat_ACU } from './api-preset-service';
 import { getCurrentChatTemplateScopeState_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeChatSheetsObject_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { deepMerge_ACU, ensureSheetOrderNumbers_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
@@ -602,6 +603,16 @@ export   function loadSettings_ACU() {
       if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
           settings_ACU.maxConcurrentGroups = 1;
       }
+
+      // [API 绑定 reconcile] 存储重载后把当前聊天绑定重新投影到 apiMode/apiConfig/tavernProfile。
+      // 覆盖三条路径：CHAT_CHANGED（resetScriptStateForNewChat）、profile 切换（switchIsolationProfile）、
+      // IDB 延迟重载（scheduleSettingsReloadAfterIdbReady 内部重入 loadSettings）。
+      // 修复 A→B→A 后运行时仍使用 profile 最后保存配置的缺陷（主计划 §4.1）。
+      const bound = reconcileApiBindingForCurrentChat_ACU();
+      if (bound.applied) {
+          persistSettingsToStorage_ACU(settings_ACU, activeCode);
+          logDebug_ACU(`[API绑定] 已把当前聊天绑定投影到运行配置: ${bound.presetName}`);
+      }
       logDebug_ACU('Settings loaded:', settings_ACU);
   }
 
@@ -791,6 +802,8 @@ export   function buildDefaultSettings_ACU() {
           tavernProfile: '',
           streamingEnabled: false, // [新增] 流式传输开关（默认关闭）
           apiPresets: [] as any[],
+          defaultApiPresetName: '',
+          apiPresetBindingsByChat: {},
           tableApiPreset: '',
           plotApiPreset: '',
           strictJsonTableFillEnabled: false,
@@ -1022,11 +1035,32 @@ export function setSummaryVectorIndexMode_ACU(modeEnabled: boolean) {
  * 导入合并配置中的 settings 字段
  * 纯业务逻辑：将 combinedData 中的各字段赋值到 settings 对象
  * 不涉及 UI（toast、DOM 更新由 presentation 层负责）
+ * 事务语义：先快照，保存失败回滚全部字段后抛出错误，避免导入污染 settings。
  * 
  * @returns 被修改的字段名列表（供 presentation 层更新对应的 UI 元素）
  */
 export function applyCombinedSettingsImport_ACU(combinedData: any): string[] {
     const modifiedFields: string[] = [];
+    const FIELDS = [
+        'charCardPrompt',
+        'mergeSummaryPrompt',
+        'mergeTargetCount',
+        'mergeBatchSize',
+        'mergeStartIndex',
+        'mergeEndIndex',
+        'autoMergeEnabled',
+        'autoMergeThreshold',
+        'autoMergeReserve',
+        'deleteStartFloor',
+        'deleteEndFloor',
+    ];
+    const snapshot: Record<string, unknown> = {};
+    for (const field of FIELDS) {
+        const value = (settings_ACU as Record<string, unknown>)[field];
+        snapshot[field] = value && typeof value === 'object'
+            ? JSON.parse(JSON.stringify(value))
+            : value;
+    }
 
     // 导入提示词
     if (Array.isArray(combinedData.prompt)) {
@@ -1063,7 +1097,25 @@ export function applyCombinedSettingsImport_ACU(combinedData: any): string[] {
         modifiedFields.push('deleteStartFloor', 'deleteEndFloor');
     }
 
-    saveSettings_ACU();
+    let saveResult;
+    try {
+        saveResult = saveSettings_ACU();
+    } catch (error) {
+        // 保存过程抛异常同样视为失败：回滚后抛出
+        for (const field of FIELDS) {
+            (settings_ACU as Record<string, unknown>)[field] = snapshot[field];
+        }
+        logError_ACU('[合并配置导入] 保存异常，已回滚全部导入字段。', error);
+        throw new Error('合并配置保存失败，已回滚。');
+    }
+    if (!saveResult.saved) {
+        // 回滚全部已修改字段，避免导入失败污染 settings
+        for (const field of FIELDS) {
+            (settings_ACU as Record<string, unknown>)[field] = snapshot[field];
+        }
+        logError_ACU('[合并配置导入] 保存失败，已回滚全部导入字段。', saveResult.error || saveResult.warning || '');
+        throw new Error(saveResult.warning || saveResult.error || '合并配置保存失败，已回滚。');
+    }
     return modifiedFields;
 }
 

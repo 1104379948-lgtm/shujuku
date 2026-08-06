@@ -11,6 +11,8 @@ import { deleteAllGeneratedEntries_ACU, updateReadableLorebookEntry_ACU } from '
 import { populateInjectionTargetSelector_ACU, populateImportWorldbookTargetSelector_ACU } from '../components/worldbook-selector';
 import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-display';
 import { exportCharCardPromptToJson_ACU, loadCharCardPromptFromJson_ACU, loadTavernApiProfiles_ACU, updateApiModeView_ACU } from '../triggers/settings-ui-sync';
+// [V1 收敛] API 配置写权限统一委托 service 事务式函数。
+import { setApiMode_ACU, setTavernProfile_ACU } from '../../service/settings/api-preset-service';
 
 // 子模块绑定函数
 import { bindStatusEvents_ACU } from './popup-bindings-status';
@@ -187,8 +189,11 @@ import { isSqliteMode } from '../../service/table/storage-mode';
         if ($apiModeRadios.length) {
             $apiModeRadios.on('change', function() {
                 const selectedMode = String(jQuery_API_ACU(this).val() || '');
-                settings_ACU.apiMode = selectedMode;
-                saveSettingsAndNotify_ACU();
+                const result = setApiMode_ACU(selectedMode);
+                if (!result.ok) {
+                    showToastr_ACU('error', result.message || '保存API模式失败，已回滚。');
+                    return;
+                }
                 updateApiModeView_ACU(selectedMode);
             });
         }
@@ -197,8 +202,11 @@ import { isSqliteMode } from '../../service/table/storage-mode';
         }
         if ($tavernProfileSelect.length) {
             $tavernProfileSelect.on('change', function() {
-                settings_ACU.tavernProfile = jQuery_API_ACU(this).val();
-                saveSettingsAndNotify_ACU();
+                const result = setTavernProfile_ACU(String(jQuery_API_ACU(this).val() || ''));
+                if (!result.ok) {
+                    showToastr_ACU('error', result.message || '保存酒馆API预设失败，已回滚。');
+                    return;
+                }
             });
         }
 

@@ -210,6 +210,8 @@ export let settings_ACU: any = {
     streamingEnabled: false,
     tavernProfile: '',
     apiPresets: [],
+    defaultApiPresetName: '',
+    apiPresetBindingsByChat: {},
     tableApiPreset: '',
     plotApiPreset: '',
     strictJsonTableFillEnabled: false,

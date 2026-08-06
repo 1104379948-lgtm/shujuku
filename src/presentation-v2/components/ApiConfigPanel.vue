@@ -355,7 +355,11 @@ function saveActiveDraft(): void {
     return;
   }
   if (formMode.value === "create") {
-    store.setActivePresetForCurrentChat(preset.name);
+    const activateOk = store.setActivePresetForCurrentChat(preset.name);
+    if (!activateOk) {
+      activeDraftError.value = "预设已保存，但切换为当前聊天预设失败。";
+      return;
+    }
   }
   store.refreshFromSettings();
   syncActiveDraft();

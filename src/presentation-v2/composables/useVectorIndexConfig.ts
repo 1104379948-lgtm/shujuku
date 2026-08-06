@@ -10,6 +10,7 @@
 import { computed, reactive, ref } from 'vue';
 import {
   getCurrentVectorMemoryConfig_ACU,
+  updateGlobalVectorMemoryConfigFields_ACU,
   validateSummaryVectorIndexConfig_ACU,
   type VectorMemoryConfig_ACU,
   type VectorMemoryKeywordPromptSegment_ACU,
@@ -53,12 +54,6 @@ function getDefaultRecentFixedInjectCount(): number {
 function getDefaultRollingDeltaFoldThreshold(): number {
   const value = Number((getDefaultVectorMemoryConfigForV2() as any).summaryIndexRollingDeltaFoldThreshold);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 15;
-}
-
-function updateGlobalVectorMemoryConfigFields_ACU(patch: Partial<VectorMemoryConfig_ACU>): VectorMemoryConfig_ACU {
-  const config = getCurrentVectorMemoryConfig_ACU();
-  Object.assign(config as unknown as Record<string, unknown>, patch);
-  return config;
 }
 
 export interface VectorIndexMessage {
@@ -276,8 +271,11 @@ export function useVectorIndexConfig() {
     const value = typeof raw === 'string' ? raw : String(raw ?? '');
     const next = key.endsWith('ApiKey') ? value : value.trim();
     (form as any)[key] = next;
-    updateGlobalVectorMemoryConfigFields_ACU({ [key]: next });
-    saveSettings_ACU();
+    const result = updateGlobalVectorMemoryConfigFields_ACU({ [key]: next });
+    if (!result.ok) {
+      toast.error(result.message || '保存失败。');
+      return;
+    }
     runValidation();
     pushSavedMessage();
   }
@@ -296,10 +294,13 @@ export function useVectorIndexConfig() {
         form.recentFixedInjectCount = Number.isFinite(value) ? Math.floor(value) : 0;
         toast.warning(`固定写入必须是正整数，已重置为默认值 ${fallback}。`);
         form.recentFixedInjectCount = fallback;
-        updateGlobalVectorMemoryConfigFields_ACU({
+        const result = updateGlobalVectorMemoryConfigFields_ACU({
           recentFixedInjectCount: fallback,
         });
-        saveSettings_ACU();
+        if (!result.ok) {
+          toast.error(result.message || '保存失败。');
+          return;
+        }
         runValidation();
         pushSavedMessage();
         return;
@@ -311,10 +312,13 @@ export function useVectorIndexConfig() {
         const fallback = getDefaultRollingDeltaFoldThreshold();
         form.summaryIndexRollingDeltaFoldThreshold = fallback;
         toast.warning(`滚动增量折叠阈值必须是正整数，已重置为默认值 ${fallback}。`);
-        updateGlobalVectorMemoryConfigFields_ACU({
+        const result = updateGlobalVectorMemoryConfigFields_ACU({
           summaryIndexRollingDeltaFoldThreshold: fallback,
         });
-        saveSettings_ACU();
+        if (!result.ok) {
+          toast.error(result.message || '保存失败。');
+          return;
+        }
         runValidation();
         pushSavedMessage();
         return;
@@ -324,8 +328,11 @@ export function useVectorIndexConfig() {
     const fallback = 1;
     const num = Math.max(min, Math.floor(Number(raw)) || fallback);
     (form as any)[key] = num;
-    updateGlobalVectorMemoryConfigFields_ACU({ [key]: num });
-    saveSettings_ACU();
+    const result = updateGlobalVectorMemoryConfigFields_ACU({ [key]: num });
+    if (!result.ok) {
+      toast.error(result.message || '保存失败。');
+      return;
+    }
     runValidation();
     pushSavedMessage();
   }
@@ -335,8 +342,11 @@ export function useVectorIndexConfig() {
   >(key: K, value: boolean): void {
     const next = value === true;
     (form as any)[key] = next;
-    updateGlobalVectorMemoryConfigFields_ACU({ [key]: next });
-    saveSettings_ACU();
+    const result = updateGlobalVectorMemoryConfigFields_ACU({ [key]: next });
+    if (!result.ok) {
+      toast.error(result.message || '保存失败。');
+      return;
+    }
     runValidation();
     pushSavedMessage();
   }
@@ -347,8 +357,11 @@ export function useVectorIndexConfig() {
       .map((item) => item.trim())
       .filter(Boolean)));
     form.summaryIndexV2WriteScopeAllowlistText = normalized.join('\n');
-    updateGlobalVectorMemoryConfigFields_ACU({ summaryIndexV2WriteScopeAllowlist: normalized });
-    saveSettings_ACU();
+    const result = updateGlobalVectorMemoryConfigFields_ACU({ summaryIndexV2WriteScopeAllowlist: normalized });
+    if (!result.ok) {
+      toast.error(result.message || '保存失败。');
+      return;
+    }
     runValidation();
     pushSavedMessage();
   }
@@ -364,8 +377,11 @@ export function useVectorIndexConfig() {
     if (num < 0) num = 0;
     if (num > 1) num = 1;
     form.minScore = num;
-    updateGlobalVectorMemoryConfigFields_ACU({ minScore: num });
-    saveSettings_ACU();
+    const result = updateGlobalVectorMemoryConfigFields_ACU({ minScore: num });
+    if (!result.ok) {
+      toast.error(result.message || '保存失败。');
+      return;
+    }
     runValidation();
     pushSavedMessage();
   }
@@ -408,12 +424,16 @@ export function useVectorIndexConfig() {
   function savePromptGroup(): void {
     const segs = prepareKeywordPromptGroup(promptSegments.value);
 
-    updateGlobalVectorMemoryConfigFields_ACU({ keywordPromptGroup: segs });
-    saveSettings_ACU();
+    const result = updateGlobalVectorMemoryConfigFields_ACU({ keywordPromptGroup: segs });
+    if (!result.ok) {
+      toast.error(result.message || '保存失败。');
+      return;
+    }
     promptSegments.value = cloneSegments(segs);
     promptDirty.value = false;
-    notify('success', '关键词生成提示词已保存。');
+    notify('success', '关键词生成提示词已保存');
   }
+
 
   function resetPromptGroup(): void {
     promptSegments.value = defaultKeywordPromptGroup();

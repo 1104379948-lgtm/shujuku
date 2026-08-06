@@ -7,6 +7,7 @@
 import { defineStore } from 'pinia';
 import { settings_ACU } from '../../service/runtime/state-manager';
 import { saveSettings_ACU, setGlobalPlotEnabled_ACU } from '../../service/settings/settings-service';
+import { setFeatureApiPreset_ACU } from '../../service/settings/feature-preset-reference-service';
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import {
   applyGlobalPlotPresetSelectionForEditor_ACU,
@@ -238,9 +239,11 @@ export const usePlotPresetStore = defineStore('acu-v2-plot-presets', {
     /** D23.4 第二层：页面级"剧情推进 API 预设"。空串 = 跟随当前活动 API。 */
     setPageApiPreset(name: string): void {
       const next = String(name || '').trim();
+      const result = setFeatureApiPreset_ACU('plot', next);
+      if (!result.ok) {
+        return; // 校验失败（预设不存在）或保存失败；store 保持原值
+      }
       this.pageApiPresetName = next;
-      settings_ACU.plotApiPreset = next;
-      saveSettings_ACU();
     },
 
     /** D23.4 第一层：任务 API 单独选择。空串清除单独选择。 */
@@ -248,17 +251,16 @@ export const usePlotPresetStore = defineStore('acu-v2-plot-presets', {
       const id = String(taskId || '').trim();
       if (!id) return;
       const next = String(presetName || '').trim();
-      const overrides = settings_ACU.plotTaskApiPresetOverridesById as Record<string, any>;
-      if (next) {
-        overrides[id] = next;
-        this.taskApiOverrides = { ...this.taskApiOverrides, [id]: next };
-      } else {
-        delete overrides[id];
-        const copy = { ...this.taskApiOverrides };
-        delete copy[id];
-        this.taskApiOverrides = copy;
+      const result = setFeatureApiPreset_ACU('plot_task', next, { taskId: id });
+      if (!result.ok) {
+        return;
       }
-      saveSettings_ACU();
+      const overrides = (settings_ACU.plotTaskApiPresetOverridesById || {}) as Record<string, any>;
+      const cleaned: Record<string, string> = {};
+      for (const [k, v] of Object.entries(overrides)) {
+        if (typeof v === 'string' && v.trim()) cleaned[k] = v.trim();
+      }
+      this.taskApiOverrides = cleaned;
     },
 
     /** 创建/覆盖一个全局预设。`originalName` 用于重命名场景。 */

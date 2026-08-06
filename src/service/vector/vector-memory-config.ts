@@ -3,6 +3,29 @@ import { cleanChatName_ACU, normalizePositiveInteger_ACU } from '../../shared/ut
 import { globalMeta_ACU, saveGlobalMeta_ACU } from '../../data/repositories/profile-repo';
 import { currentChatFileIdentifier_ACU, settings_ACU } from '../runtime/state-manager';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
+import { saveSettings_ACU } from '../settings/settings-service';
+
+/**
+ * 事务式更新全局向量配置字段：快照 → 修改 → 保存 → 失败回滚。
+ * 权威配置位于 globalMeta.vectorMemoryConfigGlobal；settings_ACU.vectorMemoryConfig 同步投影。
+ */
+export function updateGlobalVectorMemoryConfigFields_ACU(
+  patch: Partial<VectorMemoryConfig_ACU>,
+): { ok: boolean; message?: string } {
+  const config = getCurrentVectorMemoryConfig_ACU();
+  const snapshot = JSON.parse(JSON.stringify(config));
+  Object.assign(config as unknown as Record<string, unknown>, patch);
+  const saveResult = saveSettings_ACU();
+  if (!saveResult.saved) {
+    Object.assign(config as unknown as Record<string, unknown>, snapshot);
+    settings_ACU.vectorMemoryConfig = config;
+    return {
+      ok: false,
+      message: saveResult.warning || saveResult.error || '保存失败，已回滚。',
+    };
+  }
+  return { ok: true };
+}
 
 export interface VectorMemoryKeywordPromptSegment_ACU {
     role: string;

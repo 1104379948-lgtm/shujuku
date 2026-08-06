@@ -1,38 +1,40 @@
 /**
- * api-preset-store — API 页状态边界（阶段 1 / D17）
+ * api-preset-store — API 页状态边界（阶段 1 / D17，阶段 B 重构）
  *
- * Vue 组件只读写本 store；旧 settings_ACU 与 service 调用集中在这里。
+ * Vue 组件只读写本 store；本 store 是 service 的薄包装。
+ * 所有写操作委托 service/api-preset-service，不再直接改 settings_ACU。
+ * 保存失败时 service 已回滚内存，store 同步恢复快照并传播失败结果。
  */
 import { defineStore } from 'pinia';
 import { currentChatFileIdentifier_ACU, settings_ACU } from '../../service/runtime/state-manager';
-import { saveSettings_ACU } from '../../service/settings/settings-service';
+import {
+  ensureApiSettingsShape_ACU,
+  findPresetByName_ACU,
+  getBoundPresetNameForChat_ACU,
+  getCurrentChatKey_ACU,
+  normalizeApiMode_ACU,
+  normalizeApiConfig_ACU,
+  saveApiPreset_ACU,
+  saveCurrentConfigAsPreset_ACU,
+  deleteApiPreset_ACU,
+  setActivePresetForCurrentChat_ACU,
+  setDefaultApiPreset_ACU,
+  setStreamingEnabled_ACU,
+  type ApiPreset_ACU,
+  type ApiPresetApiConfig_ACU,
+  type ApiPresetApiMode_ACU,
+  type ApiPresetBinding_ACU,
+  type ApiPresetWriteResult_ACU,
+} from '../../service/settings/api-preset-service';
 import { fetchAvailableModels_ACU, getConnectionManagerProfiles_ACU } from '../../service/ai/ai-service';
 
-export type AcuV2ApiMode = 'custom' | 'tavern';
+export type AcuV2ApiMode = ApiPresetApiMode_ACU;
 
-export interface AcuV2ApiConfig {
-  url: string;
-  apiKey: string;
-  model: string;
-  useMainApi: boolean;
-  max_tokens: number;
-  temperature: number;
-  bodyParams: string;
-  excludeBodyParams: string;
-  requestHeaders: string;
-}
+export interface AcuV2ApiConfig extends ApiPresetApiConfig_ACU {}
 
-export interface AcuV2ApiPreset {
-  name: string;
-  apiMode: AcuV2ApiMode;
-  apiConfig: AcuV2ApiConfig;
-  tavernProfile: string;
-}
+export interface AcuV2ApiPreset extends ApiPreset_ACU {}
 
-export interface AcuV2ApiPresetBinding {
-  presetName: string;
-  updatedAt: number;
-}
+export interface AcuV2ApiPresetBinding extends ApiPresetBinding_ACU {}
 
 interface ApiPresetState {
   presets: AcuV2ApiPreset[];
@@ -52,84 +54,12 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? null));
 }
 
-function normalizeApiMode(value: unknown): AcuV2ApiMode {
-  return value === 'tavern' ? 'tavern' : 'custom';
-}
-
-function normalizeApiConfig(value: any): AcuV2ApiConfig {
-  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-  const maxTokens = Number(source.max_tokens ?? source.maxTokens ?? 60000);
-  const temperature = Number(source.temperature ?? 1);
-  return {
-    url: typeof source.url === 'string' ? source.url : '',
-    apiKey: typeof source.apiKey === 'string' ? source.apiKey : '',
-    model: typeof source.model === 'string' ? source.model : '',
-    useMainApi: source.useMainApi !== false,
-    max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : 60000,
-    temperature: Number.isFinite(temperature) ? temperature : 1,
-    bodyParams: typeof source.bodyParams === 'string' ? source.bodyParams : '',
-    excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
-    requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
-  };
-}
-
-function normalizePreset(value: any): AcuV2ApiPreset | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const name = typeof value.name === 'string' ? value.name.trim() : '';
-  if (!name) return null;
-  return {
-    name,
-    apiMode: normalizeApiMode(value.apiMode),
-    apiConfig: normalizeApiConfig(value.apiConfig),
-    tavernProfile: typeof value.tavernProfile === 'string' ? value.tavernProfile : '',
-  };
-}
-
-function normalizePresetList(value: unknown): AcuV2ApiPreset[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  const presets: AcuV2ApiPreset[] = [];
-  for (const raw of value) {
-    const preset = normalizePreset(raw);
-    if (!preset || seen.has(preset.name)) continue;
-    seen.add(preset.name);
-    presets.push(preset);
-  }
-  return presets;
-}
-
-function getCurrentChatKey(): string {
-  const raw = String(currentChatFileIdentifier_ACU || '').trim();
-  return raw || 'unknown_chat';
-}
-
-function ensureSettingsShape(): void {
-  if (!Array.isArray(settings_ACU.apiPresets)) settings_ACU.apiPresets = [];
-  settings_ACU.apiPresets = normalizePresetList(settings_ACU.apiPresets);
-  if (typeof settings_ACU.defaultApiPresetName !== 'string') settings_ACU.defaultApiPresetName = '';
-  if (
-    !settings_ACU.apiPresetBindingsByChat ||
-    typeof settings_ACU.apiPresetBindingsByChat !== 'object' ||
-    Array.isArray(settings_ACU.apiPresetBindingsByChat)
-  ) {
-    settings_ACU.apiPresetBindingsByChat = {};
-  }
-  settings_ACU.apiMode = normalizeApiMode(settings_ACU.apiMode);
-  settings_ACU.apiConfig = normalizeApiConfig(settings_ACU.apiConfig);
-  if (typeof settings_ACU.tavernProfile !== 'string') settings_ACU.tavernProfile = '';
-  settings_ACU.streamingEnabled = settings_ACU.streamingEnabled === true;
-}
-
-function findPresetByName(presets: AcuV2ApiPreset[], name: string): AcuV2ApiPreset | null {
-  const normalized = String(name || '').trim();
-  return presets.find(p => p.name === normalized) ?? null;
-}
-
 function getCurrentConfigAsPreset(name: string): AcuV2ApiPreset {
+  ensureApiSettingsShape_ACU();
   return {
     name,
-    apiMode: normalizeApiMode(settings_ACU.apiMode),
-    apiConfig: normalizeApiConfig(settings_ACU.apiConfig),
+    apiMode: normalizeApiMode_ACU(settings_ACU.apiMode),
+    apiConfig: normalizeApiConfig_ACU(settings_ACU.apiConfig),
     tavernProfile: typeof settings_ACU.tavernProfile === 'string' ? settings_ACU.tavernProfile : '',
   };
 }
@@ -154,8 +84,9 @@ function findPresetMatchingCurrentConfig(presets: AcuV2ApiPreset[]): AcuV2ApiPre
 }
 
 function resolveCurrentConfigStatus(): { ready: boolean; label: string } {
-  const mode = normalizeApiMode(settings_ACU.apiMode);
-  const config = normalizeApiConfig(settings_ACU.apiConfig);
+  ensureApiSettingsShape_ACU();
+  const mode = normalizeApiMode_ACU(settings_ACU.apiMode);
+  const config = normalizeApiConfig_ACU(settings_ACU.apiConfig);
   const tavernProfile = typeof settings_ACU.tavernProfile === 'string'
     ? settings_ACU.tavernProfile.trim()
     : '';
@@ -184,7 +115,7 @@ export const useApiPresetStore = defineStore('acu-v2-api-presets', {
     activePresetName: '',
     currentConfigReady: false,
     currentConfigLabel: '当前 API 配置不完整',
-    currentChatKey: getCurrentChatKey(),
+    currentChatKey: getCurrentChatKey_ACU(),
     streamingEnabled: false,
     tavernProfiles: [],
     modelOptions: [],
@@ -193,10 +124,10 @@ export const useApiPresetStore = defineStore('acu-v2-api-presets', {
   }),
   getters: {
     defaultPreset(state): AcuV2ApiPreset | null {
-      return findPresetByName(state.presets, state.defaultApiPresetName);
+      return findPresetByName_ACU(state.presets, state.defaultApiPresetName);
     },
     activePreset(state): AcuV2ApiPreset | null {
-      return findPresetByName(state.presets, state.activePresetName);
+      return findPresetByName_ACU(state.presets, state.activePresetName);
     },
     hasPresets(state): boolean {
       return state.presets.length > 0;
@@ -204,26 +135,19 @@ export const useApiPresetStore = defineStore('acu-v2-api-presets', {
   },
   actions: {
     /**
-     * 仅刷新展示用状态（presets / activePresetName / streaming）。
-     *
-     * 切换聊天后的 settings 刷新由 service 层的 loadSettings_ACU() 完成，
-     * v2 chat-changed listener 只负责让 store 重新读取最新 settings。
-     * 当前聊天 API 配置的显式写回只在 setActivePresetForCurrentChat()/savePreset() 中执行，避免刷新阶段产生循环写入。
+     * 仅刷新展示用状态。只读消费 service 快照，不写回运行配置。
+     * 聊天切换后的运行配置投影由 service 层 reconcile（loadSettings_ACU 末尾）完成。
      */
     refreshFromSettings(): void {
-      ensureSettingsShape();
-      this.currentChatKey = getCurrentChatKey();
+      ensureApiSettingsShape_ACU();
+      this.currentChatKey = getCurrentChatKey_ACU();
       this.presets = clone(settings_ACU.apiPresets);
-      const defaultName = findPresetByName(this.presets, settings_ACU.defaultApiPresetName)
+      const defaultName = findPresetByName_ACU(this.presets, settings_ACU.defaultApiPresetName)
         ? settings_ACU.defaultApiPresetName
         : '';
-      settings_ACU.defaultApiPresetName = defaultName;
       this.defaultApiPresetName = defaultName;
 
-      const binding = settings_ACU.apiPresetBindingsByChat[this.currentChatKey] as AcuV2ApiPresetBinding | undefined;
-      const boundName = binding && findPresetByName(this.presets, binding.presetName)
-        ? binding.presetName
-        : '';
+      const boundName = getBoundPresetNameForChat_ACU(this.currentChatKey);
       const matchedCurrentName = findPresetMatchingCurrentConfig(this.presets)?.name ?? '';
       this.activePresetName = boundName || defaultName || matchedCurrentName;
       const currentConfig = resolveCurrentConfigStatus();
@@ -231,112 +155,28 @@ export const useApiPresetStore = defineStore('acu-v2-api-presets', {
       this.currentConfigLabel = currentConfig.label;
       this.streamingEnabled = settings_ACU.streamingEnabled === true;
     },
-    persist(): void {
-      settings_ACU.apiPresets = clone(this.presets);
-      settings_ACU.defaultApiPresetName = this.defaultApiPresetName;
-      settings_ACU.streamingEnabled = this.streamingEnabled;
-      saveSettings_ACU();
+    /** 应用写操作结果：成功与失败都同步展示态（失败时 service 已回滚内存）；返回 boolean 保持旧契约。 */
+    applyWriteResult(result: ApiPresetWriteResult_ACU): boolean {
+      this.refreshFromSettings();
+      return result.ok === true;
     },
-    setStreamingEnabled(enabled: boolean): void {
-      this.streamingEnabled = !!enabled;
-      settings_ACU.streamingEnabled = this.streamingEnabled;
-      saveSettings_ACU();
+    setStreamingEnabled(enabled: boolean): boolean {
+      return this.applyWriteResult(setStreamingEnabled_ACU(enabled));
     },
     setDefaultPreset(name: string): boolean {
-      const preset = findPresetByName(this.presets, name);
-      if (!preset) return false;
-      this.defaultApiPresetName = preset.name;
-      settings_ACU.defaultApiPresetName = preset.name;
-      saveSettings_ACU();
-      return true;
+      return this.applyWriteResult(setDefaultApiPreset_ACU(name));
     },
     setActivePresetForCurrentChat(name: string): boolean {
-      const preset = findPresetByName(this.presets, name);
-      if (!preset) return false;
-      this.currentChatKey = getCurrentChatKey();
-      this.activePresetName = preset.name;
-      settings_ACU.apiPresetBindingsByChat[this.currentChatKey] = {
-        presetName: preset.name,
-        updatedAt: Date.now(),
-      };
-      settings_ACU.apiMode = preset.apiMode;
-      settings_ACU.apiConfig = clone(preset.apiConfig);
-      settings_ACU.tavernProfile = preset.tavernProfile;
-      saveSettings_ACU();
-      return true;
+      return this.applyWriteResult(setActivePresetForCurrentChat_ACU(name));
     },
     savePreset(presetInput: AcuV2ApiPreset, originalName = ''): boolean {
-      const preset = normalizePreset(presetInput);
-      if (!preset) return false;
-      const oldName = String(originalName || '').trim();
-      const activePresetNameBeforeSave = String(this.activePresetName || '').trim();
-      const isRenamingActivePreset = !!oldName && activePresetNameBeforeSave === oldName;
-      const hadPresets = this.presets.length > 0;
-      const existingByNewName = this.presets.findIndex(p => p.name === preset.name);
-      if (existingByNewName >= 0 && this.presets[existingByNewName].name !== oldName) {
-        this.presets[existingByNewName] = preset;
-      } else {
-        const existingByOldName = oldName
-          ? this.presets.findIndex(p => p.name === oldName)
-          : -1;
-        if (existingByOldName >= 0) this.presets[existingByOldName] = preset;
-        else this.presets.push(preset);
-      }
-
-      if (!this.defaultApiPresetName) this.defaultApiPresetName = preset.name;
-      if (oldName && this.defaultApiPresetName === oldName) this.defaultApiPresetName = preset.name;
-      if (oldName && this.activePresetName === oldName) this.activePresetName = preset.name;
-
-      for (const binding of Object.values(settings_ACU.apiPresetBindingsByChat) as AcuV2ApiPresetBinding[]) {
-        if (oldName && binding?.presetName === oldName) {
-          binding.presetName = preset.name;
-          binding.updatedAt = Date.now();
-        }
-      }
-
-      this.persist();
-      const shouldSyncActivePresetAfterSave = !hadPresets
-        || !activePresetNameBeforeSave
-        || activePresetNameBeforeSave === preset.name
-        || isRenamingActivePreset;
-      if (shouldSyncActivePresetAfterSave) {
-        this.setActivePresetForCurrentChat(preset.name);
-      } else if (this.activePresetName !== activePresetNameBeforeSave) {
-        this.activePresetName = activePresetNameBeforeSave;
-      }
-      return true;
+      return this.applyWriteResult(saveApiPreset_ACU(presetInput, originalName));
     },
     saveCurrentConfigAsPreset(name: string): boolean {
-      return this.savePreset(getCurrentConfigAsPreset(name));
+      return this.applyWriteResult(saveCurrentConfigAsPreset_ACU(name));
     },
     deletePreset(name: string): boolean {
-      const target = findPresetByName(this.presets, name);
-      if (!target) return false;
-      this.presets = this.presets.filter(p => p.name !== target.name);
-      if (this.defaultApiPresetName === target.name) {
-        this.defaultApiPresetName = this.presets[0]?.name ?? '';
-      }
-      if (this.activePresetName === target.name) {
-        this.activePresetName = this.defaultApiPresetName;
-      }
-      if (settings_ACU.tableApiPreset === target.name) settings_ACU.tableApiPreset = '';
-      if (settings_ACU.plotApiPreset === target.name) settings_ACU.plotApiPreset = '';
-      if (settings_ACU.contentOptimizationSettings?.apiPreset === target.name) {
-        settings_ACU.contentOptimizationSettings.apiPreset = '';
-      }
-      if (settings_ACU.tableApiPresetOverridesByName && typeof settings_ACU.tableApiPresetOverridesByName === 'object') {
-        for (const key of Object.keys(settings_ACU.tableApiPresetOverridesByName)) {
-          if (settings_ACU.tableApiPresetOverridesByName[key] === target.name) {
-            delete settings_ACU.tableApiPresetOverridesByName[key];
-          }
-        }
-      }
-      for (const [chatKey, binding] of Object.entries(settings_ACU.apiPresetBindingsByChat) as Array<[string, AcuV2ApiPresetBinding]>) {
-        if (binding?.presetName === target.name) delete settings_ACU.apiPresetBindingsByChat[chatKey];
-      }
-      this.persist();
-      if (this.activePresetName) this.setActivePresetForCurrentChat(this.activePresetName);
-      return true;
+      return this.applyWriteResult(deleteApiPreset_ACU(name));
     },
     refreshTavernProfiles(): void {
       try {

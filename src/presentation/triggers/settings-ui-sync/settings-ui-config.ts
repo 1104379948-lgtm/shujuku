@@ -1,7 +1,6 @@
 /**
  * presentation/triggers/settings-ui-sync/settings-ui-config.ts
  */
-import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU } from '../../../shared/defaults-json.js';
 import { AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU } from '../../../shared/defaults';
 import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-status-display';
 import { getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, manualExtraHint_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU } from '../../components/plot-editors';
@@ -10,12 +9,10 @@ import { ACU_TOAST_CATEGORY_ACU } from '../../../shared/constants';
 import { SillyTavern_API_ACU, TavernHelper_API_ACU, toastr_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU } from '../../../shared/host-api';
 import { jQuery_API_ACU } from '../../dom-utils';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
-import { isSqliteMode } from '../../../service/table/storage-mode';
 import { getConnectionManagerProfiles_ACU } from '../../../service/ai/ai-service';
 import { getCurrentCharacterFallback_ACU } from '../../../service/host/host-state-service';
 import { NEW_MESSAGE_DEBOUNCE_DELAY_ACU, allChatMessages_ACU, coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
 import { $popupInstance_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $apiStatusDisplay_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateTokenThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $tableMaxRetriesInput_ACU, $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
-import { saveSettingsAndNotify_ACU, loadSettingsAndRefreshUI_ACU } from '../../components/settings-ui-helpers';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../../../service/summary/merge-logic';
 import { processUpdates_ACU } from '../update-process';
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
@@ -27,20 +24,8 @@ import { topLevelWindow_ACU } from '../../../shared/env';
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../../shared/utils';
 import { executeContentOptimization_ACU } from '../../components/optimization-ui';
 import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/helpers-remaining';
-
-  function getCurrentPromptSettingKey_ACU(mode: 'native' | 'sqlite' = isSqliteMode() ? 'sqlite' : 'native') {
-    if (settings_ACU.strictJsonTableFillEnabled === true) {
-      return mode === 'sqlite' ? 'strictJsonSqlCharCardPrompt' : 'strictJsonCharCardPrompt';
-    }
-    return 'charCardPrompt';
-  }
-
-  function getDefaultPromptForMode_ACU(mode: 'native' | 'sqlite') {
-    if (settings_ACU.strictJsonTableFillEnabled === true) {
-      return mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU : DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU;
-    }
-    return mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU;
-  }
+// [V1 收敛] 填表提示词写权限收敛到 service 事务式函数。
+import { setCurrentPromptSegments_ACU, resetCurrentPromptToDefault_ACU, setUpdateNumberFields_ACU } from '../../../service/settings/settings-write-service';
 
   export function saveCustomCharCardPrompt_ACU() {
     if (!$popupInstance_ACU || !$charCardPromptSegmentsContainer_ACU) {
@@ -73,33 +58,24 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
       });
     } catch (e) {}
 
-    // 保存为JSON数组格式
-    settings_ACU[getCurrentPromptSettingKey_ACU()] = newPromptSegments;
-    saveSettingsAndNotify_ACU();
+    // [V1 收敛] 委托 service 事务式保存；保存失败已回滚，不再触发全量 reload。
+    const result = setCurrentPromptSegments_ACU(newPromptSegments);
+    if (!result.ok) {
+      showToastr_ACU('error', result.message || '更新预设保存失败，已回滚。');
+      return;
+    }
     showToastr_ACU('success', '更新预设已保存！');
-    loadSettingsAndRefreshUI_ACU(); // This will re-render from the saved data.
   }
 
   export function resetDefaultCharCardPrompt_ACU() {
-    const mode = isSqliteMode() ? 'sqlite' : 'native';
-    settings_ACU[getCurrentPromptSettingKey_ACU(mode)] = getDefaultPromptForMode_ACU(mode);
-    saveSettingsAndNotify_ACU();
+    // [V1 收敛] 委托 service 事务式重置；保存失败已回滚，不再触发全量 reload。
+    const result = resetCurrentPromptToDefault_ACU();
+    if (!result.ok) {
+      showToastr_ACU('error', result.message || '恢复默认提示词失败，已回滚。');
+      return;
+    }
     showToastr_ACU('info', '更新预设已恢复为默认值！');
-    // loadSettings will trigger renderPromptSegments_ACU which correctly handles the string default
-    loadSettingsAndRefreshUI_ACU();
   }
-
-  /**
-   * 按指定目标模式恢复默认填表提示词（charCardPrompt）。
-   * 与 resetDefaultCharCardPrompt_ACU 不同，此函数接收显式 mode 参数，
-   * 用于"模式切换后恢复目标模式默认提示词"场景——此时当前模式可能已完成切换。
-   */
-  export function applyModeDefaultCharCardPrompt_ACU(mode: 'native' | 'sqlite') {
-    settings_ACU[getCurrentPromptSettingKey_ACU(mode)] = getDefaultPromptForMode_ACU(mode);
-    saveSettingsAndNotify_ACU();
-    loadSettingsAndRefreshUI_ACU();
-  }
-
   export function loadCharCardPromptFromJson_ACU() {
     const input = document.createElement('input');
     input.type = 'file';
@@ -205,13 +181,16 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
     const newT = parseInt(valStr, 10);
 
     if (!isNaN(newT) && newT >= 0) {
-      settings_ACU.autoUpdateThreshold = newT;
-      saveSettingsAndNotify_ACU();
+      // [V1 收敛] 委托 service 事务式写入（含归一化与保存失败回滚）
+      const result = setUpdateNumberFields_ACU({ autoUpdateThreshold: newT });
+      if (!result.ok) {
+        if (!silent) showToastr_ACU('error', result.message || '自动更新阈值保存失败，已回滚。');
+        return;
+      }
       if (!silent) {
         if (newT === 0) showToastr_ACU('success', '自动更新阈值已保存！标准表自动更新已禁用。');
         else showToastr_ACU('success', '自动更新阈值已保存！');
       }
-      if (!skipReload) loadSettingsAndRefreshUI_ACU();
     } else {
       if (!silent) showToastr_ACU('warning', `阈值 "${valStr}" 无效。请输入一个大于等于0的整数。恢复为: ${settings_ACU.autoUpdateThreshold}`);
       $autoUpdateThresholdInput_ACU.val(settings_ACU.autoUpdateThreshold);
@@ -227,10 +206,13 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
     const newT = parseInt(valStr, 10);
 
     if (!isNaN(newT) && newT >= 0) {
-      settings_ACU.autoUpdateTokenThreshold = newT;
-      saveSettingsAndNotify_ACU();
+      // [V1 收敛] 委托 service 事务式写入
+      const result = setUpdateNumberFields_ACU({ autoUpdateTokenThreshold: newT });
+      if (!result.ok) {
+        if (!silent) showToastr_ACU('error', result.message || '自动更新Token阈值保存失败，已回滚。');
+        return;
+      }
       if (!silent) showToastr_ACU('success', '自动更新Token阈值已保存！');
-      if (!skipReload) loadSettingsAndRefreshUI_ACU();
     } else {
       if (!silent) showToastr_ACU('warning', `Token阈值 "${valStr}" 无效。请输入一个大于等于0的整数。恢复为: ${settings_ACU.autoUpdateTokenThreshold}`);
       $autoUpdateTokenThresholdInput_ACU.val(settings_ACU.autoUpdateTokenThreshold);
@@ -246,10 +228,13 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
     const valStr = $tableMaxRetriesInput_ACU.val() as string;
     const newR = parseInt(valStr, 10);
     if (!isNaN(newR) && newR >= 1 && newR <= 10) {
-      settings_ACU.tableMaxRetries = newR;
-      saveSettingsAndNotify_ACU();
+      // [V1 收敛] 委托 service 事务式写入
+      const result = setUpdateNumberFields_ACU({ tableMaxRetries: newR });
+      if (!result.ok) {
+        if (!silent) showToastr_ACU('error', result.message || '填表自动重试次数保存失败，已回滚。');
+        return;
+      }
       if (!silent) showToastr_ACU('success', '填表自动重试次数已保存！');
-      if (!skipReload) loadSettingsAndRefreshUI_ACU();
     } else {
       if (!silent) showToastr_ACU('warning', `重试次数 "${valStr}" 无效。请输入1-10之间的整数。恢复为: ${settings_ACU.tableMaxRetries || 3}`);
       $tableMaxRetriesInput_ACU.val(settings_ACU.tableMaxRetries || 3);
@@ -265,10 +250,13 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
     const newF = parseInt(valStr, 10);
 
     if (!isNaN(newF) && newF >= 1) {
-      settings_ACU.autoUpdateFrequency = newF;
-      saveSettingsAndNotify_ACU();
+      // [V1 收敛] 委托 service 事务式写入
+      const result = setUpdateNumberFields_ACU({ autoUpdateFrequency: newF });
+      if (!result.ok) {
+        if (!silent) showToastr_ACU('error', result.message || '自动更新频率保存失败，已回滚。');
+        return;
+      }
       if (!silent) showToastr_ACU('success', '自动更新频率已保存！');
-      if (!skipReload) loadSettingsAndRefreshUI_ACU();
     } else {
       if (!silent) showToastr_ACU('warning', `更新频率 "${valStr}" 无效。请输入一个大于0的整数。恢复为: ${settings_ACU.autoUpdateFrequency}`);
       $autoUpdateFrequencyInput_ACU.val(settings_ACU.autoUpdateFrequency);
@@ -286,10 +274,13 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
       const newBatchSize = parseInt(valStr, 10);
 
       if (!isNaN(newBatchSize) && newBatchSize >= 1) {
-          settings_ACU.updateBatchSize = newBatchSize;
-          saveSettingsAndNotify_ACU();
+          // [V1 收敛] 委托 service 事务式写入
+          const result = setUpdateNumberFields_ACU({ updateBatchSize: newBatchSize });
+          if (!result.ok) {
+              if (!silent) showToastr_ACU('error', result.message || '批处理大小保存失败，已回滚。');
+              return;
+          }
           if (!silent) showToastr_ACU('success', '批处理大小已保存！');
-          if (!skipReload) loadSettingsAndRefreshUI_ACU();
       } else {
           if (!silent) showToastr_ACU('warning', `批处理大小 "${valStr}" 无效。请输入一个大于0的整数。恢复为: ${settings_ACU.updateBatchSize}`);
           $updateBatchSizeInput_ACU.val(settings_ACU.updateBatchSize);
@@ -306,10 +297,13 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
       const newLimit = parseInt(valStr, 10);
 
       if (!isNaN(newLimit) && newLimit >= 1) {
-          settings_ACU.maxConcurrentGroups = newLimit;
-          saveSettingsAndNotify_ACU();
+          // [V1 收敛] 委托 service 事务式写入
+          const result = setUpdateNumberFields_ACU({ maxConcurrentGroups: newLimit });
+          if (!result.ok) {
+              if (!silent) showToastr_ACU('error', result.message || '最大并发数保存失败，已回滚。');
+              return;
+          }
           if (!silent) showToastr_ACU('success', '最大并发数已保存！');
-          if (!skipReload) loadSettingsAndRefreshUI_ACU();
       } else {
           if (!silent) showToastr_ACU('warning', `最大并发数 "${valStr}" 无效。请输入一个大于0的整数。恢复为: ${settings_ACU.maxConcurrentGroups || 1}`);
           $maxConcurrentGroupsInput_ACU.val(settings_ACU.maxConcurrentGroups || 1);
@@ -326,10 +320,13 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
        const newSkip = parseInt(valStr, 10);
  
        if (!isNaN(newSkip) && newSkip >= 0) {
-           settings_ACU.skipUpdateFloors = newSkip;
-           saveSettingsAndNotify_ACU();
+           // [V1 收敛] 委托 service 事务式写入
+           const result = setUpdateNumberFields_ACU({ skipUpdateFloors: newSkip });
+           if (!result.ok) {
+               if (!silent) showToastr_ACU('error', result.message || '跳过更新楼层保存失败，已回滚。');
+               return;
+           }
            if (!silent) showToastr_ACU('success', '跳过更新楼层已保存！');
-           if (!skipReload) loadSettingsAndRefreshUI_ACU();
        } else {
            if (!silent) showToastr_ACU('warning', `跳过更新楼层 "${valStr}" 无效。请输入一个大于等于0的整数。恢复为: ${settings_ACU.skipUpdateFloors || 0}`);
            $skipUpdateFloorsInput_ACU.val(settings_ACU.skipUpdateFloors || 0);
@@ -347,8 +344,12 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
        // 空字符串或无效值视为0（全部保留）
        const newRetain = (!valStr || valStr.trim() === '' || isNaN(parsed)) ? 0 : Math.max(0, parsed);
 
-       settings_ACU.retainRecentLayers = newRetain;
-       saveSettingsAndNotify_ACU();
+       // [V1 收敛] 委托 service 事务式写入
+       const result = setUpdateNumberFields_ACU({ retainRecentLayers: newRetain });
+       if (!result.ok) {
+           if (!silent) showToastr_ACU('error', result.message || 'AI 回复楼层保留数保存失败，已回滚。');
+           return;
+       }
        if (!silent) {
            if (newRetain === 0) {
                showToastr_ACU('success', 'AI 回复楼层保留数已清空（将保留全部历史数据）！');
@@ -356,7 +357,6 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
                showToastr_ACU('success', `AI 回复楼层保留数已保存：最近 ${newRetain} 个 AI 回复楼层！`);
            }
        }
-       if (!skipReload) loadSettingsAndRefreshUI_ACU();
    }
 
    // [新增] 清理超出 AI 回复楼层保留数的旧本地数据（表格数据 + 剧情推进数据）
@@ -378,10 +378,13 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
       const newSize = parseInt(valStr, 10);
 
       if (!isNaN(newSize) && newSize >= 100) {
-          settings_ACU.importSplitSize = newSize;
-          saveSettingsAndNotify_ACU();
+          // [V1 收敛] 委托 service 事务式写入
+          const result = setUpdateNumberFields_ACU({ importSplitSize: newSize });
+          if (!result.ok) {
+              showToastr_ACU('error', result.message || '导入分割大小保存失败，已回滚。');
+              return;
+          }
           showToastr_ACU('success', '导入分割大小已保存！');
-          loadSettingsAndRefreshUI_ACU();
       } else {
           showToastr_ACU('warning', `导入分割大小 "${valStr}" 无效。请输入一个大于等于100的整数。恢复为: ${settings_ACU.importSplitSize}`);
           $input.val(settings_ACU.importSplitSize);

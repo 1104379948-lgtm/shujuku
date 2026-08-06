@@ -1,4 +1,3 @@
-import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU, TABLE_TEMPLATE_ACU } from '../../shared/defaults-json.js';
 import { deriveTemplatePresetNameForImport_ACU, getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU, sanitizeFilenameComponent_ACU } from '../../shared/template-preset-utils';
 import { renderPromptSegments_ACU } from '../components/plot-editors';
 import { getDefaultTemplateSnapshot_ACU, getTemplatePreset_ACU, resolveTemplateForExport_ACU } from '../../service/template/template-preset-service';
@@ -11,8 +10,7 @@ import { isWorldbookApiAvailable_ACU } from '../../service/worldbook/worldbook-s
 import { cleanupWorldbookEntriesAfterDataDeletion_ACU } from '../../service/worldbook/worldbook-cleanup';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../../service/runtime/state-manager';
 import { $popupInstance_ACU } from '../state/ui-refs';
-import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
-import { loadSettingsAndRefreshUI_ACU } from '../components/settings-ui-helpers';
+import { resetAllPromptsToDefault_ACU } from '../../service/settings/settings-write-service';
 import { sanitizeChatSheetsObject_ACU } from '../../service/template/chat-scope';
 import { refreshMergedDataAndNotifyWithUI_ACU, refreshPresetUIAfterSwitch_ACU } from '../components/pipeline-ui-helpers';
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
@@ -29,7 +27,7 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
  * 从 features/data/01_data_admin.js 迁移而来
  */
 
-  function importCombinedSettings_ACU() {
+  export function importCombinedSettings_ACU() {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.json';
@@ -297,9 +295,12 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
       }
 
       try {
-          settings_ACU.charCardPrompt = isSqliteMode() ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU;
-          settings_ACU.mergeSummaryPrompt = isSqliteMode() ? DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU : DEFAULT_MERGE_SUMMARY_PROMPT_ACU;
-          saveSettingsAndNotify_ACU();
+          // [V1 收敛] 委托 service 事务式恢复默认提示词（含保存失败回滚），不再直写 settings_ACU。
+          const promptResetResult = resetAllPromptsToDefault_ACU();
+          if (!promptResetResult.ok) {
+              showToastr_ACU('error', promptResetResult.message || '恢复默认提示词失败，已回滚。');
+              return false;
+          }
 
           const templateResetOk = await resetTableTemplate_ACU({
               showToast: false,
@@ -314,7 +315,6 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
               return false;
           }
 
-          loadSettingsAndRefreshUI_ACU();
           refreshTemplatePresetSelectInUI_ACU({ selectName: '', keepValue: false });
           showToastr_ACU('success', '已恢复默认预设及模板！模板已更新，但不会影响当前聊天记录的本地数据。');
           return true;

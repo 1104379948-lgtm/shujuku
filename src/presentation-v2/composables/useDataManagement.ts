@@ -5,12 +5,7 @@
  * 调用集中在这里，避免 Vue 组件跨进旧 presentation 层。
  */
 import { computed, reactive, ref } from 'vue';
-import {
-  DEFAULT_CHAR_CARD_PROMPT_ACU,
-  DEFAULT_CHAR_CARD_PROMPT_SQL_ACU,
-  DEFAULT_MERGE_SUMMARY_PROMPT_ACU,
-  DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU,
-} from '../../shared/defaults-json.js';
+import { DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU } from '../../shared/defaults-json.js';
 import { normalizeIsolationCode_ACU } from '../../shared/data-constants';
 import { ensureSheetOrderNumbers_ACU, logError_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
@@ -23,6 +18,7 @@ import {
   saveSettings_ACU,
   switchIsolationProfile_ACU,
 } from '../../service/settings/settings-service';
+import { resetAllPromptsToDefault_ACU } from '../../service/settings/settings-write-service';
 import { getCurrentStorageMode, isSqliteMode } from '../../service/table/storage-mode';
 import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
 import { getChatArray_ACU, deleteLocalDataWithScope_ACU, isFullRangeDeletionRequest_ACU, overrideLatestLayerWithTemplateCore_ACU } from '../../service/chat/chat-service';
@@ -566,8 +562,11 @@ export function useDataManagement() {
       if (cleanup.restoreTemplateAndPrompts && !snapshot?.templateStr) throw new Error('无法解析默认模板。');
 
       if (cleanup.restoreTemplateAndPrompts) {
-        settings_ACU.charCardPrompt = isSqliteMode() ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU;
-        settings_ACU.mergeSummaryPrompt = isSqliteMode() ? DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU : DEFAULT_MERGE_SUMMARY_PROMPT_ACU;
+        // [V1 收敛] 委托 service 写入默认提示词（save: false，由下方统一 saveSettings_ACU 原子落盘）
+        const promptReset = resetAllPromptsToDefault_ACU(undefined, { save: false });
+        if (!promptReset.ok) {
+          throw new Error(promptReset.message || '恢复默认提示词失败。');
+        }
       }
 
       if (cleanup.clearTableOrder) {

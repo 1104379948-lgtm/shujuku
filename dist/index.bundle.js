@@ -60547,6 +60547,442 @@ $CONTENT
      */
     // AI 输入准备
 
+    // ═══════════════════════════════════════════════════════════
+    // service/settings/api-preset-service.ts — API 预设单一权威
+    //
+    // 本模块是 API 配置与预设的唯一写入、归一化、引用清理、解析边界。
+    // V1 presentation 不得直接修改这些字段；V2 必须通过本 service 操作。
+    // 写操作流程：校验 → 快照 → 改内存 → saveSettings_ACU → 失败回滚。
+    // ═══════════════════════════════════════════════════════════════
+    // ═══ 归一化 ═══
+    function normalizeApiMode_ACU(value) {
+        return value === 'tavern' ? 'tavern' : 'custom';
+    }
+    function normalizeApiConfig_ACU(value) {
+        const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        const maxTokens = Number(source.max_tokens ?? source.maxTokens ?? 60000);
+        const temperature = Number(source.temperature ?? 1);
+        // [修复] 保留源对象中所有非白名单字段（如 topP/top_p/frequency_penalty），
+        // 避免对运行中 apiConfig 的归一化破坏调用方依赖的透传字段。
+        return {
+            url: typeof source.url === 'string' ? source.url : '',
+            apiKey: typeof source.apiKey === 'string' ? source.apiKey : '',
+            model: typeof source.model === 'string' ? source.model : '',
+            useMainApi: source.useMainApi === true,
+            max_tokens: Number.isFinite(maxTokens) && maxTokens >= 0 ? Math.floor(maxTokens) : 60000,
+            maxTokens: Number.isFinite(maxTokens) && maxTokens >= 0 ? Math.floor(maxTokens) : 60000,
+            temperature: Number.isFinite(temperature) ? temperature : 1,
+            bodyParams: typeof source.bodyParams === 'string' ? source.bodyParams : '',
+            excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
+            requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
+            ...Object.fromEntries(Object.entries(source).filter(([key]) => !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders'].includes(key))),
+        };
+    }
+    function normalizePreset_ACU(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value))
+            return null;
+        const name = typeof value.name === 'string' ? value.name.trim() : '';
+        if (!name)
+            return null;
+        return {
+            name,
+            apiMode: normalizeApiMode_ACU(value.apiMode),
+            apiConfig: normalizeApiConfig_ACU(value.apiConfig),
+            tavernProfile: typeof value.tavernProfile === 'string' ? value.tavernProfile : '',
+        };
+    }
+    function normalizePresetList_ACU(value) {
+        if (!Array.isArray(value))
+            return [];
+        const seen = new Set();
+        const presets = [];
+        for (const raw of value) {
+            const preset = normalizePreset_ACU(raw);
+            if (!preset || seen.has(preset.name))
+                continue;
+            seen.add(preset.name);
+            presets.push(preset);
+        }
+        return presets;
+    }
+    /** 确保 settings shape 就位（纯内存，不持久化） */
+    function ensureApiSettingsShape_ACU() {
+        if (!Array.isArray(settings_ACU.apiPresets))
+            settings_ACU.apiPresets = [];
+        settings_ACU.apiPresets = normalizePresetList_ACU(settings_ACU.apiPresets);
+        if (typeof settings_ACU.defaultApiPresetName !== 'string')
+            settings_ACU.defaultApiPresetName = '';
+        if (!settings_ACU.apiPresetBindingsByChat ||
+            typeof settings_ACU.apiPresetBindingsByChat !== 'object' ||
+            Array.isArray(settings_ACU.apiPresetBindingsByChat)) {
+            settings_ACU.apiPresetBindingsByChat = {};
+        }
+        settings_ACU.apiMode = normalizeApiMode_ACU(settings_ACU.apiMode);
+        // [修复] 仅在 apiConfig shape 非法时重建；合法时保留原引用，避免读路径破坏引用同一性。
+        if (!settings_ACU.apiConfig || typeof settings_ACU.apiConfig !== 'object' || Array.isArray(settings_ACU.apiConfig)) {
+            settings_ACU.apiConfig = normalizeApiConfig_ACU(settings_ACU.apiConfig);
+        }
+        if (typeof settings_ACU.tavernProfile !== 'string')
+            settings_ACU.tavernProfile = '';
+        settings_ACU.streamingEnabled = settings_ACU.streamingEnabled === true;
+        if (typeof settings_ACU.tableApiPreset !== 'string')
+            settings_ACU.tableApiPreset = '';
+        if (typeof settings_ACU.plotApiPreset !== 'string')
+            settings_ACU.plotApiPreset = '';
+        if (!settings_ACU.tableApiPresetOverridesByName ||
+            typeof settings_ACU.tableApiPresetOverridesByName !== 'object' ||
+            Array.isArray(settings_ACU.tableApiPresetOverridesByName)) {
+            settings_ACU.tableApiPresetOverridesByName = {};
+        }
+        if (!settings_ACU.plotTaskApiPresetOverridesById ||
+            typeof settings_ACU.plotTaskApiPresetOverridesById !== 'object' ||
+            Array.isArray(settings_ACU.plotTaskApiPresetOverridesById)) {
+            settings_ACU.plotTaskApiPresetOverridesById = {};
+        }
+        if (!settings_ACU.contentOptimizationSettings || typeof settings_ACU.contentOptimizationSettings !== 'object') {
+            settings_ACU.contentOptimizationSettings = { apiPreset: '' };
+        }
+        if (typeof settings_ACU.contentOptimizationSettings.apiPreset !== 'string') {
+            settings_ACU.contentOptimizationSettings.apiPreset = '';
+        }
+    }
+    // ═══ 读取 ═══
+    function findPresetByName_ACU(presets, name) {
+        const normalized = String(name || '').trim();
+        return presets.find(p => p.name === normalized) ?? null;
+    }
+    function getCurrentChatKey_ACU() {
+        const raw = String(currentChatFileIdentifier_ACU || '').trim();
+        return raw || 'unknown_chat';
+    }
+    /** 读取当前聊天绑定的预设名（悬挂引用返回空串） */
+    function getBoundPresetNameForChat_ACU(chatKey) {
+        ensureApiSettingsShape_ACU();
+        const key = chatKey || getCurrentChatKey_ACU();
+        const binding = settings_ACU.apiPresetBindingsByChat[key];
+        if (!binding || typeof binding !== 'object')
+            return '';
+        const preset = findPresetByName_ACU(settings_ACU.apiPresets, binding.presetName);
+        return preset ? preset.name : '';
+    }
+    /** 按预设名解析运行配置；空名或悬挂引用返回可断言结果（不静默复用当前配置） */
+    function resolveApiConfigByPreset_ACU(presetName) {
+        ensureApiSettingsShape_ACU();
+        const normalized = String(presetName || '').trim();
+        if (!normalized) {
+            return {
+                apiMode: settings_ACU.apiMode,
+                apiConfig: settings_ACU.apiConfig,
+                tavernProfile: settings_ACU.tavernProfile,
+                resolved: false,
+            };
+        }
+        const preset = findPresetByName_ACU(settings_ACU.apiPresets, normalized);
+        if (preset) {
+            return {
+                apiMode: preset.apiMode,
+                apiConfig: preset.apiConfig,
+                tavernProfile: preset.tavernProfile,
+                resolved: true,
+            };
+        }
+        // 悬挂引用：返回当前配置但标记未解析，调用方应据此拒绝或回退，而不是静默误用。
+        logWarn_ACU(`[API预设] 预设 "${normalized}" 不存在，返回当前配置（resolved=false）。`);
+        return {
+            apiMode: settings_ACU.apiMode,
+            apiConfig: settings_ACU.apiConfig,
+            tavernProfile: settings_ACU.tavernProfile,
+            resolved: false,
+        };
+    }
+    /** 聊天切换后 reconcile：把当前聊天绑定重新投影到 apiMode/apiConfig/tavernProfile */
+    function reconcileApiBindingForCurrentChat_ACU() {
+        ensureApiSettingsShape_ACU();
+        const boundName = getBoundPresetNameForChat_ACU();
+        if (!boundName)
+            return { applied: false, presetName: '' };
+        const preset = findPresetByName_ACU(settings_ACU.apiPresets, boundName);
+        if (!preset)
+            return { applied: false, presetName: '' };
+        settings_ACU.apiMode = preset.apiMode;
+        settings_ACU.apiConfig = JSON.parse(JSON.stringify(preset.apiConfig));
+        settings_ACU.tavernProfile = preset.tavernProfile;
+        return { applied: true, presetName: preset.name };
+    }
+    // ═══ 写操作（事务式：快照 → 修改 → 保存 → 失败回滚） ═══
+    function clone$9(value) {
+        return JSON.parse(JSON.stringify(value ?? null));
+    }
+    function snapshotApiFields_ACU() {
+        ensureApiSettingsShape_ACU();
+        return {
+            apiMode: settings_ACU.apiMode,
+            apiConfig: clone$9(settings_ACU.apiConfig),
+            tavernProfile: settings_ACU.tavernProfile,
+            apiPresets: clone$9(settings_ACU.apiPresets),
+            defaultApiPresetName: settings_ACU.defaultApiPresetName,
+            apiPresetBindingsByChat: clone$9(settings_ACU.apiPresetBindingsByChat),
+            tableApiPreset: settings_ACU.tableApiPreset,
+            plotApiPreset: settings_ACU.plotApiPreset,
+            tableApiPresetOverridesByName: clone$9(settings_ACU.tableApiPresetOverridesByName),
+            plotTaskApiPresetOverridesById: clone$9(settings_ACU.plotTaskApiPresetOverridesById),
+            contentOptimizationApiPreset: settings_ACU.contentOptimizationSettings?.apiPreset,
+            streamingEnabled: settings_ACU.streamingEnabled,
+        };
+    }
+    function restoreApiFields_ACU(snapshot) {
+        settings_ACU.apiMode = snapshot.apiMode;
+        settings_ACU.apiConfig = clone$9(snapshot.apiConfig);
+        settings_ACU.tavernProfile = snapshot.tavernProfile;
+        settings_ACU.apiPresets = clone$9(snapshot.apiPresets);
+        settings_ACU.defaultApiPresetName = snapshot.defaultApiPresetName;
+        settings_ACU.apiPresetBindingsByChat = clone$9(snapshot.apiPresetBindingsByChat);
+        settings_ACU.tableApiPreset = snapshot.tableApiPreset;
+        settings_ACU.plotApiPreset = snapshot.plotApiPreset;
+        settings_ACU.tableApiPresetOverridesByName = clone$9(snapshot.tableApiPresetOverridesByName);
+        settings_ACU.plotTaskApiPresetOverridesById = clone$9(snapshot.plotTaskApiPresetOverridesById);
+        if (settings_ACU.contentOptimizationSettings && typeof settings_ACU.contentOptimizationSettings === 'object') {
+            settings_ACU.contentOptimizationSettings.apiPreset = snapshot.contentOptimizationApiPreset;
+        }
+        settings_ACU.streamingEnabled = snapshot.streamingEnabled;
+    }
+    function finalizeSave_ACU(snapshot) {
+        const saveResult = saveSettings_ACU();
+        if (!saveResult.saved) {
+            restoreApiFields_ACU(snapshot);
+            return {
+                ok: false,
+                code: saveResult.code === 'settings_loading' ? 'settings_loading' : 'save_failed',
+                changed: true,
+                saveResult,
+                message: saveResult.warning || saveResult.error || '保存失败，已回滚。',
+            };
+        }
+        return { ok: true, code: 'ok', changed: true, saveResult };
+    }
+    /** 清除所有指向指定预设的引用（table/plot/optimization/vector/chat binding） */
+    function clearApiPresetReferences_ACU(presetName) {
+        const target = String(presetName || '').trim();
+        if (!target)
+            return;
+        if (settings_ACU.tableApiPreset === target)
+            settings_ACU.tableApiPreset = '';
+        if (settings_ACU.plotApiPreset === target)
+            settings_ACU.plotApiPreset = '';
+        if (settings_ACU.contentOptimizationSettings?.apiPreset === target) {
+            settings_ACU.contentOptimizationSettings.apiPreset = '';
+        }
+        if (settings_ACU.tableApiPresetOverridesByName && typeof settings_ACU.tableApiPresetOverridesByName === 'object') {
+            for (const key of Object.keys(settings_ACU.tableApiPresetOverridesByName)) {
+                if (settings_ACU.tableApiPresetOverridesByName[key] === target) {
+                    delete settings_ACU.tableApiPresetOverridesByName[key];
+                }
+            }
+        }
+        if (settings_ACU.plotTaskApiPresetOverridesById && typeof settings_ACU.plotTaskApiPresetOverridesById === 'object') {
+            for (const key of Object.keys(settings_ACU.plotTaskApiPresetOverridesById)) {
+                if (settings_ACU.plotTaskApiPresetOverridesById[key] === target) {
+                    delete settings_ACU.plotTaskApiPresetOverridesById[key];
+                }
+            }
+        }
+        if (settings_ACU.apiPresetBindingsByChat && typeof settings_ACU.apiPresetBindingsByChat === 'object') {
+            for (const [chatKey, binding] of Object.entries(settings_ACU.apiPresetBindingsByChat)) {
+                if (binding?.presetName === target)
+                    delete settings_ACU.apiPresetBindingsByChat[chatKey];
+            }
+        }
+    }
+    /** 重命名预设时原子更新所有引用 */
+    function renameApiPresetReferences_ACU(oldName, newName) {
+        const oldN = String(oldName || '').trim();
+        const newN = String(newName || '').trim();
+        if (!oldN || !newN || oldN === newN)
+            return;
+        const now = Date.now();
+        if (settings_ACU.tableApiPreset === oldN)
+            settings_ACU.tableApiPreset = newN;
+        if (settings_ACU.plotApiPreset === oldN)
+            settings_ACU.plotApiPreset = newN;
+        if (settings_ACU.contentOptimizationSettings?.apiPreset === oldN) {
+            settings_ACU.contentOptimizationSettings.apiPreset = newN;
+        }
+        if (settings_ACU.tableApiPresetOverridesByName && typeof settings_ACU.tableApiPresetOverridesByName === 'object') {
+            for (const key of Object.keys(settings_ACU.tableApiPresetOverridesByName)) {
+                if (settings_ACU.tableApiPresetOverridesByName[key] === oldN) {
+                    settings_ACU.tableApiPresetOverridesByName[key] = newN;
+                }
+            }
+        }
+        if (settings_ACU.plotTaskApiPresetOverridesById && typeof settings_ACU.plotTaskApiPresetOverridesById === 'object') {
+            for (const key of Object.keys(settings_ACU.plotTaskApiPresetOverridesById)) {
+                if (settings_ACU.plotTaskApiPresetOverridesById[key] === oldN) {
+                    settings_ACU.plotTaskApiPresetOverridesById[key] = newN;
+                }
+            }
+        }
+        if (settings_ACU.apiPresetBindingsByChat && typeof settings_ACU.apiPresetBindingsByChat === 'object') {
+            for (const binding of Object.values(settings_ACU.apiPresetBindingsByChat)) {
+                if (binding?.presetName === oldN) {
+                    binding.presetName = newN;
+                    binding.updatedAt = now;
+                }
+            }
+        }
+    }
+    /** 设置当前聊天绑定并投影到运行配置 */
+    function setActivePresetForCurrentChat_ACU(name) {
+        ensureApiSettingsShape_ACU();
+        const preset = findPresetByName_ACU(settings_ACU.apiPresets, name);
+        if (!preset) {
+            return { ok: false, code: 'not_found', changed: false, message: `预设 "${name}" 不存在。` };
+        }
+        const snapshot = snapshotApiFields_ACU();
+        const chatKey = getCurrentChatKey_ACU();
+        settings_ACU.apiPresetBindingsByChat[chatKey] = { presetName: preset.name, updatedAt: Date.now() };
+        settings_ACU.apiMode = preset.apiMode;
+        settings_ACU.apiConfig = clone$9(preset.apiConfig);
+        settings_ACU.tavernProfile = preset.tavernProfile;
+        return finalizeSave_ACU(snapshot);
+    }
+    /** 保存/新建预设；oldName 存在时为重命名，原子更新所有引用 */
+    function saveApiPreset_ACU$1(presetInput, originalName = '') {
+        const preset = normalizePreset_ACU(presetInput);
+        if (!preset) {
+            return { ok: false, code: 'invalid_input', changed: false, message: '预设数据无效。' };
+        }
+        ensureApiSettingsShape_ACU();
+        const snapshot = snapshotApiFields_ACU();
+        const oldName = String(originalName || '').trim();
+        const existingByNewName = settings_ACU.apiPresets.findIndex((p) => p.name === preset.name);
+        if (existingByNewName >= 0 && settings_ACU.apiPresets[existingByNewName].name !== oldName) {
+            settings_ACU.apiPresets[existingByNewName] = preset;
+        }
+        else {
+            const existingByOldName = oldName ? settings_ACU.apiPresets.findIndex((p) => p.name === oldName) : -1;
+            if (existingByOldName >= 0)
+                settings_ACU.apiPresets[existingByOldName] = preset;
+            else
+                settings_ACU.apiPresets.push(preset);
+        }
+        if (!settings_ACU.defaultApiPresetName)
+            settings_ACU.defaultApiPresetName = preset.name;
+        if (oldName && settings_ACU.defaultApiPresetName === oldName)
+            settings_ACU.defaultApiPresetName = preset.name;
+        if (oldName && oldName !== preset.name)
+            renameApiPresetReferences_ACU(oldName, preset.name);
+        // [兼容] 保存/重命名的预设是当前聊天活动预设、或当前无活动预设（保存第一个预设）时，
+        // 自动绑定到当前聊天并投影其配置到运行 apiMode/apiConfig/tavernProfile。
+        // 旧 V2 store 的 savePreset 在保存后会对 active preset 重新 setActivePresetForCurrentChat，
+        // service 迁移需保持该语义（事务式：快照之后投影，失败由 finalizeSave 回滚）。
+        const boundName = getBoundPresetNameForChat_ACU();
+        const shouldAutoSelect = !oldName
+            ? !boundName || boundName === preset.name
+            : boundName === oldName || boundName === preset.name;
+        if (shouldAutoSelect && findPresetByName_ACU(settings_ACU.apiPresets, preset.name)) {
+            settings_ACU.apiPresetBindingsByChat[getCurrentChatKey_ACU()] = {
+                presetName: preset.name,
+                updatedAt: Date.now(),
+            };
+            settings_ACU.apiMode = preset.apiMode;
+            settings_ACU.apiConfig = clone$9(preset.apiConfig);
+            settings_ACU.tavernProfile = preset.tavernProfile;
+        }
+        const result = finalizeSave_ACU(snapshot);
+        if (!result.ok)
+            return result;
+        return { ...result, value: preset };
+    }
+    /** 删除预设并清理全部引用 */
+    function deleteApiPreset_ACU$1(name) {
+        ensureApiSettingsShape_ACU();
+        const target = findPresetByName_ACU(settings_ACU.apiPresets, name);
+        if (!target) {
+            return { ok: false, code: 'not_found', changed: false, message: `预设 "${name}" 不存在。` };
+        }
+        const snapshot = snapshotApiFields_ACU();
+        const chatKey = getCurrentChatKey_ACU();
+        // [关键] 在删除前捕获当前聊天绑定：删除后 findPresetByName 对已删预设返回 null，
+        // getBoundPresetNameForChat_ACU 会把悬挂引用归一为空串，导致无法识别“删除的是活动预设”。
+        const boundBeforeDelete = getBoundPresetNameForChat_ACU();
+        const wasActive = boundBeforeDelete === target.name;
+        settings_ACU.apiPresets = settings_ACU.apiPresets.filter((p) => p.name !== target.name);
+        if (settings_ACU.defaultApiPresetName === target.name) {
+            settings_ACU.defaultApiPresetName = settings_ACU.apiPresets[0]?.name ?? '';
+        }
+        clearApiPresetReferences_ACU(target.name);
+        // [兼容] 删除的是当前聊天活动预设时，重新投影到默认/剩余预设，保持旧 V2 store 语义。
+        if (wasActive) {
+            const fallbackName = settings_ACU.defaultApiPresetName || settings_ACU.apiPresets[0]?.name || '';
+            if (fallbackName) {
+                settings_ACU.apiPresetBindingsByChat[chatKey] = {
+                    presetName: fallbackName,
+                    updatedAt: Date.now(),
+                };
+                const fallback = findPresetByName_ACU(settings_ACU.apiPresets, fallbackName);
+                if (fallback) {
+                    settings_ACU.apiMode = fallback.apiMode;
+                    settings_ACU.apiConfig = clone$9(fallback.apiConfig);
+                    settings_ACU.tavernProfile = fallback.tavernProfile;
+                }
+            }
+        }
+        const result = finalizeSave_ACU(snapshot);
+        if (!result.ok)
+            return result;
+        return { ...result, value: target.name };
+    }
+    /** 设置默认预设 */
+    function setDefaultApiPreset_ACU(name) {
+        ensureApiSettingsShape_ACU();
+        const preset = findPresetByName_ACU(settings_ACU.apiPresets, name);
+        if (!preset) {
+            return { ok: false, code: 'not_found', changed: false, message: `预设 "${name}" 不存在。` };
+        }
+        const snapshot = snapshotApiFields_ACU();
+        settings_ACU.defaultApiPresetName = preset.name;
+        return finalizeSave_ACU(snapshot);
+    }
+    /** 设置流式开关 */
+    function setStreamingEnabled_ACU(enabled) {
+        ensureApiSettingsShape_ACU();
+        const snapshot = snapshotApiFields_ACU();
+        settings_ACU.streamingEnabled = !!enabled;
+        return finalizeSave_ACU(snapshot);
+    }
+    /** 设置 API 配置是否使用主 API（apiConfig.useMainApi） */
+    function setUseMainApi_ACU(enabled) {
+        ensureApiSettingsShape_ACU();
+        const snapshot = snapshotApiFields_ACU();
+        settings_ACU.apiConfig.useMainApi = !!enabled;
+        return finalizeSave_ACU(snapshot);
+    }
+    /** 设置当前 API 模式（apiMode） */
+    function setApiMode_ACU(mode) {
+        ensureApiSettingsShape_ACU();
+        const normalized = normalizeApiMode_ACU(mode);
+        const snapshot = snapshotApiFields_ACU();
+        settings_ACU.apiMode = normalized;
+        return finalizeSave_ACU(snapshot);
+    }
+    /** 设置当前 tavern API profile（tavernProfile） */
+    function setTavernProfile_ACU(profileId) {
+        ensureApiSettingsShape_ACU();
+        const snapshot = snapshotApiFields_ACU();
+        settings_ACU.tavernProfile = String(profileId || '');
+        return finalizeSave_ACU(snapshot);
+    }
+    /** 将当前配置保存为新预设 */
+    function saveCurrentConfigAsPreset_ACU(name) {
+        const preset = {
+            name: String(name || '').trim(),
+            apiMode: normalizeApiMode_ACU(settings_ACU.apiMode),
+            apiConfig: normalizeApiConfig_ACU(settings_ACU.apiConfig),
+            tavernProfile: typeof settings_ACU.tavernProfile === 'string' ? settings_ACU.tavernProfile : '',
+        };
+        return saveApiPreset_ACU$1(preset);
+    }
+
     // service/ai/api-call.ts — AI 调用编排（剧情推进用）
     // 从 04_shared_helpers.js 迁入
     function normalizeExcludeBodyParamsForSillyTavern_ACU(raw) {
@@ -60695,28 +61131,12 @@ $CONTENT
         }
     }
     function getApiConfigByPreset_ACU(presetName) {
-        if (!presetName) {
-            // 使用当前配置
-            return {
-                apiMode: settings_ACU.apiMode,
-                apiConfig: settings_ACU.apiConfig,
-                tavernProfile: settings_ACU.tavernProfile
-            };
-        }
-        const preset = settings_ACU.apiPresets.find((p) => p.name === presetName);
-        if (preset) {
-            return {
-                apiMode: preset.apiMode,
-                apiConfig: preset.apiConfig,
-                tavernProfile: preset.tavernProfile
-            };
-        }
-        // 预设不存在，回退到当前配置
-        logWarn_ACU(`API预设 "${presetName}" 不存在，使用当前配置。`);
+        // 委托 service 单一权威解析：空名返回当前配置；悬挂引用返回 resolved=false 并告警。
+        const resolved = resolveApiConfigByPreset_ACU(presetName);
         return {
-            apiMode: settings_ACU.apiMode,
-            apiConfig: settings_ACU.apiConfig,
-            tavernProfile: settings_ACU.tavernProfile
+            apiMode: resolved.apiMode,
+            apiConfig: resolved.apiConfig,
+            tavernProfile: resolved.tavernProfile,
         };
     }
     async function callCustomOpenAI_ACU_Direct(messages) {
@@ -76681,7 +77101,7 @@ $CONTENT
     }
 
     const ROW_ID_ALIASES = new Set(['id', 'rowid', 'row-id', 'row_id', '行号']);
-    function clone$7(value) {
+    function clone$8(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function isRowIdAlias(value) {
@@ -76694,7 +77114,7 @@ $CONTENT
         if (!guideData || typeof guideData !== 'object' || Array.isArray(guideData)) {
             return { guideData, changed: false, blockers: ['Sheet Guide 必须是对象。'] };
         }
-        const candidate = clone$7(guideData);
+        const candidate = clone$8(guideData);
         const blockers = [];
         let changed = false;
         for (const [key, sheet] of Object.entries(candidate)) {
@@ -78884,6 +79304,8 @@ $CONTENT
         streamingEnabled: false,
         tavernProfile: '',
         apiPresets: [],
+        defaultApiPresetName: '',
+        apiPresetBindingsByChat: {},
         tableApiPreset: '',
         plotApiPreset: '',
         strictJsonTableFillEnabled: false,
@@ -79007,6 +79429,25 @@ $CONTENT
     function _set_autoFillDebounceTimer_ACU(v) { autoFillDebounceTimer_ACU = v; }
     function _set_chatMutationDebounceTimer_ACU(v) { chatMutationDebounceTimer_ACU = v; }
 
+    /**
+     * 事务式更新全局向量配置字段：快照 → 修改 → 保存 → 失败回滚。
+     * 权威配置位于 globalMeta.vectorMemoryConfigGlobal；settings_ACU.vectorMemoryConfig 同步投影。
+     */
+    function updateGlobalVectorMemoryConfigFields_ACU(patch) {
+        const config = getCurrentVectorMemoryConfig_ACU();
+        const snapshot = JSON.parse(JSON.stringify(config));
+        Object.assign(config, patch);
+        const saveResult = saveSettings_ACU();
+        if (!saveResult.saved) {
+            Object.assign(config, snapshot);
+            settings_ACU.vectorMemoryConfig = config;
+            return {
+                ok: false,
+                message: saveResult.warning || saveResult.error || '保存失败，已回滚。',
+            };
+        }
+        return { ok: true };
+    }
     function normalizeArchiveTriggerCount_ACU(value, fallbackValue) {
         const normalized = normalizePositiveInteger_ACU$1(value, fallbackValue);
         return Math.max(1, normalized);
@@ -79903,6 +80344,15 @@ $CONTENT
         if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
             settings_ACU.maxConcurrentGroups = 1;
         }
+        // [API 绑定 reconcile] 存储重载后把当前聊天绑定重新投影到 apiMode/apiConfig/tavernProfile。
+        // 覆盖三条路径：CHAT_CHANGED（resetScriptStateForNewChat）、profile 切换（switchIsolationProfile）、
+        // IDB 延迟重载（scheduleSettingsReloadAfterIdbReady 内部重入 loadSettings）。
+        // 修复 A→B→A 后运行时仍使用 profile 最后保存配置的缺陷（主计划 §4.1）。
+        const bound = reconcileApiBindingForCurrentChat_ACU();
+        if (bound.applied) {
+            persistSettingsToStorage_ACU(settings_ACU, activeCode);
+            logDebug_ACU(`[API绑定] 已把当前聊天绑定投影到运行配置: ${bound.presetName}`);
+        }
         logDebug_ACU('Settings loaded:', settings_ACU);
     }
     // loadSettingsAndRefreshUI_ACU 已搬到 presentation/components/settings-ui-helpers.ts
@@ -80095,6 +80545,8 @@ $CONTENT
             tavernProfile: '',
             streamingEnabled: false, // [新增] 流式传输开关（默认关闭）
             apiPresets: [],
+            defaultApiPresetName: '',
+            apiPresetBindingsByChat: {},
             tableApiPreset: '',
             plotApiPreset: '',
             strictJsonTableFillEnabled: false,
@@ -80311,11 +80763,32 @@ $CONTENT
      * 导入合并配置中的 settings 字段
      * 纯业务逻辑：将 combinedData 中的各字段赋值到 settings 对象
      * 不涉及 UI（toast、DOM 更新由 presentation 层负责）
+     * 事务语义：先快照，保存失败回滚全部字段后抛出错误，避免导入污染 settings。
      *
      * @returns 被修改的字段名列表（供 presentation 层更新对应的 UI 元素）
      */
     function applyCombinedSettingsImport_ACU(combinedData) {
         const modifiedFields = [];
+        const FIELDS = [
+            'charCardPrompt',
+            'mergeSummaryPrompt',
+            'mergeTargetCount',
+            'mergeBatchSize',
+            'mergeStartIndex',
+            'mergeEndIndex',
+            'autoMergeEnabled',
+            'autoMergeThreshold',
+            'autoMergeReserve',
+            'deleteStartFloor',
+            'deleteEndFloor',
+        ];
+        const snapshot = {};
+        for (const field of FIELDS) {
+            const value = settings_ACU[field];
+            snapshot[field] = value && typeof value === 'object'
+                ? JSON.parse(JSON.stringify(value))
+                : value;
+        }
         // 导入提示词
         if (Array.isArray(combinedData.prompt)) {
             settings_ACU.charCardPrompt = combinedData.prompt;
@@ -80345,7 +80818,26 @@ $CONTENT
             settings_ACU.deleteEndFloor = combinedData.deleteEndFloor || null;
             modifiedFields.push('deleteStartFloor', 'deleteEndFloor');
         }
-        saveSettings_ACU();
+        let saveResult;
+        try {
+            saveResult = saveSettings_ACU();
+        }
+        catch (error) {
+            // 保存过程抛异常同样视为失败：回滚后抛出
+            for (const field of FIELDS) {
+                settings_ACU[field] = snapshot[field];
+            }
+            logError_ACU('[合并配置导入] 保存异常，已回滚全部导入字段。', error);
+            throw new Error('合并配置保存失败，已回滚。');
+        }
+        if (!saveResult.saved) {
+            // 回滚全部已修改字段，避免导入失败污染 settings
+            for (const field of FIELDS) {
+                settings_ACU[field] = snapshot[field];
+            }
+            logError_ACU('[合并配置导入] 保存失败，已回滚全部导入字段。', saveResult.error || saveResult.warning || '');
+            throw new Error(saveResult.warning || saveResult.error || '合并配置保存失败，已回滚。');
+        }
         return modifiedFields;
     }
 
@@ -82532,9 +83024,6 @@ $CONTENT
     async function bindWorldbookEvents_ACU() {
         // [向量记忆] 配置已迁移到全局 settings_ACU.vectorMemoryConfig，
         // 不再跟随世界书配置（角色级），而是跟随数据库全局设置。
-        const ensureVectorMemoryConfig_ACU = () => {
-            return getCurrentVectorMemoryConfig_ACU();
-        };
         const toggleVectorMemoryConfigBlock_ACU = () => {
             const worldbookConfig = getCurrentWorldbookConfig_ACU();
             const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
@@ -82543,18 +83032,15 @@ $CONTENT
         };
         const logVectorMemorySaveResult_ACU = (fieldNames, result) => {
             const safeFieldNames = fieldNames.map(field => /key/i.test(field) ? `${field}(redacted)` : field).join(',');
-            logDebug_ACU(`[交火模式配置] 已保存字段: ${safeFieldNames}; storage=${result.storageType}${result.warning ? `; warning=${result.warning}` : ''}${result.error ? `; error=${result.error}` : ''}`);
+            logDebug_ACU(`[交火模式配置] 已保存字段: ${safeFieldNames}; ok=${result.ok}${result.message ? `; message=${result.message}` : ''}`);
         };
         const updateVectorMemoryFields_ACU = (patch) => {
-            const vectorMemoryConfig = ensureVectorMemoryConfig_ACU();
-            globalMeta_ACU.vectorMemoryConfigGlobal = vectorMemoryConfig;
-            settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
-            Object.keys(patch).forEach((field) => {
-                globalMeta_ACU.vectorMemoryConfigGlobal[field] = patch[field];
-            });
-            settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
-            saveGlobalMeta_ACU();
-            const result = saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式更新（快照 → 修改 → 保存 → 失败回滚）。
+            const result = updateGlobalVectorMemoryConfigFields_ACU(patch);
+            if (!result.ok) {
+                showToastr_ACU('error', result.message || '保存向量记忆配置失败，已回滚。');
+                return;
+            }
             logVectorMemorySaveResult_ACU(Object.keys(patch), result);
         };
         const updateVectorMemoryField_ACU = (field, value) => {
@@ -83040,6 +83526,9 @@ $CONTENT
     }
 
     /**
+     * presentation/triggers/settings-ui-sync/settings-ui-api.ts
+     */
+    /**
      * presentation/triggers/settings-ui-sync.ts — UI读写/保存/刷新函数
      * 从 service/runtime/helpers-remaining.ts 提取的纯 UI 函数
      */
@@ -83141,117 +83630,56 @@ $CONTENT
             showToastr_ACU('error', '无法加载酒馆API预设列表。');
         }
     }
+    // [V1 收敛] API 配置写权限已迁移至 V2（service 层单一权威）。
+    // 旧 popup 不再直接读写 settings_ACU.apiConfig；调用方应跳转 V2 配置面板。
     function saveApiConfig_ACU() {
-        if (!$popupInstance_ACU || !$customApiUrlInput_ACU || !$customApiKeyInput_ACU || !$customApiModelInput_ACU) {
-            logError_ACU('保存API配置失败：UI元素未初始化。');
-            return;
-        }
-        const url = String($customApiUrlInput_ACU.val() || '').trim();
-        const apiKey = $customApiKeyInput_ACU.val();
-        const model = String($customApiModelInput_ACU.val() || '').trim();
-        const max_tokens = parseInt($maxTokensInput_ACU.val(), 10);
-        const temperature = parseFloat($temperatureInput_ACU.val());
-        if (!url) {
-            showToastr_ACU('warning', 'API URL 不能为空。');
-            return;
-        }
-        if (!model) {
-            showToastr_ACU('warning', '请输入或选择一个模型。');
-            return;
-        }
-        Object.assign(settings_ACU.apiConfig, {
-            url,
-            apiKey,
-            model,
-            max_tokens: isNaN(max_tokens) ? 120000 : max_tokens,
-            temperature: isNaN(temperature) ? 0.9 : temperature,
-            bodyParams: String($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-body-params`).val() ?? ''),
-            excludeBodyParams: String($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-exclude-body-params`).val() ?? ''),
-            requestHeaders: String($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-request-headers`).val() ?? ''),
-        });
-        // 将新保存的模型添加到select中（如果不存在）
-        if ($customApiModelSelect_ACU && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU$1(model)}"]`).length === 0) {
-            $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(model)}">${escapeHtml_ACU$1(model)}</option>`);
-        }
-        saveSettingsAndNotify_ACU();
-        showToastr_ACU('success', 'API配置已保存！');
-        loadSettingsAndRefreshUI_ACU();
+        showToastr_ACU('warning', '旧UI的API配置编辑已停用，请使用 扩展菜单 → SP·数据库 VIII 管理API配置。');
     }
     function clearApiConfig_ACU() {
-        Object.assign(settings_ACU.apiConfig, { url: '', apiKey: '', model: '', max_tokens: 120000, temperature: 0.9, bodyParams: '', excludeBodyParams: '', requestHeaders: '' });
-        saveSettingsAndNotify_ACU();
-        showToastr_ACU('info', 'API配置已清除！');
-        loadSettingsAndRefreshUI_ACU();
+        showToastr_ACU('warning', '旧UI的API配置清除已停用，请使用 扩展菜单 → SP·数据库 VIII 管理API配置。');
     }
-    // --- [新增] API预设管理函数 ---
+    // --- [V1 收敛] API预设管理函数 ---
+    // 写权限已收敛到 service 层单一权威。以下函数只做事务式委托与 UI 提示：
+    // 保存失败时 service 已回滚内存状态，V1 不再显示错误的成功提示，
+    // 也不再触发 loadSettingsAndRefreshUI_ACU() 全量重载覆盖内存配置。
     function saveApiPreset_ACU(presetName) {
         if (!presetName || !presetName.trim()) {
             showToastr_ACU('warning', '请输入预设名称。');
             return false;
         }
-        presetName = presetName.trim();
-        const newPreset = {
-            name: presetName,
-            apiMode: settings_ACU.apiMode,
-            apiConfig: JSON.parse(JSON.stringify(settings_ACU.apiConfig)),
-            tavernProfile: settings_ACU.tavernProfile
-        };
-        // 检查是否已存在同名预设
-        const existingIndex = settings_ACU.apiPresets.findIndex((p) => p.name === presetName);
-        if (existingIndex >= 0) {
-            settings_ACU.apiPresets[existingIndex] = newPreset;
-            showToastr_ACU('success', `API预设 "${presetName}" 已更新。`);
+        const result = saveCurrentConfigAsPreset_ACU(presetName.trim());
+        if (!result.ok) {
+            showToastr_ACU('error', result.message || '保存API预设失败，已回滚。');
+            return false;
         }
-        else {
-            settings_ACU.apiPresets.push(newPreset);
-            showToastr_ACU('success', `API预设 "${presetName}" 已保存。`);
-        }
-        saveSettingsAndNotify_ACU();
         refreshApiPresetSelectors_ACU();
+        showToastr_ACU('success', `API预设 "${presetName.trim()}" 已保存。`);
         return true;
     }
     function loadApiPreset_ACU(presetName) {
-        const preset = settings_ACU.apiPresets.find((p) => p.name === presetName);
-        if (!preset) {
-            showToastr_ACU('error', `未找到预设 "${presetName}"。`);
+        if (!presetName) {
+            showToastr_ACU('warning', '请先选择一个预设。');
             return false;
         }
-        settings_ACU.apiMode = preset.apiMode;
-        settings_ACU.apiConfig = JSON.parse(JSON.stringify(preset.apiConfig));
-        settings_ACU.tavernProfile = preset.tavernProfile;
-        saveSettingsAndNotify_ACU();
-        loadSettingsAndRefreshUI_ACU();
-        showToastr_ACU('success', `已加载API预设 "${presetName}"。`);
+        const result = setActivePresetForCurrentChat_ACU(presetName);
+        if (!result.ok) {
+            showToastr_ACU('error', result.message || `加载预设 "${presetName}" 失败，已回滚。`);
+            return false;
+        }
+        refreshApiPresetSelectors_ACU();
+        showToastr_ACU('success', `已加载API预设 "${presetName}" 并绑定到当前聊天。`);
         return true;
     }
     function deleteApiPreset_ACU(presetName) {
-        const index = settings_ACU.apiPresets.findIndex((p) => p.name === presetName);
-        if (index < 0) {
-            showToastr_ACU('error', `未找到预设 "${presetName}"。`);
+        if (!presetName) {
+            showToastr_ACU('warning', '请先选择一个预设。');
             return false;
         }
-        settings_ACU.apiPresets.splice(index, 1);
-        // 清除使用该预设的引用
-        if (settings_ACU.tableApiPreset === presetName) {
-            settings_ACU.tableApiPreset = '';
+        const result = deleteApiPreset_ACU$1(presetName);
+        if (!result.ok) {
+            showToastr_ACU('error', result.message || `删除预设 "${presetName}" 失败，已回滚。`);
+            return false;
         }
-        if (settings_ACU.plotApiPreset === presetName) {
-            settings_ACU.plotApiPreset = '';
-        }
-        const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
-        if (vectorMemoryConfig.keywordApiPreset === presetName) {
-            vectorMemoryConfig.keywordApiPreset = '';
-        }
-        // [新增] 清除按表名保存的表级 API 预设覆盖中引用了该预设的条目
-        if (settings_ACU.tableApiPresetOverridesByName && typeof settings_ACU.tableApiPresetOverridesByName === 'object') {
-            const overrides = settings_ACU.tableApiPresetOverridesByName;
-            Object.keys(overrides).forEach((tableName) => {
-                if (overrides[tableName] === presetName) {
-                    delete overrides[tableName];
-                }
-            });
-        }
-        saveSettingsAndNotify_ACU();
         refreshApiPresetSelectors_ACU();
         showToastr_ACU('info', `API预设 "${presetName}" 已删除。`);
         return true;
@@ -83335,21 +83763,238 @@ $CONTENT
      * @returns {object} - 包含 apiMode, apiConfig, tavernProfile 的配置对象
      */
 
-    /**
-     * presentation/triggers/settings-ui-sync/settings-ui-config.ts
-     */
-    function getCurrentPromptSettingKey_ACU(mode = isSqliteMode() ? 'sqlite' : 'native') {
+    // ═══════════════════════════════════════════════════════════
+    // service/settings/settings-write-service.ts — 通用重要配置写边界
+    //
+    // 统一事务式写入原语：校验 → 快照 → 改内存 → saveSettings_ACU → 失败回滚。
+    // 按字段簇提供语义 setter（storage/update/prompt/preset-reference）。
+    // vector 配置权威在 service/vector/vector-memory-config.ts，此处不重复。
+    // ═══════════════════════════════════════════════════════════════
+    /** 读取字段快照（深拷贝） */
+    function snapshotSettingsFields_ACU(fields) {
+        const snapshot = {};
+        for (const field of fields) {
+            const value = settings_ACU[field];
+            snapshot[field] =
+                value && typeof value === 'object'
+                    ? JSON.parse(JSON.stringify(value))
+                    : value;
+        }
+        return snapshot;
+    }
+    /** 恢复字段快照 */
+    function restoreSettingsFields_ACU(snapshot) {
+        for (const [field, value] of Object.entries(snapshot)) {
+            settings_ACU[field] =
+                value && typeof value === 'object'
+                    ? JSON.parse(JSON.stringify(value))
+                    : value;
+        }
+    }
+    /** 执行写事务：mutate 内直接修改 settings_ACU；保存失败自动回滚 */
+    function withSettingsWrite_ACU(fields, mutate, options = {}) {
+        const snapshot = snapshotSettingsFields_ACU(fields);
+        let mutated = false;
+        try {
+            mutate();
+            mutated = true;
+        }
+        catch (e) {
+            restoreSettingsFields_ACU(snapshot);
+            return {
+                ok: false,
+                code: 'invalid_input',
+                changed: false,
+                message: options.message || '设置写入失败：输入无效。',
+            };
+        }
+        const saveResult = saveSettings_ACU();
+        if (!saveResult.saved) {
+            restoreSettingsFields_ACU(snapshot);
+            return {
+                ok: false,
+                code: saveResult.code === 'settings_loading' ? 'settings_loading' : 'save_failed',
+                changed: mutated,
+                saveResult,
+                message: saveResult.warning || saveResult.error || '保存失败，已回滚。',
+            };
+        }
+        return { ok: true, code: 'ok', changed: mutated, saveResult };
+    }
+    // ═══ storage 字段簇 ═══
+    /** 切换 storageMode + 重置填表提示词（与 provider 切换解耦；provider 失败由调用方回滚） */
+    function setStorageMode_ACU(mode) {
+        if (mode !== 'native' && mode !== 'sqlite') {
+            return { ok: false, code: 'invalid_input', changed: false, message: '存储模式无效。' };
+        }
+        if (getCurrentStorageMode() === mode) {
+            return { ok: true, code: 'ok', changed: false };
+        }
+        return withSettingsWrite_ACU(['storageMode', 'charCardPrompt', 'strictJsonCharCardPrompt', 'strictJsonSqlCharCardPrompt'], () => {
+            settings_ACU.storageMode = mode;
+            settings_ACU.charCardPrompt = JSON.parse(JSON.stringify(mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU));
+            settings_ACU.strictJsonCharCardPrompt = JSON.parse(JSON.stringify(DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU));
+            settings_ACU.strictJsonSqlCharCardPrompt = JSON.parse(JSON.stringify(DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU));
+        });
+    }
+    const UPDATE_NUMBER_DEFAULTS_ACU = {
+        autoUpdateThreshold: DEFAULT_AUTO_UPDATE_THRESHOLD_ACU,
+        autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
+        autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
+        updateBatchSize: 3,
+        maxConcurrentGroups: 1,
+        skipUpdateFloors: 0,
+        retainRecentLayers: 100,
+        importSplitSize: 10000,
+        tableMaxRetries: 3,
+    };
+    function normalizeUpdateNumber_ACU(key, value) {
+        const fallback = UPDATE_NUMBER_DEFAULTS_ACU[key];
+        const min = key === 'importSplitSize'
+            ? 100
+            : (key === 'autoUpdateThreshold' || key === 'autoUpdateTokenThreshold' || key === 'skipUpdateFloors' || key === 'retainRecentLayers' ? 0 : 1);
+        const normalized = min > 0
+            ? normalizePositiveInteger_ACU$1(value, fallback)
+            : normalizeNonNegativeInteger_ACU$1(value, fallback);
+        return Math.max(min, normalized);
+    }
+    /** 更新自动更新数值字段（批量原子写） */
+    function setUpdateNumberFields_ACU(patch) {
+        const keys = Object.keys(patch);
+        if (keys.length === 0) {
+            return { ok: true, code: 'ok', changed: false };
+        }
+        const normalizedMap = {};
+        for (const key of keys) {
+            const normalized = normalizeUpdateNumber_ACU(key, patch[key]);
+            if (normalized === null) {
+                return { ok: false, code: 'invalid_input', changed: false, message: `字段 ${key} 数值无效。` };
+            }
+            normalizedMap[key] = normalized;
+        }
+        return withSettingsWrite_ACU([...keys], () => {
+            for (const [key, value] of Object.entries(normalizedMap)) {
+                settings_ACU[key] = value;
+            }
+        });
+    }
+    /** 自动更新总开关 */
+    function setAutoUpdateEnabled_ACU(enabled) {
+        return withSettingsWrite_ACU(['autoUpdateEnabled'], () => {
+            settings_ACU.autoUpdateEnabled = !!enabled;
+        });
+    }
+    // ═══ prompt 字段簇 ═══
+    function setCharCardPrompt_ACU(prompt) {
+        return withSettingsWrite_ACU(['charCardPrompt'], () => {
+            settings_ACU.charCardPrompt = prompt && typeof prompt === 'object'
+                ? JSON.parse(JSON.stringify(prompt))
+                : prompt;
+        });
+    }
+    /** 解析当前填表提示词应写入的字段名（与 V1 getCurrentPromptSettingKey_ACU 语义一致） */
+    function resolveCurrentPromptKey_ACU(mode = getCurrentStorageMode()) {
         if (settings_ACU.strictJsonTableFillEnabled === true) {
             return mode === 'sqlite' ? 'strictJsonSqlCharCardPrompt' : 'strictJsonCharCardPrompt';
         }
         return 'charCardPrompt';
     }
-    function getDefaultPromptForMode_ACU(mode) {
-        if (settings_ACU.strictJsonTableFillEnabled === true) {
-            return mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU : DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU;
-        }
-        return mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU;
+    /** 按当前填表模式 + strictJson 分支保存提示词（V1 语义收敛到 service） */
+    function setCurrentPromptSegments_ACU(prompt) {
+        const key = resolveCurrentPromptKey_ACU();
+        return withSettingsWrite_ACU([key], () => {
+            settings_ACU[key] = prompt && typeof prompt === 'object'
+                ? JSON.parse(JSON.stringify(prompt))
+                : prompt;
+        });
     }
+    /** 按当前填表模式 + strictJson 分支恢复默认提示词（V1 语义收敛到 service） */
+    function resetCurrentPromptToDefault_ACU() {
+        const mode = getCurrentStorageMode();
+        const key = resolveCurrentPromptKey_ACU(mode);
+        const defaultValue = settings_ACU.strictJsonTableFillEnabled === true
+            ? (mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU : DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU)
+            : (mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU);
+        return withSettingsWrite_ACU([key], () => {
+            settings_ACU[key] = JSON.parse(JSON.stringify(defaultValue));
+        });
+    }
+    /** 按指定模式恢复默认填表提示词（applyModeDefaultCharCardPrompt_ACU 语义收敛） */
+    function applyDefaultCharCardPrompt_ACU(mode) {
+        const key = resolveCurrentPromptKey_ACU(mode);
+        const defaultValue = settings_ACU.strictJsonTableFillEnabled === true
+            ? (mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU : DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU)
+            : (mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU);
+        return withSettingsWrite_ACU([key], () => {
+            settings_ACU[key] = JSON.parse(JSON.stringify(defaultValue));
+        });
+    }
+    /** 恢复默认填表提示词（按当前存储模式） */
+    function resetFormFillPromptsToDefault_ACU() {
+        return withSettingsWrite_ACU(['charCardPrompt', 'strictJsonCharCardPrompt', 'strictJsonSqlCharCardPrompt'], () => {
+            const mode = getCurrentStorageMode();
+            settings_ACU.charCardPrompt = JSON.parse(JSON.stringify(mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU));
+            settings_ACU.strictJsonCharCardPrompt = JSON.parse(JSON.stringify(DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU));
+            settings_ACU.strictJsonSqlCharCardPrompt = JSON.parse(JSON.stringify(DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU));
+        });
+    }
+    /**
+     * 一次性恢复默认填表提示词与合并纪要提示词（resetAllToDefaults 语义收敛）。
+     *
+     * 原 V1 行为：无条件写 `charCardPrompt` 与 `mergeSummaryPrompt`（不区分 strictJson 分支），
+     * 按当前存储模式选择 native/sqlite 默认值。此 API 保持该语义，且两字段原子写入：
+     * 任一保存失败则整体回滚。
+     *
+     * `save: false` 供编排场景使用（调用方自行统一保存，例如 V2 resetAllDefaults
+     * 在应用模板后一次性 `saveSettings_ACU()`，避免中间多次保存引入部分失败窗口）。
+     */
+    function resetAllPromptsToDefault_ACU(mode = getCurrentStorageMode(), options = {}) {
+        if (mode !== 'native' && mode !== 'sqlite') {
+            return { ok: false, code: 'invalid_input', changed: false, message: '存储模式无效。' };
+        }
+        const applyDefaults = () => {
+            settings_ACU.charCardPrompt = JSON.parse(JSON.stringify(mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU));
+            settings_ACU.mergeSummaryPrompt = JSON.parse(JSON.stringify(mode === 'sqlite' ? DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU : DEFAULT_MERGE_SUMMARY_PROMPT_ACU));
+        };
+        if (options.save === false) {
+            try {
+                applyDefaults();
+                return { ok: true, code: 'ok', changed: true };
+            }
+            catch (e) {
+                return { ok: false, code: 'invalid_input', changed: false, message: '恢复默认提示词失败：输入无效。' };
+            }
+        }
+        return withSettingsWrite_ACU(['charCardPrompt', 'mergeSummaryPrompt'], applyDefaults);
+    }
+    function setMergeSummaryPrompt_ACU(prompt) {
+        return withSettingsWrite_ACU(['mergeSummaryPrompt'], () => {
+            settings_ACU.mergeSummaryPrompt = prompt && typeof prompt === 'object'
+                ? JSON.parse(JSON.stringify(prompt))
+                : prompt;
+        });
+    }
+    function resetMergeSummaryPrompt_ACU(mode = getCurrentStorageMode()) {
+        if (mode !== 'native' && mode !== 'sqlite') {
+            return { ok: false, code: 'invalid_input', changed: false, message: '存储模式无效。' };
+        }
+        return withSettingsWrite_ACU(['mergeSummaryPrompt'], () => {
+            settings_ACU.mergeSummaryPrompt = JSON.parse(JSON.stringify(mode === 'sqlite' ? DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU : DEFAULT_MERGE_SUMMARY_PROMPT_ACU));
+        });
+    }
+    /** 表格标签提取/排除规则 */
+    function setTableContextRules_ACU(kind, rules) {
+        const field = kind === 'extract' ? 'tableContextExtractRules' : 'tableContextExcludeRules';
+        const tagField = kind === 'extract' ? 'tableContextExtractTags' : 'tableContextExcludeTags';
+        const normalized = (kind === 'extract'
+            ? normalizeExtractRules_ACU(rules, '')
+            : normalizeExcludeRules_ACU(rules, ''));
+        return withSettingsWrite_ACU([field, tagField], () => {
+            settings_ACU[field] = JSON.parse(JSON.stringify(normalized));
+            settings_ACU[tagField] = '';
+        });
+    }
+
     function saveCustomCharCardPrompt_ACU() {
         if (!$popupInstance_ACU || !$charCardPromptSegmentsContainer_ACU) {
             logError_ACU('保存更新预设失败：UI元素未初始化。');
@@ -83380,29 +84025,22 @@ $CONTENT
             });
         }
         catch (e) { }
-        // 保存为JSON数组格式
-        settings_ACU[getCurrentPromptSettingKey_ACU()] = newPromptSegments;
-        saveSettingsAndNotify_ACU();
+        // [V1 收敛] 委托 service 事务式保存；保存失败已回滚，不再触发全量 reload。
+        const result = setCurrentPromptSegments_ACU(newPromptSegments);
+        if (!result.ok) {
+            showToastr_ACU('error', result.message || '更新预设保存失败，已回滚。');
+            return;
+        }
         showToastr_ACU('success', '更新预设已保存！');
-        loadSettingsAndRefreshUI_ACU(); // This will re-render from the saved data.
     }
     function resetDefaultCharCardPrompt_ACU() {
-        const mode = isSqliteMode() ? 'sqlite' : 'native';
-        settings_ACU[getCurrentPromptSettingKey_ACU(mode)] = getDefaultPromptForMode_ACU(mode);
-        saveSettingsAndNotify_ACU();
+        // [V1 收敛] 委托 service 事务式重置；保存失败已回滚，不再触发全量 reload。
+        const result = resetCurrentPromptToDefault_ACU();
+        if (!result.ok) {
+            showToastr_ACU('error', result.message || '恢复默认提示词失败，已回滚。');
+            return;
+        }
         showToastr_ACU('info', '更新预设已恢复为默认值！');
-        // loadSettings will trigger renderPromptSegments_ACU which correctly handles the string default
-        loadSettingsAndRefreshUI_ACU();
-    }
-    /**
-     * 按指定目标模式恢复默认填表提示词（charCardPrompt）。
-     * 与 resetDefaultCharCardPrompt_ACU 不同，此函数接收显式 mode 参数，
-     * 用于"模式切换后恢复目标模式默认提示词"场景——此时当前模式可能已完成切换。
-     */
-    function applyModeDefaultCharCardPrompt_ACU(mode) {
-        settings_ACU[getCurrentPromptSettingKey_ACU(mode)] = getDefaultPromptForMode_ACU(mode);
-        saveSettingsAndNotify_ACU();
-        loadSettingsAndRefreshUI_ACU();
     }
     function loadCharCardPromptFromJson_ACU() {
         const input = document.createElement('input');
@@ -83504,16 +84142,19 @@ $CONTENT
         const valStr = $autoUpdateThresholdInput_ACU.val();
         const newT = parseInt(valStr, 10);
         if (!isNaN(newT) && newT >= 0) {
-            settings_ACU.autoUpdateThreshold = newT;
-            saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式写入（含归一化与保存失败回滚）
+            const result = setUpdateNumberFields_ACU({ autoUpdateThreshold: newT });
+            if (!result.ok) {
+                if (!silent)
+                    showToastr_ACU('error', result.message || '自动更新阈值保存失败，已回滚。');
+                return;
+            }
             if (!silent) {
                 if (newT === 0)
                     showToastr_ACU('success', '自动更新阈值已保存！标准表自动更新已禁用。');
                 else
                     showToastr_ACU('success', '自动更新阈值已保存！');
             }
-            if (!skipReload)
-                loadSettingsAndRefreshUI_ACU();
         }
         else {
             if (!silent)
@@ -83529,12 +84170,15 @@ $CONTENT
         const valStr = $autoUpdateTokenThresholdInput_ACU.val();
         const newT = parseInt(valStr, 10);
         if (!isNaN(newT) && newT >= 0) {
-            settings_ACU.autoUpdateTokenThreshold = newT;
-            saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式写入
+            const result = setUpdateNumberFields_ACU({ autoUpdateTokenThreshold: newT });
+            if (!result.ok) {
+                if (!silent)
+                    showToastr_ACU('error', result.message || '自动更新Token阈值保存失败，已回滚。');
+                return;
+            }
             if (!silent)
                 showToastr_ACU('success', '自动更新Token阈值已保存！');
-            if (!skipReload)
-                loadSettingsAndRefreshUI_ACU();
         }
         else {
             if (!silent)
@@ -83551,12 +84195,15 @@ $CONTENT
         const valStr = $tableMaxRetriesInput_ACU.val();
         const newR = parseInt(valStr, 10);
         if (!isNaN(newR) && newR >= 1 && newR <= 10) {
-            settings_ACU.tableMaxRetries = newR;
-            saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式写入
+            const result = setUpdateNumberFields_ACU({ tableMaxRetries: newR });
+            if (!result.ok) {
+                if (!silent)
+                    showToastr_ACU('error', result.message || '填表自动重试次数保存失败，已回滚。');
+                return;
+            }
             if (!silent)
                 showToastr_ACU('success', '填表自动重试次数已保存！');
-            if (!skipReload)
-                loadSettingsAndRefreshUI_ACU();
         }
         else {
             if (!silent)
@@ -83572,12 +84219,15 @@ $CONTENT
         const valStr = $autoUpdateFrequencyInput_ACU.val();
         const newF = parseInt(valStr, 10);
         if (!isNaN(newF) && newF >= 1) {
-            settings_ACU.autoUpdateFrequency = newF;
-            saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式写入
+            const result = setUpdateNumberFields_ACU({ autoUpdateFrequency: newF });
+            if (!result.ok) {
+                if (!silent)
+                    showToastr_ACU('error', result.message || '自动更新频率保存失败，已回滚。');
+                return;
+            }
             if (!silent)
                 showToastr_ACU('success', '自动更新频率已保存！');
-            if (!skipReload)
-                loadSettingsAndRefreshUI_ACU();
         }
         else {
             if (!silent)
@@ -83594,12 +84244,15 @@ $CONTENT
         const valStr = $updateBatchSizeInput_ACU.val();
         const newBatchSize = parseInt(valStr, 10);
         if (!isNaN(newBatchSize) && newBatchSize >= 1) {
-            settings_ACU.updateBatchSize = newBatchSize;
-            saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式写入
+            const result = setUpdateNumberFields_ACU({ updateBatchSize: newBatchSize });
+            if (!result.ok) {
+                if (!silent)
+                    showToastr_ACU('error', result.message || '批处理大小保存失败，已回滚。');
+                return;
+            }
             if (!silent)
                 showToastr_ACU('success', '批处理大小已保存！');
-            if (!skipReload)
-                loadSettingsAndRefreshUI_ACU();
         }
         else {
             if (!silent)
@@ -83616,12 +84269,15 @@ $CONTENT
         const valStr = $maxConcurrentGroupsInput_ACU.val();
         const newLimit = parseInt(valStr, 10);
         if (!isNaN(newLimit) && newLimit >= 1) {
-            settings_ACU.maxConcurrentGroups = newLimit;
-            saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式写入
+            const result = setUpdateNumberFields_ACU({ maxConcurrentGroups: newLimit });
+            if (!result.ok) {
+                if (!silent)
+                    showToastr_ACU('error', result.message || '最大并发数保存失败，已回滚。');
+                return;
+            }
             if (!silent)
                 showToastr_ACU('success', '最大并发数已保存！');
-            if (!skipReload)
-                loadSettingsAndRefreshUI_ACU();
         }
         else {
             if (!silent)
@@ -83638,12 +84294,15 @@ $CONTENT
         const valStr = $skipUpdateFloorsInput_ACU.val();
         const newSkip = parseInt(valStr, 10);
         if (!isNaN(newSkip) && newSkip >= 0) {
-            settings_ACU.skipUpdateFloors = newSkip;
-            saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式写入
+            const result = setUpdateNumberFields_ACU({ skipUpdateFloors: newSkip });
+            if (!result.ok) {
+                if (!silent)
+                    showToastr_ACU('error', result.message || '跳过更新楼层保存失败，已回滚。');
+                return;
+            }
             if (!silent)
                 showToastr_ACU('success', '跳过更新楼层已保存！');
-            if (!skipReload)
-                loadSettingsAndRefreshUI_ACU();
         }
         else {
             if (!silent)
@@ -83661,8 +84320,13 @@ $CONTENT
         const parsed = parseInt(valStr, 10);
         // 空字符串或无效值视为0（全部保留）
         const newRetain = (!valStr || valStr.trim() === '' || isNaN(parsed)) ? 0 : Math.max(0, parsed);
-        settings_ACU.retainRecentLayers = newRetain;
-        saveSettingsAndNotify_ACU();
+        // [V1 收敛] 委托 service 事务式写入
+        const result = setUpdateNumberFields_ACU({ retainRecentLayers: newRetain });
+        if (!result.ok) {
+            if (!silent)
+                showToastr_ACU('error', result.message || 'AI 回复楼层保留数保存失败，已回滚。');
+            return;
+        }
         if (!silent) {
             if (newRetain === 0) {
                 showToastr_ACU('success', 'AI 回复楼层保留数已清空（将保留全部历史数据）！');
@@ -83671,8 +84335,6 @@ $CONTENT
                 showToastr_ACU('success', `AI 回复楼层保留数已保存：最近 ${newRetain} 个 AI 回复楼层！`);
             }
         }
-        if (!skipReload)
-            loadSettingsAndRefreshUI_ACU();
     }
     function saveImportSplitSize_ACU() {
         if (!$popupInstance_ACU)
@@ -83685,10 +84347,13 @@ $CONTENT
         const valStr = $input.val();
         const newSize = parseInt(valStr, 10);
         if (!isNaN(newSize) && newSize >= 100) {
-            settings_ACU.importSplitSize = newSize;
-            saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式写入
+            const result = setUpdateNumberFields_ACU({ importSplitSize: newSize });
+            if (!result.ok) {
+                showToastr_ACU('error', result.message || '导入分割大小保存失败，已回滚。');
+                return;
+            }
             showToastr_ACU('success', '导入分割大小已保存！');
-            loadSettingsAndRefreshUI_ACU();
         }
         else {
             showToastr_ACU('warning', `导入分割大小 "${valStr}" 无效。请输入一个大于等于100的整数。恢复为: ${settings_ACU.importSplitSize}`);
@@ -84660,12 +85325,6 @@ $CONTENT
         });
         return normalizeExcludeRules_ACU(collected, '');
     }
-    function getPlotPromptContentById_ACU(promptId) {
-        return getPlotPromptContentByIdFromSettings_ACU(settings_ACU?.plotSettings, promptId);
-    }
-    function setPlotPromptContentById_ACU(promptId, content) {
-        setPlotPromptContentByIdForSettings_ACU(settings_ACU?.plotSettings, promptId, content);
-    }
     // --- [剧情推进] 循环提示词列表渲染和管理 ---
     function renderLoopPromptsList_ACU(plotSettingsOverride = null) {
         const $container = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-prompts-container`);
@@ -84731,65 +85390,6 @@ $CONTENT
         plotSettings.loopSettings.quickReplyContent = prompts;
         plotSettings.loopSettings.currentPromptIndex = 0; // 重置索引
         saveSettingsAndNotify_ACU();
-    }
-    // --- [剧情推进] 临时替换"AI指令预设"(settings_ACU.charCardPrompt)，并在生成结束后恢复 ---
-    let plotPromptOverrideActive_ACU = false;
-    let plotPromptOverrideBackup_ACU = null;
-    // [剧情推进] 去重锁：避免同一次发送被 TavernHelper.generate 钩子 + GENERATION_AFTER_COMMANDS 双重处理导致重复 toast/误报失败
-    function buildPlotModifiedCharCardPrompt_ACU(original) {
-        const originalArr = Array.isArray(original)
-            ? original
-            : (typeof original === 'string' ? [{ role: 'USER', content: original }] : []);
-        const cloned = JSON.parse(JSON.stringify(originalArr));
-        const plotMain = (getPlotPromptContentById_ACU('mainPrompt') || '').trim();
-        const plotTask = (getPlotPromptContentById_ACU('systemPrompt') || '').trim();
-        if (!plotMain && !plotTask)
-            return cloned;
-        const getMainSlot = (seg) => {
-            if (!seg)
-                return '';
-            const slot = String(seg.mainSlot || '').toUpperCase();
-            if (slot === 'A' || slot === 'B')
-                return slot;
-            if (seg.isMain)
-                return 'A'; // 兼容旧字段
-            if (seg.isMain2)
-                return 'B'; // 兼容旧字段（若存在）
-            return '';
-        };
-        // 简化逻辑：只替换内容，不插入、不改role、不改结构
-        // 1) 定位主提示词A/B：优先 mainSlot，其次旧 isMain/isMain2
-        let mainAIdx = cloned.findIndex((p) => getMainSlot(p) === 'A');
-        let mainBIdx = cloned.findIndex((p) => getMainSlot(p) === 'B');
-        if (plotMain && mainAIdx !== -1 && cloned[mainAIdx]) {
-            cloned[mainAIdx].content = plotMain;
-        }
-        if (plotTask && mainBIdx !== -1 && cloned[mainBIdx]) {
-            cloned[mainBIdx].content = plotTask;
-        }
-        return cloned;
-    }
-    function applyPlotPromptOverride_ACU() {
-        if (plotPromptOverrideActive_ACU)
-            return;
-        if (!settings_ACU?.plotSettings?.enabled)
-            return;
-        const plotMain = (getPlotPromptContentById_ACU('mainPrompt') || '').trim();
-        const plotTask = (getPlotPromptContentById_ACU('systemPrompt') || '').trim();
-        if (!plotMain && !plotTask)
-            return;
-        plotPromptOverrideBackup_ACU = settings_ACU.charCardPrompt;
-        settings_ACU.charCardPrompt = buildPlotModifiedCharCardPrompt_ACU(plotPromptOverrideBackup_ACU);
-        plotPromptOverrideActive_ACU = true;
-        logDebug_ACU('[剧情推进] 已临时替换AI指令预设（charCardPrompt）。');
-    }
-    function restorePlotPromptOverride_ACU() {
-        if (!plotPromptOverrideActive_ACU)
-            return;
-        settings_ACU.charCardPrompt = plotPromptOverrideBackup_ACU;
-        plotPromptOverrideBackup_ACU = null;
-        plotPromptOverrideActive_ACU = false;
-        logDebug_ACU('[剧情推进] 已恢复AI指令预设（charCardPrompt）。');
     }
 
     /**
@@ -93297,109 +93897,6 @@ $CONTENT
     // saveCurrentDataForTable_ACU 已搬迁到 service/chat/chat-service.ts
     // 通过文件顶部的 re-export 保持外部调用方兼容
 
-    // admin-ui.ts — 导入合并配置（presentation 层：涉及 DOM 操作和 UI 刷新）
-    // 从 01_data_admin.js 迁入
-    function importCombinedSettings_ACU$1() {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = '.json';
-        input.onchange = e => {
-            const file = e.target.files[0];
-            if (!file)
-                return;
-            const reader = new FileReader();
-            reader.onload = async (readerEvent) => {
-                const content = readerEvent.target.result;
-                let combinedData;
-                try {
-                    combinedData = JSON.parse(content);
-                }
-                catch (error) {
-                    logError_ACU('导入合并配置失败：JSON解析错误。', error);
-                    showToastr_ACU('error', '文件不是有效的JSON格式。', { timeOut: 5000 });
-                    return;
-                }
-                try {
-                    // Validation
-                    if (!combinedData.prompt || !combinedData.template) {
-                        throw new Error('JSON文件缺少 "prompt" 或 "template" 键。');
-                    }
-                    if (!Array.isArray(combinedData.prompt)) {
-                        throw new Error('"prompt" 的值必须是一个数组。');
-                    }
-                    if (typeof combinedData.template !== 'object' || combinedData.template === null) {
-                        throw new Error('"template" 的值必须是一个对象。');
-                    }
-                    // 1. Apply and save prompt
-                    settings_ACU.charCardPrompt = combinedData.prompt;
-                    saveSettingsAndNotify_ACU();
-                    renderPromptSegments_ACU(combinedData.prompt);
-                    showToastr_ACU('success', '提示词预设已成功导入并保存！');
-                    // [新增] 导入合并提示词 (如果存在)
-                    if (combinedData.mergeSummaryPrompt) {
-                        settings_ACU.mergeSummaryPrompt = combinedData.mergeSummaryPrompt;
-                        saveSettingsAndNotify_ACU();
-                        if (typeof syncMergeSettingsToUI_ACU === 'function')
-                            syncMergeSettingsToUI_ACU(settings_ACU);
-                        logDebug_ACU('Merge summary prompt imported.');
-                    }
-                    // [新增] 导入所有合并设置 (如果存在)
-                    if (typeof combinedData.mergeSummaryPrompt !== 'undefined' ||
-                        typeof combinedData.autoMergeEnabled !== 'undefined') {
-                        // 导入合并提示词
-                        if (combinedData.mergeSummaryPrompt) {
-                            settings_ACU.mergeSummaryPrompt = combinedData.mergeSummaryPrompt;
-                        }
-                        // 导入手动合并设置
-                        settings_ACU.mergeTargetCount = combinedData.mergeTargetCount || 1;
-                        settings_ACU.mergeBatchSize = combinedData.mergeBatchSize || 5;
-                        settings_ACU.mergeStartIndex = combinedData.mergeStartIndex || 1;
-                        settings_ACU.mergeEndIndex = combinedData.mergeEndIndex || null;
-                        // 导入自动合并设置
-                        settings_ACU.autoMergeEnabled = combinedData.autoMergeEnabled || false;
-                        settings_ACU.autoMergeThreshold = combinedData.autoMergeThreshold || 20;
-                        settings_ACU.autoMergeReserve = combinedData.autoMergeReserve || 0;
-                        // 导入删除楼层范围设置
-                        settings_ACU.deleteStartFloor = combinedData.deleteStartFloor || null;
-                        settings_ACU.deleteEndFloor = combinedData.deleteEndFloor || null;
-                        saveSettingsAndNotify_ACU();
-                        // UI 回填交给 presentation 层
-                        if (typeof syncMergeSettingsToUI_ACU === 'function')
-                            syncMergeSettingsToUI_ACU(settings_ACU);
-                        logDebug_ACU('All merge settings imported.');
-                    }
-                    // 2. Apply and save template
-                    // [瘦身] 导入时清洗模板并回写（兼容旧模板带冗余字段）
-                    const sheetKeys = Object.keys(combinedData.template).filter(k => k.startsWith('sheet_'));
-                    ensureSheetOrderNumbers_ACU(combinedData.template, { baseOrderKeys: sheetKeys, forceRebuild: false });
-                    const sanitizedTemplate = sanitizeChatSheetsObject_ACU(combinedData.template, { ensureMate: true });
-                    const appliedTemplate = await applyTemplateSnapshotToScope_ACU(sanitizedTemplate, {
-                        scope: 'global',
-                        source: 'import_combined',
-                        presetName: normalizeTemplatePresetSelectionValue_ACU(getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: false })),
-                        save: true,
-                        persistChatScope: false,
-                    });
-                    if (!appliedTemplate) {
-                        throw new Error('合并配置中的表格模板已解析，但应用到全局模板失败。');
-                    }
-                    showToastr_ACU('success', '表格模板已成功导入！模板已更新，但不会影响当前聊天记录的本地数据。');
-                    // 刷新模板预设下拉 UI，确保预设列表与状态文案同步
-                    refreshPresetUIAfterSwitch_ACU();
-                    // [优化] 不再触发表格数据初始化，仅修改当前插件模板
-                    // 只有在新开卡或之前没有用过插件的聊天记录里才会使用新的通用模板作为基底
-                    showToastr_ACU('success', '合并配置已成功导入！');
-                }
-                catch (error) {
-                    logError_ACU('导入合并配置失败：结构验证失败。', error);
-                    showToastr_ACU('error', `导入失败: ${error.message}`, { timeOut: 10000 });
-                }
-            };
-            reader.readAsText(file, 'UTF-8');
-        };
-        input.click();
-    }
-
     /**
      * service/import/import-executor.ts — 外部导入核心业务逻辑
      * 从 presentation/triggers/import-process.ts 的 processImportedTxtAsUpdates_ACU 中提取
@@ -98650,7 +99147,7 @@ $CONTENT
 
     // Chat metadata stores scope/guide outside message fields, so both containers are snapshotted explicitly below.
     const MESSAGE_FIELDS = ['TavernDB_ACU_IsolatedData', 'TavernDB_ACU_Data', 'TavernDB_ACU_SummaryData', 'TavernDB_ACU_IndependentData', 'TavernDB_ACU_Identity', 'TavernDB_ACU_ModifiedKeys', 'TavernDB_ACU_UpdateGroupKeys', 'TavernDB_ACU_TableHeaderGuide', '_acu_local_template_base_state_seeded'];
-    function clone$6(value) { return value === undefined ? value : JSON.parse(JSON.stringify(value)); }
+    function clone$7(value) { return value === undefined ? value : JSON.parse(JSON.stringify(value)); }
     function prepareTemplate(templateData) {
         if (!templateData || typeof templateData !== 'object' || Array.isArray(templateData))
             throw new Error('初始化模板必须是对象。');
@@ -98670,11 +99167,11 @@ $CONTENT
         const result = {};
         for (const [key, value] of Object.entries(normalizedTemplateData))
             if (!key.startsWith('sheet_'))
-                result[key] = clone$6(value);
+                result[key] = clone$7(value);
         entries.forEach(([oldKey, source], index) => {
             if (!source || typeof source !== 'object' || Array.isArray(source))
                 throw new Error(`初始化模板 Sheet 无效：${oldKey}`);
-            const sheet = clone$6(source);
+            const sheet = clone$7(source);
             if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0]) || sheet.content[0][0] !== 'row_id')
                 throw new Error(`初始化模板 Sheet 缺少 row_id 表头：${oldKey}`);
             if (sheet.content.slice(1).some((row) => !Array.isArray(row)))
@@ -98704,7 +99201,7 @@ $CONTENT
         return { templateData: result, normalizationAudit: normalization.audits };
     }
     function snapshotMessages(chat) {
-        return chat.filter(message => message && typeof message === 'object').map(message => ({ message, fields: MESSAGE_FIELDS.map(field => ({ field, had: Object.prototype.hasOwnProperty.call(message, field), value: clone$6(message[field]) })) }));
+        return chat.filter(message => message && typeof message === 'object').map(message => ({ message, fields: MESSAGE_FIELDS.map(field => ({ field, had: Object.prototype.hasOwnProperty.call(message, field), value: clone$7(message[field]) })) }));
     }
     function restoreMessages(snapshots) {
         for (const snapshot of snapshots)
@@ -98743,8 +99240,8 @@ $CONTENT
                 const firstMessage = chat[0];
                 const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
                 const messageSnapshots = snapshotMessages(chat);
-                const previousScope = clone$6(peekChatScopedConfigContainer_ACU(chat));
-                const previousGuide = clone$6(peekChatSheetGuideContainer_ACU(chat));
+                const previousScope = clone$7(peekChatScopedConfigContainer_ACU(chat));
+                const previousGuide = clone$7(peekChatSheetGuideContainer_ACU(chat));
                 let primarySaveAttempted = false;
                 try {
                     for (const message of chat) {
@@ -98791,8 +99288,8 @@ $CONTENT
                         throw new Error('目标聊天已切换，已取消初始化提交。');
                     primarySaveAttempted = true;
                     await saveChatToHostStrict_ACU();
-                    _set_currentJsonTableData_ACU(clone$6(prepared));
-                    return { saved: true, messageIndex: targetIndex, runtimeReady: true, normalizedTemplateData: clone$6(prepared), normalizationAudit };
+                    _set_currentJsonTableData_ACU(clone$7(prepared));
+                    return { saved: true, messageIndex: targetIndex, runtimeReady: true, normalizedTemplateData: clone$7(prepared), normalizationAudit };
                 }
                 catch (error) {
                     restoreMessages(messageSnapshots);
@@ -99496,9 +99993,12 @@ $CONTENT
             return false;
         }
         try {
-            settings_ACU.charCardPrompt = isSqliteMode() ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU;
-            settings_ACU.mergeSummaryPrompt = isSqliteMode() ? DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU : DEFAULT_MERGE_SUMMARY_PROMPT_ACU;
-            saveSettingsAndNotify_ACU();
+            // [V1 收敛] 委托 service 事务式恢复默认提示词（含保存失败回滚），不再直写 settings_ACU。
+            const promptResetResult = resetAllPromptsToDefault_ACU();
+            if (!promptResetResult.ok) {
+                showToastr_ACU('error', promptResetResult.message || '恢复默认提示词失败，已回滚。');
+                return false;
+            }
             const templateResetOk = await resetTableTemplate_ACU({
                 showToast: false,
                 updatePresetSelection: true,
@@ -99511,7 +100011,6 @@ $CONTENT
                 showToastr_ACU('error', '恢复默认设置失败：默认表格模板恢复失败。');
                 return false;
             }
-            loadSettingsAndRefreshUI_ACU();
             refreshTemplatePresetSelectInUI_ACU({ selectName: '', keepValue: false });
             showToastr_ACU('success', '已恢复默认预设及模板！模板已更新，但不会影响当前聊天记录的本地数据。');
             return true;
@@ -100428,7 +100927,7 @@ $CONTENT
                 return false;
             } },
             importCombinedSettings: async function () { try {
-                return await importCombinedSettings_ACU$1();
+                return await importCombinedSettings_ACU();
             }
             catch (e) {
                 logError_ACU('importCombinedSettings failed:', e);
@@ -100702,19 +101201,25 @@ $CONTENT
                         logError_ACU('setUpdateConfigParams: Invalid params');
                         return false;
                     }
+                    // [V1 收敛] 委托 service 事务式批量写入（含归一化与保存失败回滚）
+                    const patch = {};
                     if (typeof params.autoUpdateThreshold === 'number' && params.autoUpdateThreshold >= 0) {
-                        settings_ACU.autoUpdateThreshold = Math.floor(params.autoUpdateThreshold);
+                        patch.autoUpdateThreshold = Math.floor(params.autoUpdateThreshold);
                     }
                     if (typeof params.autoUpdateFrequency === 'number' && params.autoUpdateFrequency >= 1) {
-                        settings_ACU.autoUpdateFrequency = Math.floor(params.autoUpdateFrequency);
+                        patch.autoUpdateFrequency = Math.floor(params.autoUpdateFrequency);
                     }
                     if (typeof params.updateBatchSize === 'number' && params.updateBatchSize >= 1) {
-                        settings_ACU.updateBatchSize = Math.floor(params.updateBatchSize);
+                        patch.updateBatchSize = Math.floor(params.updateBatchSize);
                     }
                     if (typeof params.autoUpdateTokenThreshold === 'number' && params.autoUpdateTokenThreshold >= 0) {
-                        settings_ACU.autoUpdateTokenThreshold = Math.floor(params.autoUpdateTokenThreshold);
+                        patch.autoUpdateTokenThreshold = Math.floor(params.autoUpdateTokenThreshold);
                     }
-                    saveSettingsAndNotify_ACU();
+                    const result = setUpdateNumberFields_ACU(patch);
+                    if (!result.ok) {
+                        logError_ACU('setUpdateConfigParams failed:', result.message || '');
+                        return false;
+                    }
                     logDebug_ACU('Update config params saved:', params);
                     return true;
                 }
@@ -121539,89 +122044,21 @@ Expected function or array of functions, received type ${typeof value}.`
     };
 
     /**
-     * api-preset-store — API 页状态边界（阶段 1 / D17）
+     * api-preset-store — API 页状态边界（阶段 1 / D17，阶段 B 重构）
      *
-     * Vue 组件只读写本 store；旧 settings_ACU 与 service 调用集中在这里。
+     * Vue 组件只读写本 store；本 store 是 service 的薄包装。
+     * 所有写操作委托 service/api-preset-service，不再直接改 settings_ACU。
+     * 保存失败时 service 已回滚内存，store 同步恢复快照并传播失败结果。
      */
-    function clone$5(value) {
+    function clone$6(value) {
         return JSON.parse(JSON.stringify(value ?? null));
     }
-    function normalizeApiMode(value) {
-        return value === 'tavern' ? 'tavern' : 'custom';
-    }
-    function normalizeApiConfig(value) {
-        const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-        const maxTokens = Number(source.max_tokens ?? source.maxTokens ?? 60000);
-        const temperature = Number(source.temperature ?? 1);
-        return {
-            url: typeof source.url === 'string' ? source.url : '',
-            apiKey: typeof source.apiKey === 'string' ? source.apiKey : '',
-            model: typeof source.model === 'string' ? source.model : '',
-            useMainApi: source.useMainApi !== false,
-            max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : 60000,
-            temperature: Number.isFinite(temperature) ? temperature : 1,
-            bodyParams: typeof source.bodyParams === 'string' ? source.bodyParams : '',
-            excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
-            requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
-        };
-    }
-    function normalizePreset(value) {
-        if (!value || typeof value !== 'object' || Array.isArray(value))
-            return null;
-        const name = typeof value.name === 'string' ? value.name.trim() : '';
-        if (!name)
-            return null;
-        return {
-            name,
-            apiMode: normalizeApiMode(value.apiMode),
-            apiConfig: normalizeApiConfig(value.apiConfig),
-            tavernProfile: typeof value.tavernProfile === 'string' ? value.tavernProfile : '',
-        };
-    }
-    function normalizePresetList(value) {
-        if (!Array.isArray(value))
-            return [];
-        const seen = new Set();
-        const presets = [];
-        for (const raw of value) {
-            const preset = normalizePreset(raw);
-            if (!preset || seen.has(preset.name))
-                continue;
-            seen.add(preset.name);
-            presets.push(preset);
-        }
-        return presets;
-    }
-    function getCurrentChatKey() {
-        const raw = String(currentChatFileIdentifier_ACU || '').trim();
-        return raw || 'unknown_chat';
-    }
-    function ensureSettingsShape$3() {
-        if (!Array.isArray(settings_ACU.apiPresets))
-            settings_ACU.apiPresets = [];
-        settings_ACU.apiPresets = normalizePresetList(settings_ACU.apiPresets);
-        if (typeof settings_ACU.defaultApiPresetName !== 'string')
-            settings_ACU.defaultApiPresetName = '';
-        if (!settings_ACU.apiPresetBindingsByChat ||
-            typeof settings_ACU.apiPresetBindingsByChat !== 'object' ||
-            Array.isArray(settings_ACU.apiPresetBindingsByChat)) {
-            settings_ACU.apiPresetBindingsByChat = {};
-        }
-        settings_ACU.apiMode = normalizeApiMode(settings_ACU.apiMode);
-        settings_ACU.apiConfig = normalizeApiConfig(settings_ACU.apiConfig);
-        if (typeof settings_ACU.tavernProfile !== 'string')
-            settings_ACU.tavernProfile = '';
-        settings_ACU.streamingEnabled = settings_ACU.streamingEnabled === true;
-    }
-    function findPresetByName(presets, name) {
-        const normalized = String(name || '').trim();
-        return presets.find(p => p.name === normalized) ?? null;
-    }
     function getCurrentConfigAsPreset(name) {
+        ensureApiSettingsShape_ACU();
         return {
             name,
-            apiMode: normalizeApiMode(settings_ACU.apiMode),
-            apiConfig: normalizeApiConfig(settings_ACU.apiConfig),
+            apiMode: normalizeApiMode_ACU(settings_ACU.apiMode),
+            apiConfig: normalizeApiConfig_ACU(settings_ACU.apiConfig),
             tavernProfile: typeof settings_ACU.tavernProfile === 'string' ? settings_ACU.tavernProfile : '',
         };
     }
@@ -121644,8 +122081,9 @@ Expected function or array of functions, received type ${typeof value}.`
         }) ?? null;
     }
     function resolveCurrentConfigStatus() {
-        const mode = normalizeApiMode(settings_ACU.apiMode);
-        const config = normalizeApiConfig(settings_ACU.apiConfig);
+        ensureApiSettingsShape_ACU();
+        const mode = normalizeApiMode_ACU(settings_ACU.apiMode);
+        const config = normalizeApiConfig_ACU(settings_ACU.apiConfig);
         const tavernProfile = typeof settings_ACU.tavernProfile === 'string'
             ? settings_ACU.tavernProfile.trim()
             : '';
@@ -121669,7 +122107,7 @@ Expected function or array of functions, received type ${typeof value}.`
             activePresetName: '',
             currentConfigReady: false,
             currentConfigLabel: '当前 API 配置不完整',
-            currentChatKey: getCurrentChatKey(),
+            currentChatKey: getCurrentChatKey_ACU(),
             streamingEnabled: false,
             tavernProfiles: [],
             modelOptions: [],
@@ -121678,10 +122116,10 @@ Expected function or array of functions, received type ${typeof value}.`
         }),
         getters: {
             defaultPreset(state) {
-                return findPresetByName(state.presets, state.defaultApiPresetName);
+                return findPresetByName_ACU(state.presets, state.defaultApiPresetName);
             },
             activePreset(state) {
-                return findPresetByName(state.presets, state.activePresetName);
+                return findPresetByName_ACU(state.presets, state.activePresetName);
             },
             hasPresets(state) {
                 return state.presets.length > 0;
@@ -121689,25 +122127,18 @@ Expected function or array of functions, received type ${typeof value}.`
         },
         actions: {
             /**
-             * 仅刷新展示用状态（presets / activePresetName / streaming）。
-             *
-             * 切换聊天后的 settings 刷新由 service 层的 loadSettings_ACU() 完成，
-             * v2 chat-changed listener 只负责让 store 重新读取最新 settings。
-             * 当前聊天 API 配置的显式写回只在 setActivePresetForCurrentChat()/savePreset() 中执行，避免刷新阶段产生循环写入。
+             * 仅刷新展示用状态。只读消费 service 快照，不写回运行配置。
+             * 聊天切换后的运行配置投影由 service 层 reconcile（loadSettings_ACU 末尾）完成。
              */
             refreshFromSettings() {
-                ensureSettingsShape$3();
-                this.currentChatKey = getCurrentChatKey();
-                this.presets = clone$5(settings_ACU.apiPresets);
-                const defaultName = findPresetByName(this.presets, settings_ACU.defaultApiPresetName)
+                ensureApiSettingsShape_ACU();
+                this.currentChatKey = getCurrentChatKey_ACU();
+                this.presets = clone$6(settings_ACU.apiPresets);
+                const defaultName = findPresetByName_ACU(this.presets, settings_ACU.defaultApiPresetName)
                     ? settings_ACU.defaultApiPresetName
                     : '';
-                settings_ACU.defaultApiPresetName = defaultName;
                 this.defaultApiPresetName = defaultName;
-                const binding = settings_ACU.apiPresetBindingsByChat[this.currentChatKey];
-                const boundName = binding && findPresetByName(this.presets, binding.presetName)
-                    ? binding.presetName
-                    : '';
+                const boundName = getBoundPresetNameForChat_ACU(this.currentChatKey);
                 const matchedCurrentName = findPresetMatchingCurrentConfig(this.presets)?.name ?? '';
                 this.activePresetName = boundName || defaultName || matchedCurrentName;
                 const currentConfig = resolveCurrentConfigStatus();
@@ -121715,124 +122146,28 @@ Expected function or array of functions, received type ${typeof value}.`
                 this.currentConfigLabel = currentConfig.label;
                 this.streamingEnabled = settings_ACU.streamingEnabled === true;
             },
-            persist() {
-                settings_ACU.apiPresets = clone$5(this.presets);
-                settings_ACU.defaultApiPresetName = this.defaultApiPresetName;
-                settings_ACU.streamingEnabled = this.streamingEnabled;
-                saveSettings_ACU();
+            /** 应用写操作结果：成功与失败都同步展示态（失败时 service 已回滚内存）；返回 boolean 保持旧契约。 */
+            applyWriteResult(result) {
+                this.refreshFromSettings();
+                return result.ok === true;
             },
             setStreamingEnabled(enabled) {
-                this.streamingEnabled = !!enabled;
-                settings_ACU.streamingEnabled = this.streamingEnabled;
-                saveSettings_ACU();
+                return this.applyWriteResult(setStreamingEnabled_ACU(enabled));
             },
             setDefaultPreset(name) {
-                const preset = findPresetByName(this.presets, name);
-                if (!preset)
-                    return false;
-                this.defaultApiPresetName = preset.name;
-                settings_ACU.defaultApiPresetName = preset.name;
-                saveSettings_ACU();
-                return true;
+                return this.applyWriteResult(setDefaultApiPreset_ACU(name));
             },
             setActivePresetForCurrentChat(name) {
-                const preset = findPresetByName(this.presets, name);
-                if (!preset)
-                    return false;
-                this.currentChatKey = getCurrentChatKey();
-                this.activePresetName = preset.name;
-                settings_ACU.apiPresetBindingsByChat[this.currentChatKey] = {
-                    presetName: preset.name,
-                    updatedAt: Date.now(),
-                };
-                settings_ACU.apiMode = preset.apiMode;
-                settings_ACU.apiConfig = clone$5(preset.apiConfig);
-                settings_ACU.tavernProfile = preset.tavernProfile;
-                saveSettings_ACU();
-                return true;
+                return this.applyWriteResult(setActivePresetForCurrentChat_ACU(name));
             },
             savePreset(presetInput, originalName = '') {
-                const preset = normalizePreset(presetInput);
-                if (!preset)
-                    return false;
-                const oldName = String(originalName || '').trim();
-                const activePresetNameBeforeSave = String(this.activePresetName || '').trim();
-                const isRenamingActivePreset = !!oldName && activePresetNameBeforeSave === oldName;
-                const hadPresets = this.presets.length > 0;
-                const existingByNewName = this.presets.findIndex(p => p.name === preset.name);
-                if (existingByNewName >= 0 && this.presets[existingByNewName].name !== oldName) {
-                    this.presets[existingByNewName] = preset;
-                }
-                else {
-                    const existingByOldName = oldName
-                        ? this.presets.findIndex(p => p.name === oldName)
-                        : -1;
-                    if (existingByOldName >= 0)
-                        this.presets[existingByOldName] = preset;
-                    else
-                        this.presets.push(preset);
-                }
-                if (!this.defaultApiPresetName)
-                    this.defaultApiPresetName = preset.name;
-                if (oldName && this.defaultApiPresetName === oldName)
-                    this.defaultApiPresetName = preset.name;
-                if (oldName && this.activePresetName === oldName)
-                    this.activePresetName = preset.name;
-                for (const binding of Object.values(settings_ACU.apiPresetBindingsByChat)) {
-                    if (oldName && binding?.presetName === oldName) {
-                        binding.presetName = preset.name;
-                        binding.updatedAt = Date.now();
-                    }
-                }
-                this.persist();
-                const shouldSyncActivePresetAfterSave = !hadPresets
-                    || !activePresetNameBeforeSave
-                    || activePresetNameBeforeSave === preset.name
-                    || isRenamingActivePreset;
-                if (shouldSyncActivePresetAfterSave) {
-                    this.setActivePresetForCurrentChat(preset.name);
-                }
-                else if (this.activePresetName !== activePresetNameBeforeSave) {
-                    this.activePresetName = activePresetNameBeforeSave;
-                }
-                return true;
+                return this.applyWriteResult(saveApiPreset_ACU$1(presetInput, originalName));
             },
             saveCurrentConfigAsPreset(name) {
-                return this.savePreset(getCurrentConfigAsPreset(name));
+                return this.applyWriteResult(saveCurrentConfigAsPreset_ACU(name));
             },
             deletePreset(name) {
-                const target = findPresetByName(this.presets, name);
-                if (!target)
-                    return false;
-                this.presets = this.presets.filter(p => p.name !== target.name);
-                if (this.defaultApiPresetName === target.name) {
-                    this.defaultApiPresetName = this.presets[0]?.name ?? '';
-                }
-                if (this.activePresetName === target.name) {
-                    this.activePresetName = this.defaultApiPresetName;
-                }
-                if (settings_ACU.tableApiPreset === target.name)
-                    settings_ACU.tableApiPreset = '';
-                if (settings_ACU.plotApiPreset === target.name)
-                    settings_ACU.plotApiPreset = '';
-                if (settings_ACU.contentOptimizationSettings?.apiPreset === target.name) {
-                    settings_ACU.contentOptimizationSettings.apiPreset = '';
-                }
-                if (settings_ACU.tableApiPresetOverridesByName && typeof settings_ACU.tableApiPresetOverridesByName === 'object') {
-                    for (const key of Object.keys(settings_ACU.tableApiPresetOverridesByName)) {
-                        if (settings_ACU.tableApiPresetOverridesByName[key] === target.name) {
-                            delete settings_ACU.tableApiPresetOverridesByName[key];
-                        }
-                    }
-                }
-                for (const [chatKey, binding] of Object.entries(settings_ACU.apiPresetBindingsByChat)) {
-                    if (binding?.presetName === target.name)
-                        delete settings_ACU.apiPresetBindingsByChat[chatKey];
-                }
-                this.persist();
-                if (this.activePresetName)
-                    this.setActivePresetForCurrentChat(this.activePresetName);
-                return true;
+                return this.applyWriteResult(deleteApiPreset_ACU$1(name));
             },
             refreshTavernProfiles() {
                 try {
@@ -122809,7 +123144,11 @@ Expected function or array of functions, received type ${typeof value}.`
                     return;
                 }
                 if (formMode.value === "create") {
-                    store.setActivePresetForCurrentChat(preset.name);
+                    const activateOk = store.setActivePresetForCurrentChat(preset.name);
+                    if (!activateOk) {
+                        activeDraftError.value = "预设已保存，但切换为当前聊天预设失败。";
+                        return;
+                    }
                 }
                 store.refreshFromSettings();
                 syncActiveDraft();
@@ -122833,8 +123172,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-49910465] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\r\n  gap: 6px;\r\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-49910465] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-49910465] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-49910465] {\r\n  display: flex;\r\n  align-items: center;\r\n  flex-wrap: wrap;\r\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-49910465] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-49910465] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-49910465] {\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-49910465] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\n}\r\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-49910465");
-    var ApiConfigPanel_vue_vue_type_style_index_0_scoped_49910465_lang = null;
+    injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-c3462564] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\n  gap: 6px;\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-c3462564] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-c3462564] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-c3462564] {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-c3462564] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-c3462564] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-c3462564] {\n  color: var(--acu-danger);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-c3462564] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n}\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-c3462564");
+    var ApiConfigPanel_vue_vue_type_style_index_0_scoped_c3462564_lang = null;
 
     const _hoisted_1$Q = { class: "acu-api-config-panel__select-row" };
     const _hoisted_2$J = { class: "acu-api-config-panel__editor-section" };
@@ -123127,7 +123466,119 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-49910465"]]);
+    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-c3462564"]]);
+
+    // ═══════════════════════════════════════════════════════════
+    // service/settings/feature-preset-reference-service.ts — 功能级 API 预设引用
+    //
+    // 管理 API 预设在表格、剧情、正文优化、vector/agent 中的引用字段。
+    // 引用字段的写入必须走 service（校验预设存在），删除/重命名预设时
+    // 由 api-preset-service 原子清理，本模块只负责单点写入。
+    // ═══════════════════════════════════════════════════════════════
+    function clone$5(value) {
+        return JSON.parse(JSON.stringify(value ?? null));
+    }
+    function ensureContentOptimizationShape_ACU() {
+        if (!settings_ACU.contentOptimizationSettings || typeof settings_ACU.contentOptimizationSettings !== 'object') {
+            settings_ACU.contentOptimizationSettings = { apiPreset: '' };
+        }
+        if (typeof settings_ACU.contentOptimizationSettings.apiPreset !== 'string') {
+            settings_ACU.contentOptimizationSettings.apiPreset = '';
+        }
+    }
+    function snapshotRefFields_ACU(target, taskId = '') {
+        ensureApiSettingsShape_ACU();
+        ensureContentOptimizationShape_ACU();
+        switch (target) {
+            case 'table':
+                return { tableApiPreset: settings_ACU.tableApiPreset };
+            case 'plot':
+                return { plotApiPreset: settings_ACU.plotApiPreset };
+            case 'plot_task':
+                return { plotTaskOverride: settings_ACU.plotTaskApiPresetOverridesById?.[taskId] };
+            case 'optimization':
+                return { contentOptimizationApiPreset: settings_ACU.contentOptimizationSettings.apiPreset };
+            case 'vector_keyword':
+                return { vectorKeywordApiPreset: clone$5(getCurrentVectorMemoryConfig_ACU().keywordApiPreset) };
+        }
+    }
+    function restoreRefFields_ACU(target, snapshot, taskId = '') {
+        switch (target) {
+            case 'table':
+                settings_ACU.tableApiPreset = String(snapshot.tableApiPreset ?? '');
+                break;
+            case 'plot':
+                settings_ACU.plotApiPreset = String(snapshot.plotApiPreset ?? '');
+                break;
+            case 'plot_task':
+                if (snapshot.plotTaskOverride) {
+                    settings_ACU.plotTaskApiPresetOverridesById[taskId] = String(snapshot.plotTaskOverride);
+                }
+                else {
+                    delete settings_ACU.plotTaskApiPresetOverridesById[taskId];
+                }
+                break;
+            case 'optimization':
+                settings_ACU.contentOptimizationSettings.apiPreset = String(snapshot.contentOptimizationApiPreset ?? '');
+                break;
+            case 'vector_keyword':
+                getCurrentVectorMemoryConfig_ACU().keywordApiPreset = String(snapshot.vectorKeywordApiPreset ?? '');
+                break;
+        }
+    }
+    /** 设置某功能的 API 预设引用；空串表示使用当前配置 */
+    function setFeatureApiPreset_ACU(target, presetName, options = {}) {
+        const normalized = String(presetName || '').trim();
+        ensureApiSettingsShape_ACU();
+        if (normalized) {
+            const preset = findPresetByName_ACU(settings_ACU.apiPresets, normalized);
+            if (!preset) {
+                return { ok: false, code: 'not_found', changed: false, message: `API 预设 "${normalized}" 不存在。` };
+            }
+        }
+        const snapshot = snapshotRefFields_ACU(target, options.taskId || '');
+        switch (target) {
+            case 'table':
+                settings_ACU.tableApiPreset = normalized;
+                break;
+            case 'plot':
+                settings_ACU.plotApiPreset = normalized;
+                break;
+            case 'plot_task': {
+                const taskId = String(options.taskId || '').trim();
+                if (!taskId) {
+                    return { ok: false, code: 'invalid_input', changed: false, message: '任务 ID 不能为空。' };
+                }
+                if (normalized) {
+                    settings_ACU.plotTaskApiPresetOverridesById[taskId] = normalized;
+                }
+                else {
+                    delete settings_ACU.plotTaskApiPresetOverridesById[taskId];
+                }
+                break;
+            }
+            case 'optimization':
+                ensureContentOptimizationShape_ACU();
+                settings_ACU.contentOptimizationSettings.apiPreset = normalized;
+                break;
+            case 'vector_keyword':
+                getCurrentVectorMemoryConfig_ACU().keywordApiPreset = normalized;
+                break;
+        }
+        const saveResult = saveSettings_ACU();
+        if (!saveResult.saved) {
+            restoreRefFields_ACU(target, snapshot, options.taskId || '');
+            return {
+                ok: false,
+                code: saveResult.code === 'settings_loading' ? 'settings_loading' : 'save_failed',
+                changed: true,
+                saveResult,
+                message: saveResult.warning || saveResult.error || '保存失败，已回滚。',
+            };
+        }
+        logDebug_ACU(`[预设引用] ${target} 的 API 预设已更新: ${normalized || '(当前配置)'}`);
+        return { ok: true, code: 'ok', changed: true, saveResult };
+    }
 
     /**
      * plot-preset-store — 剧情推进页状态边界（D23）
@@ -123328,9 +123779,11 @@ Expected function or array of functions, received type ${typeof value}.`
             /** D23.4 第二层：页面级"剧情推进 API 预设"。空串 = 跟随当前活动 API。 */
             setPageApiPreset(name) {
                 const next = String(name || '').trim();
+                const result = setFeatureApiPreset_ACU('plot', next);
+                if (!result.ok) {
+                    return; // 校验失败（预设不存在）或保存失败；store 保持原值
+                }
                 this.pageApiPresetName = next;
-                settings_ACU.plotApiPreset = next;
-                saveSettings_ACU();
             },
             /** D23.4 第一层：任务 API 单独选择。空串清除单独选择。 */
             setTaskApiOverride(taskId, presetName) {
@@ -123338,18 +123791,17 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (!id)
                     return;
                 const next = String(presetName || '').trim();
-                const overrides = settings_ACU.plotTaskApiPresetOverridesById;
-                if (next) {
-                    overrides[id] = next;
-                    this.taskApiOverrides = { ...this.taskApiOverrides, [id]: next };
+                const result = setFeatureApiPreset_ACU('plot_task', next, { taskId: id });
+                if (!result.ok) {
+                    return;
                 }
-                else {
-                    delete overrides[id];
-                    const copy = { ...this.taskApiOverrides };
-                    delete copy[id];
-                    this.taskApiOverrides = copy;
+                const overrides = (settings_ACU.plotTaskApiPresetOverridesById || {});
+                const cleaned = {};
+                for (const [k, v] of Object.entries(overrides)) {
+                    if (typeof v === 'string' && v.trim())
+                        cleaned[k] = v.trim();
                 }
-                saveSettings_ACU();
+                this.taskApiOverrides = cleaned;
             },
             /** 创建/覆盖一个全局预设。`originalName` 用于重命名场景。 */
             savePreset(preset, originalName = '') {
@@ -123993,27 +124445,38 @@ Expected function or array of functions, received type ${typeof value}.`
             promptDirty.value = false;
         }
         function setTableApiPreset(value) {
+            const result = setFeatureApiPreset_ACU("table", String(value || ""));
+            if (!result.ok) {
+                message.value = { kind: "error", text: result.message || "API 预设更新失败。", scope: "settings" };
+                return;
+            }
             tableApiPreset.value = String(value || "");
-            settings_ACU.tableApiPreset = tableApiPreset.value;
-            saveSettings_ACU();
             message.value = null;
         }
         function setNumber(key, rawValue) {
             const normalized = normalizeNumber(key, rawValue);
+            const result = setUpdateNumberFields_ACU({ [key]: normalized });
+            if (!result.ok) {
+                message.value = { kind: "error", text: result.message || "设置保存失败。", scope: "settings" };
+                return;
+            }
             values.value = { ...values.value, [key]: normalized };
-            settings_ACU[key] = normalized;
-            saveSettings_ACU();
             message.value = null;
         }
         function setNumbers(patch) {
             const nextValues = { ...values.value };
+            const normalizedPatch = {};
             for (const key of Object.keys(patch)) {
                 const normalized = normalizeNumber(key, patch[key]);
                 nextValues[key] = normalized;
-                settings_ACU[key] = normalized;
+                normalizedPatch[key] = normalized;
+            }
+            const result = setUpdateNumberFields_ACU(normalizedPatch);
+            if (!result.ok) {
+                message.value = { kind: "error", text: result.message || "设置保存失败。", scope: "settings" };
+                return;
             }
             values.value = nextValues;
-            saveSettings_ACU();
             message.value = null;
         }
         function setTableEditLastPairOnly(value) {
@@ -124038,16 +124501,20 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         function setExtractRules(rules) {
             extractRules.value = coerceRulePairs$2(rules);
-            settings_ACU.tableContextExtractRules = clone$3(normalizeRules(extractRules.value, "", "extract"));
-            settings_ACU.tableContextExtractTags = "";
-            saveSettings_ACU();
+            const result = setTableContextRules_ACU("extract", normalizeRules(extractRules.value, "", "extract"));
+            if (!result.ok) {
+                message.value = { kind: "error", text: result.message || "规则保存失败。", scope: "settings" };
+                return;
+            }
             message.value = null;
         }
         function setExcludeRules(rules) {
             excludeRules.value = coerceRulePairs$2(rules);
-            settings_ACU.tableContextExcludeRules = clone$3(normalizeRules(excludeRules.value, "", "exclude"));
-            settings_ACU.tableContextExcludeTags = "";
-            saveSettings_ACU();
+            const result = setTableContextRules_ACU("exclude", normalizeRules(excludeRules.value, "", "exclude"));
+            if (!result.ok) {
+                message.value = { kind: "error", text: result.message || "规则保存失败。", scope: "settings" };
+                return;
+            }
             message.value = null;
         }
         function addPromptSegment(position) {
@@ -124110,8 +124577,28 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         function savePrompt() {
             const prepared = preparePromptForSave(promptSegments.value);
-            settings_ACU[currentPromptSettingKey()] = clone$3(prepared);
-            saveSettings_ACU();
+            const key = currentPromptSettingKey();
+            let result;
+            if (key === "charCardPrompt") {
+                result = setCharCardPrompt_ACU(clone$3(prepared));
+            }
+            else {
+                // strictJson 提示词：写入对应字段，保存失败回滚。
+                const field = key;
+                const snapshot = settings_ACU[field];
+                settings_ACU[field] = clone$3(prepared);
+                const saveResult = saveSettings_ACU();
+                if (!saveResult.saved) {
+                    settings_ACU[field] = snapshot;
+                    message.value = { kind: "error", text: saveResult.warning || saveResult.error || "提示词保存失败。", scope: "prompt" };
+                    return;
+                }
+                result = { ok: true, code: "ok", changed: true, saveResult };
+            }
+            if (!result.ok) {
+                message.value = { kind: "error", text: result.message || "提示词保存失败。", scope: "prompt" };
+                return;
+            }
             promptSegments.value = prepared;
             promptDirty.value = false;
             message.value = null;
@@ -131142,22 +131629,34 @@ Expected function or array of functions, received type ${typeof value}.`
             else if (key === "autoUpdateEnabled" ||
                 key === "toastMuteEnabled" ||
                 key === "streamingEnabled") {
-                settings_ACU[key] = !!value;
-                saveSettings_ACU();
+                if (key === "autoUpdateEnabled") {
+                    setAutoUpdateEnabled_ACU(!!value);
+                }
+                else if (key === "streamingEnabled") {
+                    useApiPresetStore().setStreamingEnabled(!!value);
+                }
+                else {
+                    settings_ACU[key] = !!value;
+                    saveSettings_ACU();
+                }
             }
+            dataRefreshTick.value++;
             dataRefreshTick.value++;
         }
         async function setStorageMode(rawMode) {
             const mode = normalizeStorageMode(rawMode);
+            const previousMode = normalizeStorageMode(getCurrentStorageMode());
+            // 先通过 service 原子写 settings（含提示词重置）；保存失败即返回，不触发 provider 切换。
+            const writeResult = setStorageMode_ACU(mode);
+            if (!writeResult.ok) {
+                storageMessage.value = {
+                    kind: "error",
+                    text: writeResult.message || "存储模式保存失败。",
+                };
+                await refresh();
+                return;
+            }
             storageMode.value = mode;
-            settings_ACU.storageMode = mode;
-            // SQL 表与原生表必须使用对应模式的默认提示词才能被正确填写——切换无条件重置
-            settings_ACU.charCardPrompt = clone$2(mode === "sqlite"
-                ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU
-                : DEFAULT_CHAR_CARD_PROMPT_ACU);
-            settings_ACU.strictJsonCharCardPrompt = clone$2(DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU);
-            settings_ACU.strictJsonSqlCharCardPrompt = clone$2(DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU);
-            saveSettings_ACU();
             try {
                 await switchStorageMode(mode);
                 storageMessage.value = null;
@@ -131165,6 +131664,13 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             catch (error) {
                 logError_ACU("[ACU-V2] storage mode switch failed", error);
+                // provider 切换失败：回滚 settings 到切换前的模式，避免 storageMode 与运行时 provider 分叉。
+                // 失败时运行时 provider 已由 switchStorageMode 内部回退或保持旧 provider，按 previousMode 重置提示词并保存。
+                const rollbackResult = setStorageMode_ACU(previousMode);
+                if (!rollbackResult.ok) {
+                    logError_ACU("[ACU-V2] storage mode rollback failed", rollbackResult.message);
+                }
+                storageMode.value = previousMode;
                 storageMessage.value = null;
                 toast.error("存储模式切换失败，详情见运行日志");
             }
@@ -137543,11 +138049,6 @@ Expected function or array of functions, received type ${typeof value}.`
         const value = Number(getDefaultVectorMemoryConfigForV2().summaryIndexRollingDeltaFoldThreshold);
         return Number.isFinite(value) && value > 0 ? Math.floor(value) : 15;
     }
-    function updateGlobalVectorMemoryConfigFields_ACU(patch) {
-        const config = getCurrentVectorMemoryConfig_ACU();
-        Object.assign(config, patch);
-        return config;
-    }
     const STATUS_LABELS = {
         none: '未加载',
         building: '构建中',
@@ -137703,8 +138204,11 @@ Expected function or array of functions, received type ${typeof value}.`
             const value = typeof raw === 'string' ? raw : String(raw ?? '');
             const next = key.endsWith('ApiKey') ? value : value.trim();
             form[key] = next;
-            updateGlobalVectorMemoryConfigFields_ACU({ [key]: next });
-            saveSettings_ACU();
+            const result = updateGlobalVectorMemoryConfigFields_ACU({ [key]: next });
+            if (!result.ok) {
+                toast.error(result.message || '保存失败。');
+                return;
+            }
             runValidation();
             pushSavedMessage();
         }
@@ -137716,10 +138220,13 @@ Expected function or array of functions, received type ${typeof value}.`
                     form.recentFixedInjectCount = Number.isFinite(value) ? Math.floor(value) : 0;
                     toast.warning(`固定写入必须是正整数，已重置为默认值 ${fallback}。`);
                     form.recentFixedInjectCount = fallback;
-                    updateGlobalVectorMemoryConfigFields_ACU({
+                    const result = updateGlobalVectorMemoryConfigFields_ACU({
                         recentFixedInjectCount: fallback,
                     });
-                    saveSettings_ACU();
+                    if (!result.ok) {
+                        toast.error(result.message || '保存失败。');
+                        return;
+                    }
                     runValidation();
                     pushSavedMessage();
                     return;
@@ -137731,10 +138238,13 @@ Expected function or array of functions, received type ${typeof value}.`
                     const fallback = getDefaultRollingDeltaFoldThreshold();
                     form.summaryIndexRollingDeltaFoldThreshold = fallback;
                     toast.warning(`滚动增量折叠阈值必须是正整数，已重置为默认值 ${fallback}。`);
-                    updateGlobalVectorMemoryConfigFields_ACU({
+                    const result = updateGlobalVectorMemoryConfigFields_ACU({
                         summaryIndexRollingDeltaFoldThreshold: fallback,
                     });
-                    saveSettings_ACU();
+                    if (!result.ok) {
+                        toast.error(result.message || '保存失败。');
+                        return;
+                    }
                     runValidation();
                     pushSavedMessage();
                     return;
@@ -137744,16 +138254,22 @@ Expected function or array of functions, received type ${typeof value}.`
             const fallback = 1;
             const num = Math.max(min, Math.floor(Number(raw)) || fallback);
             form[key] = num;
-            updateGlobalVectorMemoryConfigFields_ACU({ [key]: num });
-            saveSettings_ACU();
+            const result = updateGlobalVectorMemoryConfigFields_ACU({ [key]: num });
+            if (!result.ok) {
+                toast.error(result.message || '保存失败。');
+                return;
+            }
             runValidation();
             pushSavedMessage();
         }
         function setBooleanField(key, value) {
             const next = value === true;
             form[key] = next;
-            updateGlobalVectorMemoryConfigFields_ACU({ [key]: next });
-            saveSettings_ACU();
+            const result = updateGlobalVectorMemoryConfigFields_ACU({ [key]: next });
+            if (!result.ok) {
+                toast.error(result.message || '保存失败。');
+                return;
+            }
             runValidation();
             pushSavedMessage();
         }
@@ -137763,8 +138279,11 @@ Expected function or array of functions, received type ${typeof value}.`
                 .map((item) => item.trim())
                 .filter(Boolean)));
             form.summaryIndexV2WriteScopeAllowlistText = normalized.join('\n');
-            updateGlobalVectorMemoryConfigFields_ACU({ summaryIndexV2WriteScopeAllowlist: normalized });
-            saveSettings_ACU();
+            const result = updateGlobalVectorMemoryConfigFields_ACU({ summaryIndexV2WriteScopeAllowlist: normalized });
+            if (!result.ok) {
+                toast.error(result.message || '保存失败。');
+                return;
+            }
             runValidation();
             pushSavedMessage();
         }
@@ -137781,8 +138300,11 @@ Expected function or array of functions, received type ${typeof value}.`
             if (num > 1)
                 num = 1;
             form.minScore = num;
-            updateGlobalVectorMemoryConfigFields_ACU({ minScore: num });
-            saveSettings_ACU();
+            const result = updateGlobalVectorMemoryConfigFields_ACU({ minScore: num });
+            if (!result.ok) {
+                toast.error(result.message || '保存失败。');
+                return;
+            }
             runValidation();
             pushSavedMessage();
         }
@@ -137822,11 +138344,14 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         function savePromptGroup() {
             const segs = prepareKeywordPromptGroup(promptSegments.value);
-            updateGlobalVectorMemoryConfigFields_ACU({ keywordPromptGroup: segs });
-            saveSettings_ACU();
+            const result = updateGlobalVectorMemoryConfigFields_ACU({ keywordPromptGroup: segs });
+            if (!result.ok) {
+                toast.error(result.message || '保存失败。');
+                return;
+            }
             promptSegments.value = cloneSegments(segs);
             promptDirty.value = false;
-            notify('success', '关键词生成提示词已保存。');
+            notify('success', '关键词生成提示词已保存');
         }
         function resetPromptGroup() {
             promptSegments.value = defaultKeywordPromptGroup();
@@ -139692,8 +140217,11 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (cleanup.restoreTemplateAndPrompts && !snapshot?.templateStr)
                     throw new Error('无法解析默认模板。');
                 if (cleanup.restoreTemplateAndPrompts) {
-                    settings_ACU.charCardPrompt = isSqliteMode() ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU;
-                    settings_ACU.mergeSummaryPrompt = isSqliteMode() ? DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU : DEFAULT_MERGE_SUMMARY_PROMPT_ACU;
+                    // [V1 收敛] 委托 service 写入默认提示词（save: false，由下方统一 saveSettings_ACU 原子落盘）
+                    const promptReset = resetAllPromptsToDefault_ACU(undefined, { save: false });
+                    if (!promptReset.ok) {
+                        throw new Error(promptReset.message || '恢复默认提示词失败。');
+                    }
                 }
                 if (cleanup.clearTableOrder) {
                     settings_ACU.tableKeyOrder = [];

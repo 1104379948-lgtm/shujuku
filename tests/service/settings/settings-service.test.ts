@@ -430,6 +430,38 @@ describe('applyCombinedSettingsImport_ACU', () => {
     applyCombinedSettingsImport_ACU({ prompt: [{ role: 'USER', content: '测试' }] });
     expect(mockPersistSettingsToStorage).toHaveBeenCalled();
   });
+
+  it('保存失败时回滚全部导入字段并抛错', () => {
+    mockSettings.charCardPrompt = [{ role: 'USER', content: '原有' }];
+    mockSettings.mergeSummaryPrompt = '原有合并';
+    mockPersistSettingsToStorage.mockImplementationOnce(() => {
+      throw new Error('存储写入失败');
+    });
+
+    expect(() => applyCombinedSettingsImport_ACU({
+      prompt: [{ role: 'USER', content: '新提示词' }],
+      mergeSummaryPrompt: '新合并',
+    })).toThrow('合并配置保存失败');
+
+    // 回滚：恢复导入前值
+    expect(mockSettings.charCardPrompt).toEqual([{ role: 'USER', content: '原有' }]);
+    expect(mockSettings.mergeSummaryPrompt).toBe('原有合并');
+  });
+
+  it('保存返回 saved:false 时回滚全部导入字段并抛错', () => {
+    mockSettings.charCardPrompt = [{ role: 'USER', content: '原有' }];
+    mockSettings.mergeSummaryPrompt = '原有合并';
+    _set_settingsStorageReadyForSave_ACU(false);
+
+    expect(() => applyCombinedSettingsImport_ACU({
+      prompt: [{ role: 'USER', content: '新提示词' }],
+      mergeSummaryPrompt: '新合并',
+    })).toThrow();
+
+    expect(mockSettings.charCardPrompt).toEqual([{ role: 'USER', content: '原有' }]);
+    expect(mockSettings.mergeSummaryPrompt).toBe('原有合并');
+    _set_settingsStorageReadyForSave_ACU(true);
+  });
 });
 
 // ═══ persistCurrentTemplatePresetName_ACU ═══

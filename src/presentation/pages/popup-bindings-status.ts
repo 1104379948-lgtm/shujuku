@@ -2,14 +2,14 @@
 // 状态&操作标签页事件绑定（对话编辑器 + 设置参数自动保存 + checkbox）
 
 import { showToastr_ACU } from '../theme/toast';
-import { showCustomConfirm_ACU } from '../theme/custom-confirm';
 import { ACU_TOAST_CATEGORY_ACU, SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { jQuery_API_ACU } from '../dom-utils';
 import { settings_ACU } from '../../service/runtime/state-manager';
 import { $popupInstance_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateTokenThresholdInput_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $tableMaxRetriesInput_ACU, $autoUpdateEnabledCheckbox_ACU, $standardizedTableFillEnabledCheckbox_ACU, $toastMuteEnabledCheckbox_ACU, $promptTemplateEnabledCheckbox_ACU, $tableEditLastPairOnlyCheckbox_ACU, $manualUpdateCardButton_ACU, $manualTableSelectAll_ACU, $manualTableSelectNone_ACU } from '../state/ui-refs';
 import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
-import { saveAutoUpdateFrequency_ACU, saveAutoUpdateThreshold_ACU, saveAutoUpdateTokenThreshold_ACU, saveMaxConcurrentGroups_ACU, saveRetainRecentLayers_ACU, saveSkipUpdateFloors_ACU, saveTableMaxRetries_ACU, saveUpdateBatchSize_ACU, applyModeDefaultCharCardPrompt_ACU } from '../triggers/settings-ui-sync';
+import { saveAutoUpdateFrequency_ACU, saveAutoUpdateThreshold_ACU, saveAutoUpdateTokenThreshold_ACU, saveMaxConcurrentGroups_ACU, saveRetainRecentLayers_ACU, saveSkipUpdateFloors_ACU, saveTableMaxRetries_ACU, saveUpdateBatchSize_ACU } from '../triggers/settings-ui-sync';
+import { setStorageMode_ACU, setAutoUpdateEnabled_ACU } from '../../service/settings/settings-write-service';
 import { handleManualUpdate_ACU } from '../triggers/update-process';
 import { handleManualSelectAll_ACU, handleManualSelectNone_ACU } from '../components/table-selector';
 import { renderPromptSegments_ACU, getCharCardPromptFromUI_ACU } from '../components/plot-editors';
@@ -104,10 +104,15 @@ export async function bindStatusEvents_ACU(): Promise<void> {
       bindAutoSaveNumberInput_ACU($tableMaxRetriesInput_ACU, saveTableMaxRetries_ACU); // [新增] 填表重试次数
       if ($autoUpdateEnabledCheckbox_ACU.length) {
         $autoUpdateEnabledCheckbox_ACU.on('change', function () {
-          settings_ACU.autoUpdateEnabled = jQuery_API_ACU(this).is(':checked');
-          saveSettingsAndNotify_ACU();
-          logDebug_ACU('数据库自动更新启用状态已保存:', settings_ACU.autoUpdateEnabled);
-          showToastr_ACU('info', `数据库自动更新已 ${settings_ACU.autoUpdateEnabled ? '启用' : '禁用'}`);
+          const enabled = jQuery_API_ACU(this).is(':checked');
+          const result = setAutoUpdateEnabled_ACU(enabled);
+          if (!result.ok) {
+            showToastr_ACU('error', result.message || '保存自动更新开关失败，已回滚。');
+            jQuery_API_ACU(this).prop('checked', !enabled);
+            return;
+          }
+          logDebug_ACU('数据库自动更新启用状态已保存:', enabled);
+          showToastr_ACU('info', `数据库自动更新已 ${enabled ? '启用' : '禁用'}`);
         });
       }
       if ($standardizedTableFillEnabledCheckbox_ACU && $standardizedTableFillEnabledCheckbox_ACU.length) {
@@ -179,37 +184,31 @@ export async function bindStatusEvents_ACU(): Promise<void> {
               const previousMode = getCurrentStorageMode();
               if (selectedMode === previousMode) return;
 
-              // 弹出确认框：询问是否恢复到目标模式对应的默认填表提示词
               const targetModeLabel = selectedMode === 'sqlite' ? 'SQLite' : '原生';
-              const shouldResetPrompt = await showCustomConfirm_ACU(
-                  `切换到${targetModeLabel}模式`,
-                  `即将切换到${targetModeLabel}模式。\n\n是否同时恢复到${targetModeLabel}模式的默认填表提示词？\n\n选择"${'取消'}"将保留当前自定义提示词，仅切换模式。`,
-                  { confirmLabel: '恢复默认并切换', cancelLabel: '仅切换模式' }
-              );
-
               showToastr_ACU('info', `正在切换到 ${targetModeLabel} 模式...`);
 
               try {
-                  // 更新设置
-                  settings_ACU.storageMode = selectedMode;
-                  saveSettingsAndNotify_ACU();
+                  // [V1 收敛] 先通过 service 原子写 settings（含提示词重置）；
+                  // 保存失败即返回，不触发 provider 切换。与 V2 useDashboardPage.setStorageMode 语义一致。
+                  const writeResult = setStorageMode_ACU(selectedMode);
+                  if (!writeResult.ok) {
+                      showToastr_ACU('error', writeResult.message || '存储模式保存失败。');
+                      $storageModeRadios.filter(`[value="${previousMode}"]`).prop('checked', true);
+                      return;
+                  }
 
                   // 执行模式切换（包含数据重载和 fallback）
                   await switchStorageMode(selectedMode);
 
-                  // 模式切换成功后，根据用户意图决定是否恢复默认提示词
-                  if (shouldResetPrompt) {
-                      applyModeDefaultCharCardPrompt_ACU(selectedMode);
-                      showToastr_ACU('success', `已切换到 ${targetModeLabel} 模式，并恢复到该模式的默认提示词。`);
-                  } else {
-                      showToastr_ACU('success', `已切换到 ${targetModeLabel} 模式！数据已重新加载。`);
-                  }
-                  logDebug_ACU(`存储模式已切换: ${previousMode} → ${selectedMode}${shouldResetPrompt ? '（已恢复默认提示词）' : ''}`);
+                  showToastr_ACU('success', `已切换到 ${targetModeLabel} 模式，数据已重新加载。`);
+                  logDebug_ACU(`存储模式已切换: ${previousMode} → ${selectedMode}`);
               } catch (e: any) {
-                  // 切换失败，回退 radio 状态和设置
+                  // 切换失败：回滚 settings 到切换前的模式，避免 storageMode 与运行时 provider 分叉。
                   const fallbackMode = getCurrentStorageMode(); // switchStorageMode 内部可能已 fallback
-                  settings_ACU.storageMode = fallbackMode;
-                  saveSettingsAndNotify_ACU();
+                  const rollbackResult = setStorageMode_ACU(fallbackMode);
+                  if (!rollbackResult.ok) {
+                      logError_ACU('存储模式回滚失败:', rollbackResult.message);
+                  }
                   $storageModeRadios.filter(`[value="${fallbackMode}"]`).prop('checked', true);
 
                   logError_ACU(`存储模式切换失败: ${e?.message}`);

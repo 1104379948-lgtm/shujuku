@@ -13,14 +13,11 @@ const { mockHandleTxtImportAndSplit, mockImportTxtTextAndSplitCore, mockInjectIm
 vi.mock('../../src/presentation/triggers/data-admin-ui', () => ({
   exportCurrentJsonData_ACU: vi.fn(),
   exportTableTemplate_ACU: vi.fn(),
+  importCombinedSettings_ACU: vi.fn(),
   importTableTemplate_ACU: vi.fn(),
   overrideLatestLayerWithTemplate_ACU: vi.fn(),
   resetAllToDefaults_ACU: vi.fn(),
   resetTableTemplate_ACU: vi.fn(),
-}));
-
-vi.mock('../../src/presentation/triggers/admin-ui', () => ({
-  importCombinedSettings_ACU: vi.fn(),
 }));
 
 vi.mock('../../src/presentation/triggers/update-trigger', () => ({

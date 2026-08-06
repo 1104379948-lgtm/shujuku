@@ -2,13 +2,11 @@
  * presentation/components/optimization-ui/optimization-ui-rules.ts
  * 排除规则 + 循环提示词 UI
  */
-import { DEFAULT_PLOT_SETTINGS_ACU } from '../../../shared/defaults-json.js';
 import { activePlotEditorSettings_ACU, buildDefaultPlotPromptGroup_ACU, currentEditablePlotPresetState_ACU, currentPlotTaskEditorId_ACU, ensurePlotPromptGroup_ACU , _set_currentEditablePlotPresetState_ACU, _set_activePlotEditorSettings_ACU, _set_currentPlotTaskEditorId_ACU} from '../../../service/plot/plot-state';
 import { showToastr_ACU } from '../../theme/toast';
 import { getChatArray_ACU, saveChatToHost_ACU, setChatMessages_ACU, emitMessageUpdated_ACU } from '../../../service/chat/chat-service';
 import { jQuery_API_ACU } from '../../dom-utils';
 import { toastr_API_ACU } from '../../../shared/host-api';
-import { currentChatFileIdentifier_ACU, settings_ACU } from '../../../service/runtime/state-manager';
 import { $popupInstance_ACU } from '../../state/ui-refs';
 import { saveSettingsAndNotify_ACU } from '../settings-ui-helpers';
 import { buildChatPlotScopeStateFromSettings_ACU, clearCurrentChatPlotScopeState_ACU, getCurrentChatPlotScopeState_ACU, sanitizePlotSettingsSnapshotForChat_ACU, setCurrentChatPlotScopeState_ACU } from '../../../service/template/chat-scope';
@@ -18,7 +16,7 @@ import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeEx
 import { triggerAutomaticUpdateIfNeeded_ACU } from '../../triggers/settings-ui-sync';
 import { cancelContentOptimization_ACU, contentOptimizationAbortRequested_ACU, ensureOptimizationNotCancelled_ACU, getLastOptimizationBase_ACU, optimizationProgressToast_ACU, performContentOptimization_ACU, setLastOptimizationBase_ACU, _set_optimizationProgressToast_ACU, _set_contentOptimizationAbortRequested_ACU } from '../../../service/optimization/content-optimization';
 import { applyContextTagFilters_ACU } from '../../../service/runtime/helpers-remaining';
-import { getActivePlotEditorSettings_ACU, getPlotPromptContentByIdFromSettings_ACU, setPlotPromptContentByIdForSettings_ACU, ensureLoopPromptsArray_ACU } from '../../../service/plot/plot-logic';
+import { getActivePlotEditorSettings_ACU, ensureLoopPromptsArray_ACU } from '../../../service/plot/plot-logic';
 
 
   function schedulePlotSettingsUiRefresh_ACU(plotSettingsOverride: any = null) {
@@ -93,13 +91,6 @@ import { getActivePlotEditorSettings_ACU, getPlotPromptContentByIdFromSettings_A
     return normalizeExcludeRules_ACU(collected, '');
   }
 
-  function getPlotPromptContentById_ACU(promptId: string) {
-    return getPlotPromptContentByIdFromSettings_ACU(settings_ACU?.plotSettings, promptId);
-  }
-
-  function setPlotPromptContentById_ACU(promptId: string, content: string) {
-    setPlotPromptContentByIdForSettings_ACU(settings_ACU?.plotSettings, promptId, content);
-  }
 
   // --- [剧情推进] 循环提示词列表渲染和管理 ---
   export function renderLoopPromptsList_ACU(plotSettingsOverride: any = null) {
@@ -179,65 +170,4 @@ import { getActivePlotEditorSettings_ACU, getPlotPromptContentByIdFromSettings_A
     saveSettingsAndNotify_ACU();
   }
 
-  // --- [剧情推进] 临时替换"AI指令预设"(settings_ACU.charCardPrompt)，并在生成结束后恢复 ---
-  let plotPromptOverrideActive_ACU = false;
-  let plotPromptOverrideBackup_ACU: any = null;
-
-  // [剧情推进] 去重锁：避免同一次发送被 TavernHelper.generate 钩子 + GENERATION_AFTER_COMMANDS 双重处理导致重复 toast/误报失败
-  function buildPlotModifiedCharCardPrompt_ACU(original: any) {
-    const originalArr = Array.isArray(original)
-      ? original
-      : (typeof original === 'string' ? [{ role: 'USER', content: original }] : []);
-
-    const cloned = JSON.parse(JSON.stringify(originalArr));
-
-    const plotMain = (getPlotPromptContentById_ACU('mainPrompt') || '').trim();
-    const plotTask = (getPlotPromptContentById_ACU('systemPrompt') || '').trim();
-
-    if (!plotMain && !plotTask) return cloned;
-
-    const getMainSlot = (seg: any) => {
-      if (!seg) return '';
-      const slot = String(seg.mainSlot || '').toUpperCase();
-      if (slot === 'A' || slot === 'B') return slot;
-      if (seg.isMain) return 'A'; // 兼容旧字段
-      if (seg.isMain2) return 'B'; // 兼容旧字段（若存在）
-      return '';
-    };
-
-    // 简化逻辑：只替换内容，不插入、不改role、不改结构
-    // 1) 定位主提示词A/B：优先 mainSlot，其次旧 isMain/isMain2
-    let mainAIdx = cloned.findIndex((p: any) => getMainSlot(p) === 'A');
-    let mainBIdx = cloned.findIndex((p: any) => getMainSlot(p) === 'B');
-
-    if (plotMain && mainAIdx !== -1 && cloned[mainAIdx]) {
-      cloned[mainAIdx].content = plotMain;
-    }
-    if (plotTask && mainBIdx !== -1 && cloned[mainBIdx]) {
-      cloned[mainBIdx].content = plotTask;
-    }
-
-    return cloned;
-  }
-
-  function applyPlotPromptOverride_ACU() {
-    if (plotPromptOverrideActive_ACU) return;
-    if (!settings_ACU?.plotSettings?.enabled) return;
-    const plotMain = (getPlotPromptContentById_ACU('mainPrompt') || '').trim();
-    const plotTask = (getPlotPromptContentById_ACU('systemPrompt') || '').trim();
-    if (!plotMain && !plotTask) return;
-
-    plotPromptOverrideBackup_ACU = settings_ACU.charCardPrompt;
-    settings_ACU.charCardPrompt = buildPlotModifiedCharCardPrompt_ACU(plotPromptOverrideBackup_ACU);
-    plotPromptOverrideActive_ACU = true;
-    logDebug_ACU('[剧情推进] 已临时替换AI指令预设（charCardPrompt）。');
-  }
-
-  function restorePlotPromptOverride_ACU() {
-    if (!plotPromptOverrideActive_ACU) return;
-    settings_ACU.charCardPrompt = plotPromptOverrideBackup_ACU;
-    plotPromptOverrideBackup_ACU = null;
-    plotPromptOverrideActive_ACU = false;
-    logDebug_ACU('[剧情推进] 已恢复AI指令预设（charCardPrompt）。');
-  }
 

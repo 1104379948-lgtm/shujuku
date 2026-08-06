@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerUiSurface_ACU, resetUiSurfaceRegistryForTests_ACU } from '../../src/shared/ui-surface-registry';
 
-const { mockGetPromptTemplates, mockReadControl, mockSetPromptTemplates, mockWriteControl, mockSaveSettings } = vi.hoisted(() => ({
+const { mockGetPromptTemplates, mockReadControl, mockSetPromptTemplates, mockWriteControl, mockSaveSettings, mockSetUpdateNumberFields } = vi.hoisted(() => ({
   mockGetPromptTemplates: vi.fn(),
   mockReadControl: vi.fn(),
   mockSetPromptTemplates: vi.fn(),
   mockWriteControl: vi.fn(),
   mockSaveSettings: vi.fn(),
+  mockSetUpdateNumberFields: vi.fn(),
 }));
 
 vi.mock('../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logError_ACU: vi.fn() }));
@@ -18,6 +19,7 @@ vi.mock('../../src/service/template/chat-scope', () => ({ getSortedSheetKeys_ACU
 vi.mock('../../src/presentation/triggers/update-process', () => ({ handleManualUpdate_ACU: vi.fn() }));
 vi.mock('../../src/presentation/triggers/settings-ui-sync', () => ({ deleteApiPreset_ACU: vi.fn(), loadApiPreset_ACU: vi.fn() }));
 vi.mock('../../src/presentation/components/settings-ui-helpers', () => ({ saveSettingsAndNotify_ACU: mockSaveSettings }));
+vi.mock('../../src/service/settings/settings-write-service', () => ({ setUpdateNumberFields_ACU: mockSetUpdateNumberFields }));
 vi.mock('../../src/service/agent/agent-worldbook-config-meta', () => ({
   getAgentPromptTemplateDefaults_ACU: mockGetPromptTemplates,
   readAgentWorldbookControlFromWorldbooks_ACU: mockReadControl,
@@ -56,6 +58,7 @@ describe('createSettingsConfigApi Agent config source', () => {
     });
     mockSetPromptTemplates.mockReturnValue(true);
     mockWriteControl.mockResolvedValue({ updated: true, control });
+    mockSetUpdateNumberFields.mockReturnValue({ ok: true, code: 'ok', changed: true });
   });
 
   it('openSettings 与 openVisualizer 委派到已注册的 V2 surface', async () => {
@@ -215,6 +218,37 @@ describe('createSettingsConfigApi Agent config source', () => {
 
     expect(result.skillifyMaxEntries).not.toBe(99);
     expect(mockWriteControl).not.toHaveBeenCalled();
+    expect(mockSaveSettings).not.toHaveBeenCalled();
+  });
+
+  it('setUpdateConfigParams 将数值 patch 委托给 service 事务写入', () => {
+    const api = createSettingsConfigApi({} as any);
+
+    const result = api.setUpdateConfigParams({
+      autoUpdateThreshold: 3.9,
+      autoUpdateFrequency: 2.1,
+      updateBatchSize: 4,
+      autoUpdateTokenThreshold: 0.5,
+    });
+
+    expect(result).toBe(true);
+    expect(mockSetUpdateNumberFields).toHaveBeenCalledWith({
+      autoUpdateThreshold: 3,
+      autoUpdateFrequency: 2,
+      updateBatchSize: 4,
+      autoUpdateTokenThreshold: 0,
+    });
+    expect(mockSaveSettings).not.toHaveBeenCalled();
+  });
+
+  it('setUpdateConfigParams 在 service 写入失败时返回 false 且不保存 legacy settings', () => {
+    mockSetUpdateNumberFields.mockReturnValue({ ok: false, code: 'invalid_input', changed: false, message: '字段 autoUpdateThreshold 数值无效。' });
+    const api = createSettingsConfigApi({} as any);
+
+    const result = api.setUpdateConfigParams({ autoUpdateThreshold: -1 });
+
+    expect(result).toBe(false);
+    expect(mockSetUpdateNumberFields).toHaveBeenCalledWith({});
     expect(mockSaveSettings).not.toHaveBeenCalled();
   });
 });

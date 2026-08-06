@@ -141,7 +141,8 @@ async function mountVectorIndexPage(opts: {
     getCurrentVectorMemoryConfig_ACU: () => config,
     updateGlobalVectorMemoryConfigFields_ACU: (patch: Record<string, any>) => {
       Object.assign(config, patch);
-      return config;
+      saveSettings();
+      return { ok: true };
     },
     validateSummaryVectorIndexConfig_ACU: () => validationResult,
   }));

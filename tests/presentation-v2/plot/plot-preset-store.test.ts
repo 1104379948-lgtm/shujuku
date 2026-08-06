@@ -17,6 +17,10 @@ function createSettings() {
     },
     plotApiPreset: '',
     plotTaskApiPresetOverridesById: {} as Record<string, string>,
+    apiPresets: [
+      { name: 'claude-fast', apiMode: 'custom', apiConfig: {}, tavernProfile: '' },
+      { name: 'gpt-4o', apiMode: 'custom', apiConfig: {}, tavernProfile: '' },
+    ],
   } as any;
 }
 

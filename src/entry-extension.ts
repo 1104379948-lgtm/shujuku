@@ -57,7 +57,6 @@ import './service/optimization/content-optimization';
 // presentation 层
 // ═══════════════════════════════════════════════════════════════
 import './presentation/triggers/update-process';
-import './presentation/triggers/admin-ui';
 import './presentation/triggers/import-process';
 import './presentation/bootstrap/init';
 import './presentation/bootstrap/api-registry';

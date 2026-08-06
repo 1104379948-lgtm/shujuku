@@ -1,6 +1,8 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { settings_ACU } from "../../service/runtime/state-manager";
 import { saveSettings_ACU } from "../../service/settings/settings-service";
+import { setFeatureApiPreset_ACU } from "../../service/settings/feature-preset-reference-service";
+import { setUpdateNumberFields_ACU, setTableContextRules_ACU, setCharCardPrompt_ACU } from "../../service/settings/settings-write-service";
 import { getCurrentStorageMode } from "../../service/table/storage-mode";
 import {
   DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
@@ -371,17 +373,23 @@ export function useFormFillSettings(): FormFillSettingsState {
   }
 
   function setTableApiPreset(value: string): void {
+    const result = setFeatureApiPreset_ACU("table", String(value || ""));
+    if (!result.ok) {
+      message.value = { kind: "error", text: result.message || "API 预设更新失败。", scope: "settings" };
+      return;
+    }
     tableApiPreset.value = String(value || "");
-    settings_ACU.tableApiPreset = tableApiPreset.value;
-    saveSettings_ACU();
     message.value = null;
   }
 
   function setNumber(key: NumberSettingKey, rawValue: number | string): void {
     const normalized = normalizeNumber(key, rawValue);
+    const result = setUpdateNumberFields_ACU({ [key]: normalized });
+    if (!result.ok) {
+      message.value = { kind: "error", text: result.message || "设置保存失败。", scope: "settings" };
+      return;
+    }
     values.value = { ...values.value, [key]: normalized };
-    settings_ACU[key] = normalized;
-    saveSettings_ACU();
     message.value = null;
   }
 
@@ -389,15 +397,21 @@ export function useFormFillSettings(): FormFillSettingsState {
     patch: Partial<Record<NumberSettingKey, number | string>>,
   ): void {
     const nextValues = { ...values.value };
+    const normalizedPatch: Partial<Record<NumberSettingKey, number>> = {};
     for (const key of Object.keys(patch) as NumberSettingKey[]) {
       const normalized = normalizeNumber(key, patch[key]);
       nextValues[key] = normalized;
-      settings_ACU[key] = normalized;
+      normalizedPatch[key] = normalized;
+    }
+    const result = setUpdateNumberFields_ACU(normalizedPatch);
+    if (!result.ok) {
+      message.value = { kind: "error", text: result.message || "设置保存失败。", scope: "settings" };
+      return;
     }
     values.value = nextValues;
-    saveSettings_ACU();
     message.value = null;
   }
+
 
   function setTableEditLastPairOnly(value: boolean): void {
     tableEditLastPairOnly.value = !!value;
@@ -424,21 +438,27 @@ export function useFormFillSettings(): FormFillSettingsState {
 
   function setExtractRules(rules: FormFillRulePair[]): void {
     extractRules.value = coerceRulePairs(rules);
-    settings_ACU.tableContextExtractRules = clone(
+    const result = setTableContextRules_ACU(
+      "extract",
       normalizeRules(extractRules.value, "", "extract"),
     );
-    settings_ACU.tableContextExtractTags = "";
-    saveSettings_ACU();
+    if (!result.ok) {
+      message.value = { kind: "error", text: result.message || "规则保存失败。", scope: "settings" };
+      return;
+    }
     message.value = null;
   }
 
   function setExcludeRules(rules: FormFillRulePair[]): void {
     excludeRules.value = coerceRulePairs(rules);
-    settings_ACU.tableContextExcludeRules = clone(
+    const result = setTableContextRules_ACU(
+      "exclude",
       normalizeRules(excludeRules.value, "", "exclude"),
     );
-    settings_ACU.tableContextExcludeTags = "";
-    saveSettings_ACU();
+    if (!result.ok) {
+      message.value = { kind: "error", text: result.message || "规则保存失败。", scope: "settings" };
+      return;
+    }
     message.value = null;
   }
 
@@ -507,8 +527,27 @@ export function useFormFillSettings(): FormFillSettingsState {
 
   function savePrompt(): void {
     const prepared = preparePromptForSave(promptSegments.value);
-    settings_ACU[currentPromptSettingKey()] = clone(prepared);
-    saveSettings_ACU();
+    const key = currentPromptSettingKey();
+    let result: ReturnType<typeof setCharCardPrompt_ACU>;
+    if (key === "charCardPrompt") {
+      result = setCharCardPrompt_ACU(clone(prepared));
+    } else {
+      // strictJson 提示词：写入对应字段，保存失败回滚。
+      const field = key;
+      const snapshot = settings_ACU[field];
+      settings_ACU[field] = clone(prepared);
+      const saveResult = saveSettings_ACU();
+      if (!saveResult.saved) {
+        settings_ACU[field] = snapshot;
+        message.value = { kind: "error", text: saveResult.warning || saveResult.error || "提示词保存失败。", scope: "prompt" };
+        return;
+      }
+      result = { ok: true, code: "ok", changed: true, saveResult };
+    }
+    if (!result.ok) {
+      message.value = { kind: "error", text: result.message || "提示词保存失败。", scope: "prompt" };
+      return;
+    }
     promptSegments.value = prepared;
     promptDirty.value = false;
     message.value = null;

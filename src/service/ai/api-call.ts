@@ -5,6 +5,7 @@ import { handleApiResponse_ACU } from './prompt-builder';
 import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { resolveApiConfigByPreset_ACU } from '../settings/api-preset-service';
 
 function normalizeExcludeBodyParamsForSillyTavern_ACU(raw: any): string {
   if (typeof raw !== 'string') return '';
@@ -179,30 +180,12 @@ export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal
 
 
 export function getApiConfigByPreset_ACU(presetName: string) {
-    if (!presetName) {
-      // 使用当前配置
-      return {
-        apiMode: settings_ACU.apiMode,
-        apiConfig: settings_ACU.apiConfig,
-        tavernProfile: settings_ACU.tavernProfile
-      };
-    }
-
-    const preset = settings_ACU.apiPresets.find((p: any) => p.name === presetName);
-    if (preset) {
-      return {
-        apiMode: preset.apiMode,
-        apiConfig: preset.apiConfig,
-        tavernProfile: preset.tavernProfile
-      };
-    }
-
-    // 预设不存在，回退到当前配置
-    logWarn_ACU(`API预设 "${presetName}" 不存在，使用当前配置。`);
+    // 委托 service 单一权威解析：空名返回当前配置；悬挂引用返回 resolved=false 并告警。
+    const resolved = resolveApiConfigByPreset_ACU(presetName);
     return {
-      apiMode: settings_ACU.apiMode,
-      apiConfig: settings_ACU.apiConfig,
-      tavernProfile: settings_ACU.tavernProfile
+      apiMode: resolved.apiMode,
+      apiConfig: resolved.apiConfig,
+      tavernProfile: resolved.tavernProfile,
     };
 }
 

@@ -12,11 +12,15 @@ import { jQuery_API_ACU } from '../dom-utils';
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { settings_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU } from '../../service/runtime/state-manager';
 import { $popupInstance_ACU, $charCardPromptToggle_ACU, $charCardPromptAreaDiv_ACU, $saveCharCardPromptButton_ACU, $resetCharCardPromptButton_ACU, $loadModelsButton_ACU, $saveApiConfigButton_ACU, $clearApiConfigButton_ACU, $useMainApiCheckbox_ACU, $streamingEnabledCheckbox_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $importTableSelectAll_ACU, $importTableSelectNone_ACU } from '../state/ui-refs';
-import { saveSettingsAndNotify_ACU, loadSettingsAndRefreshUI_ACU } from '../components/settings-ui-helpers';
+import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
 import { updateImportStatusUI_ACU, handleTxtImportAndSplit_ACU } from '../components/import-status-ui';
 import { clearImportLocalStorage_ACU, clearImportedEntries_ACU, deleteImportedEntries_ACU, handleInjectImportedTxtSelected_ACU } from '../triggers/import-process';
-import { importCombinedSettings_ACU } from '../triggers/admin-ui';
+import { importCombinedSettings_ACU } from '../triggers/data-admin-ui';
 import { applyTemplateScopeForCurrentChat_ACU, getDataIsolationHistory_ACU, removeDataIsolationHistory_ACU, switchIsolationProfile_ACU, persistCurrentTemplatePresetName_ACU, setSummaryVectorIndexMode_ACU } from '../../service/settings/settings-service';
+// [V1 收敛] 以下写操作统一委托 service 层事务式函数，禁止 V1 直接写 settings_ACU。
+import { setFeatureApiPreset_ACU } from '../../service/settings/feature-preset-reference-service';
+import { setStreamingEnabled_ACU, setUseMainApi_ACU } from '../../service/settings/api-preset-service';
+import { setTableContextRules_ACU } from '../../service/settings/settings-write-service';
 import { deleteAllGeneratedEntries_ACU } from '../../service/worldbook/pipeline';
 import { refreshMergedDataAndNotifyWithUI_ACU, refreshPresetUIAfterSwitch_ACU } from '../components/pipeline-ui-helpers';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../../service/table/table-service';
@@ -476,18 +480,28 @@ export async function bindDataEvents_ACU(): Promise<void> {
 
       if ($useMainApiCheckbox_ACU.length) {
         $useMainApiCheckbox_ACU.on('change', function () {
-            settings_ACU.apiConfig.useMainApi = jQuery_API_ACU(this).is(':checked');
-            saveSettingsAndNotify_ACU();
+            const useMainApi = jQuery_API_ACU(this).is(':checked');
+            const result = setUseMainApi_ACU(useMainApi);
+            if (!result.ok) {
+              showToastr_ACU('error', result.message || '保存主API开关失败，已回滚。');
+              jQuery_API_ACU(this).prop('checked', !useMainApi);
+              return;
+            }
             updateCustomApiInputsState_ACU();
-            showToastr_ACU('info', `自定义API已切换为 ${settings_ACU.apiConfig.useMainApi ? '使用主API' : '使用独立配置'}`);
+            showToastr_ACU('info', `自定义API已切换为 ${useMainApi ? '使用主API' : '使用独立配置'}`);
         });
       }
       // [新增] 流式传输开关事件监听
       if ($streamingEnabledCheckbox_ACU.length) {
         $streamingEnabledCheckbox_ACU.on('change', function () {
-            settings_ACU.streamingEnabled = jQuery_API_ACU(this).is(':checked');
-            saveSettingsAndNotify_ACU();
-            showToastr_ACU('info', `流式传输已${settings_ACU.streamingEnabled ? '启用' : '关闭'}`);
+            const enabled = jQuery_API_ACU(this).is(':checked');
+            const result = setStreamingEnabled_ACU(enabled);
+            if (!result.ok) {
+              showToastr_ACU('error', result.message || '保存流式传输开关失败，已回滚。');
+              jQuery_API_ACU(this).prop('checked', !enabled);
+              return;
+            }
+            showToastr_ACU('info', `流式传输已${enabled ? '启用' : '关闭'}`);
         });
       }
       if ($loadModelsButton_ACU.length) $loadModelsButton_ACU.on('click', fetchModelsAndConnect_ACU);
@@ -534,9 +548,13 @@ export async function bindDataEvents_ACU(): Promise<void> {
 
       // 填表API预设选择器
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-table-api-preset-select`).on('change', function() {
-        settings_ACU.tableApiPreset = jQuery_API_ACU(this).val();
-        saveSettingsAndNotify_ACU();
-        logDebug_ACU(`填表API预设已切换为: ${settings_ACU.tableApiPreset || '当前配置'}`);
+        const next = String(jQuery_API_ACU(this).val() || '');
+        const result = setFeatureApiPreset_ACU('table', next);
+        if (!result.ok) {
+          showToastr_ACU('error', result.message || '保存填表API预设失败，已回滚。');
+          return;
+        }
+        logDebug_ACU(`填表API预设已切换为: ${next || '当前配置'}`);
       });
 
       // 填表正文标签提取规则编辑器
@@ -547,14 +565,16 @@ export async function bindDataEvents_ACU(): Promise<void> {
         );
       });
       $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules .acu-exclude-rule-end`, function() {
-        settings_ACU.tableContextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`);
-        saveSettingsAndNotify_ACU();
+        const rules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`);
+        const result = setTableContextRules_ACU('extract', rules);
+        if (!result.ok) showToastr_ACU('error', result.message || '保存填表提取规则失败，已回滚。');
       });
       $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules .acu-exclude-rule-delete`, function() {
         const $row = jQuery_API_ACU(this).closest('.acu-exclude-rule-row');
         if ($row.length) $row.remove();
-        settings_ACU.tableContextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`);
-        saveSettingsAndNotify_ACU();
+        const rules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`);
+        const result = setTableContextRules_ACU('extract', rules);
+        if (!result.ok) showToastr_ACU('error', result.message || '保存填表提取规则失败，已回滚。');
       });
 
       // 填表正文标签排除规则编辑器
@@ -565,21 +585,27 @@ export async function bindDataEvents_ACU(): Promise<void> {
         );
       });
       $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules .acu-exclude-rule-end`, function() {
-        settings_ACU.tableContextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`);
-        saveSettingsAndNotify_ACU();
+        const rules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`);
+        const result = setTableContextRules_ACU('exclude', rules);
+        if (!result.ok) showToastr_ACU('error', result.message || '保存填表排除规则失败，已回滚。');
       });
       $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules .acu-exclude-rule-delete`, function() {
         const $row = jQuery_API_ACU(this).closest('.acu-exclude-rule-row');
         if ($row.length) $row.remove();
-        settings_ACU.tableContextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`);
-        saveSettingsAndNotify_ACU();
+        const rules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`);
+        const result = setTableContextRules_ACU('exclude', rules);
+        if (!result.ok) showToastr_ACU('error', result.message || '保存填表排除规则失败，已回滚。');
       });
 
       // 剧情推进API预设选择器
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-api-preset-select`).on('change', function() {
-        settings_ACU.plotApiPreset = jQuery_API_ACU(this).val();
-        saveSettingsAndNotify_ACU();
-        logDebug_ACU(`剧情推进API预设已切换为: ${settings_ACU.plotApiPreset || '当前配置'}`);
+        const next = String(jQuery_API_ACU(this).val() || '');
+        const result = setFeatureApiPreset_ACU('plot', next);
+        if (!result.ok) {
+          showToastr_ACU('error', result.message || '保存剧情推进API预设失败，已回滚。');
+          return;
+        }
+        logDebug_ACU(`剧情推进API预设已切换为: ${next || '当前配置'}`);
       });
 
       if ($charCardPromptToggle_ACU.length)

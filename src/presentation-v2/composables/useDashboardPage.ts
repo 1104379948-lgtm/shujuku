@@ -23,6 +23,7 @@ import { getCurrentStorageMode } from "../../service/table/storage-mode";
 import { resolveTableHistoryStateFromChat_ACU } from "../../service/table/table-history";
 import { switchStorageMode } from "../../service/table/table-storage-strategy";
 import { getCurrentTableDisplayData_ACU } from "../../service/settings/settings-readers";
+import { setStorageMode_ACU, setAutoUpdateEnabled_ACU } from "../../service/settings/settings-write-service";
 import { getSortedSheetKeys_ACU } from "../../service/template/chat-scope";
 import { getActiveTemplatePresetMeta_ACU } from "../../service/template/template-preset-service";
 import {
@@ -58,6 +59,7 @@ import {
 } from "../stores/content-replace-gate";
 import { dashboardCopy } from "../copy/dashboard-copy";
 import { useToastStore } from "../stores/toast-store";
+import { useApiPresetStore } from "../stores/api-preset-store";
 import { useDevOptions } from "./useDevOptions";
 
 type MessageKind = "info" | "success" | "warning" | "error";
@@ -1112,31 +1114,46 @@ export function useDashboardPage(): DashboardPageState {
       key === "toastMuteEnabled" ||
       key === "streamingEnabled"
     ) {
-      settings_ACU[key] = !!value;
-      saveSettings_ACU();
+      if (key === "autoUpdateEnabled") {
+        setAutoUpdateEnabled_ACU(!!value);
+      } else if (key === "streamingEnabled") {
+        useApiPresetStore().setStreamingEnabled(!!value);
+      } else {
+        settings_ACU[key] = !!value;
+        saveSettings_ACU();
+      }
     }
+    dataRefreshTick.value++;
     dataRefreshTick.value++;
   }
 
   async function setStorageMode(rawMode: string): Promise<void> {
     const mode = normalizeStorageMode(rawMode);
+    const previousMode = normalizeStorageMode(getCurrentStorageMode());
+    // 先通过 service 原子写 settings（含提示词重置）；保存失败即返回，不触发 provider 切换。
+    const writeResult = setStorageMode_ACU(mode);
+    if (!writeResult.ok) {
+      storageMessage.value = {
+        kind: "error",
+        text: writeResult.message || "存储模式保存失败。",
+      };
+      await refresh();
+      return;
+    }
     storageMode.value = mode;
-    settings_ACU.storageMode = mode;
-    // SQL 表与原生表必须使用对应模式的默认提示词才能被正确填写——切换无条件重置
-    settings_ACU.charCardPrompt = clone(
-      mode === "sqlite"
-        ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU
-        : DEFAULT_CHAR_CARD_PROMPT_ACU,
-    );
-    settings_ACU.strictJsonCharCardPrompt = clone(DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU);
-    settings_ACU.strictJsonSqlCharCardPrompt = clone(DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU);
-    saveSettings_ACU();
     try {
       await switchStorageMode(mode);
       storageMessage.value = null;
       toast.success(dashboardCopy.storage.switched(mode));
     } catch (error: any) {
       logError_ACU("[ACU-V2] storage mode switch failed", error);
+      // provider 切换失败：回滚 settings 到切换前的模式，避免 storageMode 与运行时 provider 分叉。
+      // 失败时运行时 provider 已由 switchStorageMode 内部回退或保持旧 provider，按 previousMode 重置提示词并保存。
+      const rollbackResult = setStorageMode_ACU(previousMode);
+      if (!rollbackResult.ok) {
+        logError_ACU("[ACU-V2] storage mode rollback failed", rollbackResult.message);
+      }
+      storageMode.value = previousMode;
       storageMessage.value = null;
       toast.error("存储模式切换失败，详情见运行日志");
     } finally {

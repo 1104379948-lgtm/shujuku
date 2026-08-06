@@ -6,7 +6,7 @@
 import { logError_ACU } from '../../../shared/utils';
 import { getUiSurface_ACU } from '../../../shared/ui-surface-registry';
 import { exportCurrentJsonData_ACU, exportTableTemplate_ACU, importTableTemplate_ACU, migrateLegacySummaryVectorIndex_ACU, overrideLatestLayerWithTemplate_ACU, resetAllToDefaults_ACU, resetTableTemplate_ACU } from '../../triggers/data-admin-ui';
-import { importCombinedSettings_ACU } from '../../triggers/admin-ui';
+import { importCombinedSettings_ACU } from '../../triggers/data-admin-ui';
 import { exportCombinedSettings_ACU, handleManualMergeSummary_ACU } from '../../triggers/update-trigger';
 import { clearImportLocalStorage_ACU, clearImportedEntries_ACU, deleteImportedEntries_ACU } from '../../triggers/import-process';
 import { handleTxtImportAndSplit_ACU, handleInjectSplitEntriesFull_ACU, handleInjectSplitEntriesStandard_ACU, handleInjectSplitEntriesSummary_ACU } from '../../components/import-status-ui';

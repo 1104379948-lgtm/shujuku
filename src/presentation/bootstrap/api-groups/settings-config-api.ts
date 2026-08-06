@@ -9,6 +9,7 @@ import { settings_ACU, currentJsonTableData_ACU } from '../../../service/runtime
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
 import { handleManualUpdate_ACU } from '../../triggers/update-process';
 import { saveSettingsAndNotify_ACU } from '../../components/settings-ui-helpers';
+import { setUpdateNumberFields_ACU, type UpdateNumberSettingKey_ACU } from '../../../service/settings/settings-write-service';
 // deleteApiPreset_ACU / loadApiPreset_ACU 不再从公开 API 层直接导入；
 // 内部 UI 仍通过 settings-ui-sync 独立使用，不受公开 API 收敛影响。
 import type { ApiGroupContext } from './callback-api';
@@ -167,20 +168,25 @@ export function createSettingsConfigApi(_ctx: ApiGroupContext): Record<string, F
                     return false;
                 }
 
+                // [V1 收敛] 委托 service 事务式批量写入（含归一化与保存失败回滚）
+                const patch: Partial<Record<UpdateNumberSettingKey_ACU, number>> = {};
                 if (typeof params.autoUpdateThreshold === 'number' && params.autoUpdateThreshold >= 0) {
-                    settings_ACU.autoUpdateThreshold = Math.floor(params.autoUpdateThreshold);
+                    patch.autoUpdateThreshold = Math.floor(params.autoUpdateThreshold);
                 }
                 if (typeof params.autoUpdateFrequency === 'number' && params.autoUpdateFrequency >= 1) {
-                    settings_ACU.autoUpdateFrequency = Math.floor(params.autoUpdateFrequency);
+                    patch.autoUpdateFrequency = Math.floor(params.autoUpdateFrequency);
                 }
                 if (typeof params.updateBatchSize === 'number' && params.updateBatchSize >= 1) {
-                    settings_ACU.updateBatchSize = Math.floor(params.updateBatchSize);
+                    patch.updateBatchSize = Math.floor(params.updateBatchSize);
                 }
                 if (typeof params.autoUpdateTokenThreshold === 'number' && params.autoUpdateTokenThreshold >= 0) {
-                    settings_ACU.autoUpdateTokenThreshold = Math.floor(params.autoUpdateTokenThreshold);
+                    patch.autoUpdateTokenThreshold = Math.floor(params.autoUpdateTokenThreshold);
                 }
-
-                saveSettingsAndNotify_ACU();
+                const result = setUpdateNumberFields_ACU(patch);
+                if (!result.ok) {
+                    logError_ACU('setUpdateConfigParams failed:', result.message || '');
+                    return false;
+                }
                 logDebug_ACU('Update config params saved:', params);
                 return true;
             } catch (e) {
