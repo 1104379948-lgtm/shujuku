@@ -43,7 +43,28 @@ export function buildCustomApiRequestBody_ACU(
   }
 
   const body: Record<string, any> = {
-    messages,
+    // 统一将 messages 的 role 归一为小写（system / user / assistant）。
+    //
+    // 背景：改表助手等伪 role 提示词组（buildPseudoRoleTemplateAssistantPromptSegments_ACU）
+    // 产出的 role 为大写 SYSTEM / USER，而自定义 chat-completions 后端（本函数构建的 body）
+    // 只接受小写 role。此前 messages 被原样透传，导致后端报
+    // `unknown variant SYSTEM`，改表助手 AI 调用失败。
+    //
+    // 本项目既有约定（merge-logic.ts:198 / merge-executor.ts:126 / content-optimization.ts:183）
+    // 均在发送前对 role 做 toLowerCase；此处是自定义 chat-completions 的统一出口，
+    // 对已是小写的输入（merge / plot / 存量路径）为无操作，不破坏既有行为。
+    // tavern / 主 API（generateRaw）路径不经过本函数，不受影响。
+    //
+    // 边界契约：仅当 role 是字符串时才归一为小写；缺失 role、非字符串 role、
+    // 数组/原始值等异常消息一律原样保留，交由后端校验，绝不把缺失 role 静默
+    // 改造成 "undefined" / "null"。
+    messages: Array.isArray(messages)
+        ? messages.map((m) =>
+              m && typeof m === 'object' && !Array.isArray(m) && typeof m.role === 'string'
+                  ? { ...m, role: m.role.toLowerCase() }
+                  : m,
+          )
+        : messages,
     model,
     max_tokens: maxTokens,
     temperature,

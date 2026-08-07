@@ -386,6 +386,89 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body.temperature).toBe(1.0);
     expect(body.top_p).toBe(0.95);
   });
+
+  it('messages 的 role 以大写 SYSTEM/USER 传入时归一为小写', () => {
+    // 回归点：改表助手伪 role 提示词组（buildPseudoRoleTemplateAssistantPromptSegments_ACU）
+    // 产出 role 为大写 SYSTEM / USER，自定义 chat-completions 后端只接受小写 role。
+    // 此前 messages 被原样透传导致 `unknown variant SYSTEM`。
+    const before = [
+      { role: 'SYSTEM', content: '你是改表助手。' },
+      { role: 'assistant', content: '收到。' },
+      { role: 'USER', content: '请改表。' },
+    ];
+    const body = buildCustomApiRequestBody_ACU(
+      before,
+      { url: 'https://api.example.com', model: 'gpt-4' },
+    );
+    expect(body.messages).toEqual([
+      { role: 'system', content: '你是改表助手。' },
+      { role: 'assistant', content: '收到。' },
+      { role: 'user', content: '请改表。' },
+    ]);
+    // 不原地修改调用方原始数组与对象
+    expect(before).toEqual([
+      { role: 'SYSTEM', content: '你是改表助手。' },
+      { role: 'assistant', content: '收到。' },
+      { role: 'USER', content: '请改表。' },
+    ]);
+    expect(body.messages).not.toBe(before);
+    expect(body.messages[0]).not.toBe(before[0]);
+  });
+
+  it('messages 的 role 已为小写时不改变内容，也不改动调用方数组', () => {
+    const original = [{ role: 'user', content: '你好' }];
+    const body = buildCustomApiRequestBody_ACU(original, { url: 'https://api.example.com', model: 'gpt-4' });
+    expect(body.messages).toEqual([{ role: 'user', content: '你好' }]);
+    expect(original).toEqual([{ role: 'user', content: '你好' }]);
+    expect(body.messages).not.toBe(original);
+    expect(body.messages[0]).not.toBe(original[0]);
+  });
+
+  it('缺失或非字符串 role、数组/原始值等异常消息原样保留，不静默改造成 undefined', () => {
+    const input = [
+      { content: '缺 role' },
+      { role: null, content: 'role 为 null' },
+      { role: 123, content: 'role 为数字' },
+      ['x'],
+      'raw string',
+      null,
+    ] as any[];
+    const body = buildCustomApiRequestBody_ACU(input, { url: 'https://api.example.com', model: 'gpt-4' });
+    // 边界契约：仅字符串 role 归一化；缺失/非字符串/数组/原始值原样保留，交由后端校验
+    expect(body.messages).toEqual([
+      { content: '缺 role' },
+      { role: null, content: 'role 为 null' },
+      { role: 123, content: 'role 为数字' },
+      ['x'],
+      'raw string',
+      null,
+    ]);
+  });
+});
+
+// ═══ callAIWithPreset_ACU 自定义模式最终发送 body 层面：role 小写化回归 ═══
+describe('callAIWithPreset_ACU 自定义模式 role 归一化', () => {
+  it('改表助手大写的 SYSTEM/USER 消息在最终 fetch body 中归一为小写', async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+    mockHandleApiResponse.mockResolvedValue('AI 回复');
+    const messages = [
+      { role: 'SYSTEM', content: '你是 visualizer 内的模板改表助手。' },
+      { role: 'USER', content: '以下是全局表格结构：$3' },
+    ];
+    const result = await callAIWithPreset_ACU(messages, '');
+    expect(result).toBe('AI 回复');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const fetchBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(fetchBody.messages).toEqual([
+      { role: 'system', content: '你是 visualizer 内的模板改表助手。' },
+      { role: 'user', content: '以下是全局表格结构：$3' },
+    ]);
+    // 调用方原始数组未被原地修改
+    expect(messages).toEqual([
+      { role: 'SYSTEM', content: '你是 visualizer 内的模板改表助手。' },
+      { role: 'USER', content: '以下是全局表格结构：$3' },
+    ]);
+  });
 });
 
 // ═══ callApi_ACU 温度透传 ═══
