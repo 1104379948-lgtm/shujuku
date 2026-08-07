@@ -141852,7 +141852,7 @@ Expected function or array of functions, received type ${typeof value}.`
     	id: "acu-sqlite-runtime-title",
     	class: "acu-v2-data-mgmt-page__section-title"
     };
-    const _hoisted_24$3 = { class: "acu-v2-data-mgmt-page__meta" };
+    const _hoisted_24$2 = { class: "acu-v2-data-mgmt-page__meta" };
     const _hoisted_25$2 = {
     	class: "acu-v2-data-mgmt-page__runtime-health",
     	"data-testid": "sqlite-runtime-health"
@@ -142295,7 +142295,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					),
     					createBaseVNode(
     						"p",
-    						_hoisted_24$3,
+    						_hoisted_24$2,
     						toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.description),
     						1
     						/* TEXT */
@@ -144519,7 +144519,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_21$2 = { class: "acu-v2-advanced-tools-page__log-actions" };
     const _hoisted_22$2 = { class: "acu-v2-advanced-tools-page__toggles" };
     const _hoisted_23$2 = { class: "acu-v2-advanced-tools-page__hint" };
-    const _hoisted_24$2 = {
+    const _hoisted_24$1 = {
 	ref: "logListRef",
 	class: "acu-v2-advanced-tools-page__log-list",
 	role: "log",
@@ -144911,7 +144911,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				createBaseVNode(
 					"div",
-					_hoisted_24$2,
+					_hoisted_24$1,
 					[!$setup.logFlow.visibleLogs.value.length ? (openBlock(), createElementBlock("div", _hoisted_25$1, " 暂无匹配日志 ")) : createCommentVNode("v-if", true), (openBlock(true), createElementBlock(
 						Fragment,
 						null,
@@ -148615,11 +148615,14 @@ Expected function or array of functions, received type ${typeof value}.`
      * 结构：SYSTEM 指令 / 协议卡 / 全局结构卡 / 当前表卡 + assistant 应答示范，
      * 第 9 张是唯一含 `$1` 的卡（构成 priorTurns 插入锚点），第 10 张是 AI 应答预填充卡（必须为最后一条）。
      *
-     * **预填充卡内容硬约束**：
-     * - 禁止包含 `<templateAssistantDraft>` 字面量（含尖括号）——否则 AI 以为标签已开，只补闭合部分，
-     *   响应无开标签，解析链击穿（extractFallbackDraftJson 会拿内部嵌套 `{` 瞎截取）；
-     * - 禁止包含未闭合的 `{`——同理破坏配对逻辑。
-     * 表述上用「draft 标签」而非字面量，以冒号结尾不换行，引导 AI 直接输出完整标签对。
+     * **标签字面量约束的位置区分（重要，勿再误扩大）**：
+     * - 第 1 张 SYSTEM 指令卡：**允许且必须**包含 `<templateAssistantDraft>` 字面量。它只是格式规范告知，
+     *   不构成预填充；缺失字面量会让 AI 自行猜测标签名（实测曾输出 `<draft>`，导致解析链兜底截取错误片段，
+     *   误报「protocolVersion 必须为 1 或 2」假错误）。
+     * - 第 10 张预填充卡：**禁止**包含 `<templateAssistantDraft>` 字面量（含尖括号）——否则 AI 以为标签已开，
+     *   只补闭合部分，响应无开标签，解析链击穿（extractFallbackDraftJson 会拿内部嵌套 `{` 瞎截取）；
+     * - 预填充卡同时禁止包含未闭合的 `{`——同理破坏配对逻辑。
+     * 预填充卡表述上用「draft 标签」而非字面量，以冒号结尾不换行，引导 AI 直接输出完整标签对。
      *
      * 全模板不含世界书占位符。
      */
@@ -148627,7 +148630,15 @@ Expected function or array of functions, received type ${typeof value}.`
         return [
             {
                 role: 'SYSTEM',
-                content: '你是 visualizer 内的模板改表助手。你只能输出一个被 draft 标签包裹的 JSON 对象，不输出解释文本。严格使用 protocolVersion=2、mode="modify_current_template_incremental"、atomic=true。',
+                content: [
+                    '你是 visualizer 内的模板改表助手。',
+                    '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
+                    '严格使用 protocolVersion=2、mode="modify_current_template_incremental"、atomic=true。',
+                    '顶层 JSON 必须包含且只包含以下 9 个键：protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、operations。',
+                    'baseFingerprint 与 selectedSheetKey 必须原样复制输入数据中给出的值，不得自造。',
+                    '每个 operations[i] 必须使用 op 字段表示操作名；禁止使用 type、operation、action 等别名。',
+                    '输入数据中 constraints 里的字段（如 requestIdRequired）是给你看的约束说明，不是 draft 的字段，禁止出现在输出 JSON 里。',
+                ].join('\n'),
                 deletable: false,
             },
             {
@@ -148637,7 +148648,15 @@ Expected function or array of functions, received type ${typeof value}.`
             },
             {
                 role: 'USER',
-                content: `以下是表格结构协议与规则，必须严格遵守：${TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU}；语法参考文档：${TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU}`,
+                content: [
+                    `以下是表格结构协议与规则，必须严格遵守：${TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU}；语法参考文档：${TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU}`,
+                    '操作白名单（只允许以下 11 种操作名，禁止其他）：add_sheet、rename_sheet、delete_sheet、move_sheet、patch_sheet_source_data、patch_sheet_update_config、patch_sheet_export_config、patch_sheet_content、patch_sheet_schema、patch_sheet_locks、patch_global_injection_config。',
+                    '不存在 patch_sheet_ddl 操作；DDL 只能通过 patch_sheet_schema.patch.ddl 修改。',
+                    'add_sheet 必须同时提供非空 sheetName 和至少一个 headers 项；不要生成 sheetKey，本地会自动生成；应尽量同时提供 sourceData 的 note、initNode、insertNode、updateNode、deleteNode 五段。',
+                    'add_sheet.sourceData 与 patch_sheet_source_data.patch 只允许 note、initNode、insertNode、updateNode、deleteNode 五个字段；禁止出现 ddl、sql、schema、createTable 等字段。',
+                    '默认不主动输出 patch_sheet_schema.ddl；除非用户明确要求 DDL、字段类型、约束或 SQLite 建表语句。中文 headers 必须使用英文/ASCII 物理列名并配 `-- 中文表头` 注释按原顺序一一对应；第一列必须 row_id INTEGER PRIMARY KEY 并保留 `-- 行号` 注释。',
+                    '如果需求信息不足、字段缺失、或当前协议无法安全表达，仍然必须返回合法 draft：summary 简述原因、warnings 写明原因、operations 输出空数组；不要输出追问文本。',
+                ].join('\n'),
                 deletable: true,
             },
             {
@@ -150312,16 +150331,80 @@ Expected function or array of functions, received type ${typeof value}.`
         const anchorKey = String(currentSheetKey || '').trim();
         return turns
             .filter((turn) => turn.type === 'final' && (!anchorKey || getResultAnchorSheetKey(turn.result) === anchorKey))
-            .map(turn => ({
-            user: turn.userRequest,
-            assistant: String(turn.result.aiRawText || '').trim() || undefined,
-        }));
+            .map(turn => {
+            const rawText = String(turn.result.aiRawText || '').trim()
+                || String(turn.result.session?.lastFailure?.rawText || '').trim()
+                || undefined;
+            const failureMessage = turn.result.session?.lastFailure?.message;
+            const user = failureMessage
+                ? `${turn.userRequest}\n\n（上一轮输出未通过本地校验：${failureMessage}）`
+                : turn.userRequest;
+            return {
+                user,
+                assistant: rawText,
+            };
+        });
     }
     function getResultAnchorSheetKey(result) {
         return String(result?.draft?.selectedSheetKey || '').trim();
     }
     function getRoundAnchorSheetKey(round) {
         return String(round?.draft?.selectedSheetKey || '').trim();
+    }
+    /**
+     * 把一张 turn 提炼成「可应用到编辑器的载荷」。
+     *
+     * - round：取 `perRoundCompileResult`（累计候选：原始 + 前 N 轮），anchor 用 round draft 的 selectedSheetKey，
+     *   baseline 用会话落盘时记录的 `turn.baselineFingerprint`（T10）。
+     * - final：取 `compileResult`，baseline 优先 `getTemplateAssistantApplyBaselineFingerprint_ACU(result)`，
+     *   为空时回退 `turn.baselineFingerprint`（与 applyLatestDraft 语义一致）。
+     * - user / error：无载荷，返回 null。
+     * - draft.operations 为空的 turn 返回 null（没有可应用的变更）。
+     */
+    function getTurnApplyPayload(turn) {
+        const anchorSheetKey = turn.anchorSheetKey;
+        if (turn.type === 'round') {
+            const compileResult = turn.roundData.perRoundCompileResult;
+            const draft = turn.roundData.draft;
+            if (!compileResult || !draft || !asList(draft.operations).length)
+                return null;
+            const candidateData = compileResult.candidateData && typeof compileResult.candidateData === 'object'
+                ? compileResult.candidateData
+                : null;
+            if (!candidateData || !Object.keys(candidateData).length)
+                return null;
+            return {
+                candidateData,
+                orderedSheetKeys: Array.isArray(compileResult.orderedSheetKeys) ? [...compileResult.orderedSheetKeys] : [],
+                deletedSheetKeys: asList(compileResult.deletedSheetKeys).map((item) => String(item)),
+                lockChanges: asList(compileResult.lockChanges),
+                focusSheetKey: compileResult.focusSheetKey || null,
+                anchorSheetKey,
+                baselineFingerprint: String(turn.baselineFingerprint || '').trim(),
+            };
+        }
+        if (turn.type === 'final') {
+            const compileResult = turn.result.compileResult;
+            const draft = turn.result.draft;
+            if (!compileResult || !draft || !asList(draft.operations).length)
+                return null;
+            const candidateData = compileResult.candidateData && typeof compileResult.candidateData === 'object'
+                ? compileResult.candidateData
+                : null;
+            if (!candidateData || !Object.keys(candidateData).length)
+                return null;
+            const baselineFingerprint = String(getTemplateAssistantApplyBaselineFingerprint_ACU(turn.result) || turn.baselineFingerprint || '').trim();
+            return {
+                candidateData,
+                orderedSheetKeys: Array.isArray(compileResult.orderedSheetKeys) ? [...compileResult.orderedSheetKeys] : [],
+                deletedSheetKeys: asList(compileResult.deletedSheetKeys).map((item) => String(item)),
+                lockChanges: asList(compileResult.lockChanges),
+                focusSheetKey: compileResult.focusSheetKey || null,
+                anchorSheetKey,
+                baselineFingerprint,
+            };
+        }
+        return null;
     }
     function useVisualizerAssistant() {
         const visualizer = useVisualizerStore();
@@ -150367,7 +150450,19 @@ Expected function or array of functions, received type ${typeof value}.`
         });
         const diffGroups = computed(() => buildVisualizerAssistantDiffGroups(latestResult.value, getResultAnchorSheetKey(latestResult.value) || visualizer.currentSheetKey));
         const highRiskItems = computed(() => buildVisualizerAssistantHighRiskItems(latestResult.value, getResultAnchorSheetKey(latestResult.value) || visualizer.currentSheetKey));
-        const allHighRiskConfirmed = computed(() => highRiskItems.value.every((_, index) => riskConfirmations.value[String(index)] === true));
+        // T12：风险确认键改为 turn 级（turnId:index）。allHighRiskConfirmed 保留导出但语义
+        // 委托到「最后一张可应用 final turn」的 turn 级确认，与 applyLatestDraft 的委托目标一致。
+        const allHighRiskConfirmed = computed(() => {
+            const result = latestResult.value;
+            if (!result)
+                return false;
+            const latestRequestId = String(result.draft?.requestId || '').trim();
+            const target = turns.value
+                .filter((turn) => turn.type === 'final')
+                .filter(turn => turn.result === result || (latestRequestId && String(turn.result.draft?.requestId || '').trim() === latestRequestId))
+                .pop();
+            return target ? isTurnAllHighRiskConfirmed(target) : false;
+        });
         const isLatestDraftForCurrentSheet = computed(() => {
             const result = latestResult.value;
             if (!result)
@@ -150498,8 +150593,14 @@ Expected function or array of functions, received type ${typeof value}.`
         function getTurnRawText(turn) {
             if (turn.type === 'round')
                 return String(turn.roundData.aiRawText || '');
-            if (turn.type === 'final')
-                return String(turn.result.aiRawText || '');
+            if (turn.type === 'final') {
+                const raw = String(turn.result.aiRawText || '').trim();
+                if (raw)
+                    return raw;
+                return String(turn.result.session?.lastFailure?.rawText || '');
+            }
+            if (turn.type === 'error')
+                return String(turn.rawText || '');
             return '';
         }
         function getTurnValidationError(turn) {
@@ -150526,13 +150627,14 @@ Expected function or array of functions, received type ${typeof value}.`
         function appendTurn(turn) {
             visualizer.assistantTurns = [...visualizer.assistantTurns, turn];
         }
-        function appendErrorTurn(message, anchorSheetKey) {
+        function appendErrorTurn(message, anchorSheetKey, rawText) {
             appendTurn({
                 id: createTurnId('error'),
                 type: 'error',
                 errorMessage: message,
                 anchorSheetKey,
                 createdAt: Date.now(),
+                rawText: rawText ? String(rawText) : undefined,
             });
         }
         async function run() {
@@ -150547,6 +150649,7 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             const requestSheetKey = visualizer.currentSheetKey;
             const createdAt = Date.now();
+            const sessionBaselineFingerprint = buildTemplateAssistantFingerprint_ACU(visualizer.tempData || {});
             guardController = createTemplateAssistantSessionGuard_ACU();
             visualizer.assistantIsRunning = true;
             visualizer.assistantErrorMessage = '';
@@ -150582,12 +150685,13 @@ Expected function or array of functions, received type ${typeof value}.`
                             roundData: progress.round,
                             anchorSheetKey: getRoundAnchorSheetKey(progress.round) || requestSheetKey,
                             createdAt: Date.now(),
+                            baselineFingerprint: sessionBaselineFingerprint,
                         });
                     },
                 });
                 if (requestSheetKey !== visualizer.currentSheetKey) {
                     visualizer.assistantErrorMessage = '当前选中表已变化，请重新生成 AI 草稿。';
-                    appendErrorTurn(visualizer.assistantErrorMessage, requestSheetKey);
+                    appendErrorTurn(visualizer.assistantErrorMessage, requestSheetKey, result.session?.lastFailure?.rawText);
                     toastStore.warning(visualizer.assistantErrorMessage, { muteable: false });
                     return false;
                 }
@@ -150600,6 +150704,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     result,
                     anchorSheetKey: getResultAnchorSheetKey(result) || requestSheetKey,
                     createdAt: Date.now(),
+                    baselineFingerprint: sessionBaselineFingerprint,
                 });
                 resetRiskConfirmations();
                 userRequest.value = '';
@@ -150608,13 +150713,13 @@ Expected function or array of functions, received type ${typeof value}.`
             catch (error) {
                 if (error instanceof TemplateAssistantSessionStoppedError_ACU) {
                     visualizer.assistantErrorMessage = error.message;
-                    appendErrorTurn(error.message, requestSheetKey);
+                    appendErrorTurn(error.message, requestSheetKey, error?.failureRawText);
                     toastStore.warning(error.message, { muteable: false });
                 }
                 else {
                     const message = error instanceof Error ? error.message : 'AI 改表助手执行失败。';
                     visualizer.assistantErrorMessage = message;
-                    appendErrorTurn(message, requestSheetKey);
+                    appendErrorTurn(message, requestSheetKey, error?.failureRawText);
                     logWarn_ACU('[ACU-V2 Visualizer Assistant] run failed:', error);
                     toastStore.error(message, { muteable: false });
                 }
@@ -150627,44 +150732,36 @@ Expected function or array of functions, received type ${typeof value}.`
         function cancel() {
             guardController.cancel();
         }
-        function setRiskConfirmation(index, value) {
-            visualizer.assistantRiskConfirmations[String(index)] = value;
+        function setRiskConfirmation(turnId, index, value) {
+            visualizer.assistantRiskConfirmations[`${turnId}:${index}`] = value;
         }
-        function applyLatestDraft() {
-            const result = latestResult.value;
-            if (!result)
-                return false;
-            const anchorKey = getResultAnchorSheetKey(result);
-            if (!anchorKey || anchorKey !== visualizer.currentSheetKey) {
-                toastStore.warning('这份 AI 草稿属于其他锚点表，请切回原表或重新生成。', { muteable: false });
-                return false;
+        function getTurnHighRiskItems(turn) {
+            if (turn.type === 'round') {
+                return buildVisualizerAssistantHighRiskItems({ compileResult: turn.roundData.perRoundCompileResult }, getRoundAnchorSheetKey(turn.roundData) || turn.anchorSheetKey);
             }
-            if (!allHighRiskConfirmed.value) {
-                toastStore.warning('请先确认所有高风险项后再应用。', { muteable: false });
-                return false;
+            if (turn.type === 'final') {
+                return buildVisualizerAssistantHighRiskItems(turn.result, getResultAnchorSheetKey(turn.result) || turn.anchorSheetKey);
             }
-            const baselineFingerprint = getTemplateAssistantApplyBaselineFingerprint_ACU(result);
-            const currentFingerprint = buildTemplateAssistantFingerprint_ACU(visualizer.tempData || {});
-            if (!baselineFingerprint || currentFingerprint !== baselineFingerprint) {
-                toastStore.warning('当前结构已变化，AI 草稿已失效，请重新生成。', { muteable: false });
-                return false;
-            }
+            return [];
+        }
+        function isTurnAllHighRiskConfirmed(turn) {
+            return getTurnHighRiskItems(turn).every((_, index) => visualizer.assistantRiskConfirmations[`${turn.id}:${index}`] === true);
+        }
+        function applyCompileResultToVisualizer(payload) {
             assertVisualizerDataOpsEditable_ACU(visualizer);
-            visualizer.tempData = cloneData(result.compileResult.candidateData || {});
-            visualizer.sheetOrder = Array.isArray(result.compileResult.orderedSheetKeys)
-                ? [...result.compileResult.orderedSheetKeys]
-                : [];
+            visualizer.tempData = cloneData(payload.candidateData || {});
+            visualizer.sheetOrder = Array.isArray(payload.orderedSheetKeys) ? [...payload.orderedSheetKeys] : [];
             applySheetOrderNumbers_ACU(visualizer.tempData, visualizer.sheetOrder);
             const deleted = new Set(visualizer.deletedSheetKeys || []);
-            asList(result.compileResult.deletedSheetKeys).forEach(key => deleted.add(String(key)));
+            asList(payload.deletedSheetKeys).forEach(key => deleted.add(String(key)));
             visualizer.deletedSheetKeys = Array.from(deleted);
-            visualizer.queueLockChanges(asList(result.compileResult.lockChanges));
+            visualizer.queueLockChanges(asList(payload.lockChanges));
             const previousSheetKey = visualizer.currentSheetKey;
             if (previousSheetKey && visualizer.tempData?.[previousSheetKey]) {
                 visualizer.currentSheetKey = previousSheetKey;
             }
-            else if (result.compileResult.focusSheetKey && visualizer.tempData?.[result.compileResult.focusSheetKey]) {
-                visualizer.currentSheetKey = result.compileResult.focusSheetKey;
+            else if (payload.focusSheetKey && visualizer.tempData?.[payload.focusSheetKey]) {
+                visualizer.currentSheetKey = payload.focusSheetKey;
             }
             else {
                 visualizer.currentSheetKey = visualizer.sheetOrder[0] || null;
@@ -150674,6 +150771,67 @@ Expected function or array of functions, received type ${typeof value}.`
             visualizer.setDirty(true);
             toastStore.success('AI 草稿已应用到编辑器，保存前不会写回聊天。', { muteable: false });
             return true;
+        }
+        function getTurnApplyBlockReason(turn) {
+            if (isRunning.value)
+                return '会话运行中，暂不能应用。';
+            if (visualizer.isSaving)
+                return '保存进行中，暂不能应用。';
+            if (!getTurnApplyPayload(turn))
+                return '这张卡片没有可应用的变更。';
+            if (!isTurnAllHighRiskConfirmed(turn))
+                return '请先确认该卡片列出的所有高风险项。';
+            const payload = getTurnApplyPayload(turn);
+            if (payload && payload.anchorSheetKey && payload.anchorSheetKey !== visualizer.currentSheetKey) {
+                return '这份草稿属于其他锚点表，请切回原表或重新生成。';
+            }
+            if (payload && !payload.baselineFingerprint)
+                return '缺少基线指纹，无法校验当前结构，请重新生成。';
+            const currentFingerprint = buildTemplateAssistantFingerprint_ACU(visualizer.tempData || {});
+            if (payload && payload.baselineFingerprint !== currentFingerprint) {
+                return '当前结构已变化，该草稿已失效，请重新生成。';
+            }
+            return '';
+        }
+        function canApplyTurn(turn) {
+            return !isRunning.value
+                && !!getTurnApplyPayload(turn)
+                && getTurnApplyBlockReason(turn) === '';
+        }
+        function applyTurnDraft(turn) {
+            const blockReason = getTurnApplyBlockReason(turn);
+            if (blockReason) {
+                // saving 是数据写保护硬闸门：与 applyCompileResultToVisualizer 内
+                // assertVisualizerDataOpsEditable_ACU 的 throw 语义保持一致（既有测试断言 throw），
+                // 其余原因走 toast 返回 false。
+                if (visualizer.isSaving) {
+                    assertVisualizerDataOpsEditable_ACU(visualizer);
+                }
+                toastStore.warning(blockReason, { muteable: false });
+                return false;
+            }
+            const payload = getTurnApplyPayload(turn);
+            if (!payload) {
+                toastStore.warning('这张卡片没有可应用的变更。', { muteable: false });
+                return false;
+            }
+            return applyCompileResultToVisualizer(payload);
+        }
+        function applyLatestDraft() {
+            const result = latestResult.value;
+            if (!result)
+                return false;
+            const latestRequestId = String(result.draft?.requestId || '').trim();
+            const finalTurns = turns.value
+                .filter((turn) => turn.type === 'final')
+                .filter(turn =>
+            // 优先按对象引用（同一次 run() 内）；反序列化/重建后用 requestId 内容匹配
+            turn.result === result
+                || (latestRequestId && String(turn.result.draft?.requestId || '').trim() === latestRequestId));
+            const target = finalTurns[finalTurns.length - 1];
+            if (!target)
+                return false;
+            return applyTurnDraft(target);
         }
         function syncApiPresetFromCurrentSheet() {
             visualizer.assistantTableApiPreset = resolveEffectiveTableApiPreset(visualizer);
@@ -150743,6 +150901,12 @@ Expected function or array of functions, received type ${typeof value}.`
             cancel,
             setRiskConfirmation,
             applyLatestDraft,
+            getTurnHighRiskItems,
+            isTurnAllHighRiskConfirmed,
+            getTurnApplyPayload,
+            getTurnApplyBlockReason,
+            canApplyTurn,
+            applyTurnDraft,
             syncApiPresetFromCurrentSheet,
             runWithRepairFeedback,
             getTurnRawText,
@@ -150761,29 +150925,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const transcriptExpanded = ref(true);
             const draftExpanded = ref(true);
             const promptDrawerOpen = ref(false);
-            const rawOutputExpanded = ref(false);
             const repairFeedback = ref('');
-            const FAILURE_KIND_LABELS = {
-                parse: '解析失败',
-                validate: '校验失败',
-                fingerprint: '结构指纹不一致',
-                preflight: '迁移预检失败',
-                unknown: '执行失败',
-            };
-            function failureKindLabel(kind) {
-                return FAILURE_KIND_LABELS[kind] || kind || '执行失败';
-            }
-            const canApplyReason = computed(() => {
-                if (assistant.isRunning.value)
-                    return '';
-                if (!assistant.latestResult.value)
-                    return '还没有可应用的草稿。';
-                if (!assistant.allHighRiskConfirmed.value)
-                    return '请先确认所有高风险项。';
-                if (!assistant.isLatestDraftForCurrentSheet.value)
-                    return '这份草稿属于其他锚点表，请切回原表或重新生成。';
-                return '';
-            });
             function submitRepair() {
                 assistant.runWithRepairFeedback(repairFeedback.value);
                 repairFeedback.value = '';
@@ -150796,64 +150938,69 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (value)
                     draftExpanded.value = true;
             });
-            const __returned__ = { assistant, transcriptExpanded, draftExpanded, promptDrawerOpen, rawOutputExpanded, repairFeedback, FAILURE_KIND_LABELS, failureKindLabel, canApplyReason, submitRepair, updateMaxRounds, AssistantPromptDrawer, AcuBadge, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInfoBanner, AcuInput, AcuPanel, AcuSelect, AcuTextarea };
+            const __returned__ = { assistant, transcriptExpanded, draftExpanded, promptDrawerOpen, repairFeedback, submitRepair, updateMaxRounds, AssistantPromptDrawer, AcuBadge, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInfoBanner, AcuInput, AcuPanel, AcuSelect, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-viz-assistant[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  gap: 12px;\n}\n.acu-viz-assistant__controls[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);\n  gap: 10px;\n}\n.acu-viz-assistant__disclosure[data-v-23a97577] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__disclosure[data-v-23a97577] .acu-disclosure-group__header {\n  min-height: 38px;\n  padding: 8px 12px;\n}\n[data-v-23a97577] .acu-viz-assistant__disclosure-body {\n  padding: 0;\n}\n.acu-viz-assistant__folded-panel[data-v-23a97577] {\n  border: 0;\n  border-radius: 0;\n}\n.acu-viz-assistant__action-row[data-v-23a97577],\n.acu-viz-assistant__summary[data-v-23a97577],\n.acu-viz-assistant__running[data-v-23a97577],\n.acu-viz-assistant__turn-head[data-v-23a97577] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  gap: 8px;\n}\n.acu-viz-assistant__repair[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__apply-reason[data-v-23a97577] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.4;\n}\n.acu-viz-assistant__action-row[data-v-23a97577],\n.acu-viz-assistant__summary[data-v-23a97577] {\n  flex-wrap: wrap;\n}\n.acu-viz-assistant__failure-msg[data-v-23a97577] {\n  margin: 4px 0 0;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  overflow-wrap: anywhere;\n}\n.acu-viz-assistant__raw-disclosure[data-v-23a97577] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__raw-text[data-v-23a97577] {\n  margin: 0;\n  max-height: 260px;\n  overflow: auto;\n  padding: 10px;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n  font-family: var(--acu-font-mono);\n  font-size: 11px;\n  line-height: 1.5;\n  color: var(--acu-text-2);\n  background: var(--acu-bg-1);\n  border-radius: var(--acu-radius-sm);\n}\n.acu-viz-assistant__running[data-v-23a97577] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-viz-assistant__empty[data-v-23a97577] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__turns[data-v-23a97577],\n.acu-viz-assistant__risk-list[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__turn[data-v-23a97577],\n.acu-viz-assistant__risk-item[data-v-23a97577],\n.acu-viz-assistant__diff-group[data-v-23a97577] {\n  min-width: 0;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__turn strong[data-v-23a97577],\n.acu-viz-assistant__diff-group h4[data-v-23a97577],\n.acu-viz-assistant__risk-list h4[data-v-23a97577] {\n  min-width: 0;\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.35;\n}\n.acu-viz-assistant__turn[data-v-23a97577] {\n  display: grid;\n  gap: 6px;\n}\n.acu-viz-assistant__turn--user[data-v-23a97577] {\n  box-shadow: inset 3px 0 0 var(--acu-accent);\n}\n.acu-viz-assistant__turn--round[data-v-23a97577] {\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__turn--error[data-v-23a97577] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__turn-head[data-v-23a97577] {\n  justify-content: space-between;\n}\n.acu-viz-assistant__turn-head strong[data-v-23a97577] {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-viz-assistant__turn p[data-v-23a97577] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__diff-grid[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-viz-assistant__turn-diff[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group[data-v-23a97577] {\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group--warning[data-v-23a97577] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__diff-group ul[data-v-23a97577],\n.acu-viz-assistant__inline-list[data-v-23a97577] {\n  margin: 0;\n  padding-left: 18px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__risk-list[data-v-23a97577] {\n  padding-top: 10px;\n  border-top: 1px solid var(--acu-border-2);\n}\n@media (max-width: 860px) {\n.acu-viz-assistant__controls[data-v-23a97577],\n  .acu-viz-assistant__diff-grid[data-v-23a97577] {\n    grid-template-columns: 1fr;\n}\n[data-v-23a97577] .acu-viz-assistant__disclosure-body {\n    max-height: min(68vh, 620px);\n    overflow-y: auto;\n}\n}\n@media (max-width: 767px) {\n.acu-viz-assistant__action-row[data-v-23a97577] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-viz-assistant__action-row[data-v-23a97577] .acu-btn {\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-viz-assistant__turn-head[data-v-23a97577] {\n    align-items: flex-start;\n    flex-direction: column;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerAssistantPanel.vue#style-0-23a97577");
-    var VisualizerAssistantPanel_vue_vue_type_style_index_0_scoped_23a97577_lang = null;
+    injectSfcStyle("\n.acu-viz-assistant[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  gap: 12px;\n}\n.acu-viz-assistant__controls[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);\n  gap: 10px;\n}\n.acu-viz-assistant__disclosure[data-v-009d88ce] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__disclosure[data-v-009d88ce] .acu-disclosure-group__header {\n  min-height: 38px;\n  padding: 8px 12px;\n}\n[data-v-009d88ce] .acu-viz-assistant__disclosure-body {\n  padding: 0;\n}\n.acu-viz-assistant__folded-panel[data-v-009d88ce] {\n  border: 0;\n  border-radius: 0;\n}\n.acu-viz-assistant__action-row[data-v-009d88ce],\n.acu-viz-assistant__summary[data-v-009d88ce],\n.acu-viz-assistant__running[data-v-009d88ce],\n.acu-viz-assistant__turn-head[data-v-009d88ce] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  gap: 8px;\n}\n.acu-viz-assistant__repair[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__apply-reason[data-v-009d88ce] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.4;\n}\n.acu-viz-assistant__action-row[data-v-009d88ce],\n.acu-viz-assistant__summary[data-v-009d88ce] {\n  flex-wrap: wrap;\n}\n.acu-viz-assistant__failure-msg[data-v-009d88ce] {\n  margin: 4px 0 0;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  overflow-wrap: anywhere;\n}\n.acu-viz-assistant__raw-disclosure[data-v-009d88ce] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__raw-text[data-v-009d88ce] {\n  margin: 0;\n  max-height: 260px;\n  overflow: auto;\n  padding: 10px;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n  font-family: var(--acu-font-mono);\n  font-size: 11px;\n  line-height: 1.5;\n  color: var(--acu-text-2);\n  background: var(--acu-bg-1);\n  border-radius: var(--acu-radius-sm);\n}\n.acu-viz-assistant__running[data-v-009d88ce] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-viz-assistant__empty[data-v-009d88ce] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__turns[data-v-009d88ce],\n.acu-viz-assistant__risk-list[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__turn[data-v-009d88ce],\n.acu-viz-assistant__risk-item[data-v-009d88ce],\n.acu-viz-assistant__diff-group[data-v-009d88ce] {\n  min-width: 0;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__turn strong[data-v-009d88ce],\n.acu-viz-assistant__diff-group h4[data-v-009d88ce],\n.acu-viz-assistant__risk-list h4[data-v-009d88ce] {\n  min-width: 0;\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.35;\n}\n.acu-viz-assistant__turn[data-v-009d88ce] {\n  display: grid;\n  gap: 6px;\n}\n.acu-viz-assistant__turn--user[data-v-009d88ce] {\n  box-shadow: inset 3px 0 0 var(--acu-accent);\n}\n.acu-viz-assistant__turn--round[data-v-009d88ce] {\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__turn--error[data-v-009d88ce] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__turn-head[data-v-009d88ce] {\n  justify-content: space-between;\n}\n.acu-viz-assistant__turn-head strong[data-v-009d88ce] {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-viz-assistant__turn p[data-v-009d88ce] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__diff-grid[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-viz-assistant__turn-diff[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group[data-v-009d88ce] {\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group--warning[data-v-009d88ce] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__diff-group ul[data-v-009d88ce],\n.acu-viz-assistant__inline-list[data-v-009d88ce] {\n  margin: 0;\n  padding-left: 18px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__risk-list[data-v-009d88ce] {\n  padding-top: 10px;\n  border-top: 1px solid var(--acu-border-2);\n}\n@media (max-width: 860px) {\n.acu-viz-assistant__controls[data-v-009d88ce],\n  .acu-viz-assistant__diff-grid[data-v-009d88ce] {\n    grid-template-columns: 1fr;\n}\n[data-v-009d88ce] .acu-viz-assistant__disclosure-body {\n    max-height: min(68vh, 620px);\n    overflow-y: auto;\n}\n}\n@media (max-width: 767px) {\n.acu-viz-assistant__action-row[data-v-009d88ce] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-viz-assistant__action-row[data-v-009d88ce] .acu-btn {\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-viz-assistant__turn-head[data-v-009d88ce] {\n    align-items: flex-start;\n    flex-direction: column;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerAssistantPanel.vue#style-0-009d88ce");
+    var VisualizerAssistantPanel_vue_vue_type_style_index_0_scoped_009d88ce_lang = null;
 
     const _hoisted_1$7 = {
 	class: "acu-viz-assistant",
 	"data-acu-visualizer-assistant": ""
     };
     const _hoisted_2$6 = { class: "acu-viz-assistant__controls" };
-    const _hoisted_3$6 = { class: "acu-viz-assistant__failure-msg" };
-    const _hoisted_4$5 = { class: "acu-viz-assistant__raw-text" };
-    const _hoisted_5$5 = {
-	key: 2,
+    const _hoisted_3$6 = {
+	key: 0,
 	class: "acu-viz-assistant__repair"
     };
-    const _hoisted_6$4 = { class: "acu-viz-assistant__action-row" };
-    const _hoisted_7$3 = {
-	key: 2,
-	class: "acu-viz-assistant__apply-reason"
-    };
-    const _hoisted_8$3 = {
+    const _hoisted_4$5 = { class: "acu-viz-assistant__action-row" };
+    const _hoisted_5$5 = {
 	key: 0,
 	class: "acu-viz-assistant__running"
     };
-    const _hoisted_9$3 = {
+    const _hoisted_6$4 = {
 	key: 1,
 	class: "acu-viz-assistant__empty"
     };
-    const _hoisted_10$3 = { class: "acu-viz-assistant__turns" };
-    const _hoisted_11$3 = { class: "acu-viz-assistant__turn-head" };
-    const _hoisted_12$3 = { key: 0 };
-    const _hoisted_13$3 = { key: 1 };
-    const _hoisted_14$3 = { key: 2 };
-    const _hoisted_15$3 = { key: 3 };
-    const _hoisted_16$3 = { class: "acu-viz-assistant__raw-text" };
-    const _hoisted_17$2 = { class: "acu-viz-assistant__inline-list" };
-    const _hoisted_18$2 = {
+    const _hoisted_7$3 = { class: "acu-viz-assistant__turns" };
+    const _hoisted_8$3 = { class: "acu-viz-assistant__turn-head" };
+    const _hoisted_9$3 = { key: 0 };
+    const _hoisted_10$3 = { key: 1 };
+    const _hoisted_11$3 = { key: 2 };
+    const _hoisted_12$3 = { key: 3 };
+    const _hoisted_13$3 = { class: "acu-viz-assistant__raw-text" };
+    const _hoisted_14$3 = { class: "acu-viz-assistant__inline-list" };
+    const _hoisted_15$3 = {
 	key: 3,
 	class: "acu-viz-assistant__turn-diff"
     };
-    const _hoisted_19$2 = { class: "acu-viz-assistant__summary" };
-    const _hoisted_20$1 = { class: "acu-viz-assistant__inline-list" };
-    const _hoisted_21$1 = {
+    const _hoisted_16$3 = {
+	key: 4,
+	class: "acu-viz-assistant__turn-apply"
+    };
+    const _hoisted_17$2 = {
+	key: 0,
+	class: "acu-viz-assistant__turn-risk"
+    };
+    const _hoisted_18$2 = {
+	key: 2,
+	class: "acu-viz-assistant__apply-reason"
+    };
+    const _hoisted_19$2 = {
+	key: 3,
+	class: "acu-viz-assistant__apply-reason"
+    };
+    const _hoisted_20$1 = { class: "acu-viz-assistant__summary" };
+    const _hoisted_21$1 = { class: "acu-viz-assistant__inline-list" };
+    const _hoisted_22$1 = {
 	key: 1,
 	class: "acu-viz-assistant__diff-grid"
     };
-    const _hoisted_22$1 = {
+    const _hoisted_23$1 = {
 	key: 2,
-	class: "acu-viz-assistant__empty"
-    };
-    const _hoisted_23$1 = { class: "acu-viz-assistant__risk-list" };
-    const _hoisted_24$1 = {
-	key: 0,
 	class: "acu-viz-assistant__empty"
     };
     function _sfc_render$7(_ctx, _cache, $props, $setup, $data, $options) {
@@ -150866,7 +151013,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				key: 0,
 				variant: "warning"
 			}, {
-				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
+				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
 					"运行中",
 					-1
 					/* CACHED */
@@ -150876,7 +151023,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				key: 1,
 				variant: "accent"
 			}, {
-				default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
+				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
 					"有草稿",
 					-1
 					/* CACHED */
@@ -150886,7 +151033,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				key: 2,
 				variant: "neutral"
 			}, {
-				default: withCtx(() => [..._cache[14] || (_cache[14] = [createTextVNode(
+				default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
 					"待输入",
 					-1
 					/* CACHED */
@@ -150914,7 +151061,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: $setup.assistant.isRunning.value,
 						onClick: _cache[1] || (_cache[1] = ($event) => $setup.promptDrawerOpen = true)
 					}, {
-						default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
+						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
 							"i",
 							{ class: "fa-solid fa-pen-to-square" },
 							null,
@@ -150950,46 +151097,9 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value", "disabled"])]),
 					_: 1
 				}),
-				$setup.assistant.lastFailure.value ? (openBlock(), createBlock($setup["AcuInfoBanner"], {
-					key: 0,
-					tone: "warning"
-				}, {
-					default: withCtx(() => [createBaseVNode(
-						"strong",
-						null,
-						toDisplayString($setup.failureKindLabel($setup.assistant.lastFailure.value.kind)),
-						1
-						/* TEXT */
-					), createBaseVNode(
-						"p",
-						_hoisted_3$6,
-						toDisplayString($setup.assistant.lastFailure.value.message),
-						1
-						/* TEXT */
-					)]),
-					_: 1
-				})) : createCommentVNode("v-if", true),
-				$setup.assistant.lastFailure.value && $setup.assistant.lastFailure.value.rawText ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
-					key: 1,
-					label: "查看 AI 原始输出",
-					expanded: $setup.rawOutputExpanded,
-					"body-id": "acu-viz-assistant-raw-failure",
-					"body-mode": "show",
-					"root-class": "acu-viz-assistant__raw-disclosure",
-					onToggle: _cache[3] || (_cache[3] = ($event) => $setup.rawOutputExpanded = !$setup.rawOutputExpanded)
-				}, {
-					default: withCtx(() => [createBaseVNode(
-						"pre",
-						_hoisted_4$5,
-						toDisplayString($setup.assistant.lastFailure.value.rawText),
-						1
-						/* TEXT */
-					)]),
-					_: 1
-				}, 8, ["expanded"])) : createCommentVNode("v-if", true),
-				$setup.assistant.lastFailure.value ? (openBlock(), createElementBlock("div", _hoisted_5$5, [createVNode($setup["AcuTextarea"], {
+				$setup.assistant.lastFailure.value ? (openBlock(), createElementBlock("div", _hoisted_3$6, [createVNode($setup["AcuTextarea"], {
 					modelValue: $setup.repairFeedback,
-					"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.repairFeedback = $event),
+					"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.repairFeedback = $event),
 					rows: 2,
 					placeholder: "说明你希望 AI 如何修正（可选），例如：不要输出解释文字，直接给改表 JSON。",
 					disabled: $setup.assistant.isRunning.value
@@ -150999,7 +151109,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					disabled: $setup.assistant.isRunning.value,
 					onClick: $setup.submitRepair
 				}, {
-					default: withCtx(() => [..._cache[16] || (_cache[16] = [createBaseVNode(
+					default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
 						"i",
 						{ class: "fa-solid fa-rotate" },
 						null,
@@ -151012,69 +151122,44 @@ Expected function or array of functions, received type ${typeof value}.`
 					)])]),
 					_: 1
 				}, 8, ["disabled"])])) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_6$4, [
-					$setup.assistant.isRunning.value ? (openBlock(), createBlock($setup["AcuButton"], {
-						key: 0,
-						variant: "danger",
-						onClick: $setup.assistant.cancel
-					}, {
-						default: withCtx(() => [..._cache[17] || (_cache[17] = [createBaseVNode(
-							"i",
-							{ class: "fa-solid fa-stop" },
-							null,
-							-1
-							/* CACHED */
-						), createTextVNode(
-							" 停止会话 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, ["onClick"])) : (openBlock(), createBlock($setup["AcuButton"], {
-						key: 1,
-						variant: "primary",
-						disabled: !$setup.assistant.userRequest.value.trim(),
-						onClick: $setup.assistant.run
-					}, {
-						default: withCtx(() => [..._cache[18] || (_cache[18] = [createBaseVNode(
-							"i",
-							{ class: "fa-solid fa-wand-magic-sparkles" },
-							null,
-							-1
-							/* CACHED */
-						), createTextVNode(
-							" 生成改表草稿 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, ["disabled", "onClick"])),
-					createVNode($setup["AcuButton"], {
-						disabled: !$setup.assistant.canApply.value,
-						title: $setup.canApplyReason,
-						onClick: $setup.assistant.applyLatestDraft
-					}, {
-						default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
-							" 应用到编辑器草稿 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, [
-						"disabled",
-						"title",
-						"onClick"
-					]),
-					!$setup.assistant.canApply.value && $setup.canApplyReason ? (openBlock(), createElementBlock(
-						"span",
-						_hoisted_7$3,
-						toDisplayString($setup.canApplyReason),
-						1
-						/* TEXT */
-					)) : createCommentVNode("v-if", true)
-				]),
+				createBaseVNode("div", _hoisted_4$5, [$setup.assistant.isRunning.value ? (openBlock(), createBlock($setup["AcuButton"], {
+					key: 0,
+					variant: "danger",
+					onClick: $setup.assistant.cancel
+				}, {
+					default: withCtx(() => [..._cache[16] || (_cache[16] = [createBaseVNode(
+						"i",
+						{ class: "fa-solid fa-stop" },
+						null,
+						-1
+						/* CACHED */
+					), createTextVNode(
+						" 停止会话 ",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, ["onClick"])) : (openBlock(), createBlock($setup["AcuButton"], {
+					key: 1,
+					variant: "primary",
+					disabled: !$setup.assistant.userRequest.value.trim(),
+					onClick: $setup.assistant.run
+				}, {
+					default: withCtx(() => [..._cache[17] || (_cache[17] = [createBaseVNode(
+						"i",
+						{ class: "fa-solid fa-wand-magic-sparkles" },
+						null,
+						-1
+						/* CACHED */
+					), createTextVNode(
+						" 生成改表草稿 ",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, ["disabled", "onClick"]))]),
 				$setup.assistant.errorMessage.value ? (openBlock(), createBlock($setup["AcuInfoBanner"], {
-					key: 3,
+					key: 1,
 					tone: "warning"
 				}, {
 					default: withCtx(() => [createTextVNode(
@@ -151095,7 +151180,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			"body-max-height": "min(72vh, 680px)",
 			"root-class": "acu-viz-assistant__disclosure",
 			"body-class": "acu-viz-assistant__disclosure-body",
-			onToggle: _cache[5] || (_cache[5] = ($event) => $setup.transcriptExpanded = !$setup.transcriptExpanded)
+			onToggle: _cache[4] || (_cache[4] = ($event) => $setup.transcriptExpanded = !$setup.transcriptExpanded)
 		}, {
 			meta: withCtx(() => [createTextVNode(
 				toDisplayString($setup.assistant.turns.value.length || $setup.assistant.rounds.value.length) + " 条 ",
@@ -151108,7 +151193,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				description: "用于查看 AI 每轮做了什么。正常只看最终草稿；结果奇怪或报错时再展开排查。"
 			}, {
 				default: withCtx(() => [
-					$setup.assistant.isRunning.value ? (openBlock(), createElementBlock("div", _hoisted_8$3, [_cache[20] || (_cache[20] = createBaseVNode(
+					$setup.assistant.isRunning.value ? (openBlock(), createElementBlock("div", _hoisted_5$5, [_cache[18] || (_cache[18] = createBaseVNode(
 						"i",
 						{ class: "fa-solid fa-spinner fa-spin" },
 						null,
@@ -151121,8 +151206,8 @@ Expected function or array of functions, received type ${typeof value}.`
 						1
 						/* TEXT */
 					)])) : createCommentVNode("v-if", true),
-					!$setup.assistant.turns.value.length && !$setup.assistant.rounds.value.length ? (openBlock(), createElementBlock("p", _hoisted_9$3, " 还没有会话。输入需求后，助手会返回摘要、警告、分组 diff 和需要确认的风险项。 ")) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_10$3, [(openBlock(true), createElementBlock(
+					!$setup.assistant.turns.value.length && !$setup.assistant.rounds.value.length ? (openBlock(), createElementBlock("p", _hoisted_6$4, " 还没有会话。输入需求后，助手会返回摘要、警告、分组 diff 和需要确认的风险项。 ")) : createCommentVNode("v-if", true),
+					createBaseVNode("div", _hoisted_7$3, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.assistant.turns.value, (turn) => {
@@ -151133,13 +151218,13 @@ Expected function or array of functions, received type ${typeof value}.`
 									class: normalizeClass(["acu-viz-assistant__turn", `acu-viz-assistant__turn--${turn.type}`])
 								},
 								[
-									createBaseVNode("header", _hoisted_11$3, [turn.type === "user" ? (openBlock(), createElementBlock("strong", _hoisted_12$3, "你提出的需求")) : turn.type === "round" ? (openBlock(), createElementBlock(
+									createBaseVNode("header", _hoisted_8$3, [turn.type === "user" ? (openBlock(), createElementBlock("strong", _hoisted_9$3, "你提出的需求")) : turn.type === "round" ? (openBlock(), createElementBlock(
 										"strong",
-										_hoisted_13$3,
+										_hoisted_10$3,
 										"AI 助手 · 第 " + toDisplayString(turn.round) + " / " + toDisplayString(turn.maxRounds) + " 轮",
 										1
 										/* TEXT */
-									)) : turn.type === "final" ? (openBlock(), createElementBlock("strong", _hoisted_14$3, "AI 助手 · 最终草稿")) : (openBlock(), createElementBlock("strong", _hoisted_15$3, "执行错误")), turn.type === "final" ? (openBlock(), createBlock(
+									)) : turn.type === "final" ? (openBlock(), createElementBlock("strong", _hoisted_11$3, "AI 助手 · 最终草稿")) : (openBlock(), createElementBlock("strong", _hoisted_12$3, "执行错误")), turn.type === "final" ? (openBlock(), createBlock(
 										$setup["AcuBadge"],
 										{
 											key: 4,
@@ -151159,7 +151244,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										key: 5,
 										variant: "neutral"
 									}, {
-										default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
+										default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
 											"过程记录",
 											-1
 											/* CACHED */
@@ -151169,7 +151254,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										key: 6,
 										variant: "warning"
 									}, {
-										default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
+										default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
 											"需要处理",
 											-1
 											/* CACHED */
@@ -151179,7 +151264,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										key: 7,
 										variant: "neutral"
 									}, {
-										default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+										default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
 											"请求",
 											-1
 											/* CACHED */
@@ -151210,29 +151295,23 @@ Expected function or array of functions, received type ${typeof value}.`
 										1024
 										/* DYNAMIC_SLOTS */
 									)) : createCommentVNode("v-if", true),
-									$setup.assistant.getTurnRawText(turn) ? (openBlock(), createBlock(
-										$setup["AcuDisclosureGroup"],
-										{
-											key: 1,
-											label: "查看 AI 原始输出",
-											expanded: false,
-											"body-id": "acu-viz-assistant-raw-turn",
-											"body-mode": "show",
-											"root-class": "acu-viz-assistant__raw-disclosure"
-										},
-										{
-											default: withCtx(() => [createBaseVNode(
-												"pre",
-												_hoisted_16$3,
-												toDisplayString($setup.assistant.getTurnRawText(turn)),
-												1
-												/* TEXT */
-											)]),
-											_: 2
-										},
-										1024
-										/* DYNAMIC_SLOTS */
-									)) : createCommentVNode("v-if", true),
+									$setup.assistant.getTurnRawText(turn) ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
+										key: 1,
+										label: "查看 AI 原始输出",
+										expanded: false,
+										"body-id": `acu-viz-assistant-raw-turn-${turn.id}`,
+										"body-mode": "show",
+										"root-class": "acu-viz-assistant__raw-disclosure"
+									}, {
+										default: withCtx(() => [createBaseVNode(
+											"pre",
+											_hoisted_13$3,
+											toDisplayString($setup.assistant.getTurnRawText(turn)),
+											1
+											/* TEXT */
+										)]),
+										_: 2
+									}, 1032, ["body-id"])) : createCommentVNode("v-if", true),
 									$setup.assistant.getTurnWarnings(turn).length ? (openBlock(), createBlock(
 										$setup["AcuInfoBanner"],
 										{
@@ -151240,7 +151319,7 @@ Expected function or array of functions, received type ${typeof value}.`
 											tone: "warning"
 										},
 										{
-											default: withCtx(() => [createBaseVNode("ul", _hoisted_17$2, [(openBlock(true), createElementBlock(
+											default: withCtx(() => [createBaseVNode("ul", _hoisted_14$3, [(openBlock(true), createElementBlock(
 												Fragment,
 												null,
 												renderList($setup.assistant.getTurnWarnings(turn), (warning) => {
@@ -151260,7 +151339,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										1024
 										/* DYNAMIC_SLOTS */
 									)) : createCommentVNode("v-if", true),
-									$setup.assistant.getTurnDiffGroups(turn).length ? (openBlock(), createElementBlock("div", _hoisted_18$2, [(openBlock(true), createElementBlock(
+									$setup.assistant.getTurnDiffGroups(turn).length ? (openBlock(), createElementBlock("div", _hoisted_15$3, [(openBlock(true), createElementBlock(
 										Fragment,
 										null,
 										renderList($setup.assistant.getTurnDiffGroups(turn), (group) => {
@@ -151297,7 +151376,62 @@ Expected function or array of functions, received type ${typeof value}.`
 										}),
 										128
 										/* KEYED_FRAGMENT */
-									))])) : createCommentVNode("v-if", true)
+									))])) : createCommentVNode("v-if", true),
+									turn.type === "round" || turn.type === "final" ? (openBlock(), createElementBlock("div", _hoisted_16$3, [
+										$setup.assistant.getTurnHighRiskItems(turn).length ? (openBlock(), createElementBlock("div", _hoisted_17$2, [_cache[22] || (_cache[22] = createBaseVNode(
+											"h4",
+											null,
+											"高风险确认",
+											-1
+											/* CACHED */
+										)), (openBlock(true), createElementBlock(
+											Fragment,
+											null,
+											renderList($setup.assistant.getTurnHighRiskItems(turn), (item, index) => {
+												return openBlock(), createElementBlock("article", {
+													key: `${turn.id}-${item.type}-${index}`,
+													class: "acu-viz-assistant__risk-item"
+												}, [createVNode($setup["AcuCheckbox"], {
+													"model-value": $setup.assistant.riskConfirmations.value[`${turn.id}:${index}`] === true,
+													"onUpdate:modelValue": (value) => $setup.assistant.setRiskConfirmation(turn.id, index, value)
+												}, {
+													default: withCtx(() => [createTextVNode(
+														toDisplayString(item.label),
+														1
+														/* TEXT */
+													)]),
+													_: 2
+												}, 1032, ["model-value", "onUpdate:modelValue"])]);
+											}),
+											128
+											/* KEYED_FRAGMENT */
+										))])) : createCommentVNode("v-if", true),
+										$setup.assistant.getTurnApplyPayload(turn) ? (openBlock(), createBlock($setup["AcuButton"], {
+											key: 1,
+											disabled: !$setup.assistant.canApplyTurn(turn),
+											title: $setup.assistant.getTurnApplyBlockReason(turn),
+											onClick: ($event) => $setup.assistant.applyTurnDraft(turn)
+										}, {
+											default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+												" 应用到编辑器草稿 ",
+												-1
+												/* CACHED */
+											)])]),
+											_: 1
+										}, 8, [
+											"disabled",
+											"title",
+											"onClick"
+										])) : createCommentVNode("v-if", true),
+										$setup.assistant.getTurnApplyPayload(turn) && $setup.assistant.getTurnApplyBlockReason(turn) ? (openBlock(), createElementBlock(
+											"p",
+											_hoisted_18$2,
+											toDisplayString($setup.assistant.getTurnApplyBlockReason(turn)),
+											1
+											/* TEXT */
+										)) : createCommentVNode("v-if", true),
+										turn.type === "round" && $setup.assistant.getTurnApplyPayload(turn) ? (openBlock(), createElementBlock("p", _hoisted_19$2, " 应用此轮结果将不包含后续轮次改动。 ")) : createCommentVNode("v-if", true)
+									])) : createCommentVNode("v-if", true)
 								],
 								2
 								/* CLASS */
@@ -151320,7 +151454,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			"body-max-height": "min(72vh, 680px)",
 			"root-class": "acu-viz-assistant__disclosure",
 			"body-class": "acu-viz-assistant__disclosure-body",
-			onToggle: _cache[6] || (_cache[6] = ($event) => $setup.draftExpanded = !$setup.draftExpanded)
+			onToggle: _cache[5] || (_cache[5] = ($event) => $setup.draftExpanded = !$setup.draftExpanded)
 		}, {
 			meta: withCtx(() => [createTextVNode(
 				toDisplayString($setup.assistant.highRiskItems.value.length ? `高风险 ${$setup.assistant.highRiskItems.value.length} 项` : "可检查"),
@@ -151333,7 +151467,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				description: "应用前检查每组变更。涉及删表、跨表、排序、锁、全局配置等高风险项时，需要逐项确认。"
 			}, {
 				default: withCtx(() => [
-					createBaseVNode("div", _hoisted_19$2, [createVNode($setup["AcuBadge"], { variant: "neutral" }, {
+					createBaseVNode("div", _hoisted_20$1, [createVNode($setup["AcuBadge"], { variant: "neutral" }, {
 						default: withCtx(() => [createTextVNode(
 							toDisplayString($setup.assistant.sessionSummary.value || "会话完成"),
 							1
@@ -151365,7 +151499,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						key: 0,
 						tone: "warning"
 					}, {
-						default: withCtx(() => [createBaseVNode("ul", _hoisted_20$1, [(openBlock(true), createElementBlock(
+						default: withCtx(() => [createBaseVNode("ul", _hoisted_21$1, [(openBlock(true), createElementBlock(
 							Fragment,
 							null,
 							renderList($setup.assistant.latestResult.value.draft.warnings, (warning) => {
@@ -151382,7 +151516,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						))])]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					$setup.assistant.diffGroups.value.length ? (openBlock(), createElementBlock("div", _hoisted_21$1, [(openBlock(true), createElementBlock(
+					$setup.assistant.diffGroups.value.length ? (openBlock(), createElementBlock("div", _hoisted_22$1, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.assistant.diffGroups.value, (group) => {
@@ -151419,39 +151553,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						}),
 						128
 						/* KEYED_FRAGMENT */
-					))])) : (openBlock(), createElementBlock("p", _hoisted_22$1, " 草稿没有声明具体变更。通常表示助手认为需求不够明确，或本次无需修改。 ")),
-					createBaseVNode("div", _hoisted_23$1, [
-						_cache[25] || (_cache[25] = createBaseVNode(
-							"h4",
-							null,
-							"高风险确认",
-							-1
-							/* CACHED */
-						)),
-						!$setup.assistant.highRiskItems.value.length ? (openBlock(), createElementBlock("p", _hoisted_24$1, " 没有需要额外确认的高风险操作。 ")) : createCommentVNode("v-if", true),
-						(openBlock(true), createElementBlock(
-							Fragment,
-							null,
-							renderList($setup.assistant.highRiskItems.value, (item, index) => {
-								return openBlock(), createElementBlock("article", {
-									key: `${item.type}-${index}`,
-									class: "acu-viz-assistant__risk-item"
-								}, [createVNode($setup["AcuCheckbox"], {
-									"model-value": $setup.assistant.riskConfirmations.value[String(index)] === true,
-									"onUpdate:modelValue": (value) => $setup.assistant.setRiskConfirmation(index, value)
-								}, {
-									default: withCtx(() => [createTextVNode(
-										toDisplayString(item.label),
-										1
-										/* TEXT */
-									)]),
-									_: 2
-								}, 1032, ["model-value", "onUpdate:modelValue"])]);
-							}),
-							128
-							/* KEYED_FRAGMENT */
-						))
-					])
+					))])) : (openBlock(), createElementBlock("p", _hoisted_23$1, " 草稿没有声明具体变更。通常表示助手认为需求不够明确，或本次无需修改。 "))
 				]),
 				_: 1
 			})]),
@@ -151462,14 +151564,14 @@ Expected function or array of functions, received type ${typeof value}.`
 			segments: $setup.assistant.promptSegments.value,
 			dirty: $setup.assistant.promptDirty.value,
 			message: null,
-			onClose: _cache[7] || (_cache[7] = ($event) => $setup.promptDrawerOpen = false),
+			onClose: _cache[6] || (_cache[6] = ($event) => $setup.promptDrawerOpen = false),
 			onSave: $setup.assistant.savePrompt,
 			onReset: $setup.assistant.resetPrompt,
-			onImportFile: _cache[8] || (_cache[8] = ($event) => $setup.assistant.importPromptFile($event)),
+			onImportFile: _cache[7] || (_cache[7] = ($event) => $setup.assistant.importPromptFile($event)),
 			onExport: $setup.assistant.exportPrompt,
-			onAdd: _cache[9] || (_cache[9] = ($event) => $setup.assistant.addPromptSegment($event)),
-			onDelete: _cache[10] || (_cache[10] = ($event) => $setup.assistant.deletePromptSegment($event)),
-			onUpdate: _cache[11] || (_cache[11] = (index, patch) => $setup.assistant.updatePromptSegment(index, patch))
+			onAdd: _cache[8] || (_cache[8] = ($event) => $setup.assistant.addPromptSegment($event)),
+			onDelete: _cache[9] || (_cache[9] = ($event) => $setup.assistant.deletePromptSegment($event)),
+			onUpdate: _cache[10] || (_cache[10] = (index, patch) => $setup.assistant.updatePromptSegment(index, patch))
 		}, null, 8, [
 			"is-open",
 			"segments",
@@ -151480,7 +151582,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var VisualizerAssistantPanel = /*#__PURE__*/ _export_sfc(_sfc_main$7, [["render", _sfc_render$7], ["__scopeId", "data-v-23a97577"]]);
+    var VisualizerAssistantPanel = /*#__PURE__*/ _export_sfc(_sfc_main$7, [["render", _sfc_render$7], ["__scopeId", "data-v-009d88ce"]]);
 
     var _sfc_main$6 = /*@__PURE__*/ defineComponent({
         __name: 'VisualizerPlacementEditor',

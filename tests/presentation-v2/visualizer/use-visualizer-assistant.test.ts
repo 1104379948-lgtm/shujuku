@@ -53,7 +53,7 @@ function buildResult(input: any, overrides: any = {}) {
       selectedSheetKey: input.currentSheetKey,
       summary: '已生成草稿',
       warnings: [],
-      operations: [],
+      operations: [{ op: 'add_sheet', sheetName: '测试表', headers: ['名称'] }],
       ...overrides.draft,
     },
     aiRawText: '<templateAssistantDraft>{}</templateAssistantDraft>',
@@ -63,7 +63,7 @@ function buildResult(input: any, overrides: any = {}) {
     session: {
       originalBaseFingerprint: baseFingerprint,
       finalWorkingFingerprint: 'next',
-      stopReason: 'empty_operations',
+      stopReason: 'max_rounds',
       roundsExecuted: 1,
       maxRounds: 3,
       lastFailure: null,
@@ -94,6 +94,9 @@ function buildResult(input: any, overrides: any = {}) {
       lockChanges: [],
       ...overrides.compileResult,
     },
+    // 顶层标量字段兜底（aiRawText / messages / rounds / originalBaseFingerprint 等），
+    // 不覆盖已展开的 draft / session / compileResult 对象，避免意外替换破坏结构。
+    ...(Object.fromEntries(Object.entries(overrides).filter(([key]) => !['draft', 'session', 'compileResult'].includes(key)))),
   };
 }
 
@@ -203,7 +206,8 @@ describe('useVisualizerAssistant', () => {
     }));
     expect(assistant.canApply.value).toBe(false);
 
-    assistant.setRiskConfirmation(0, true);
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    assistant.setRiskConfirmation(finalTurn.id, 0, true);
     expect(assistant.canApply.value).toBe(true);
     expect(assistant.applyLatestDraft()).toBe(true);
 
@@ -277,7 +281,8 @@ describe('useVisualizerAssistant', () => {
     await assistant.run();
 
     expect(assistant.canApply.value).toBe(false);
-    assistant.setRiskConfirmation(0, true);
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    assistant.setRiskConfirmation(finalTurn.id, 0, true);
     expect(assistant.canApply.value).toBe(true);
   });
 
@@ -318,7 +323,8 @@ describe('useVisualizerAssistant', () => {
     expect(assistant.canApply.value).toBe(false);
     expect(assistant.applyLatestDraft()).toBe(false);
 
-    assistant.setRiskConfirmation(0, true);
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    assistant.setRiskConfirmation(finalTurn.id, 0, true);
     expect(assistant.canApply.value).toBe(true);
   });
 
@@ -574,5 +580,223 @@ describe('useVisualizerAssistant', () => {
     assistant.resetPrompt();
     expect(assistant.promptSegments.value).toEqual([{ role: 'SYSTEM', content: '伪 role 模板卡', deletable: false }]);
     expect(assistant.promptDirty.value).toBe(true);
+  });
+
+  it('getTurnApplyPayload：user/error/空 operations 返回 null，round/final 返回各自载荷', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant, getTurnApplyPayload } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    mockRunSession.mockImplementation(async (input: any) => {
+      const result = buildResult(input, {
+        compileResult: {
+          candidateData: {
+            mate: { type: 'chatSheets', version: 1 },
+            sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名', '状态'], [null, 'A', '警觉']] },
+          },
+          orderedSheetKeys: ['sheet_a'],
+        },
+      });
+      const round = {
+        round: 1,
+        userRequest: input.userRequest,
+        draft: { ...result.draft, summary: '第一轮草稿' },
+        aiRawText: '<templateAssistantDraft>{"round":1}</templateAssistantDraft>',
+        messages: [],
+        perRoundCompileResult: result.compileResult,
+        workingFingerprint: 'round-fp',
+      };
+      input.onRoundComplete?.({ round, rounds: [round], maxRounds: input.maxRounds });
+      return { ...result, rounds: [round] };
+    });
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '新增状态列';
+    await assistant.run();
+
+    const turns = assistant.turns.value;
+    const userTurn = turns[0];
+    const roundTurn = turns[1];
+    const finalTurn = turns[2];
+    expect(getTurnApplyPayload(userTurn)).toBeNull();
+    expect(getTurnApplyPayload(roundTurn)?.candidateData.sheet_a.content[1][2]).toBe('警觉');
+    expect(getTurnApplyPayload(finalTurn)?.candidateData.sheet_a.content[1][2]).toBe('警觉');
+
+    // 空 operations 的 final → null
+    const emptyOpTurn = {
+      id: 'final-empty',
+      type: 'final',
+      userRequest: 'x',
+      result: buildResult({ tempData: visualizer.tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'] }, { draft: { operations: [] } }),
+      anchorSheetKey: 'sheet_a',
+      createdAt: Date.now(),
+    };
+    expect(getTurnApplyPayload(emptyOpTurn as any)).toBeNull();
+  });
+
+  it('canApplyTurn：指纹不一致 / 未确认高风险 / 锚点不符 → false，确认后 true', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      compileResult: {
+        highRiskItems: [{ type: 'delete_sheet', label: '删除表: 旧表' }],
+        candidateData: {
+          mate: { type: 'chatSheets', version: 1 },
+          sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名', '状态'], [null, 'A', '警觉']] },
+        },
+        orderedSheetKeys: ['sheet_a'],
+      },
+    }));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '新增状态列';
+    await assistant.run();
+
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    expect(assistant.canApplyTurn(finalTurn)).toBe(false); // 高风险未确认
+    expect(assistant.getTurnApplyBlockReason(finalTurn)).toContain('高风险');
+
+    assistant.setRiskConfirmation(finalTurn.id, 0, true);
+    expect(assistant.canApplyTurn(finalTurn)).toBe(true);
+
+    // 指纹不一致 → false
+    visualizer.tempData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'B']] },
+    };
+    expect(assistant.canApplyTurn(finalTurn)).toBe(false);
+    expect(assistant.getTurnApplyBlockReason(finalTurn)).toContain('结构已变化');
+  });
+
+  it('风险确认按 turn 隔离：turn A 确认第 0 项不影响 turn B 的 canApplyTurn', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      compileResult: { highRiskItems: [{ type: 'delete_sheet', label: '删除表: 旧表' }] },
+    }));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '新增状态列';
+    await assistant.run();
+
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    const otherTurn = {
+      id: 'other-final',
+      type: 'final',
+      userRequest: '其他',
+      result: finalTurn.result,
+      anchorSheetKey: 'sheet_a',
+      createdAt: Date.now(),
+    };
+    assistant.setRiskConfirmation(finalTurn.id, 0, true);
+    expect(assistant.isTurnAllHighRiskConfirmed(finalTurn)).toBe(true);
+    expect(assistant.isTurnAllHighRiskConfirmed(otherTurn as any)).toBe(false);
+  });
+
+  it('applyTurnDraft 应用到较早那张 final turn 时写入的是该 turn 自己的 candidateData', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    const candidateA = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名', '第A列'], [null, 'A', 'a1']] },
+    };
+    const candidateB = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名', '第B列'], [null, 'A', 'b1']] },
+    };
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      compileResult: { candidateData: candidateA, orderedSheetKeys: ['sheet_a'] },
+    }));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '第一版';
+    await assistant.run();
+    const firstFinal = assistant.turns.value.find(turn => turn.type === 'final') as any;
+
+    // 第二次会话（不同 requestId）
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      draft: { requestId: 'req-v2-second' },
+      compileResult: { candidateData: candidateB, orderedSheetKeys: ['sheet_a'] },
+    }));
+    assistant.userRequest.value = '第二版';
+    await assistant.run();
+
+    const secondFinal = assistant.turns.value.filter(turn => turn.type === 'final').pop() as any;
+    expect(secondFinal.result.draft.requestId).toBe('req-v2-second');
+
+    // 应用较早那张
+    expect(assistant.applyTurnDraft(firstFinal)).toBe(true);
+    expect(visualizer.tempData.sheet_a.content[1][2]).toBe('a1');
+  });
+
+  it('getTurnRawText 回退链：final 的 aiRawText 为空时回退 session.lastFailure.rawText', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      aiRawText: '',
+      session: {
+        stopReason: 'repair_retry_capped',
+        roundsExecuted: 0,
+        lastFailure: { kind: 'parse', message: '未找到标签', rawText: '这是失败原文' },
+      },
+    }));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '生成草稿';
+    await assistant.run();
+
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    expect(assistant.getTurnRawText(finalTurn)).toBe('这是失败原文');
+  });
+
+  it('getTurnApplyPayload：candidateData 为空对象时返回 null（防清空编辑器）', async () => {
+    const { getTurnApplyPayload } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    const finalTurn = {
+      id: 'final-empty-candidate',
+      type: 'final',
+      userRequest: 'x',
+      result: buildResult(
+        { tempData: visualizer.tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'] },
+        { compileResult: { candidateData: {} } },
+      ),
+      anchorSheetKey: 'sheet_a',
+      createdAt: Date.now(),
+    };
+    expect(getTurnApplyPayload(finalTurn as any)).toBeNull();
   });
 });

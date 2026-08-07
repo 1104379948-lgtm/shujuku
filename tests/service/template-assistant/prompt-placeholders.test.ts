@@ -200,6 +200,58 @@ describe('buildAssistantPlaceholderContext_ACU 映射', () => {
 });
 
 describe('伪 role 模板结构', () => {
+  it('第 1 张 SYSTEM 卡包含完整标签字面量与 9 个顶层键清单', () => {
+    const segments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    const first = segments[0]!;
+    expect(first.role).toBe('SYSTEM');
+    expect(first.content).toContain('<templateAssistantDraft>');
+    expect(first.content).toContain('</templateAssistantDraft>');
+    expect(first.content).toContain('不要使用 <draft>');
+    ['protocolVersion', 'mode', 'requestId', 'baseFingerprint', 'atomic', 'selectedSheetKey', 'summary', 'warnings', 'operations'].forEach(key => {
+      expect(first.content).toContain(key);
+    });
+    expect(first.content).toContain('op 字段');
+    expect(first.content).toContain('禁止使用');
+    expect(first.content).toContain('type');
+    expect(first.content).toContain('constraints');
+    expect(first.content).toContain('requestIdRequired');
+  });
+
+  it('第 3 张 USER 协议卡包含全部 11 个白名单操作名且不含 patch_sheet_ddl', () => {
+    const segments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    const third = segments[2]!;
+    expect(third.role).toBe('USER');
+    const whitelist = [
+      'add_sheet',
+      'rename_sheet',
+      'delete_sheet',
+      'move_sheet',
+      'patch_sheet_source_data',
+      'patch_sheet_update_config',
+      'patch_sheet_export_config',
+      'patch_sheet_content',
+      'patch_sheet_schema',
+      'patch_sheet_locks',
+      'patch_global_injection_config',
+    ];
+    whitelist.forEach(op => expect(third.content).toContain(op));
+    expect(third.content).toContain('patch_sheet_schema');
+    // 白名单行（操作白名单…）本身不得包含 patch_sheet_ddl（防回归）
+    const whitelistLine = third.content.split('\n').find(line => line.includes('操作白名单')) || '';
+    expect(whitelistLine).not.toContain('patch_sheet_ddl');
+    // 但整卡必须包含「不存在 patch_sheet_ddl 操作」的教育句（实测踩坑项，不能删）
+    expect(third.content).toContain('不存在 patch_sheet_ddl 操作');
+    expect(third.content).toContain('add_sheet');
+    expect(third.content).toContain('sheetKey');
+    expect(third.content).toContain('note');
+    expect(third.content).toContain('initNode');
+    expect(third.content).toContain('insertNode');
+    expect(third.content).toContain('updateNode');
+    expect(third.content).toContain('deleteNode');
+    expect(third.content).toContain('operations');
+    expect(third.content).toContain('warnings');
+  });
+
   it('10 卡，恰 1 张含 $1 且下标 8，末条 role 为 assistant 且不含 draft 开标签，role 交替', () => {
     const segments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
     expect(segments).toHaveLength(10);

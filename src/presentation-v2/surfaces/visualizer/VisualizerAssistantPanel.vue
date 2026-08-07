@@ -45,23 +45,6 @@
         />
       </AcuFormRow>
 
-      <AcuInfoBanner v-if="assistant.lastFailure.value" tone="warning">
-        <strong>{{ failureKindLabel(assistant.lastFailure.value.kind) }}</strong>
-        <p class="acu-viz-assistant__failure-msg">{{ assistant.lastFailure.value.message }}</p>
-      </AcuInfoBanner>
-
-      <AcuDisclosureGroup
-        v-if="assistant.lastFailure.value && assistant.lastFailure.value.rawText"
-        label="查看 AI 原始输出"
-        :expanded="rawOutputExpanded"
-        body-id="acu-viz-assistant-raw-failure"
-        body-mode="show"
-        root-class="acu-viz-assistant__raw-disclosure"
-        @toggle="rawOutputExpanded = !rawOutputExpanded"
-      >
-        <pre class="acu-viz-assistant__raw-text">{{ assistant.lastFailure.value.rawText }}</pre>
-      </AcuDisclosureGroup>
-
       <div v-if="assistant.lastFailure.value" class="acu-viz-assistant__repair">
         <AcuTextarea
           v-model="repairFeedback"
@@ -97,16 +80,6 @@
           <i class="fa-solid fa-wand-magic-sparkles"></i>
           生成改表草稿
         </AcuButton>
-        <AcuButton
-          :disabled="!assistant.canApply.value"
-          :title="canApplyReason"
-          @click="assistant.applyLatestDraft"
-        >
-          应用到编辑器草稿
-        </AcuButton>
-        <span v-if="!assistant.canApply.value && canApplyReason" class="acu-viz-assistant__apply-reason">
-          {{ canApplyReason }}
-        </span>
       </div>
 
       <AcuInfoBanner v-if="assistant.errorMessage.value" tone="warning">
@@ -174,7 +147,7 @@
               v-if="assistant.getTurnRawText(turn)"
               label="查看 AI 原始输出"
               :expanded="false"
-              body-id="acu-viz-assistant-raw-turn"
+              :body-id="`acu-viz-assistant-raw-turn-${turn.id}`"
               body-mode="show"
               root-class="acu-viz-assistant__raw-disclosure"
             >
@@ -210,6 +183,50 @@
                   <li v-for="item in group.items" :key="item">{{ item }}</li>
                 </ul>
               </section>
+            </div>
+
+            <div
+              v-if="turn.type === 'round' || turn.type === 'final'"
+              class="acu-viz-assistant__turn-apply"
+            >
+              <div
+                v-if="assistant.getTurnHighRiskItems(turn).length"
+                class="acu-viz-assistant__turn-risk"
+              >
+                <h4>高风险确认</h4>
+                <article
+                  v-for="(item, index) in assistant.getTurnHighRiskItems(turn)"
+                  :key="`${turn.id}-${item.type}-${index}`"
+                  class="acu-viz-assistant__risk-item"
+                >
+                  <AcuCheckbox
+                    :model-value="assistant.riskConfirmations.value[`${turn.id}:${index}`] === true"
+                    @update:model-value="value => assistant.setRiskConfirmation(turn.id, index, value)"
+                  >
+                    {{ item.label }}
+                  </AcuCheckbox>
+                </article>
+              </div>
+              <AcuButton
+                v-if="assistant.getTurnApplyPayload(turn)"
+                :disabled="!assistant.canApplyTurn(turn)"
+                :title="assistant.getTurnApplyBlockReason(turn)"
+                @click="assistant.applyTurnDraft(turn)"
+              >
+                应用到编辑器草稿
+              </AcuButton>
+              <p
+                v-if="assistant.getTurnApplyPayload(turn) && assistant.getTurnApplyBlockReason(turn)"
+                class="acu-viz-assistant__apply-reason"
+              >
+                {{ assistant.getTurnApplyBlockReason(turn) }}
+              </p>
+              <p
+                v-if="turn.type === 'round' && assistant.getTurnApplyPayload(turn)"
+                class="acu-viz-assistant__apply-reason"
+              >
+                应用此轮结果将不包含后续轮次改动。
+              </p>
             </div>
           </article>
         </div>
@@ -275,24 +292,6 @@
           草稿没有声明具体变更。通常表示助手认为需求不够明确，或本次无需修改。
         </p>
 
-        <div class="acu-viz-assistant__risk-list">
-          <h4>高风险确认</h4>
-          <p v-if="!assistant.highRiskItems.value.length" class="acu-viz-assistant__empty">
-            没有需要额外确认的高风险操作。
-          </p>
-          <article
-            v-for="(item, index) in assistant.highRiskItems.value"
-            :key="`${item.type}-${index}`"
-            class="acu-viz-assistant__risk-item"
-          >
-            <AcuCheckbox
-              :model-value="assistant.riskConfirmations.value[String(index)] === true"
-              @update:model-value="value => assistant.setRiskConfirmation(index, value)"
-            >
-              {{ item.label }}
-            </AcuCheckbox>
-          </article>
-        </div>
       </AcuPanel>
     </AcuDisclosureGroup>
 
@@ -314,7 +313,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { ref, watch } from 'vue';
 import AssistantPromptDrawer from '../../components/AssistantPromptDrawer.vue';
 import AcuBadge from '../../components/_lib/AcuBadge.vue';
 import AcuButton from '../../components/_lib/AcuButton.vue';
@@ -327,34 +326,12 @@ import AcuPanel from '../../components/_lib/AcuPanel.vue';
 import AcuSelect from '../../components/_lib/AcuSelect.vue';
 import AcuTextarea from '../../components/_lib/AcuTextarea.vue';
 import { useVisualizerAssistant } from '../../composables/visualizer/useVisualizerAssistant';
-import type { TemplateAssistantFailureKind_ACU } from '../../../service/template-assistant/service';
 
 const assistant = useVisualizerAssistant();
 const transcriptExpanded = ref(true);
 const draftExpanded = ref(true);
 const promptDrawerOpen = ref(false);
-const rawOutputExpanded = ref(false);
 const repairFeedback = ref('');
-
-const FAILURE_KIND_LABELS: Record<TemplateAssistantFailureKind_ACU, string> = {
-  parse: '解析失败',
-  validate: '校验失败',
-  fingerprint: '结构指纹不一致',
-  preflight: '迁移预检失败',
-  unknown: '执行失败',
-};
-
-function failureKindLabel(kind: TemplateAssistantFailureKind_ACU): string {
-  return FAILURE_KIND_LABELS[kind] || kind || '执行失败';
-}
-
-const canApplyReason = computed(() => {
-  if (assistant.isRunning.value) return '';
-  if (!assistant.latestResult.value) return '还没有可应用的草稿。';
-  if (!assistant.allHighRiskConfirmed.value) return '请先确认所有高风险项。';
-  if (!assistant.isLatestDraftForCurrentSheet.value) return '这份草稿属于其他锚点表，请切回原表或重新生成。';
-  return '';
-});
 
 function submitRepair(): void {
   assistant.runWithRepairFeedback(repairFeedback.value);

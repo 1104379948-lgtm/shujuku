@@ -34,6 +34,7 @@ export type VisualizerAssistantTurnState =
       userRequest: string;
       anchorSheetKey: string;
       createdAt: number;
+      baselineFingerprint?: string;
     }
   | {
       id: string;
@@ -43,6 +44,7 @@ export type VisualizerAssistantTurnState =
       roundData: any;
       anchorSheetKey: string;
       createdAt: number;
+      baselineFingerprint?: string;
     }
   | {
       id: string;
@@ -51,6 +53,7 @@ export type VisualizerAssistantTurnState =
       result: any;
       anchorSheetKey: string;
       createdAt: number;
+      baselineFingerprint?: string;
     }
   | {
       id: string;
@@ -58,6 +61,8 @@ export type VisualizerAssistantTurnState =
       errorMessage: string;
       anchorSheetKey: string;
       createdAt: number;
+      rawText?: string;
+      baselineFingerprint?: string;
     };
 
 interface VisualizerEntrySnapshot {

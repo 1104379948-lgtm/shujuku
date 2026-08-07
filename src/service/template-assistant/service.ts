@@ -414,11 +414,14 @@ function normalizeAssistantPromptSegments_ACU(input: unknown): TemplateAssistant
  * 结构：SYSTEM 指令 / 协议卡 / 全局结构卡 / 当前表卡 + assistant 应答示范，
  * 第 9 张是唯一含 `$1` 的卡（构成 priorTurns 插入锚点），第 10 张是 AI 应答预填充卡（必须为最后一条）。
  *
- * **预填充卡内容硬约束**：
- * - 禁止包含 `<templateAssistantDraft>` 字面量（含尖括号）——否则 AI 以为标签已开，只补闭合部分，
- *   响应无开标签，解析链击穿（extractFallbackDraftJson 会拿内部嵌套 `{` 瞎截取）；
- * - 禁止包含未闭合的 `{`——同理破坏配对逻辑。
- * 表述上用「draft 标签」而非字面量，以冒号结尾不换行，引导 AI 直接输出完整标签对。
+ * **标签字面量约束的位置区分（重要，勿再误扩大）**：
+ * - 第 1 张 SYSTEM 指令卡：**允许且必须**包含 `<templateAssistantDraft>` 字面量。它只是格式规范告知，
+ *   不构成预填充；缺失字面量会让 AI 自行猜测标签名（实测曾输出 `<draft>`，导致解析链兜底截取错误片段，
+ *   误报「protocolVersion 必须为 1 或 2」假错误）。
+ * - 第 10 张预填充卡：**禁止**包含 `<templateAssistantDraft>` 字面量（含尖括号）——否则 AI 以为标签已开，
+ *   只补闭合部分，响应无开标签，解析链击穿（extractFallbackDraftJson 会拿内部嵌套 `{` 瞎截取）；
+ * - 预填充卡同时禁止包含未闭合的 `{`——同理破坏配对逻辑。
+ * 预填充卡表述上用「draft 标签」而非字面量，以冒号结尾不换行，引导 AI 直接输出完整标签对。
  *
  * 全模板不含世界书占位符。
  */
@@ -426,8 +429,15 @@ export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(): TemplateAs
     return [
         {
             role: 'SYSTEM',
-            content:
-                '你是 visualizer 内的模板改表助手。你只能输出一个被 draft 标签包裹的 JSON 对象，不输出解释文本。严格使用 protocolVersion=2、mode="modify_current_template_incremental"、atomic=true。',
+            content: [
+                '你是 visualizer 内的模板改表助手。',
+                '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
+                '严格使用 protocolVersion=2、mode="modify_current_template_incremental"、atomic=true。',
+                '顶层 JSON 必须包含且只包含以下 9 个键：protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、operations。',
+                'baseFingerprint 与 selectedSheetKey 必须原样复制输入数据中给出的值，不得自造。',
+                '每个 operations[i] 必须使用 op 字段表示操作名；禁止使用 type、operation、action 等别名。',
+                '输入数据中 constraints 里的字段（如 requestIdRequired）是给你看的约束说明，不是 draft 的字段，禁止出现在输出 JSON 里。',
+            ].join('\n'),
             deletable: false,
         },
         {
@@ -437,8 +447,15 @@ export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(): TemplateAs
         },
         {
             role: 'USER',
-            content:
+            content: [
                 `以下是表格结构协议与规则，必须严格遵守：${TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU}；语法参考文档：${TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU}`,
+                '操作白名单（只允许以下 11 种操作名，禁止其他）：add_sheet、rename_sheet、delete_sheet、move_sheet、patch_sheet_source_data、patch_sheet_update_config、patch_sheet_export_config、patch_sheet_content、patch_sheet_schema、patch_sheet_locks、patch_global_injection_config。',
+                '不存在 patch_sheet_ddl 操作；DDL 只能通过 patch_sheet_schema.patch.ddl 修改。',
+                'add_sheet 必须同时提供非空 sheetName 和至少一个 headers 项；不要生成 sheetKey，本地会自动生成；应尽量同时提供 sourceData 的 note、initNode、insertNode、updateNode、deleteNode 五段。',
+                'add_sheet.sourceData 与 patch_sheet_source_data.patch 只允许 note、initNode、insertNode、updateNode、deleteNode 五个字段；禁止出现 ddl、sql、schema、createTable 等字段。',
+                '默认不主动输出 patch_sheet_schema.ddl；除非用户明确要求 DDL、字段类型、约束或 SQLite 建表语句。中文 headers 必须使用英文/ASCII 物理列名并配 `-- 中文表头` 注释按原顺序一一对应；第一列必须 row_id INTEGER PRIMARY KEY 并保留 `-- 行号` 注释。',
+                '如果需求信息不足、字段缺失、或当前协议无法安全表达，仍然必须返回合法 draft：summary 简述原因、warnings 写明原因、operations 输出空数组；不要输出追问文本。',
+            ].join('\n'),
             deletable: true,
         },
         {

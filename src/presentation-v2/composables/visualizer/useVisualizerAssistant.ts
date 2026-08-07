@@ -189,10 +189,19 @@ function buildPriorTurns(turns: VisualizerAssistantTurn[], currentSheetKey: stri
     .filter((turn): turn is Extract<VisualizerAssistantTurn, { type: 'final' }> =>
       turn.type === 'final' && (!anchorKey || getResultAnchorSheetKey(turn.result) === anchorKey),
     )
-    .map(turn => ({
-      user: turn.userRequest,
-      assistant: String(turn.result.aiRawText || '').trim() || undefined,
-    }));
+    .map(turn => {
+      const rawText = String(turn.result.aiRawText || '').trim()
+        || String(turn.result.session?.lastFailure?.rawText || '').trim()
+        || undefined;
+      const failureMessage = turn.result.session?.lastFailure?.message;
+      const user = failureMessage
+        ? `${turn.userRequest}\n\n（上一轮输出未通过本地校验：${failureMessage}）`
+        : turn.userRequest;
+      return {
+        user,
+        assistant: rawText,
+      };
+    });
 }
 
 function getResultAnchorSheetKey(result: TemplateAssistantSessionResult_ACU | null | undefined): string {
@@ -201,6 +210,70 @@ function getResultAnchorSheetKey(result: TemplateAssistantSessionResult_ACU | nu
 
 function getRoundAnchorSheetKey(round: TemplateAssistantSessionRound_ACU | null | undefined): string {
   return String(round?.draft?.selectedSheetKey || '').trim();
+}
+
+export interface VisualizerAssistantTurnApplyPayload {
+  candidateData: Record<string, any>;
+  orderedSheetKeys: string[];
+  deletedSheetKeys: string[];
+  lockChanges: any[];
+  focusSheetKey: string | null;
+  anchorSheetKey: string;
+  baselineFingerprint: string;
+}
+
+/**
+ * 把一张 turn 提炼成「可应用到编辑器的载荷」。
+ *
+ * - round：取 `perRoundCompileResult`（累计候选：原始 + 前 N 轮），anchor 用 round draft 的 selectedSheetKey，
+ *   baseline 用会话落盘时记录的 `turn.baselineFingerprint`（T10）。
+ * - final：取 `compileResult`，baseline 优先 `getTemplateAssistantApplyBaselineFingerprint_ACU(result)`，
+ *   为空时回退 `turn.baselineFingerprint`（与 applyLatestDraft 语义一致）。
+ * - user / error：无载荷，返回 null。
+ * - draft.operations 为空的 turn 返回 null（没有可应用的变更）。
+ */
+export function getTurnApplyPayload(turn: VisualizerAssistantTurn): VisualizerAssistantTurnApplyPayload | null {
+  const anchorSheetKey = turn.anchorSheetKey;
+  if (turn.type === 'round') {
+    const compileResult = turn.roundData.perRoundCompileResult;
+    const draft = turn.roundData.draft;
+    if (!compileResult || !draft || !asList(draft.operations).length) return null;
+    const candidateData = compileResult.candidateData && typeof compileResult.candidateData === 'object'
+      ? compileResult.candidateData
+      : null;
+    if (!candidateData || !Object.keys(candidateData).length) return null;
+    return {
+      candidateData,
+      orderedSheetKeys: Array.isArray(compileResult.orderedSheetKeys) ? [...compileResult.orderedSheetKeys] : [],
+      deletedSheetKeys: asList(compileResult.deletedSheetKeys).map((item: any) => String(item)),
+      lockChanges: asList(compileResult.lockChanges),
+      focusSheetKey: compileResult.focusSheetKey || null,
+      anchorSheetKey,
+      baselineFingerprint: String(turn.baselineFingerprint || '').trim(),
+    };
+  }
+  if (turn.type === 'final') {
+    const compileResult = turn.result.compileResult;
+    const draft = turn.result.draft;
+    if (!compileResult || !draft || !asList(draft.operations).length) return null;
+    const candidateData = compileResult.candidateData && typeof compileResult.candidateData === 'object'
+      ? compileResult.candidateData
+      : null;
+    if (!candidateData || !Object.keys(candidateData).length) return null;
+    const baselineFingerprint = String(
+      getTemplateAssistantApplyBaselineFingerprint_ACU(turn.result) || turn.baselineFingerprint || '',
+    ).trim();
+    return {
+      candidateData,
+      orderedSheetKeys: Array.isArray(compileResult.orderedSheetKeys) ? [...compileResult.orderedSheetKeys] : [],
+      deletedSheetKeys: asList(compileResult.deletedSheetKeys).map((item: any) => String(item)),
+      lockChanges: asList(compileResult.lockChanges),
+      focusSheetKey: compileResult.focusSheetKey || null,
+      anchorSheetKey,
+      baselineFingerprint,
+    };
+  }
+  return null;
 }
 
 export function useVisualizerAssistant() {
@@ -264,9 +337,18 @@ export function useVisualizerAssistant() {
     ),
   );
 
-  const allHighRiskConfirmed = computed(() =>
-    highRiskItems.value.every((_, index) => riskConfirmations.value[String(index)] === true),
-  );
+  // T12：风险确认键改为 turn 级（turnId:index）。allHighRiskConfirmed 保留导出但语义
+  // 委托到「最后一张可应用 final turn」的 turn 级确认，与 applyLatestDraft 的委托目标一致。
+  const allHighRiskConfirmed = computed(() => {
+    const result = latestResult.value;
+    if (!result) return false;
+    const latestRequestId = String((result.draft as any)?.requestId || '').trim();
+    const target = turns.value
+      .filter((turn): turn is Extract<VisualizerAssistantTurn, { type: 'final' }> => turn.type === 'final')
+      .filter(turn => turn.result === result || (latestRequestId && String((turn.result.draft as any)?.requestId || '').trim() === latestRequestId))
+      .pop();
+    return target ? isTurnAllHighRiskConfirmed(target) : false;
+  });
 
   const isLatestDraftForCurrentSheet = computed(() => {
     const result = latestResult.value;
@@ -405,7 +487,12 @@ export function useVisualizerAssistant() {
 
   function getTurnRawText(turn: VisualizerAssistantTurn): string {
     if (turn.type === 'round') return String(turn.roundData.aiRawText || '');
-    if (turn.type === 'final') return String(turn.result.aiRawText || '');
+    if (turn.type === 'final') {
+      const raw = String(turn.result.aiRawText || '').trim();
+      if (raw) return raw;
+      return String(turn.result.session?.lastFailure?.rawText || '');
+    }
+    if (turn.type === 'error') return String(turn.rawText || '');
     return '';
   }
 
@@ -435,13 +522,14 @@ export function useVisualizerAssistant() {
     visualizer.assistantTurns = [...visualizer.assistantTurns, turn];
   }
 
-  function appendErrorTurn(message: string, anchorSheetKey: string): void {
+  function appendErrorTurn(message: string, anchorSheetKey: string, rawText?: string): void {
     appendTurn({
       id: createTurnId('error'),
       type: 'error',
       errorMessage: message,
       anchorSheetKey,
       createdAt: Date.now(),
+      rawText: rawText ? String(rawText) : undefined,
     });
   }
 
@@ -458,6 +546,7 @@ export function useVisualizerAssistant() {
 
     const requestSheetKey = visualizer.currentSheetKey;
     const createdAt = Date.now();
+    const sessionBaselineFingerprint = buildTemplateAssistantFingerprint_ACU(visualizer.tempData || {});
     guardController = createTemplateAssistantSessionGuard_ACU();
     visualizer.assistantIsRunning = true;
     visualizer.assistantErrorMessage = '';
@@ -493,12 +582,17 @@ export function useVisualizerAssistant() {
             roundData: progress.round,
             anchorSheetKey: getRoundAnchorSheetKey(progress.round) || requestSheetKey,
             createdAt: Date.now(),
+            baselineFingerprint: sessionBaselineFingerprint,
           });
         },
       });
       if (requestSheetKey !== visualizer.currentSheetKey) {
         visualizer.assistantErrorMessage = '当前选中表已变化，请重新生成 AI 草稿。';
-        appendErrorTurn(visualizer.assistantErrorMessage, requestSheetKey);
+        appendErrorTurn(
+          visualizer.assistantErrorMessage,
+          requestSheetKey,
+          result.session?.lastFailure?.rawText,
+        );
         toastStore.warning(visualizer.assistantErrorMessage, { muteable: false });
         return false;
       }
@@ -511,6 +605,7 @@ export function useVisualizerAssistant() {
         result,
         anchorSheetKey: getResultAnchorSheetKey(result) || requestSheetKey,
         createdAt: Date.now(),
+        baselineFingerprint: sessionBaselineFingerprint,
       });
       resetRiskConfirmations();
       userRequest.value = '';
@@ -518,12 +613,12 @@ export function useVisualizerAssistant() {
     } catch (error) {
       if (error instanceof TemplateAssistantSessionStoppedError_ACU) {
         visualizer.assistantErrorMessage = error.message;
-        appendErrorTurn(error.message, requestSheetKey);
+        appendErrorTurn(error.message, requestSheetKey, (error as any)?.failureRawText);
         toastStore.warning(error.message, { muteable: false });
       } else {
         const message = error instanceof Error ? error.message : 'AI 改表助手执行失败。';
         visualizer.assistantErrorMessage = message;
-        appendErrorTurn(message, requestSheetKey);
+        appendErrorTurn(message, requestSheetKey, (error as any)?.failureRawText);
         logWarn_ACU('[ACU-V2 Visualizer Assistant] run failed:', error);
         toastStore.error(message, { muteable: false });
       }
@@ -537,47 +632,48 @@ export function useVisualizerAssistant() {
     guardController.cancel();
   }
 
-  function setRiskConfirmation(index: number, value: boolean): void {
-    visualizer.assistantRiskConfirmations[String(index)] = value;
+  function setRiskConfirmation(turnId: string, index: number, value: boolean): void {
+    visualizer.assistantRiskConfirmations[`${turnId}:${index}`] = value;
   }
 
-  function applyLatestDraft(): boolean {
-    const result = latestResult.value;
-    if (!result) return false;
-    const anchorKey = getResultAnchorSheetKey(result);
-    if (!anchorKey || anchorKey !== visualizer.currentSheetKey) {
-      toastStore.warning('这份 AI 草稿属于其他锚点表，请切回原表或重新生成。', { muteable: false });
-      return false;
+  function getTurnHighRiskItems(turn: VisualizerAssistantTurn): VisualizerAssistantRiskItem[] {
+    if (turn.type === 'round') {
+      return buildVisualizerAssistantHighRiskItems(
+        { compileResult: turn.roundData.perRoundCompileResult } as TemplateAssistantSessionResult_ACU,
+        getRoundAnchorSheetKey(turn.roundData) || turn.anchorSheetKey,
+      );
     }
-    if (!allHighRiskConfirmed.value) {
-      toastStore.warning('请先确认所有高风险项后再应用。', { muteable: false });
-      return false;
+    if (turn.type === 'final') {
+      return buildVisualizerAssistantHighRiskItems(
+        turn.result,
+        getResultAnchorSheetKey(turn.result) || turn.anchorSheetKey,
+      );
     }
+    return [];
+  }
 
-    const baselineFingerprint = getTemplateAssistantApplyBaselineFingerprint_ACU(result);
-    const currentFingerprint = buildTemplateAssistantFingerprint_ACU(visualizer.tempData || {});
-    if (!baselineFingerprint || currentFingerprint !== baselineFingerprint) {
-      toastStore.warning('当前结构已变化，AI 草稿已失效，请重新生成。', { muteable: false });
-      return false;
-    }
+  function isTurnAllHighRiskConfirmed(turn: VisualizerAssistantTurn): boolean {
+    return getTurnHighRiskItems(turn).every((_, index) =>
+      visualizer.assistantRiskConfirmations[`${turn.id}:${index}`] === true,
+    );
+  }
 
+  function applyCompileResultToVisualizer(payload: VisualizerAssistantTurnApplyPayload): boolean {
     assertVisualizerDataOpsEditable_ACU(visualizer);
-    visualizer.tempData = cloneData(result.compileResult.candidateData || {});
-    visualizer.sheetOrder = Array.isArray(result.compileResult.orderedSheetKeys)
-      ? [...result.compileResult.orderedSheetKeys]
-      : [];
+    visualizer.tempData = cloneData(payload.candidateData || {});
+    visualizer.sheetOrder = Array.isArray(payload.orderedSheetKeys) ? [...payload.orderedSheetKeys] : [];
     applySheetOrderNumbers_ACU(visualizer.tempData, visualizer.sheetOrder);
     const deleted = new Set<string>(visualizer.deletedSheetKeys || []);
-    asList(result.compileResult.deletedSheetKeys).forEach(key => deleted.add(String(key)));
+    asList(payload.deletedSheetKeys).forEach(key => deleted.add(String(key)));
     visualizer.deletedSheetKeys = Array.from(deleted);
 
-    visualizer.queueLockChanges(asList(result.compileResult.lockChanges));
+    visualizer.queueLockChanges(asList(payload.lockChanges));
 
     const previousSheetKey = visualizer.currentSheetKey;
     if (previousSheetKey && visualizer.tempData?.[previousSheetKey]) {
       visualizer.currentSheetKey = previousSheetKey;
-    } else if (result.compileResult.focusSheetKey && visualizer.tempData?.[result.compileResult.focusSheetKey]) {
-      visualizer.currentSheetKey = result.compileResult.focusSheetKey;
+    } else if (payload.focusSheetKey && visualizer.tempData?.[payload.focusSheetKey]) {
+      visualizer.currentSheetKey = payload.focusSheetKey;
     } else {
       visualizer.currentSheetKey = visualizer.sheetOrder[0] || null;
     }
@@ -585,6 +681,65 @@ export function useVisualizerAssistant() {
     visualizer.setDirty(true);
     toastStore.success('AI 草稿已应用到编辑器，保存前不会写回聊天。', { muteable: false });
     return true;
+  }
+
+  function getTurnApplyBlockReason(turn: VisualizerAssistantTurn): string {
+    if (isRunning.value) return '会话运行中，暂不能应用。';
+    if (visualizer.isSaving) return '保存进行中，暂不能应用。';
+    if (!getTurnApplyPayload(turn)) return '这张卡片没有可应用的变更。';
+    if (!isTurnAllHighRiskConfirmed(turn)) return '请先确认该卡片列出的所有高风险项。';
+    const payload = getTurnApplyPayload(turn);
+    if (payload && payload.anchorSheetKey && payload.anchorSheetKey !== visualizer.currentSheetKey) {
+      return '这份草稿属于其他锚点表，请切回原表或重新生成。';
+    }
+    if (payload && !payload.baselineFingerprint) return '缺少基线指纹，无法校验当前结构，请重新生成。';
+    const currentFingerprint = buildTemplateAssistantFingerprint_ACU(visualizer.tempData || {});
+    if (payload && payload.baselineFingerprint !== currentFingerprint) {
+      return '当前结构已变化，该草稿已失效，请重新生成。';
+    }
+    return '';
+  }
+
+  function canApplyTurn(turn: VisualizerAssistantTurn): boolean {
+    return !isRunning.value
+      && !!getTurnApplyPayload(turn)
+      && getTurnApplyBlockReason(turn) === '';
+  }
+
+  function applyTurnDraft(turn: VisualizerAssistantTurn): boolean {
+    const blockReason = getTurnApplyBlockReason(turn);
+    if (blockReason) {
+      // saving 是数据写保护硬闸门：与 applyCompileResultToVisualizer 内
+      // assertVisualizerDataOpsEditable_ACU 的 throw 语义保持一致（既有测试断言 throw），
+      // 其余原因走 toast 返回 false。
+      if (visualizer.isSaving) {
+        assertVisualizerDataOpsEditable_ACU(visualizer);
+      }
+      toastStore.warning(blockReason, { muteable: false });
+      return false;
+    }
+    const payload = getTurnApplyPayload(turn);
+    if (!payload) {
+      toastStore.warning('这张卡片没有可应用的变更。', { muteable: false });
+      return false;
+    }
+    return applyCompileResultToVisualizer(payload);
+  }
+
+  function applyLatestDraft(): boolean {
+    const result = latestResult.value;
+    if (!result) return false;
+    const latestRequestId = String((result.draft as any)?.requestId || '').trim();
+    const finalTurns = turns.value
+      .filter((turn): turn is Extract<VisualizerAssistantTurn, { type: 'final' }> => turn.type === 'final')
+      .filter(turn =>
+        // 优先按对象引用（同一次 run() 内）；反序列化/重建后用 requestId 内容匹配
+        turn.result === result
+        || (latestRequestId && String((turn.result.draft as any)?.requestId || '').trim() === latestRequestId),
+      );
+    const target = finalTurns[finalTurns.length - 1];
+    if (!target) return false;
+    return applyTurnDraft(target);
   }
 
   function syncApiPresetFromCurrentSheet(): void {
@@ -664,6 +819,12 @@ export function useVisualizerAssistant() {
     cancel,
     setRiskConfirmation,
     applyLatestDraft,
+    getTurnHighRiskItems,
+    isTurnAllHighRiskConfirmed,
+    getTurnApplyPayload,
+    getTurnApplyBlockReason,
+    canApplyTurn,
+    applyTurnDraft,
     syncApiPresetFromCurrentSheet,
     runWithRepairFeedback,
     getTurnRawText,
