@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import { buildTemplateAssistantEmbeddedReferenceText_ACU } from '../../../src/service/template-assistant/reference-docs';
 import {
-  buildDefaultTemplateAssistantPromptSegments_ACU,
   parseTemplateAssistantDraft_ACU,
   resolveAssistantSystemPrompt_ACU,
   TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
@@ -68,20 +67,6 @@ describe('template assistant 容错解析链', () => {
 });
 
 describe('提示词占位符与默认等价', () => {
-  it('默认 segments 渲染结果与现行硬编码提示词等价（含占位符替换为引用原文）', () => {
-    const segments = buildDefaultTemplateAssistantPromptSegments_ACU();
-    expect(segments).toHaveLength(1);
-    expect(segments[0]?.role).toBe('SYSTEM');
-    const messages = resolveAssistantSystemPrompt_ACU(segments);
-    expect(messages).toHaveLength(1);
-    const content = messages[0]?.content || '';
-    expect(content).toContain('你是 visualizer 内的模板改表助手。');
-    expect(content).toContain('每个 operations[i] 必须使用 op 字段表示操作名');
-    expect(content).toContain('【原文嵌入 / syntax-reference (1).md / 导读：两种运行模式的能力差异】');
-    expect(content).toContain('【原文嵌入 / SQL模板语法从0开始上手教程.txt / 第一个能用的例子（先看这个）】');
-    expect(content).not.toContain(TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU);
-  });
-
   it('自定义 segments 含占位符时只替换一次，不重复追加', () => {
     const messages = resolveAssistantSystemPrompt_ACU([
       { role: 'SYSTEM', content: `规则一\n${TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU}` },

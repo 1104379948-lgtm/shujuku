@@ -304,7 +304,6 @@
       @close="promptDrawerOpen = false"
       @save="assistant.savePrompt"
       @reset="assistant.resetPrompt"
-      @load-pseudo-role="assistant.loadPseudoRolePrompt"
       @import-file="assistant.importPromptFile($event)"
       @export="assistant.exportPrompt"
       @add="assistant.addPromptSegment($event)"

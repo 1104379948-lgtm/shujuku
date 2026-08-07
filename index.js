@@ -122032,7 +122032,7 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_6$r = { class: "acu-dialog__check-option" };
     const _hoisted_7$o = { class: "acu-dialog__check-label" };
-    const _hoisted_8$l = {
+    const _hoisted_8$m = {
 	key: 0,
 	class: "acu-dialog__check-description"
     };
@@ -122117,7 +122117,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* TEXT */
 						), option.description ? (openBlock(), createElementBlock(
 							"span",
-							_hoisted_8$l,
+							_hoisted_8$m,
 							toDisplayString(option.description),
 							1
 							/* TEXT */
@@ -123872,7 +123872,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-preset-dd__item-meta"
     };
     const _hoisted_7$m = ["title", "onClick"];
-    const _hoisted_8$k = {
+    const _hoisted_8$l = {
 	key: 2,
 	class: "fa-solid fa-check acu-preset-dd__check"
     };
@@ -123940,7 +123940,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						2
 						/* CLASS */
 					)], 10, _hoisted_7$m)) : createCommentVNode("v-if", true),
-					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$k)) : createCommentVNode("v-if", true)
+					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$l)) : createCommentVNode("v-if", true)
 				], 10, _hoisted_4$x);
 			}),
 			128
@@ -124235,7 +124235,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-api-config-panel__two-col"
     };
-    const _hoisted_8$j = {
+    const _hoisted_8$k = {
 	key: 1,
 	class: "acu-api-config-panel__editor-section"
     };
@@ -124421,7 +124421,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					})])) : createCommentVNode("v-if", true),
-					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$j, [
+					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$k, [
 						createVNode($setup["AcuFormRow"], {
 							label: "附加主体参数",
 							hint: "SillyTavern custom_include_body，填写 YAML object，会合并到最终模型请求体。"
@@ -127689,7 +127689,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-prompt-segs__empty"
     };
-    const _hoisted_8$i = { class: "acu-prompt-segs__add" };
+    const _hoisted_8$j = { class: "acu-prompt-segs__add" };
     function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$K, [
 		createBaseVNode("div", _hoisted_2$D, [createVNode($setup["AcuButton"], {
@@ -127807,7 +127807,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true)]),
-		createBaseVNode("div", _hoisted_8$i, [createVNode($setup["AcuButton"], {
+		createBaseVNode("div", _hoisted_8$j, [createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-prompt-segs__add-btn",
 			onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("add", "bottom"))
@@ -127933,7 +127933,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_5$n = { class: "acu-v2-plot-task-editor__section" };
     const _hoisted_6$m = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_7$j = { class: "acu-v2-plot-task-editor__toggles" };
-    const _hoisted_8$h = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_8$i = { class: "acu-v2-plot-task-editor__grid" };
     const _hoisted_9$f = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_10$e = { class: "acu-v2-plot-task-editor__section" };
     const _hoisted_11$d = { class: "acu-v2-plot-task-editor__section" };
@@ -128100,7 +128100,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.patchAgentControl({ allowParallel: $event }))
 				}, null, 8, ["model-value"])
 			]),
-			createBaseVNode("div", _hoisted_8$h, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_8$i, [createVNode($setup["AcuFormRow"], {
 				label: "偏好阶段",
 				hint: "Agent 排序参考；留空则不指定。"
 			}, {
@@ -128220,7 +128220,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	title: "阶段号 — 同阶段并发，跨阶段串行"
     };
     const _hoisted_7$i = { class: "acu-v2-plot-tasks__seg-count" };
-    const _hoisted_8$g = {
+    const _hoisted_8$h = {
 	key: 0,
 	class: "acu-v2-plot-tasks__disabled-label"
     };
@@ -128299,7 +128299,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					1
 					/* TEXT */
 				),
-				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$g, "已禁用")) : createCommentVNode("v-if", true)
+				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$h, "已禁用")) : createCommentVNode("v-if", true)
 			], 10, _hoisted_4$r);
 		}),
 		128
@@ -128353,7 +128353,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_5$l = { class: "acu-v2-form__section" };
     const _hoisted_6$k = { class: "acu-v2-plot-drawer__rules" };
     const _hoisted_7$h = { class: "acu-v2-form__section" };
-    const _hoisted_8$f = { class: "acu-v2-plot-drawer__actions" };
+    const _hoisted_8$g = { class: "acu-v2-plot-drawer__actions" };
     function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
@@ -128604,7 +128604,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("footer", _hoisted_8$f, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
+					createBaseVNode("footer", _hoisted_8$g, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
 						default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
 							"关闭",
 							-1
@@ -131481,7 +131481,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	"aria-hidden": "true"
     };
     const _hoisted_7$g = { class: "acu-dashboard-storage-mode__body" };
-    const _hoisted_8$e = { class: "acu-dashboard-storage-mode__card-head" };
+    const _hoisted_8$f = { class: "acu-dashboard-storage-mode__card-head" };
     const _hoisted_9$d = { class: "acu-dashboard-storage-mode__name" };
     const _hoisted_10$d = { class: "acu-dashboard-storage-mode__badge" };
     const _hoisted_11$c = { class: "acu-dashboard-storage-mode__desc" };
@@ -131531,7 +131531,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						null,
 						2
 						/* CLASS */
-					)]), createBaseVNode("span", _hoisted_7$g, [createBaseVNode("span", _hoisted_8$e, [createBaseVNode(
+					)]), createBaseVNode("span", _hoisted_7$g, [createBaseVNode("span", _hoisted_8$f, [createBaseVNode(
 						"span",
 						_hoisted_9$d,
 						toDisplayString(option.label),
@@ -133793,7 +133793,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_5$h = { class: "acu-v2-form-fill-page__table-wrap" };
     const _hoisted_6$g = { class: "acu-v2-form-fill-page__status-table" };
     const _hoisted_7$e = { key: 0 };
-    const _hoisted_8$d = { key: 1 };
+    const _hoisted_8$e = { key: 1 };
     const _hoisted_9$c = { class: "acu-v2-form-fill-page__manual-number-grid" };
     const _hoisted_10$c = { class: "acu-v2-form-fill-page__manual-extra" };
     const _hoisted_11$b = { class: "acu-v2-form-fill-page__actions" };
@@ -133940,7 +133940,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										_: 1
 									})) : (openBlock(), createElementBlock(
 										"span",
-										_hoisted_8$d,
+										_hoisted_8$e,
 										toDisplayString(row.nextTriggerLabel),
 										1
 										/* TEXT */
@@ -134581,7 +134581,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-wb-entry-item__skill-badge"
     };
-    const _hoisted_8$c = {
+    const _hoisted_8$d = {
 	key: 1,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
@@ -134658,7 +134658,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								}, toDisplayString(entry.label), 9, _hoisted_5$g)),
 								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$f, [
 									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$d, "Skill")) : createCommentVNode("v-if", true),
-									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$c, "常量")) : createCommentVNode("v-if", true),
+									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$d, "常量")) : createCommentVNode("v-if", true),
 									$props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock(
 										"span",
 										_hoisted_9$b,
@@ -135501,7 +135501,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_5$f = { class: "acu-v2-table-page__filter" };
     const _hoisted_6$e = { class: "acu-v2-table-page__toggle-row" };
     const _hoisted_7$c = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_8$b = { class: "acu-v2-table-page__toggle-row" };
+    const _hoisted_8$c = { class: "acu-v2-table-page__toggle-row" };
     const _hoisted_9$a = { class: "acu-v2-table-page__toggle-head" };
     const _hoisted_10$a = { class: "acu-v2-table-page__hint" };
     function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
@@ -135603,7 +135603,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						-1
 						/* CACHED */
 					))]),
-					createBaseVNode("div", _hoisted_8$b, [createBaseVNode("div", _hoisted_9$a, [_cache[20] || (_cache[20] = createBaseVNode(
+					createBaseVNode("div", _hoisted_8$c, [createBaseVNode("div", _hoisted_9$a, [_cache[20] || (_cache[20] = createBaseVNode(
 						"span",
 						{ class: "acu-v2-table-page__toggle-label" },
 						" 仅识别最后一对 <tableEdit> 标签 ",
@@ -136306,7 +136306,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_5$e = { class: "acu-agent-advanced__section-head" };
     const _hoisted_6$d = { class: "acu-agent-advanced__grid" };
     const _hoisted_7$b = { class: "acu-agent-advanced__section" };
-    const _hoisted_8$a = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_8$b = { class: "acu-agent-advanced__section-head" };
     const _hoisted_9$9 = { class: "acu-agent-advanced__grid" };
     const _hoisted_10$9 = { class: "acu-agent-advanced__section" };
     const _hoisted_11$9 = { class: "acu-agent-advanced__section-head" };
@@ -136407,7 +136407,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				128
 				/* KEYED_FRAGMENT */
 			))])]),
-			createBaseVNode("section", _hoisted_7$b, [createBaseVNode("header", _hoisted_8$a, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_7$b, [createBaseVNode("header", _hoisted_8$b, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.decisionSettings.title),
@@ -136679,7 +136679,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_5$d = { class: "acu-v2-agent-wb-control__body" };
     const _hoisted_6$c = { class: "acu-v2-agent-wb-control__config-source" };
     const _hoisted_7$a = { class: "acu-v2-agent-wb-control__api-selects" };
-    const _hoisted_8$9 = { class: "acu-v2-agent-wb-control__actions" };
+    const _hoisted_8$a = { class: "acu-v2-agent-wb-control__actions" };
     function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$n, [
 		createBaseVNode("div", _hoisted_2$l, [createBaseVNode("div", null, [createBaseVNode(
@@ -136752,7 +136752,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				])]),
 				_: 1
 			}, 8, ["label", "hint"])]),
-			createBaseVNode("div", _hoisted_8$9, [
+			createBaseVNode("div", _hoisted_8$a, [
 				createVNode($setup["AcuButton"], {
 					size: "sm",
 					onClick: _cache[0] || (_cache[0] = ($event) => $setup.advancedOpen = true)
@@ -138036,7 +138036,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-continuation-page__prompt-list"
     };
     const _hoisted_7$9 = { class: "acu-v2-continuation-page__prompt-head" };
-    const _hoisted_8$8 = {
+    const _hoisted_8$9 = {
 	key: 1,
 	class: "acu-v2-continuation-page__empty"
     };
@@ -138173,7 +138173,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}),
 				128
 				/* KEYED_FRAGMENT */
-			))])) : (openBlock(), createElementBlock("p", _hoisted_8$8, " 请先添加一条内容，再启动智能续写。 "))]),
+			))])) : (openBlock(), createElementBlock("p", _hoisted_8$9, " 请先添加一条内容，再启动智能续写。 "))]),
 			_: 1
 		}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
 			title: $setup.continuationCopy.panels.controls.title,
@@ -139769,7 +139769,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_5$b = { class: "acu-v2-vector-index-page__panel-stack" };
     const _hoisted_6$a = { class: "acu-v2-vector-api-form__section" };
     const _hoisted_7$8 = { class: "acu-v2-vector-api-form__section" };
-    const _hoisted_8$7 = { class: "acu-v2-vector-api-form__actions" };
+    const _hoisted_8$8 = { class: "acu-v2-vector-api-form__actions" };
     const _hoisted_9$7 = { class: "acu-v2-vector-index-page__prompt-actions" };
     const _hoisted_10$7 = { class: "acu-v2-vector-index-page__number-grid" };
     const _hoisted_11$7 = { class: "acu-v2-vector-index-page__number-grid" };
@@ -140036,7 +140036,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							))]),
 							_: 1
 						})) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_8$7, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_8$8, [createVNode($setup["AcuButton"], {
 							variant: "primary",
 							"native-type": "submit"
 						}, {
@@ -141811,7 +141811,7 @@ Expected function or array of functions, received type ${typeof value}.`
     	key: 1,
     	class: "acu-v2-data-mgmt-page__history-empty"
     };
-    const _hoisted_8$6 = { class: "acu-v2-data-mgmt-page__actions" };
+    const _hoisted_8$7 = { class: "acu-v2-data-mgmt-page__actions" };
     const _hoisted_9$6 = {
     	key: 0,
     	class: "acu-v2-data-mgmt-page__command-grid"
@@ -141959,7 +141959,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					/* KEYED_FRAGMENT */
     				))])) : (openBlock(), createElementBlock("p", _hoisted_7$7, " 暂无历史标识。 "))]),
     				_: 1
-    			}, 8, ["meta", "expanded"])]), createBaseVNode("div", _hoisted_8$6, [createVNode($setup["AcuButton"], {
+    			}, 8, ["meta", "expanded"])]), createBaseVNode("div", _hoisted_8$7, [createVNode($setup["AcuButton"], {
     				disabled: $setup.runtimeDiagnostic.busy.value,
     				loading: $setup.flow.busyAction.value === "delete-isolation-entries",
     				onClick: $setup.onDeleteCurrentIsolationEntries
@@ -143668,7 +143668,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_5$9 = { class: "acu-v2-content-replace-page__actions" };
     const _hoisted_6$8 = { class: "acu-v2-content-replace-page__status-line" };
     const _hoisted_7$6 = { class: "acu-v2-content-replace-page__badge" };
-    const _hoisted_8$5 = { class: "acu-v2-content-replace-page__select-row" };
+    const _hoisted_8$6 = { class: "acu-v2-content-replace-page__select-row" };
     const _hoisted_9$5 = { class: "acu-v2-content-replace-page__form-grid" };
     const _hoisted_10$5 = { class: "acu-v2-content-replace-page__rule-stack" };
     const _hoisted_11$5 = { class: "acu-v2-content-replace-page__actions" };
@@ -143872,7 +143872,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								/* TEXT */
 							)
 						]),
-						createBaseVNode("div", _hoisted_8$5, [
+						createBaseVNode("div", _hoisted_8$6, [
 							createVNode($setup["AcuPresetDropdown"], {
 								items: $setup.presetDropdownItems,
 								"model-value": $setup.store.selectedPresetName,
@@ -144494,7 +144494,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-advanced-tools-page__sql-error"
     };
     const _hoisted_7$5 = { class: "acu-v2-advanced-tools-page__sql-table-wrap" };
-    const _hoisted_8$4 = { class: "acu-v2-advanced-tools-page__sql-result-table" };
+    const _hoisted_8$5 = { class: "acu-v2-advanced-tools-page__sql-result-table" };
     const _hoisted_9$4 = { key: 0 };
     const _hoisted_10$4 = ["colspan"];
     const _hoisted_11$4 = { class: "acu-v2-advanced-tools-page__sql-result-meta" };
@@ -144677,7 +144677,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)) : (openBlock(), createElementBlock(
 					Fragment,
 					{ key: 3 },
-					[createBaseVNode("div", _hoisted_7$5, [createBaseVNode("table", _hoisted_8$4, [createBaseVNode("thead", null, [createBaseVNode("tr", null, [(openBlock(true), createElementBlock(
+					[createBaseVNode("div", _hoisted_7$5, [createBaseVNode("table", _hoisted_8$5, [createBaseVNode("thead", null, [createBaseVNode("tr", null, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.sqlFlow.result.value.columns, (column) => {
@@ -148609,9 +148609,6 @@ Expected function or array of functions, received type ${typeof value}.`
         }))
             .filter((seg) => !!seg.content.trim());
     }
-    function buildDefaultTemplateAssistantPromptSegments_ACU() {
-        return [{ role: 'SYSTEM', content: buildDefaultSystemPrompt_ACU(), deletable: false }];
-    }
     /**
      * 伪 role 对话式默认模板（10 卡）。
      *
@@ -149952,7 +149949,7 @@ Expected function or array of functions, received type ${typeof value}.`
             dirty: { type: Boolean },
             message: {}
         },
-        emits: ["close", "save", "reset", "load-pseudo-role", "import-file", "export", "add", "delete", "update"],
+        emits: ["close", "save", "reset", "import-file", "export", "add", "delete", "update"],
         setup(__props, { expose: __expose, emit: __emit }) {
             __expose();
             const props = __props;
@@ -149960,6 +149957,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const placeholderDocs = TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU;
             const dataDocs = computed(() => placeholderDocs.filter((doc) => doc.kind === 'data'));
             const referenceDocs = computed(() => placeholderDocs.filter((doc) => doc.kind === 'reference'));
+            const userRequestToken = TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU;
             const dialogStore = useDialogStore();
             async function confirmIfDirty() {
                 if (!props.dirty)
@@ -149975,32 +149973,33 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (await confirmIfDirty())
                     emit('close');
             }
-            const __returned__ = { props, emit, placeholderDocs, dataDocs, referenceDocs, dialogStore, confirmIfDirty, requestClose, AcuButton, AcuDrawer, AcuFileButton, AcuMessage, AcuPromptSegments };
+            const __returned__ = { props, emit, placeholderDocs, dataDocs, referenceDocs, userRequestToken, dialogStore, confirmIfDirty, requestClose, AcuButton, AcuDrawer, AcuFileButton, AcuMessage, AcuPromptSegments };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-assistant-prompt-drawer__placeholders[data-v-d2635f74] {\n  margin-bottom: 12px;\n}\n.acu-assistant-prompt-drawer__placeholders summary[data-v-d2635f74] {\n  cursor: pointer;\n  font-size: 13px;\n  color: var(--acu-text-2);\n  user-select: none;\n}\n.acu-assistant-prompt-drawer__placeholder-group[data-v-d2635f74] {\n  margin-top: 8px;\n}\n.acu-assistant-prompt-drawer__placeholder-note[data-v-d2635f74] {\n  margin: 0 0 8px;\n  font-size: 12px;\n  color: var(--acu-text-2);\n}\n.acu-assistant-prompt-drawer__placeholder-list[data-v-d2635f74] {\n  list-style: none;\n  margin: 0;\n  padding: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-assistant-prompt-drawer__placeholder-item[data-v-d2635f74] {\n  display: flex;\n  align-items: baseline;\n  gap: 8px;\n  font-size: 12px;\n  color: var(--acu-text-1);\n}\n.acu-assistant-prompt-drawer__placeholder-item code[data-v-d2635f74] {\n  flex-shrink: 0;\n  font-size: 11px;\n}\n.acu-assistant-prompt-drawer__placeholder-item span[data-v-d2635f74] {\n  color: var(--acu-text-2);\n}\n.acu-assistant-prompt-drawer__toolbar[data-v-d2635f74] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n}\n.acu-assistant-prompt-drawer__actions[data-v-d2635f74] {\n  position: sticky;\n  bottom: -16px;\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding: 12px 0 0;\n  background: var(--acu-bg-1);\n}\n", "src/presentation-v2/components/AssistantPromptDrawer.vue#style-0-d2635f74");
-    var AssistantPromptDrawer_vue_vue_type_style_index_0_scoped_d2635f74_lang = null;
+    injectSfcStyle("\n.acu-assistant-prompt-drawer__placeholders[data-v-550ae9e9] {\n  margin-bottom: 12px;\n}\n.acu-assistant-prompt-drawer__placeholders summary[data-v-550ae9e9] {\n  cursor: pointer;\n  font-size: 13px;\n  color: var(--acu-text-2);\n  user-select: none;\n}\n.acu-assistant-prompt-drawer__placeholder-group[data-v-550ae9e9] {\n  margin-top: 8px;\n}\n.acu-assistant-prompt-drawer__placeholder-note[data-v-550ae9e9] {\n  margin: 0 0 8px;\n  font-size: 12px;\n  color: var(--acu-text-2);\n}\n.acu-assistant-prompt-drawer__placeholder-list[data-v-550ae9e9] {\n  list-style: none;\n  margin: 0;\n  padding: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-assistant-prompt-drawer__placeholder-item[data-v-550ae9e9] {\n  display: flex;\n  align-items: baseline;\n  gap: 8px;\n  font-size: 12px;\n  color: var(--acu-text-1);\n}\n.acu-assistant-prompt-drawer__placeholder-item code[data-v-550ae9e9] {\n  flex-shrink: 0;\n  font-size: 11px;\n}\n.acu-assistant-prompt-drawer__placeholder-item span[data-v-550ae9e9] {\n  color: var(--acu-text-2);\n}\n.acu-assistant-prompt-drawer__toolbar[data-v-550ae9e9] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n}\n.acu-assistant-prompt-drawer__actions[data-v-550ae9e9] {\n  position: sticky;\n  bottom: -16px;\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding: 12px 0 0;\n  background: var(--acu-bg-1);\n}\n", "src/presentation-v2/components/AssistantPromptDrawer.vue#style-0-550ae9e9");
+    var AssistantPromptDrawer_vue_vue_type_style_index_0_scoped_550ae9e9_lang = null;
 
     const _hoisted_1$8 = { class: "acu-assistant-prompt-drawer__placeholders" };
     const _hoisted_2$7 = { class: "acu-assistant-prompt-drawer__placeholder-group" };
-    const _hoisted_3$7 = { class: "acu-assistant-prompt-drawer__placeholder-list" };
-    const _hoisted_4$6 = {
+    const _hoisted_3$7 = { class: "acu-assistant-prompt-drawer__placeholder-note" };
+    const _hoisted_4$6 = { class: "acu-assistant-prompt-drawer__placeholder-list" };
+    const _hoisted_5$6 = {
 	key: 0,
 	class: "acu-assistant-prompt-drawer__placeholder-group"
     };
-    const _hoisted_5$6 = { class: "acu-assistant-prompt-drawer__placeholder-list" };
-    const _hoisted_6$5 = { class: "acu-assistant-prompt-drawer__toolbar" };
-    const _hoisted_7$4 = { class: "acu-assistant-prompt-drawer__actions" };
+    const _hoisted_6$5 = { class: "acu-assistant-prompt-drawer__placeholder-list" };
+    const _hoisted_7$4 = { class: "acu-assistant-prompt-drawer__toolbar" };
+    const _hoisted_8$4 = { class: "acu-assistant-prompt-drawer__actions" };
     function _sfc_render$8(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: "编辑 AI 改表助手提示词",
 		width: "720px",
 		"before-close": $setup.confirmIfDirty,
-		onClose: _cache[8] || (_cache[8] = ($event) => $setup.emit("close"))
+		onClose: _cache[7] || (_cache[7] = ($event) => $setup.emit("close"))
 	}, {
 		default: withCtx(() => [
 			$props.message ? (openBlock(), createBlock($setup["AcuMessage"], {
@@ -150022,17 +150021,25 @@ Expected function or array of functions, received type ${typeof value}.`
 					1
 					/* TEXT */
 				),
-				createBaseVNode("div", _hoisted_2$7, [_cache[9] || (_cache[9] = createBaseVNode(
-					"p",
-					{ class: "acu-assistant-prompt-drawer__placeholder-note" },
-					[
-						createTextVNode(" 提示词中出现任一数据占位符即视为你接管数据注入，系统不再自动追加数据消息；真实历史上下文会插入在最后一个 "),
-						createBaseVNode("code", null, "$1"),
-						createTextVNode(" 之前。 ")
-					],
-					-1
-					/* CACHED */
-				)), createBaseVNode("ul", _hoisted_3$7, [(openBlock(true), createElementBlock(
+				createBaseVNode("div", _hoisted_2$7, [createBaseVNode("p", _hoisted_3$7, [
+					_cache[8] || (_cache[8] = createTextVNode(
+						" 提示词中出现任一数据占位符即视为你接管数据注入，系统不再自动追加数据消息；真实历史上下文会插入在最后一个 ",
+						-1
+						/* CACHED */
+					)),
+					createBaseVNode(
+						"code",
+						null,
+						toDisplayString($setup.userRequestToken),
+						1
+						/* TEXT */
+					),
+					_cache[9] || (_cache[9] = createTextVNode(
+						" 之前。 ",
+						-1
+						/* CACHED */
+					))
+				]), createBaseVNode("ul", _hoisted_4$6, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.dataDocs, (doc) => {
@@ -150066,7 +150073,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					128
 					/* KEYED_FRAGMENT */
 				))])]),
-				$setup.referenceDocs.length > 0 ? (openBlock(), createElementBlock("div", _hoisted_4$6, [createBaseVNode("ul", _hoisted_5$6, [(openBlock(true), createElementBlock(
+				$setup.referenceDocs.length > 0 ? (openBlock(), createElementBlock("div", _hoisted_5$6, [createBaseVNode("ul", _hoisted_6$5, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.referenceDocs, (doc) => {
@@ -150101,7 +150108,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* KEYED_FRAGMENT */
 				))])])) : createCommentVNode("v-if", true)
 			]),
-			createBaseVNode("div", _hoisted_6$5, [
+			createBaseVNode("div", _hoisted_7$4, [
 				createVNode($setup["AcuFileButton"], {
 					size: "sm",
 					accept: "application/json,.json",
@@ -150139,22 +150146,11 @@ Expected function or array of functions, received type ${typeof value}.`
 				}),
 				createVNode($setup["AcuButton"], {
 					size: "sm",
+					variant: "primary",
 					onClick: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("reset"))
 				}, {
 					default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
 						"载入默认提示词",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}),
-				createVNode($setup["AcuButton"], {
-					size: "sm",
-					variant: "primary",
-					onClick: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("load-pseudo-role"))
-				}, {
-					default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
-						"载入伪 role 模板",
 						-1
 						/* CACHED */
 					)])]),
@@ -150166,12 +150162,12 @@ Expected function or array of functions, received type ${typeof value}.`
 				"show-slot": false,
 				rows: 8,
 				"empty-text": "暂无提示词段。点击下方按钮添加第一段。",
-				onAdd: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("add", $event)),
-				onDelete: _cache[5] || (_cache[5] = ($event) => _ctx.$emit("delete", $event)),
-				onUpdate: _cache[6] || (_cache[6] = (index, patch) => _ctx.$emit("update", index, patch))
+				onAdd: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("add", $event)),
+				onDelete: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("delete", $event)),
+				onUpdate: _cache[5] || (_cache[5] = (index, patch) => _ctx.$emit("update", index, patch))
 			}, null, 8, ["segments"]),
-			createBaseVNode("footer", _hoisted_7$4, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
-				default: withCtx(() => [..._cache[14] || (_cache[14] = [createTextVNode(
+			createBaseVNode("footer", _hoisted_8$4, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
+				default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
 					"关闭",
 					-1
 					/* CACHED */
@@ -150180,9 +150176,9 @@ Expected function or array of functions, received type ${typeof value}.`
 			}), createVNode($setup["AcuButton"], {
 				variant: "primary",
 				disabled: !$props.dirty,
-				onClick: _cache[7] || (_cache[7] = ($event) => _ctx.$emit("save"))
+				onClick: _cache[6] || (_cache[6] = ($event) => _ctx.$emit("save"))
 			}, {
-				default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
+				default: withCtx(() => [..._cache[14] || (_cache[14] = [createTextVNode(
 					"保存提示词",
 					-1
 					/* CACHED */
@@ -150193,7 +150189,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open"]);
     }
-    var AssistantPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$8, [["render", _sfc_render$8], ["__scopeId", "data-v-d2635f74"]]);
+    var AssistantPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$8, [["render", _sfc_render$8], ["__scopeId", "data-v-550ae9e9"]]);
 
     let guardController = createTemplateAssistantSessionGuard_ACU();
     function cloneData(value) {
@@ -150415,7 +150411,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 }));
             }
             else {
-                promptSegments.value = buildDefaultTemplateAssistantPromptSegments_ACU();
+                promptSegments.value = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
             }
             promptDirty.value = false;
         }
@@ -150430,10 +150426,6 @@ Expected function or array of functions, received type ${typeof value}.`
             return true;
         }
         function resetPrompt() {
-            promptSegments.value = buildDefaultTemplateAssistantPromptSegments_ACU();
-            promptDirty.value = true;
-        }
-        function loadPseudoRolePrompt() {
             promptSegments.value = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
             promptDirty.value = true;
         }
@@ -150742,7 +150734,6 @@ Expected function or array of functions, received type ${typeof value}.`
             loadPromptSegments,
             savePrompt,
             resetPrompt,
-            loadPseudoRolePrompt,
             addPromptSegment,
             deletePromptSegment,
             updatePromptSegment,
@@ -150811,8 +150802,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-viz-assistant[data-v-729172df] {\n  min-width: 0;\n  display: grid;\n  gap: 12px;\n}\n.acu-viz-assistant__controls[data-v-729172df] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);\n  gap: 10px;\n}\n.acu-viz-assistant__disclosure[data-v-729172df] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__disclosure[data-v-729172df] .acu-disclosure-group__header {\n  min-height: 38px;\n  padding: 8px 12px;\n}\n[data-v-729172df] .acu-viz-assistant__disclosure-body {\n  padding: 0;\n}\n.acu-viz-assistant__folded-panel[data-v-729172df] {\n  border: 0;\n  border-radius: 0;\n}\n.acu-viz-assistant__action-row[data-v-729172df],\n.acu-viz-assistant__summary[data-v-729172df],\n.acu-viz-assistant__running[data-v-729172df],\n.acu-viz-assistant__turn-head[data-v-729172df] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  gap: 8px;\n}\n.acu-viz-assistant__repair[data-v-729172df] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__apply-reason[data-v-729172df] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.4;\n}\n.acu-viz-assistant__action-row[data-v-729172df],\n.acu-viz-assistant__summary[data-v-729172df] {\n  flex-wrap: wrap;\n}\n.acu-viz-assistant__failure-msg[data-v-729172df] {\n  margin: 4px 0 0;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  overflow-wrap: anywhere;\n}\n.acu-viz-assistant__raw-disclosure[data-v-729172df] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__raw-text[data-v-729172df] {\n  margin: 0;\n  max-height: 260px;\n  overflow: auto;\n  padding: 10px;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n  font-family: var(--acu-font-mono);\n  font-size: 11px;\n  line-height: 1.5;\n  color: var(--acu-text-2);\n  background: var(--acu-bg-1);\n  border-radius: var(--acu-radius-sm);\n}\n.acu-viz-assistant__running[data-v-729172df] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-viz-assistant__empty[data-v-729172df] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__turns[data-v-729172df],\n.acu-viz-assistant__risk-list[data-v-729172df] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__turn[data-v-729172df],\n.acu-viz-assistant__risk-item[data-v-729172df],\n.acu-viz-assistant__diff-group[data-v-729172df] {\n  min-width: 0;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__turn strong[data-v-729172df],\n.acu-viz-assistant__diff-group h4[data-v-729172df],\n.acu-viz-assistant__risk-list h4[data-v-729172df] {\n  min-width: 0;\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.35;\n}\n.acu-viz-assistant__turn[data-v-729172df] {\n  display: grid;\n  gap: 6px;\n}\n.acu-viz-assistant__turn--user[data-v-729172df] {\n  box-shadow: inset 3px 0 0 var(--acu-accent);\n}\n.acu-viz-assistant__turn--round[data-v-729172df] {\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__turn--error[data-v-729172df] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__turn-head[data-v-729172df] {\n  justify-content: space-between;\n}\n.acu-viz-assistant__turn-head strong[data-v-729172df] {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-viz-assistant__turn p[data-v-729172df] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__diff-grid[data-v-729172df] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-viz-assistant__turn-diff[data-v-729172df] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group[data-v-729172df] {\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group--warning[data-v-729172df] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__diff-group ul[data-v-729172df],\n.acu-viz-assistant__inline-list[data-v-729172df] {\n  margin: 0;\n  padding-left: 18px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__risk-list[data-v-729172df] {\n  padding-top: 10px;\n  border-top: 1px solid var(--acu-border-2);\n}\n@media (max-width: 860px) {\n.acu-viz-assistant__controls[data-v-729172df],\n  .acu-viz-assistant__diff-grid[data-v-729172df] {\n    grid-template-columns: 1fr;\n}\n[data-v-729172df] .acu-viz-assistant__disclosure-body {\n    max-height: min(68vh, 620px);\n    overflow-y: auto;\n}\n}\n@media (max-width: 767px) {\n.acu-viz-assistant__action-row[data-v-729172df] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-viz-assistant__action-row[data-v-729172df] .acu-btn {\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-viz-assistant__turn-head[data-v-729172df] {\n    align-items: flex-start;\n    flex-direction: column;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerAssistantPanel.vue#style-0-729172df");
-    var VisualizerAssistantPanel_vue_vue_type_style_index_0_scoped_729172df_lang = null;
+    injectSfcStyle("\n.acu-viz-assistant[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  gap: 12px;\n}\n.acu-viz-assistant__controls[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);\n  gap: 10px;\n}\n.acu-viz-assistant__disclosure[data-v-23a97577] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__disclosure[data-v-23a97577] .acu-disclosure-group__header {\n  min-height: 38px;\n  padding: 8px 12px;\n}\n[data-v-23a97577] .acu-viz-assistant__disclosure-body {\n  padding: 0;\n}\n.acu-viz-assistant__folded-panel[data-v-23a97577] {\n  border: 0;\n  border-radius: 0;\n}\n.acu-viz-assistant__action-row[data-v-23a97577],\n.acu-viz-assistant__summary[data-v-23a97577],\n.acu-viz-assistant__running[data-v-23a97577],\n.acu-viz-assistant__turn-head[data-v-23a97577] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  gap: 8px;\n}\n.acu-viz-assistant__repair[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__apply-reason[data-v-23a97577] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.4;\n}\n.acu-viz-assistant__action-row[data-v-23a97577],\n.acu-viz-assistant__summary[data-v-23a97577] {\n  flex-wrap: wrap;\n}\n.acu-viz-assistant__failure-msg[data-v-23a97577] {\n  margin: 4px 0 0;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  overflow-wrap: anywhere;\n}\n.acu-viz-assistant__raw-disclosure[data-v-23a97577] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__raw-text[data-v-23a97577] {\n  margin: 0;\n  max-height: 260px;\n  overflow: auto;\n  padding: 10px;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n  font-family: var(--acu-font-mono);\n  font-size: 11px;\n  line-height: 1.5;\n  color: var(--acu-text-2);\n  background: var(--acu-bg-1);\n  border-radius: var(--acu-radius-sm);\n}\n.acu-viz-assistant__running[data-v-23a97577] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-viz-assistant__empty[data-v-23a97577] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__turns[data-v-23a97577],\n.acu-viz-assistant__risk-list[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__turn[data-v-23a97577],\n.acu-viz-assistant__risk-item[data-v-23a97577],\n.acu-viz-assistant__diff-group[data-v-23a97577] {\n  min-width: 0;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__turn strong[data-v-23a97577],\n.acu-viz-assistant__diff-group h4[data-v-23a97577],\n.acu-viz-assistant__risk-list h4[data-v-23a97577] {\n  min-width: 0;\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.35;\n}\n.acu-viz-assistant__turn[data-v-23a97577] {\n  display: grid;\n  gap: 6px;\n}\n.acu-viz-assistant__turn--user[data-v-23a97577] {\n  box-shadow: inset 3px 0 0 var(--acu-accent);\n}\n.acu-viz-assistant__turn--round[data-v-23a97577] {\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__turn--error[data-v-23a97577] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__turn-head[data-v-23a97577] {\n  justify-content: space-between;\n}\n.acu-viz-assistant__turn-head strong[data-v-23a97577] {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-viz-assistant__turn p[data-v-23a97577] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__diff-grid[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-viz-assistant__turn-diff[data-v-23a97577] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group[data-v-23a97577] {\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group--warning[data-v-23a97577] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__diff-group ul[data-v-23a97577],\n.acu-viz-assistant__inline-list[data-v-23a97577] {\n  margin: 0;\n  padding-left: 18px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__risk-list[data-v-23a97577] {\n  padding-top: 10px;\n  border-top: 1px solid var(--acu-border-2);\n}\n@media (max-width: 860px) {\n.acu-viz-assistant__controls[data-v-23a97577],\n  .acu-viz-assistant__diff-grid[data-v-23a97577] {\n    grid-template-columns: 1fr;\n}\n[data-v-23a97577] .acu-viz-assistant__disclosure-body {\n    max-height: min(68vh, 620px);\n    overflow-y: auto;\n}\n}\n@media (max-width: 767px) {\n.acu-viz-assistant__action-row[data-v-23a97577] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-viz-assistant__action-row[data-v-23a97577] .acu-btn {\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-viz-assistant__turn-head[data-v-23a97577] {\n    align-items: flex-start;\n    flex-direction: column;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerAssistantPanel.vue#style-0-23a97577");
+    var VisualizerAssistantPanel_vue_vue_type_style_index_0_scoped_23a97577_lang = null;
 
     const _hoisted_1$7 = {
 	class: "acu-viz-assistant",
@@ -151474,7 +151465,6 @@ Expected function or array of functions, received type ${typeof value}.`
 			onClose: _cache[7] || (_cache[7] = ($event) => $setup.promptDrawerOpen = false),
 			onSave: $setup.assistant.savePrompt,
 			onReset: $setup.assistant.resetPrompt,
-			onLoadPseudoRole: $setup.assistant.loadPseudoRolePrompt,
 			onImportFile: _cache[8] || (_cache[8] = ($event) => $setup.assistant.importPromptFile($event)),
 			onExport: $setup.assistant.exportPrompt,
 			onAdd: _cache[9] || (_cache[9] = ($event) => $setup.assistant.addPromptSegment($event)),
@@ -151486,12 +151476,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			"dirty",
 			"onSave",
 			"onReset",
-			"onLoadPseudoRole",
 			"onExport"
 		])
 	]);
     }
-    var VisualizerAssistantPanel = /*#__PURE__*/ _export_sfc(_sfc_main$7, [["render", _sfc_render$7], ["__scopeId", "data-v-729172df"]]);
+    var VisualizerAssistantPanel = /*#__PURE__*/ _export_sfc(_sfc_main$7, [["render", _sfc_render$7], ["__scopeId", "data-v-23a97577"]]);
 
     var _sfc_main$6 = /*@__PURE__*/ defineComponent({
         __name: 'VisualizerPlacementEditor',

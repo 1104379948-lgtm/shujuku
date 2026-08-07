@@ -51,8 +51,7 @@
       <AcuButton size="sm" @click="$emit('export')">
         <i class="fa-solid fa-upload"></i> 导出 JSON
       </AcuButton>
-      <AcuButton size="sm" @click="$emit('reset')">载入默认提示词</AcuButton>
-      <AcuButton size="sm" variant="primary" @click="$emit('load-pseudo-role')">载入伪 role 模板</AcuButton>
+      <AcuButton size="sm" variant="primary" @click="$emit('reset')">载入默认提示词</AcuButton>
     </div>
 
     <AcuPromptSegments
@@ -97,7 +96,6 @@ const emit = defineEmits<{
   (e: 'close'): void;
   (e: 'save'): void;
   (e: 'reset'): void;
-  (e: 'load-pseudo-role'): void;
   (e: 'import-file', file: File): void;
   (e: 'export'): void;
   (e: 'add', position: 'top' | 'bottom'): void;

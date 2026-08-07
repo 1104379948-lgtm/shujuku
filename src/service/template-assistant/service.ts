@@ -408,10 +408,6 @@ function normalizeAssistantPromptSegments_ACU(input: unknown): TemplateAssistant
         .filter((seg) => !!seg.content.trim());
 }
 
-export function buildDefaultTemplateAssistantPromptSegments_ACU(): TemplateAssistantPromptSegment_ACU[] {
-    return [{ role: 'SYSTEM', content: buildDefaultSystemPrompt_ACU(), deletable: false }];
-}
-
 /**
  * 伪 role 对话式默认模板（10 卡）。
  *

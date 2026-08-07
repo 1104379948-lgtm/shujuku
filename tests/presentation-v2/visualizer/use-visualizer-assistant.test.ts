@@ -28,12 +28,14 @@ const {
 
 vi.mock('../../../src/service/template-assistant/service', () => ({
   buildTemplateAssistantFingerprint_ACU: mockFingerprint,
-  buildDefaultTemplateAssistantPromptSegments_ACU: () => [{ role: 'SYSTEM', content: '默认提示词', deletable: false }],
+  buildPseudoRoleTemplateAssistantPromptSegments_ACU: () => [
+    { role: 'SYSTEM', content: '伪 role 模板卡', deletable: false },
+  ],
   createTemplateAssistantSessionGuard_ACU: mockCreateGuard,
   getTemplateAssistantApplyBaselineFingerprint_ACU: mockGetBaselineFingerprint,
   resolveAssistantSystemPrompt_ACU: (segments: any[]) => (Array.isArray(segments) && segments.length
     ? segments.map((seg: any) => ({ role: seg.role, content: seg.content }))
-    : [{ role: 'SYSTEM', content: '默认提示词' }]),
+    : [{ role: 'SYSTEM', content: '伪 role 模板卡' }]),
   runTemplateAssistantSession_ACU: mockRunSession,
   setTemplateAssistantPrompt_ACU: vi.fn((segments: any[]) => ({ ok: true })),
   TemplateAssistantSessionStoppedError_ACU: class TemplateAssistantSessionStoppedError_ACU extends Error {},
@@ -556,7 +558,7 @@ describe('useVisualizerAssistant', () => {
     }, ['sheet_a']);
 
     const assistant = useVisualizerAssistant();
-    expect(assistant.promptSegments.value).toEqual([{ role: 'SYSTEM', content: '默认提示词', deletable: false }]);
+    expect(assistant.promptSegments.value).toEqual([{ role: 'SYSTEM', content: '伪 role 模板卡', deletable: false }]);
     expect(assistant.promptDirty.value).toBe(false);
 
     assistant.updatePromptSegment(0, { content: '修改后的规则' });
@@ -570,7 +572,7 @@ describe('useVisualizerAssistant', () => {
     expect(assistant.promptDirty.value).toBe(false);
 
     assistant.resetPrompt();
-    expect(assistant.promptSegments.value).toEqual([{ role: 'SYSTEM', content: '默认提示词', deletable: false }]);
+    expect(assistant.promptSegments.value).toEqual([{ role: 'SYSTEM', content: '伪 role 模板卡', deletable: false }]);
     expect(assistant.promptDirty.value).toBe(true);
   });
 });

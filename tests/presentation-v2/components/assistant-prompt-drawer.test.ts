@@ -28,7 +28,7 @@ function mountDrawer(props: Record<string, unknown>): {
         ...props,
         onUpdate: (index: number, patch: unknown) => emitted.push({ event: 'update', args: [index, patch] }),
         onClose: () => emitted.push({ event: 'close', args: [] }),
-        onLoadPseudoRole: () => emitted.push({ event: 'load-pseudo-role', args: [] }),
+        onReset: () => emitted.push({ event: 'reset', args: [] }),
       });
     },
   });
@@ -101,7 +101,7 @@ describe('AssistantPromptDrawer update 事件透传', () => {
   });
 });
 
-describe('AssistantPromptDrawer 占位符清单与载入伪 role', () => {
+describe('AssistantPromptDrawer 占位符清单与载入默认', () => {
   it('占位符清单渲染条数 === TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU.length，且元数据驱动无硬编码', async () => {
     const { el } = mountDrawer({
       isOpen: true,
@@ -119,7 +119,7 @@ describe('AssistantPromptDrawer 占位符清单与载入伪 role', () => {
     });
   });
 
-  it('点击「载入伪 role 模板」按钮 emit load-pseudo-role', async () => {
+  it('点击「载入默认提示词」按钮 emit reset（伪 role 模板为唯一默认）', async () => {
     const { el, emitted } = mountDrawer({
       isOpen: true,
       segments: [{ role: 'SYSTEM', content: '规则', deletable: true }],
@@ -129,13 +129,21 @@ describe('AssistantPromptDrawer 占位符清单与载入伪 role', () => {
     await nextTick();
 
     const button = Array.from(el.querySelectorAll('button'))
-      .find((btn) => btn.textContent?.includes('载入伪 role 模板'));
+      .find((btn) => btn.textContent?.includes('载入默认提示词'));
     expect(button).not.toBeNull();
     (button as HTMLButtonElement).click();
     await nextTick();
 
     expect(emitted).toHaveLength(1);
-    expect(emitted[0]?.event).toBe('load-pseudo-role');
+    expect(emitted[0]?.event).toBe('reset');
     expect(emitted[0]?.args).toEqual([]);
+
+    // 工具栏应只有一个「载入默认提示词」按钮，不再有独立的伪 role 按钮
+    const resetButtons = Array.from(el.querySelectorAll('button'))
+      .filter((btn) => btn.textContent?.includes('载入默认提示词'));
+    expect(resetButtons).toHaveLength(1);
+    const pseudoButtons = Array.from(el.querySelectorAll('button'))
+      .filter((btn) => btn.textContent?.includes('伪 role'));
+    expect(pseudoButtons).toHaveLength(0);
   });
 });

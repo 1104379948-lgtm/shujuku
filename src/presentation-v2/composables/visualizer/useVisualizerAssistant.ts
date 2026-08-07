@@ -3,7 +3,6 @@ import { applySheetOrderNumbers_ACU, logWarn_ACU } from '../../../shared/utils';
 import { settings_ACU } from '../../../service/runtime/state-manager';
 import {
   buildTemplateAssistantFingerprint_ACU,
-  buildDefaultTemplateAssistantPromptSegments_ACU,
   buildPseudoRoleTemplateAssistantPromptSegments_ACU,
   createTemplateAssistantSessionGuard_ACU,
   getTemplateAssistantApplyBaselineFingerprint_ACU,
@@ -316,7 +315,7 @@ export function useVisualizerAssistant() {
         deletable: seg?.deletable !== false,
       }));
     } else {
-      promptSegments.value = buildDefaultTemplateAssistantPromptSegments_ACU();
+      promptSegments.value = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
     }
     promptDirty.value = false;
   }
@@ -333,11 +332,6 @@ export function useVisualizerAssistant() {
   }
 
   function resetPrompt(): void {
-    promptSegments.value = buildDefaultTemplateAssistantPromptSegments_ACU();
-    promptDirty.value = true;
-  }
-
-  function loadPseudoRolePrompt(): void {
     promptSegments.value = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
     promptDirty.value = true;
   }
@@ -661,7 +655,6 @@ export function useVisualizerAssistant() {
     loadPromptSegments,
     savePrompt,
     resetPrompt,
-    loadPseudoRolePrompt,
     addPromptSegment,
     deletePromptSegment,
     updatePromptSegment,
