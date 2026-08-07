@@ -162,8 +162,8 @@ import { validateDDLText } from '../../src/presentation/pages/visualizer-main-co
 // validateDDLText
 // ═══════════════════════════════════════════════════════════════
 describe('validateDDLText', () => {
-  const headers = ['物品名', '数量', '描述'];
-  const asciiHeaders = ['item_name', 'quantity', 'description'];
+  const headers = ['row_id', '物品名', '数量', '描述'];
+  const asciiHeaders = ['row_id', 'item_name', 'quantity', 'description'];
 
   // ─── 正常情况 ───
   it('有效 DDL 返回 valid', () => {
@@ -223,22 +223,29 @@ describe('validateDDLText', () => {
 
   it('表头多出列', () => {
     const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, 物品名 TEXT);';
-    const result = validateDDLText(ddl, ['物品名', '数量']);
+    const result = validateDDLText(ddl, ['row_id', '物品名', '数量']);
     expect(result.valid).toBe(false);
     expect(result.message).toContain('列数不匹配');
   });
 
   it('DDL 和表头都有多出', () => {
     const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, 物品名 TEXT, 额外列 TEXT);';
-    const result = validateDDLText(ddl, ['物品名', '数量']);
+    const result = validateDDLText(ddl, ['row_id', '物品名', '数量']);
     expect(result.valid).toBe(false);
     expect(result.message).toContain('第 2 列不匹配');
   });
 
   // ─── 空表头 ───
-  it('空表头 + 有效 DDL（只有 row_id）', () => {
+  it('空数组表头（无身份）fail-closed，不再放行', () => {
     const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);';
     const result = validateDDLText(ddl, []);
+    expect(result.valid).toBe(false);
+    expect(result.message).toContain('表头为空');
+  });
+
+  it('null 占位表头 + 有效 DDL（只有 row_id）通过', () => {
+    const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);';
+    const result = validateDDLText(ddl, [null]);
     expect(result.valid).toBe(true);
   });
 

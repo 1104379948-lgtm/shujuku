@@ -685,6 +685,7 @@ export function validateDDLTextAgainstHeaders_ACU(
   ddlText: string,
   tableHeaders: string[],
 ): { valid: boolean; message: string } {
+  const rawHeaders = Array.isArray(tableHeaders) ? tableHeaders : [];
   const trimmed = String(ddlText || '').trim();
   if (!trimmed) {
     return { valid: false, message: '⚠ DDL 为空' };
@@ -700,14 +701,47 @@ export function validateDDLTextAgainstHeaders_ACU(
     return { valid: false, message: '✗ 缺少 row_id INTEGER PRIMARY KEY 列（必须作为第一列）' };
   }
 
-  const normalizedHeaders = Array.isArray(tableHeaders)
-    ? tableHeaders.map((item) => String(item ?? '').trim()).filter(Boolean)
-    : [];
+  // 统一列身份契约：tableHeaders 必须是「完整表头」（首列为 row_id 位置）。
+  // 首列允许 row_id / 行号 / null 占位（visualizer 用 null 表示不可编辑的
+  // row_id 列）；除此之外的首列一律 fail-closed（无可靠身份不得放行）。
+  // 表头规范化（NFKC/trim）后保留全部列（保序），业务列空/空白/重复
+  // fail-closed，绝不通过 filter 剔除空列来“对齐”列数。
+  if (rawHeaders.length === 0) {
+    return { valid: false, message: '✗ 表头为空，无法校验 DDL' };
+  }
+  // 真实 visualizer 的不可编辑 row_id 占位是 null（不是空串）。`String(item ?? '')`
+  // 会把 null 也拍扁成空串，导致无法区分「null 占位」与「空串/空白表头」，
+  // 因此这里必须基于原始首列类型判断：仅 null 占位放行，空串/空白一律 fail-closed。
+  const firstRawHeader = rawHeaders[0];
+  const isNullRowIdPlaceholder = firstRawHeader === null || firstRawHeader === undefined;
+  const normalizedHeaders = rawHeaders.map((item) => String(item ?? '').normalize('NFKC').trim());
   const firstHeader = normalizedHeaders[0];
-  const isRowIdHeader = firstHeader === 'row_id' || firstHeader === '行号';
-  const comparableHeaders = isRowIdHeader
-    ? normalizedHeaders.slice(1)
-    : normalizedHeaders;
+  const isRowIdHeader = firstHeader === 'row_id' || firstHeader === '行号' || isNullRowIdPlaceholder;
+  if (!isRowIdHeader) {
+    return { valid: false, message: '✗ 表头第一列必须为 row_id（或 行号 / 不可编辑的 row_id 占位）' };
+  }
+  const comparableHeaders = normalizedHeaders.slice(1);
+  const seenCanonical = new Set<string>();
+  const headerIssues: string[] = [];
+  normalizedHeaders.forEach((header, index) => {
+    if (index === 0) {
+      if (header) seenCanonical.add(header.toLocaleLowerCase('en-US').replace(/\s+/g, ' '));
+      return;
+    }
+    if (!header) {
+      headerIssues.push(`第 ${index + 1} 列表头为空`);
+      return;
+    }
+    const canonical = header.toLocaleLowerCase('en-US').replace(/\s+/g, ' ');
+    if (seenCanonical.has(canonical)) {
+      headerIssues.push(`第 ${index + 1} 列表头「${header}」重复`);
+    }
+    seenCanonical.add(canonical);
+  });
+  if (headerIssues.length > 0) {
+    return { valid: false, message: `⚠ DDL 表头不合法：${headerIssues.join('；')}` };
+  }
+
   const comparableColumns = columnInfos.filter((item) => item.sqlName.toLowerCase() !== 'row_id');
   const issues: string[] = [];
 

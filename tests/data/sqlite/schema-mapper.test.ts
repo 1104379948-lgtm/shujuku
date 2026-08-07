@@ -444,15 +444,15 @@ describe('resolveEffectiveDDL', () => {
     expect(sheet.sourceData.ddl).toBe('CREATE TABLE broken ( INVALID SYNTAX;');
   });
 
-  it('fallback columnMap 与 DDL 对中文、保留字和物理冲突保持一致', () => {
+  it('fallback columnMap 与 DDL 对中文、保留字和同音字物理冲突保持一致', () => {
     const sheet = makeSheet({
-      content: [['row_id', '物品名称', 'select', 'Name', 'name'], ['1', '铁剑', 'x', 'A', 'B']],
+      content: [['row_id', '物品名称', 'select', '理想', '离乡'], ['1', '铁剑', 'x', 'A', 'B']],
     });
 
     const resolved = resolveEffectiveDDL(sheet, 'sheet_mapping');
 
     expect(resolved.source).toBe('fallback_missing');
-    expect(resolved.columnMap.mappings.map(mapping => mapping.sqlName)).toEqual(['row_id', 'wu_pin_ming_cheng', 'col_select', 'name', 'name_2']);
+    expect(resolved.columnMap.mappings.map(mapping => mapping.sqlName)).toEqual(['row_id', 'wu_pin_ming_cheng', 'col_select', 'li_xiang', 'li_xiang_2']);
     for (const mapping of resolved.columnMap.mappings.slice(1)) {
       expect(resolved.effectiveDDL).toMatch(new RegExp(`${mapping.sqlName} TEXT,? -- ${mapping.displayName}`));
     }
@@ -482,13 +482,65 @@ describe('generateFallbackDDL', () => {
     expect(validateDDLAgainstHeaders(ddl, ['row_id', '姓名', '状态']).valid).toBe(true);
   });
 
-  it('物理列冲突按稳定后缀消除，保留显示表头', () => {
-    const ddl = generateFallbackDDL('test_table', ['row_id', 'name', 'name']);
-    expect(ddl).toContain('name TEXT');
-    expect(ddl).toContain('name_2 TEXT');
-    expect(ddl).toContain('-- name');
+  it('重复表头 fail-closed，不再生成 col_N 掩盖重复列', () => {
+    expect(() => generateFallbackDDL('test_table', ['row_id', 'name', 'name']))
+      .toThrow(/第 3 列/);
   });
 
+  it('中间空列表头 fail-closed，不再生成 col_N 掩盖空列', () => {
+    expect(() => generateFallbackDDL('test_table', ['row_id', '姓名', '', '状态']))
+      .toThrow(/第 3 列/);
+  });
+
+  it('纯空格表头 fail-closed', () => {
+    expect(() => generateFallbackDDL('test_table', ['row_id', '姓名', '   ', '状态']))
+      .toThrow(/第 3 列/);
+  });
+
+  it('非首位 row_id fail-closed', () => {
+    expect(() => generateFallbackDDL('test_table', ['姓名', 'row_id', '状态']))
+      .toThrow(/row_id|首列|第 1 列/);
+  });
+
+  it('规范化重名（Name/name）fail-closed', () => {
+    expect(() => generateFallbackDDL('test_table', ['row_id', 'Name', 'name']))
+      .toThrow(/第 3 列/);
+  });
+
+  it('生成与验证共享同一份表头契约：合法表头生成后验证通过，空列生成失败且验证也失败', () => {
+    const ddl = generateFallbackDDL('test_table', ['row_id', '姓名', '状态']);
+    expect(validateDDLAgainstHeaders(ddl, ['row_id', '姓名', '状态']).valid).toBe(true);
+    // 表头中间空列：验证侧同样 fail-closed，不再出现“生成 5 列/验证 4 列”的二次错误
+    expect(validateDDLAgainstHeaders(ddl, ['row_id', '姓名', '', '状态']).valid).toBe(false);
+  });
+
+  it('中文表头生成稳定 ASCII 物理列并保留精确注释映射', () => {
+    const ddl = generateFallbackDDL('test_table', ['row_id', '姓名', '状态']);
+    expect(ddl).toContain('xing_ming TEXT');
+    expect(ddl).toContain('-- 姓名');
+    expect(ddl).toContain('zhuang_tai TEXT -- 状态');
+    expect(validateDDLAgainstHeaders(ddl, ['row_id', '姓名', '状态']).valid).toBe(true);
+  });
+
+  it('规范化不同但物理 slug 相同的列仍用稳定后缀消歧', () => {
+    // 中文同音不同字：canonical 不同（li_xiang_1/li_xiang_2 之类），slug 撞车
+    const ddl = generateFallbackDDL('test_table', ['row_id', '理想', '离乡']);
+    expect(ddl).toContain('li_xiang TEXT');
+    expect(ddl).toContain('li_xiang_2 TEXT');
+  });
+
+
+  it('首列 null 占位（visualizer 不可编辑 row_id）映射为 row_id', () => {
+    const ddl = generateFallbackDDL('test_table', [null, '姓名', '状态']);
+    expect(ddl).toContain('row_id INTEGER PRIMARY KEY');
+    expect(ddl).toContain('姓名');
+    expect(validateDDLAgainstHeaders(ddl, [null, '姓名', '状态']).valid).toBe(true);
+  });
+
+  it('首列空字符串（非 null 占位）fail-closed', () => {
+    expect(() => generateFallbackDDL('test_table', ['', '姓名', '状态']))
+      .toThrow(/row_id|首列|第 1 列/);
+  });
   it('空 headers 生成最小 DDL', () => {
     const ddl = generateFallbackDDL('test_table', []);
     expect(ddl).toContain('row_id INTEGER PRIMARY KEY');

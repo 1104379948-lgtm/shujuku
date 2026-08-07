@@ -2411,6 +2411,56 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(3);
   });
 
+
+  it('boundary checkpoint 后写目标陈旧时，在 AI 调用前结构化阻断（零 token、零清理、零写 frame）', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+    });
+    // 最新 full checkpoint 在 index 6（root=6），bucket 目标 0/2 早于 root → stale。
+    const chat = [
+      { is_user: false, mes: 'AI回复1' },
+      { is_user: true, mes: '用户2' },
+      { is_user: false, mes: 'AI回复3' },
+      { is_user: true, mes: '用户4' },
+      { is_user: false, mes: 'AI回复5' },
+      { is_user: true, mes: '用户6' },
+      {
+        is_user: false,
+        mes: 'AI回复7',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' }, sheet_0: { name: '测试表A', content: [['row_id', '值A'], ['1', '基底']] } } } },
+          },
+        },
+      },
+    ];
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    mockSettings.maxConcurrentGroups = 1;
+    mockSettings.autoUpdateThreshold = 0;
+    mockSettings.updateBatchSize = 1;
+    mockCurrentJsonTableData = { sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A']] } };
+    mockCallCustomOpenAI.mockClear();
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+    const processBatch = vi.fn().mockResolvedValue({ success: true });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], processBatch, mockRefreshData, {
+      clearBeforeUpdate: false,
+      contextScopeIndices: [0, 2, 4],
+    } as any);
+
+    expect(result.success).toBe(false);
+    expect(result.diagnosticCode).toBe('stale_bucket_after_boundary_checkpoint');
+    // 零 token：AI 未被调用；零清理：不预清理；零写 frame：不写 bucket。
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
+    expect(mockReloadStorageProvider).not.toHaveBeenCalled();
+  });
+
   it('手动重填在 bucket 写入期间模板源变化时，最终 commit 仍使用启动时冻结模板', async () => {
     const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     const { getGlobalTemplateSnapshotForCurrentProfile_ACU } = await import('../../../src/service/template/chat-scope');

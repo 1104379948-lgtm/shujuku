@@ -563,11 +563,15 @@ function applySheetSchemaPatch_ACU(sheet: any, sheetKey: string, rawPatch: any) 
         changes.push(`新增列: ${name}`);
     });
 
-    const finalHeaders = getSheetHeaders_ACU(sheet, sheetKey);
+    // 校验必须使用「完整表头」（首列为 row_id 位置），与
+    // validateDDLTextAgainstHeaders_ACU 的统一契约一致；
+    // getSheetHeaders_ACU 返回的是 slice(1) 业务表头，只能用于列定位。
+    const finalHeaderRow = getSheetHeaderRow_ACU(sheet, sheetKey);
+    const finalHeaders = finalHeaderRow.slice(1).map((item: any) => String(item ?? '').trim());
     assertHeadersUnique_ACU(finalHeaders);
 
     if (nextDdl) {
-        const ddlValidation = validateDdlAgainstHeaders_ACU(nextDdl, finalHeaders);
+        const ddlValidation = validateDdlAgainstHeaders_ACU(nextDdl, finalHeaderRow);
         if (!ddlValidation.valid) {
             throw new Error(`patch_sheet_schema.ddl 非法: ${ddlValidation.message}`);
         }

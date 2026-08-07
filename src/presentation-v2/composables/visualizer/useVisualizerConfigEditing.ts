@@ -295,7 +295,10 @@ export function useVisualizerConfigEditing() {
 
   function validateDDL(): { valid: boolean; message: string } {
     const sheet = currentSheet.value;
-    return validateDDLTextAgainstHeaders_ACU(stringValue(sheet?.sourceData?.ddl), headers.value);
+    // 统一契约：validator 只接受完整表头（首列为 row_id/行号/null 占位）；
+    // headers.value 是 slice(1) 业务表头，不能直接传入。
+    const headerRow = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
+    return validateDDLTextAgainstHeaders_ACU(stringValue(sheet?.sourceData?.ddl), headerRow);
   }
 
   function setSpecialIndexLock(enabled: boolean): void {

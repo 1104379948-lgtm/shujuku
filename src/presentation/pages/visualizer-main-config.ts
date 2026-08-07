@@ -499,7 +499,9 @@ export function validateDDLText(ddlText: string, tableHeaders: string[]): { vali
           jQuery_API_ACU('#cfg-ddl-validate').on('click', function() {
               const $result = jQuery_API_ACU('#cfg-ddl-validate-result');
               const ddlText = String(jQuery_API_ACU('#cfg-ddl').val() || '').trim();
-              const headers = (sheet.content && sheet.content[0]) ? sheet.content[0].slice(1) : [];
+              // 统一契约：validator 只接受完整表头（首列为 row_id/行号/null 占位），
+              // 不在此处 slice(1)。
+              const headers = (sheet.content && sheet.content[0]) ? sheet.content[0] : [];
               const validation = validateDDLText(ddlText, headers);
 
               if (validation.valid) {

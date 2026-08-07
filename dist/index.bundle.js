@@ -33696,7 +33696,10 @@ $CONTENT
         const mappings = [];
         const diagnostics = [];
         const firstHeaderCanonicalName = canonicalizeDisplayName_ACU(headers[0]);
-        if (firstHeaderCanonicalName !== 'row_id') {
+        // visualizer 的不可编辑 row_id 占位也是 null（content[0][0] === null），
+        // 与 row_id 精确匹配等价，视为 row_id 身份。
+        const firstIsRowIdPlaceholder = headers[0] === null || headers[0] === undefined;
+        if (!firstIsRowIdPlaceholder && firstHeaderCanonicalName !== 'row_id') {
             diagnostics.push({
                 code: 'missing_row_id', index: 0, originalName: String(headers[0] ?? ''),
                 normalizedDisplayName: String(headers[0] ?? '').normalize('NFKC').trim(),
@@ -33707,9 +33710,11 @@ $CONTENT
             const originalName = String(header ?? '');
             const displayName = originalName.normalize('NFKC').trim();
             const canonicalName = canonicalizeDisplayName_ACU(displayName);
-            const isRowId = index === 0 && canonicalName === 'row_id';
+            const isRowId = index === 0 && (canonicalName === 'row_id' || header === null || header === undefined);
             const firstIndex = canonicalName ? firstCanonicalIndex.get(canonicalName) : undefined;
-            if (!canonicalName) {
+            // 首列 null 占位视为合法 row_id 身份，不报 empty_column_name；
+            // 其余列（含非首列的空/空白）仍 fail-closed。
+            if (!canonicalName && !isRowId) {
                 diagnostics.push({ code: 'empty_column_name', index, originalName, normalizedDisplayName: displayName, canonicalName, candidateSqlName: null });
             }
             else if (firstIndex === undefined) {
@@ -34881,6 +34886,7 @@ $CONTENT
         return `${value.slice(0, bounds.openingIndex + 1)}${injected}${separator}${after}`;
     }
     function validateDDLTextAgainstHeaders_ACU(ddlText, tableHeaders) {
+        const rawHeaders = Array.isArray(tableHeaders) ? tableHeaders : [];
         const trimmed = String(ddlText || '').trim();
         if (!trimmed) {
             return { valid: false, message: '⚠ DDL 为空' };
@@ -34894,14 +34900,47 @@ $CONTENT
             || firstColumn.declaredType !== 'INTEGER' || !firstColumn.isPrimaryKey) {
             return { valid: false, message: '✗ 缺少 row_id INTEGER PRIMARY KEY 列（必须作为第一列）' };
         }
-        const normalizedHeaders = Array.isArray(tableHeaders)
-            ? tableHeaders.map((item) => String(item ?? '').trim()).filter(Boolean)
-            : [];
+        // 统一列身份契约：tableHeaders 必须是「完整表头」（首列为 row_id 位置）。
+        // 首列允许 row_id / 行号 / null 占位（visualizer 用 null 表示不可编辑的
+        // row_id 列）；除此之外的首列一律 fail-closed（无可靠身份不得放行）。
+        // 表头规范化（NFKC/trim）后保留全部列（保序），业务列空/空白/重复
+        // fail-closed，绝不通过 filter 剔除空列来“对齐”列数。
+        if (rawHeaders.length === 0) {
+            return { valid: false, message: '✗ 表头为空，无法校验 DDL' };
+        }
+        // 真实 visualizer 的不可编辑 row_id 占位是 null（不是空串）。`String(item ?? '')`
+        // 会把 null 也拍扁成空串，导致无法区分「null 占位」与「空串/空白表头」，
+        // 因此这里必须基于原始首列类型判断：仅 null 占位放行，空串/空白一律 fail-closed。
+        const firstRawHeader = rawHeaders[0];
+        const isNullRowIdPlaceholder = firstRawHeader === null || firstRawHeader === undefined;
+        const normalizedHeaders = rawHeaders.map((item) => String(item ?? '').normalize('NFKC').trim());
         const firstHeader = normalizedHeaders[0];
-        const isRowIdHeader = firstHeader === 'row_id' || firstHeader === '行号';
-        const comparableHeaders = isRowIdHeader
-            ? normalizedHeaders.slice(1)
-            : normalizedHeaders;
+        const isRowIdHeader = firstHeader === 'row_id' || firstHeader === '行号' || isNullRowIdPlaceholder;
+        if (!isRowIdHeader) {
+            return { valid: false, message: '✗ 表头第一列必须为 row_id（或 行号 / 不可编辑的 row_id 占位）' };
+        }
+        const comparableHeaders = normalizedHeaders.slice(1);
+        const seenCanonical = new Set();
+        const headerIssues = [];
+        normalizedHeaders.forEach((header, index) => {
+            if (index === 0) {
+                if (header)
+                    seenCanonical.add(header.toLocaleLowerCase('en-US').replace(/\s+/g, ' '));
+                return;
+            }
+            if (!header) {
+                headerIssues.push(`第 ${index + 1} 列表头为空`);
+                return;
+            }
+            const canonical = header.toLocaleLowerCase('en-US').replace(/\s+/g, ' ');
+            if (seenCanonical.has(canonical)) {
+                headerIssues.push(`第 ${index + 1} 列表头「${header}」重复`);
+            }
+            seenCanonical.add(canonical);
+        });
+        if (headerIssues.length > 0) {
+            return { valid: false, message: `⚠ DDL 表头不合法：${headerIssues.join('；')}` };
+        }
         const comparableColumns = columnInfos.filter((item) => item.sqlName.toLowerCase() !== 'row_id');
         const issues = [];
         if (comparableColumns.length !== comparableHeaders.length) {
@@ -35236,7 +35275,7 @@ $CONTENT
     }
     function buildRuntimeFallbackDDL_ACU(sheet, fallbackTableName, source = 'fallback_missing', diagnostic = 'DDL 缺失，已使用运行时 fallback schema。') {
         const headers = Array.isArray(sheet.content?.[0]) && sheet.content[0].length > 0
-            ? sheet.content[0].map(header => String(header ?? ''))
+            ? sheet.content[0].map(header => (header === null || header === undefined ? null : String(header)))
             : ['row_id'];
         const fallbackTable = sanitizeIdentifier(fallbackTableName || sheet.uid || 'unknown_table');
         return {
@@ -35253,8 +35292,8 @@ $CONTENT
             throw new Error('fallback schema 需要首列表头为 row_id，且所有表头必须可安全映射');
         }
         return {
-            mappings: mappings.map(mapping => ({ sourceIndex: mapping.index, displayName: mapping.displayName, sqlName: mapping.sqlName, required: mapping.isRowId })),
-            sqlToDisplay: new Map(mappings.map(mapping => [mapping.sqlName, mapping.displayName])),
+            mappings: mappings.map(mapping => ({ sourceIndex: mapping.index, displayName: String(mapping.displayName), sqlName: mapping.sqlName, required: mapping.isRowId })),
+            sqlToDisplay: new Map(mappings.map(mapping => [mapping.sqlName, String(mapping.displayName)])),
         };
     }
     function buildExplicitColumnMap_ACU(sheet, ddl, headers) {
@@ -35276,6 +35315,9 @@ $CONTENT
      * 从 content[0] 表头自动生成全 TEXT 的 fallback DDL
      * 第一列 "row_id" 映射为 INTEGER PRIMARY KEY
      * 其余列全部为 TEXT
+     * 生成与验证共享同一份列身份契约：表头先规范化（NFKC/trim），
+     * 空/空白/重复规范化列名、row_id 缺失或非首位一律 fail-closed，
+     * 绝不把空表头掩盖成 col_N 物理列。
      *
      * @param tableName 英文表名
      * @param headers content[0] 表头行
@@ -35283,8 +35325,14 @@ $CONTENT
      */
     function generateFallbackDDL(tableName, headers) {
         const lines = [];
-        const normalizedHeaders = headers.length > 0 ? headers : ['row_id'];
-        const { mappings } = mapSqlColumnIdentifiers_ACU(normalizedHeaders);
+        const rawHeaders = Array.isArray(headers) ? headers : [];
+        const normalizedHeaders = rawHeaders.length > 0 ? rawHeaders : ['row_id'];
+        const { mappings, diagnostics } = mapSqlColumnIdentifiers_ACU(normalizedHeaders);
+        if (diagnostics.length > 0) {
+            throw new Error(`fallback DDL 表头不合法：${diagnostics
+            .map(diagnostic => `第 ${diagnostic.index + 1} 列「${diagnostic.originalName}」${diagnostic.code}`)
+            .join('；')}`);
+        }
         if (!mappings[0]?.isRowId) {
             throw new Error('fallback DDL 需要首列表头为 row_id，且所有表头必须唯一且非空');
         }
@@ -35373,7 +35421,10 @@ $CONTENT
     function resolveInsertColumnMappings(sheet, headers, ddlOverride) {
         const ddl = ddlOverride || sheet.sourceData?.ddl?.trim();
         if (!ddl) {
-            return createSheetInsertPlan(sheet, buildFallbackColumnMap_ACU(headers.map(header => String(header ?? '')))).mappings.slice();
+            // 与 buildRuntimeFallbackDDL_ACU 保持一致：保留首列不可编辑的 null row_id 占位，
+            // 不把它拍扁成空串（否则会被映射器判为非法空列而 fail-closed）。
+            const nullPreservingHeaders = headers.map(header => (header === null || header === undefined ? null : String(header)));
+            return createSheetInsertPlan(sheet, buildFallbackColumnMap_ACU(nullPreservingHeaders)).mappings.slice();
         }
         const columns = parseDDLColumnInfos_ACU(ddl);
         const firstColumn = columns[0];
@@ -35461,7 +35512,11 @@ $CONTENT
      * @returns 校验结果
      */
     function validateDDLAgainstHeaders(ddl, headers) {
-        const normalizedHeaders = headers.filter(h => h !== null).map(h => String(h ?? ''));
+        // 保序传给统一契约校验；不再 filter 剔除 null，避免改变列位置
+        // （中间空列由 validator 按“第 N 列为空”fail-closed）。
+        // 首列 null 占位（visualizer 不可编辑 row_id）必须原样传递给统一契约，
+        // 不能拍扁成空串——否则会被误判为“空表头”fail-closed。
+        const normalizedHeaders = Array.isArray(headers) ? headers.map(h => (h === null || h === undefined ? null : String(h))) : [];
         const result = validateDDLTextAgainstHeaders_ACU(ddl, normalizedHeaders);
         return {
             valid: result.valid,
@@ -39874,9 +39929,32 @@ $CONTENT
         const affectedSheetKeys = [...new Set(repair.idRemap.map(remap => remap.sheetKey))];
         logWarn_ACU(`[V2 Replay] 旧 full checkpoint 含重复 row_id，已在内存副本中保留全部行并重映射 ${repair.idRemap.length} 行：${affectedSheetKeys.join(', ')}。原 storage frame 未修改。`);
     }
-    async function ensureSqlReplayRuntime_ACU(runtime, state, options = {}) {
-        if (runtime.loaded)
+    /**
+     * 幂等 dispose：统一维护 runtime 生命周期收尾。
+     * 任何路径（materialize 成功后、operation 失败 finally、ownedRuntime 收尾）
+     * 都经此收敛，避免底层 dispose 非幂等时出现双释放；loaded/mode 状态同步。
+     */
+    function disposeSqlReplayRuntime_ACU(runtime) {
+        if (!runtime)
             return;
+        try {
+            runtime.engine.dispose();
+        }
+        finally {
+            runtime.loaded = false;
+            runtime.mode = 'js_materialized';
+        }
+    }
+    async function ensureSqlReplayRuntime_ACU(runtime, state, options = {}) {
+        // 惰性 hydrate：仅在进入下一 SQL 段时从最新 `state` 加载一次。
+        // SQLite 已是当前权威状态时直接复用，禁止在每 operation 后重建。
+        if (runtime.mode === 'sqlite_loaded')
+            return;
+        if (runtime.mode === 'js_materialized' && runtime.loaded) {
+            // 状态机不变量：js_materialized 时 SQLite 必须已 dispose（见 materialize），
+            // 因此这里的 loaded 只可能来自未 materialize 的初始构造，按未加载处理。
+            disposeSqlReplayRuntime_ACU(runtime);
+        }
         // The snapshot handed to SQLite comes from persisted history, so legacy
         // identity must be restored before strict hydrate. The export path below
         // stays strict: by then every row has an identity, and a defect there would
@@ -39889,6 +39967,7 @@ $CONTENT
         else
             runtime.syncBridge.loadFromTableData(state, { strict: true });
         runtime.loaded = true;
+        runtime.mode = 'sqlite_loaded';
     }
     function getExportedSqlReplayRuntimeState_ACU(runtime, state, options = {}) {
         if (!runtime.loaded)
@@ -39906,54 +39985,32 @@ $CONTENT
             return;
         replaceState_ACU(state, getExportedSqlReplayRuntimeState_ACU(runtime, state, options));
     }
-    async function reloadSqlReplayRuntime_ACU(runtime, state, options = {}) {
-        if (!runtime.loaded)
+    /**
+     * 单一转换入口（SQLite → JS）：严格导出 SQLite 到 `state`，成功后 dispose Database
+     * 并将 runtime 标记为未加载。任何离开 SQL 段的路径（JS-native operation、sheet
+     * checkpoint、replay 结束）都必须先经过这里，确保不再出现新旧双 Database 同时存活。
+     */
+    async function materializeSqlRuntimeToState_ACU(runtime, state, options = {}) {
+        if (runtime.mode !== 'sqlite_loaded' || !runtime.loaded)
             return;
-        const nextEngine = new SqliteEngine();
-        const nextRuntime = {
-            engine: nextEngine,
-            syncBridge: new SyncBridge(nextEngine),
-            loaded: false,
-        };
-        try {
-            await ensureSqlReplayRuntime_ACU(nextRuntime, state, options);
-        }
-        catch (error) {
-            nextEngine.dispose();
-            throw error;
-        }
-        const previousEngine = runtime.engine;
-        runtime.engine = nextRuntime.engine;
-        runtime.syncBridge = nextRuntime.syncBridge;
-        runtime.loaded = true;
-        previousEngine.dispose();
+        const exported = getExportedSqlReplayRuntimeState_ACU(runtime, state, options);
+        // 先导出成功再 dispose：导出抛错时保持 SQLite 权威状态不变，由上层 finally 清理。
+        replaceState_ACU(state, exported);
+        disposeSqlReplayRuntime_ACU(runtime);
     }
     function buildReplayCandidate_ACU(runtime, state, options = {}) {
+        // SQLite 已加载时返回 SQLite 权威状态（不 dispose；dispose 由
+        // materializeSqlRuntimeToState_ACU 在 JS 路径的提交前统一执行）。
         return runtime?.loaded
             ? getExportedSqlReplayRuntimeState_ACU(runtime, state, options)
             : deepClone_ACU$3(state);
     }
-    async function commitReplayCandidate_ACU(runtime, state, candidate, context, options = {}) {
-        // Every operation funnels through here, so this is the single place where the
-        // historical/strict split is decided. Candidates derived from persisted
-        // operations get legacy identity restored; candidates we construct ourselves
-        // (template baselines) stay strict so new writes cannot regress the format.
-        if (options.legacyDuplicateRowIds) {
-            // SPv7.9 过渡回放必须逐项保留旧状态；此阶段的重复身份会在快照一次性重编号。
-            // 这里绝不能调用 restore/normalize，否则会在旧 operation 的中途改变匹配语义。
-        }
-        else if (options.historical)
-            normalizeHistoricalReplayState_ACU(candidate, context);
-        else
-            normalizeReplayState_ACU(candidate, context);
-        if (runtime?.loaded)
-            await reloadSqlReplayRuntime_ACU(runtime, candidate, options);
-        replaceState_ACU(state, candidate);
-    }
     async function applySheetCheckpointsForReplay_ACU(state, checkpoints, runtime) {
         if (checkpoints.length === 0)
             return;
-        const candidate = buildReplayCandidate_ACU(runtime, state);
+        // sheet checkpoint 属 JS 语义：离开 SQL 段先 materialize（导出并 dispose）。
+        await materializeSqlRuntimeToState_ACU(runtime, state);
+        const candidate = deepClone_ACU$3(state);
         for (const checkpoint of checkpoints) {
             if (checkpoint.timeline?.kind === 'sheet_hide') {
                 // hide：从 active replay state 移除该表的可见性（数据仍留存于 checkpoint.data 供后续 reveal）。
@@ -39964,7 +40021,7 @@ $CONTENT
                 candidate[checkpoint.sheetKey] = deepClone_ACU$3(checkpoint.data);
             }
         }
-        await commitReplayCandidate_ACU(runtime, state, candidate, '单表 checkpoint', { historical: true });
+        replaceState_ACU(state, candidate);
     }
     function buildReplaySqlTableAliases_ACU(state, operation) {
         const isPlainSqlIdentifier = (value) => (typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(value));
@@ -40356,15 +40413,23 @@ $CONTENT
             throw new Error('[V2 Replay] operation 缺少有效 kind。');
         }
         const ownedRuntime = !runtime && (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch')
-            ? { engine: new SqliteEngine(), syncBridge: null, loaded: false }
+            ? { engine: new SqliteEngine(), syncBridge: null, loaded: false, mode: 'js_materialized' }
             : null;
         if (ownedRuntime)
             ownedRuntime.syncBridge = new SyncBridge(ownedRuntime.engine);
         const effectiveRuntime = runtime || ownedRuntime || null;
         try {
             if (operation.kind === 'data_replace') {
+                // JS-native 提交：先退出 SQL 段（materialize + dispose），再以 JS state 提交全量替换。
+                if (effectiveRuntime)
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
                 const candidate = deepClone_ACU$3(operation.data);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace', { historical: true, ...options });
+                if (options.legacyDuplicateRowIds) {
+                    // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize；由上层 finally dispose。
+                }
+                else
+                    normalizeHistoricalReplayState_ACU(candidate, 'data_replace');
+                replaceState_ACU(state, candidate);
                 return;
             }
             if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
@@ -40376,40 +40441,68 @@ $CONTENT
                 return;
             }
             if (operation.kind === 'sheet_schema_migrate') {
+                if (effectiveRuntime)
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
                 const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 const candidate = await applySheetSchemaMigrationOperation_ACU(sourceState, operation);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate', { historical: true, ...options });
+                if (options.legacyDuplicateRowIds) {
+                    // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
+                }
+                else
+                    normalizeHistoricalReplayState_ACU(candidate, 'sheet_schema_migrate');
+                replaceState_ACU(state, candidate);
                 return;
             }
             if (operation.kind === 'sheet_replace') {
+                if (effectiveRuntime)
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 candidate[operation.sheetKey] = deepClone_ACU$3(operation.sheet);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace', { historical: true, ...options });
+                if (options.legacyDuplicateRowIds) {
+                    // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
+                }
+                else
+                    normalizeHistoricalReplayState_ACU(candidate, 'sheet_replace');
+                replaceState_ACU(state, candidate);
                 return;
             }
             if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
                 if (operation.kind === 'meta_update') {
                     assertMetaUpdateDoesNotChangeDdl_ACU(operation);
                 }
+                if (effectiveRuntime)
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 if (options.legacyDuplicateRowIds)
                     applyTablePatchLegacyDuplicateRowIds_ACU(candidate, operation);
                 else
                     applyTablePatchV2_ACU(candidate, operation);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind, { historical: true, ...options });
+                if (options.legacyDuplicateRowIds) {
+                    // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
+                }
+                else
+                    normalizeHistoricalReplayState_ACU(candidate, operation.kind);
+                replaceState_ACU(state, candidate);
                 return;
             }
             if (operation.kind === 'table_edit_dsl') {
+                if (effectiveRuntime)
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 applyTableEditDslOperationV2_ACU(candidate, operation.text);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl', { historical: true, ...options });
+                if (options.legacyDuplicateRowIds) {
+                    // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
+                }
+                else
+                    normalizeHistoricalReplayState_ACU(candidate, 'table_edit_dsl');
+                replaceState_ACU(state, candidate);
                 return;
             }
             throw new Error(`[V2 Replay] 不支持的 operation kind: ${operation.kind}`);
         }
         finally {
             if (ownedRuntime)
-                ownedRuntime.engine.dispose();
+                disposeSqlReplayRuntime_ACU(ownedRuntime);
         }
     }
     function collectScheduleSummaryFromFramesV2_ACU(chatArg, isolationKey, options = {}) {
@@ -40530,6 +40623,7 @@ $CONTENT
             engine: new SqliteEngine(),
             syncBridge: null,
             loaded: false,
+            mode: 'js_materialized',
         };
         const compatibilityRepairs = [];
         let headerOnlyTemplate;
@@ -40595,9 +40689,12 @@ $CONTENT
                                         && !Object.prototype.hasOwnProperty.call(state, operation.sheetKey)) {
                                         const templateSheet = headerOnlyTemplate?.[operation.sheetKey];
                                         if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
-                                            const candidate = buildReplayCandidate_ACU(runtime, state);
+                                            // 补锚是 JS 语义（模板 header-only 快照），先退出 SQL 段再合并。
+                                            await materializeSqlRuntimeToState_ACU(runtime, state);
+                                            const candidate = deepClone_ACU$3(state);
                                             candidate[operation.sheetKey] = deepClone_ACU$3(templateSheet);
-                                            await commitReplayCandidate_ACU(runtime, state, candidate, 'temporary sheet anchor');
+                                            normalizeHistoricalReplayState_ACU(candidate, 'temporary sheet anchor');
+                                            replaceState_ACU(state, candidate);
                                             compatibilityRepairs.push({
                                                 kind: 'temporary_sheet_anchor',
                                                 severity: 'provisional',
@@ -40622,12 +40719,15 @@ $CONTENT
                         else {
                             if (transitionRef && !isEntryAfterSpv79TransitionCutoff_ACU(ref.messageIndex, entry.seq, transitionRef.checkpoint))
                                 continue;
-                            const candidate = buildReplayCandidate_ACU(runtime, state);
+                            // legacy patches 是 JS 语义：先退出 SQL 段再应用补丁。
+                            await materializeSqlRuntimeToState_ACU(runtime, state);
+                            const candidate = deepClone_ACU$3(state);
                             // 兼容旧版 derived patch log；新 V2 不再写 patches。
                             for (const patch of entry.patches || []) {
                                 applyTablePatchV2_ACU(candidate, patch);
                             }
-                            await commitReplayCandidate_ACU(runtime, state, candidate, 'legacy patches', { historical: true });
+                            normalizeHistoricalReplayState_ACU(candidate, 'legacy patches');
+                            replaceState_ACU(state, candidate);
                         }
                         const shouldReplayEntryEvent = !transitionRef || isEntryAfterSpv79TransitionCutoff_ACU(ref.messageIndex, entry.seq, transitionRef.checkpoint);
                         if (shouldReplayEntryEvent && options.updateRuntimeState !== false) {
@@ -40641,8 +40741,8 @@ $CONTENT
                 }
                 await applyDueIntroductions(Number.POSITIVE_INFINITY);
             }
-            if (runtime.loaded)
-                exportSqlReplayRuntime_ACU(runtime, state);
+            // replay 结束：SQLite 仍为权威状态时最后导出一次并 dispose，保持单 Database 峰值。
+            await materializeSqlRuntimeToState_ACU(runtime, state);
             return {
                 data: state,
                 baseKind,
@@ -40651,7 +40751,7 @@ $CONTENT
             };
         }
         finally {
-            runtime.engine.dispose();
+            disposeSqlReplayRuntime_ACU(runtime);
         }
     }
     async function loadTableStateFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, options = {}) {
@@ -61361,7 +61461,7 @@ $CONTENT
      * @param maxTokensOverride 可选的最大 token 数覆盖，仅允许公开层传入经校验的安全值
      * @returns AI 响应文本，失败返回 null
      */
-    async function callAIWithPreset_ACU(messages, presetName = '', maxTokensOverride) {
+    async function callAIWithPreset_ACU(messages, presetName = '', maxTokensOverride, signal) {
         if (!Array.isArray(messages) || messages.length === 0) {
             logWarn_ACU('[callAIWithPreset] messages 必须是非空数组');
             return null;
@@ -61375,6 +61475,7 @@ $CONTENT
         if (effectiveApiMode === 'tavern') {
             const profileId = effectiveTavernProfile || settings_ACU.tavernProfile;
             const response = await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens);
+            assertNotAborted_ACU(signal);
             if (response?.result?.choices?.[0]?.message?.content) {
                 return response.result.choices[0].message.content;
             }
@@ -61393,6 +61494,7 @@ $CONTENT
                 should_stream: settings_ACU.streamingEnabled || false,
                 max_tokens: maxTokens,
             });
+            assertNotAborted_ACU(signal);
             return typeof response === 'string' ? response.trim() : null;
         }
         if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
@@ -61403,13 +61505,24 @@ $CONTENT
             method: 'POST',
             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
             body,
+            signal: signal || undefined,
         });
         if (!res.ok) {
             const errTxt = await res.text();
             throw new Error(`API请求失败: ${res.status} ${errTxt}`);
         }
-        const content = await handleApiResponse_ACU(res);
+        const content = await handleApiResponse_ACU(res, signal);
         return content ? content.trim() : null;
+    }
+    /**
+     * 若 signal 已 abort 则抛出 AbortError，用于宿主 gateway 调用（无法强制中断）返回后立即检查。
+     */
+    function assertNotAborted_ACU(signal) {
+        if (signal?.aborted) {
+            const err = new Error('请求已取消');
+            err.name = 'AbortError';
+            throw err;
+        }
     }
 
     /**
@@ -81695,6 +81808,7 @@ $CONTENT
             role: normalizeAssistantPromptRoleForImport_ACU(item?.role),
             content: String(item?.content ?? ''),
             deletable: item?.deletable !== false,
+            pinned: item?.pinned === true,
         }))
             .filter((seg) => !!seg.content.trim());
     }
@@ -90515,6 +90629,9 @@ $CONTENT
                 // orchestrateManualCatchUp_ACU 的 ensureManualCatchUpAnchorBeforeTarget_ACU 预检
                 // 与 persist 层 bridge 写入授权（persist.ts:2293-2295）双层保证，且此处依赖的
                 // readActiveProvisionalBridge_ACU 在编排层无法可靠读取（bridge 状态在 persist 事务内）。
+                // 手动重填（clearBeforeUpdate）也跳过此处：重填先清旧增量，中间 bucket 目标
+                // 早于清理后保留的旧 full checkpoint 是预期（末尾 commitManualRefillSheetSnapshotInRangeAtomic_ACU
+                // 才原子写新 checkpoint）；清理前 refillAdmission 已对范围末尾做准入。
                 if (!options.manualCatchUpRunId && !options.skipWriteTargetAdmission) {
                     for (const job of jobs) {
                         const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
@@ -92288,6 +92405,44 @@ $CONTENT
                     });
                     break;
                 }
+                // Task 4 二次准入（boundary checkpoint 后，仅普通手动更新路径）：
+                // loadAllChatMessages_ACU 与 ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ save: true }) 可能已把
+                // replay root 推进到 bucket 目标之后（现场 target=1/root=69 时序）。这里的
+                // bucket 目标由 planning 时的 prompt index 派生，不能直接假定等于刷新后 live
+                // chat 的物理索引。必须用「最新」聊天重新解析 root 并对 chunk 内全部目标索引
+                // 再次准入；任一目标早于新 root 时，在 AI 调用前结构化阻断（零 token 消耗），
+                // 返回 stale_bucket_after_boundary_checkpoint 要求重新 planning。
+                // 例外：重填路径（clearBeforeUpdate）不做此处准入——其清理前目标由 refillAdmission
+                // （清理前对范围末尾楼层）校验，清理后范围末尾成为新根、bucket 目标天然合法，
+                // bucket 内逐 job 准入（processGroupedRuntimeChunkCore_ACU）已不再豁免。
+                if (!manualRefillEnabled) {
+                    const liveChatAfterBoundary = getChatArray_ACU() || [];
+                    const chunkTargetIndices = [
+                        ...new Set(groupedChunk.flatMap(group => group.indices || [])),
+                    ];
+                    let staleTarget = null;
+                    let staleReason = '';
+                    for (const targetIndex of chunkTargetIndices) {
+                        const admission = assertWriteTargetNotBeforeReplayRoot_ACU({
+                            chat: liveChatAfterBoundary,
+                            isolationKey: getCurrentIsolationKey_ACU(),
+                            targetMessageIndex: targetIndex,
+                        });
+                        if (!admission.allow) {
+                            staleTarget = targetIndex;
+                            staleReason = admission.reason;
+                            break;
+                        }
+                    }
+                    if (staleTarget !== null) {
+                        logWarn_ACU(`[Manual Update] 边界 checkpoint 后写目标已陈旧，已阻止第 ${chunkIndex} 批 AI 调用：target=${staleTarget}, ${staleReason}`);
+                        return {
+                            success: false,
+                            error: `手动更新在边界 checkpoint 后写目标陈旧，请重新发起更新：${staleReason}`,
+                            diagnosticCode: 'stale_bucket_after_boundary_checkpoint',
+                        };
+                    }
+                }
                 // 最终复检（每个 chunk 紧邻 AI 调用）：loadAllChatMessages_ACU 与
                 // ensureV2BoundaryCheckpointForRetainedBuffer_ACU 都是异步边界，等待期间
                 // runtime 可能被 purge/表集合变化。必须在 processGroupedRuntimeChunk_ACU
@@ -92307,10 +92462,11 @@ $CONTENT
                 try {
                     const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
                         onProgress: options.onProgress,
+                        // 重填路径：中间 bucket 目标早于清理后保留的旧 full checkpoint 是预期，
+                        // 由清理前 refillAdmission 与末尾原子完整 checkpoint 契约保证安全。
+                        skipWriteTargetAdmission: manualRefillEnabled,
                         // 范围内旧增量已在预清理中删除，提交时无需再做增量替换。
                         replaceExistingIncremental: false,
-                        // 手动重填先清空范围内旧数据再重写，范围末尾成为新根，bucket 写入天然合法。
-                        skipWriteTargetAdmission: true,
                     });
                     committedBucketCount += chunkResult.committedBucketCount;
                     if (!chunkResult.success) {
@@ -146224,7 +146380,10 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         function validateDDL() {
             const sheet = currentSheet.value;
-            return validateDDLTextAgainstHeaders_ACU(stringValue(sheet?.sourceData?.ddl), headers.value);
+            // 统一契约：validator 只接受完整表头（首列为 row_id/行号/null 占位）；
+            // headers.value 是 slice(1) 业务表头，不能直接传入。
+            const headerRow = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
+            return validateDDLTextAgainstHeaders_ACU(stringValue(sheet?.sourceData?.ddl), headerRow);
         }
         function setSpecialIndexLock(enabled) {
             const key = visualizer.currentSheetKey;
@@ -148156,10 +148315,14 @@ Expected function or array of functions, received type ${typeof value}.`
             });
             changes.push(`新增列: ${name}`);
         });
-        const finalHeaders = getSheetHeaders_ACU(sheet, sheetKey);
+        // 校验必须使用「完整表头」（首列为 row_id 位置），与
+        // validateDDLTextAgainstHeaders_ACU 的统一契约一致；
+        // getSheetHeaders_ACU 返回的是 slice(1) 业务表头，只能用于列定位。
+        const finalHeaderRow = getSheetHeaderRow_ACU(sheet, sheetKey);
+        const finalHeaders = finalHeaderRow.slice(1).map((item) => String(item ?? '').trim());
         assertHeadersUnique_ACU(finalHeaders);
         if (nextDdl) {
-            const ddlValidation = validateDdlAgainstHeaders_ACU(nextDdl, finalHeaders);
+            const ddlValidation = validateDdlAgainstHeaders_ACU(nextDdl, finalHeaderRow);
             if (!ddlValidation.valid) {
                 throw new Error(`patch_sheet_schema.ddl 非法: ${ddlValidation.message}`);
             }
@@ -148672,6 +148835,7 @@ Expected function or array of functions, received type ${typeof value}.`
             role: normalizeAssistantPromptRole_ACU(item?.role),
             content: String(item?.content ?? ''),
             deletable: item?.deletable !== false,
+            pinned: item?.pinned === true,
         }))
             .filter((seg) => !!seg.content.trim());
     }
@@ -148696,6 +148860,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return [
             {
                 role: 'SYSTEM',
+                pinned: true,
                 content: [
                     '你是 visualizer 内的模板改表助手。',
                     '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
@@ -148709,11 +148874,13 @@ Expected function or array of functions, received type ${typeof value}.`
             },
             {
                 role: 'assistant',
+                pinned: true,
                 content: '收到，我将只输出合法的 draft JSON，不输出任何解释文本。',
                 deletable: true,
             },
             {
                 role: 'USER',
+                pinned: true,
                 content: [
                     `以下是表格结构协议与规则，必须严格遵守：${TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU}；语法参考文档：${TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU}`,
                     '操作白名单（只允许以下 11 种操作名，禁止其他）：add_sheet、rename_sheet、delete_sheet、move_sheet、patch_sheet_source_data、patch_sheet_update_config、patch_sheet_export_config、patch_sheet_content、patch_sheet_schema、patch_sheet_locks、patch_global_injection_config。',
@@ -148721,42 +148888,50 @@ Expected function or array of functions, received type ${typeof value}.`
                     'add_sheet 必须同时提供非空 sheetName 和至少一个 headers 项；不要生成 sheetKey，本地会自动生成；应尽量同时提供 sourceData 的 note、initNode、insertNode、updateNode、deleteNode 五段。',
                     'add_sheet.sourceData 与 patch_sheet_source_data.patch 只允许 note、initNode、insertNode、updateNode、deleteNode 五个字段；禁止出现 ddl、sql、schema、createTable 等字段。',
                     '默认不主动输出 patch_sheet_schema.ddl；除非用户明确要求 DDL、字段类型、约束或 SQLite 建表语句。中文 headers 必须使用英文/ASCII 物理列名并配 `-- 中文表头` 注释按原顺序一一对应；第一列必须 row_id INTEGER PRIMARY KEY 并保留 `-- 行号` 注释。',
+                    '当用户对【已存在的表】明确要求 DDL、字段类型、约束或 SQLite 建表语句时，不得因为表已存在就返回空 operations；必须通过 patch_sheet_schema.patch.ddl 输出该表的 DDL。',
                     '如果需求信息不足、字段缺失、或当前协议无法安全表达，仍然必须返回合法 draft：summary 简述原因、warnings 写明原因、operations 输出空数组；不要输出追问文本。',
                 ].join('\n'),
                 deletable: true,
             },
             {
                 role: 'assistant',
+                pinned: true,
                 content: '收到，我已阅读协议约束与语法文档，将严格在协议范围内生成操作。',
                 deletable: true,
             },
             {
                 role: 'USER',
+                pinned: true,
                 content: `以下是全局表格结构：${TEMPLATE_ASSISTANT_PLACEHOLDER_ALL_SHEETS_ACU}`,
                 deletable: true,
             },
             {
                 role: 'assistant',
+                pinned: true,
                 content: '收到，我已了解全部表格的结构与全局注入配置。',
                 deletable: true,
             },
             {
                 role: 'USER',
+                pinned: true,
                 content: `以下是当前选中表：${TEMPLATE_ASSISTANT_PLACEHOLDER_CURRENT_SHEET_ACU}`,
                 deletable: true,
             },
             {
                 role: 'assistant',
+                pinned: true,
                 content: '收到，我已聚焦当前选中表，随时可以按需求生成增量改动。',
                 deletable: true,
             },
             {
                 role: 'USER',
+                pinned: true,
                 content: `现在请按照我的需求立刻开始工作：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`,
                 deletable: false,
             },
             {
                 role: 'assistant',
+                pinned: true,
                 content: '收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：',
                 deletable: true,
             },
@@ -148843,6 +149018,9 @@ Expected function or array of functions, received type ${typeof value}.`
             messages.push({ role: 'user', content: fullPayloadText });
             return messages;
         }
+        // 伪 role 提示词组标记：存在任意 pinned 卡即视为「提前准备好的提示词组」。
+        // 判定在 resolved 之前用 normalized 完成；pinned 仅用于消息排序，不进入发送给 AI 的内容。
+        const hasPinned = normalized.some((seg) => seg.pinned === true);
         // 锚点：最后一张「含 $1 的卡」。必须在替换前（normalized）判定，
         // 因为 resolved 中的 $1 已被替换成 userRequest 值，若该值本身含 "$1" 会污染判定。
         const anchorIndex = normalized.reduce((last, seg, i) => String(seg.content || '').includes(TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU) ? i : last, -1);
@@ -148856,17 +149034,30 @@ Expected function or array of functions, received type ${typeof value}.`
                     messages.push({ role: 'assistant', content: turn.assistant });
             });
         };
-        if (anchorIndex >= 0) {
+        if (hasPinned) {
+            // 伪 role 提示词组：整体（含卡9 包装语与卡10 预填充）固定放最前，
+            // 首轮无历史时即完整提示词组；后续轮真实历史与本轮需求紧随其后。
+            messages.push(...resolved);
             const priorTurns = normalizePriorTurns_ACU(input.priorTurns);
-            // 首轮：完整伪 role 结构（卡1-8 + 卡9 包装语含 $1 + 卡10 预填充）。
+            priorTurns.forEach((turn) => {
+                if (turn.user)
+                    messages.push({ role: 'user', content: turn.user });
+                if (turn.assistant)
+                    messages.push({ role: 'assistant', content: turn.assistant });
+            });
+            if (priorTurns.length > 0) {
+                messages.push({ role: 'USER', content: String(input.userRequest || '').trim() });
+            }
+        }
+        else if (anchorIndex >= 0) {
+            const priorTurns = normalizePriorTurns_ACU(input.priorTurns);
+            // 存量路径（无 pinned 标记）：首轮完整伪 role 结构。
             if (priorTurns.length === 0) {
                 messages.push(...resolved);
             }
-            else if (anchorIndex >= 8 && resolved.length > anchorIndex) {
-                // 后续轮：卡1-8 系统骨架 → 真实历史 → 本轮需求作为普通 user 消息
-                // → 卡10 预填充仍在末尾（输出格式引导，不是历史内容）。
-                // 不再重复注入卡9 的仪式性包装语，避免在正常对话中途插入初始化指令。
-                messages.push(...resolved.slice(0, anchorIndex));
+            else {
+                // 存量后续轮：含 $1 模板整体前置，历史与本轮需求紧随其后。
+                messages.push(...resolved);
                 priorTurns.forEach((turn) => {
                     if (turn.user)
                         messages.push({ role: 'user', content: turn.user });
@@ -148874,19 +149065,6 @@ Expected function or array of functions, received type ${typeof value}.`
                         messages.push({ role: 'assistant', content: turn.assistant });
                 });
                 messages.push({ role: 'USER', content: String(input.userRequest || '').trim() });
-                messages.push(...resolved.slice(anchorIndex + 1));
-            }
-            else {
-                // 非伪 role 模板（自定义模板、卡数少）：保持原有插入语义，
-                // priorTurns 照旧插在最后一张含 $1 的卡之前，不引入裸 USER 需求替换。
-                messages.push(...resolved.slice(0, anchorIndex));
-                priorTurns.forEach((turn) => {
-                    if (turn.user)
-                        messages.push({ role: 'user', content: turn.user });
-                    if (turn.assistant)
-                        messages.push({ role: 'assistant', content: turn.assistant });
-                });
-                messages.push(...resolved.slice(anchorIndex));
             }
         }
         else {
@@ -149512,6 +149690,7 @@ Expected function or array of functions, received type ${typeof value}.`
             '当用户只表达“新增某某表”但没有给出表头时，可以根据表名语义生成一组最小、合理、通用、可直接用于后续剧情更新的 headers；自定义表头尽量避免使用带 / 的列名；不要伪造数据行。',
             '物品/战利品/库存类表，优先考虑“物品名称、数量、描述/效果、类别、备注、来源/掉落来源”等能直接支撑后续更新的列；其中应至少包含一个稳定标识列。',
             '默认优先 add_sheet + 完整 sourceData，让新表立刻具备初始化/新增/更新/删除指引；除非用户明确要求 DDL、字段类型、约束或 SQLite 建表语句，否则不要主动输出 patch_sheet_schema.ddl。',
+            '当用户对【已存在的表】明确要求 DDL、字段类型、约束或 SQLite 建表语句时，不得因为表已存在就返回空 operations；必须通过 patch_sheet_schema.patch.ddl 输出该表的 DDL。',
             '即使用户要求“顺便写 SQL/DDL”，也不要把 ddl 或 sql 塞进 add_sheet.sourceData；新建表时优先输出 headers + 合法的五段 sourceData。',
             '如果当前 headers 主要是中文，自定义 ddl 只有在你能提供英文/ASCII 物理列名，并用 `-- 中文表头` 注释按原顺序一一对应时才安全；除非用户明确要求并且已经给出可直接落地的列名方案，否则不要生成 ddl。',
             '示例 add_sheet：{"op":"add_sheet","sheetName":"角色关系表","headers":["角色A","角色B","关系","备注"]}。',
@@ -149676,24 +149855,37 @@ Expected function or array of functions, received type ${typeof value}.`
     function createTemplateAssistantSessionGuard_ACU() {
         let version = 0;
         let cancelled = false;
+        let abortController = null;
         return {
             createRunGuard() {
                 const capturedVersion = version;
                 return {
                     isCancelled: () => cancelled,
                     isStale: () => !cancelled && capturedVersion !== version,
+                    get signal() { return abortController?.signal ?? null; },
                 };
             },
             invalidate() {
                 version += 1;
+                abortController?.abort();
+                abortController = null;
             },
             cancel() {
                 cancelled = true;
                 version += 1;
+                abortController?.abort();
+                abortController = null;
             },
             reset() {
                 cancelled = false;
                 version += 1;
+                abortController = null;
+            },
+            getSignal() {
+                if (!abortController) {
+                    abortController = new AbortController();
+                }
+                return abortController.signal;
             },
         };
     }
@@ -149835,7 +150027,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
             }
         }
-        const aiRawText = await callAIWithPreset_ACU(messages, effectivePreset);
+        const aiRawText = input.guard?.signal
+            ? await callAIWithPreset_ACU(messages, effectivePreset, undefined, input.guard.signal)
+            : await callAIWithPreset_ACU(messages, effectivePreset);
         if (!aiRawText) {
             throw new Error('AI 未返回有效内容');
         }
@@ -149902,13 +150096,14 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!currentSheetKey) {
             throw new Error('请先选中一个表后再使用 AI 改表助手');
         }
-        const maxRounds = normalizePositiveInteger_ACU(input?.maxRounds, DEFAULT_TEMPLATE_ASSISTANT_MAX_ROUNDS_ACU);
+        const basePriorTurns = normalizePriorTurns_ACU(input?.priorTurns);
+        // 第一次对话（无 priorTurns）只跑 1 轮，不自动试验多轮；有历史时才按 maxRounds 允许续跑。
+        const maxRounds = basePriorTurns.length === 0 ? 1 : normalizePositiveInteger_ACU(input?.maxRounds, DEFAULT_TEMPLATE_ASSISTANT_MAX_ROUNDS_ACU);
         const maxRepairRetries = normalizeNonNegativeInteger_ACU(input?.maxRepairRetries, DEFAULT_TEMPLATE_ASSISTANT_MAX_REPAIR_RETRIES_ACU);
         const originalTempData = clone_ACU(tempData);
         const originalSheetOrder = Array.isArray(input?.sheetOrder) ? [...input.sheetOrder] : null;
         const originalBaseFingerprint = buildTemplateAssistantFingerprint_ACU(originalTempData);
         const rounds = [];
-        const basePriorTurns = normalizePriorTurns_ACU(input?.priorTurns);
         const onRoundComplete = input?.onRoundComplete;
         let workingTempData = clone_ACU(originalTempData);
         let workingSheetOrder = Array.isArray(originalSheetOrder) ? [...originalSheetOrder] : null;
@@ -149944,6 +150139,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         userRequest: roundUserRequest,
                         priorTurns: historyForRound,
                         tableApiPreset: input.tableApiPreset,
+                        guard: input.guard,
                     });
                     assertTemplateAssistantSessionActive_ACU(input.guard);
                     lastResult = result;
@@ -150596,6 +150792,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     role: String(seg?.role || 'SYSTEM'),
                     content: String(seg?.content ?? ''),
                     deletable: seg?.deletable !== false,
+                    pinned: seg?.pinned === true,
                 }));
             }
             else {
@@ -150744,6 +150941,8 @@ Expected function or array of functions, received type ${typeof value}.`
             const createdAt = Date.now();
             const sessionBaselineFingerprint = buildTemplateAssistantFingerprint_ACU(visualizer.tempData || {});
             guardController = createTemplateAssistantSessionGuard_ACU();
+            // 初始化 AbortController，使本会话的 runGuard.signal 持有可中断的 signal
+            guardController.getSignal();
             visualizer.assistantIsRunning = true;
             visualizer.assistantErrorMessage = '';
             visualizer.assistantRounds = [];

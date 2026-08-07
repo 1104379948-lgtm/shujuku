@@ -3756,36 +3756,110 @@ describe('loadTableStateFromFramesV2_ACU', () => {
   });
 
 
-  it('已加载 runtime 的候选 hydrate 失败时保留旧 runtime 与输入 state', async () => {
+  it('JS-native 操作离开 SQL 段时先 materialize 一次并 dispose（单 Database 峰值）', async () => {
     const state = makeCheckpointData();
-    const original = structuredClone(state);
     const oldDispose = vi.fn();
     const exported = structuredClone(state);
     const loadedRuntime = {
       loaded: true,
+      mode: 'sqlite_loaded',
       engine: { dispose: oldDispose },
       syncBridge: {
         exportToTableData: () => structuredClone(exported),
       },
     };
-    const invalidSheet = {
+    const nextSheet = {
       ...structuredClone(state.sheet_0),
-      sourceData: { ddl: 'CREATE TABLE broken ( INVALID SYNTAX;' },
+      content: [['row_id', 'name'], ['1', '铁剑'], ['2', '新行']],
+    };
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'sheet_replace',
+      sheetKey: 'sheet_0',
+      sheet: nextSheet,
+      reason: 'system',
+    } as any, loadedRuntime as any);
+
+    // materialize：SQLite 导出 → state，随后 dispose，runtime 标记未加载。
+    // JS-native 提交不再 hydrate candidate，因此这里不重建 Database。
+    expect(oldDispose).toHaveBeenCalledTimes(1);
+    expect(loadedRuntime.loaded).toBe(false);
+    expect(loadedRuntime.mode).toBe('js_materialized');
+    expect(state.sheet_0.content).toEqual(nextSheet.content);
+  });
+
+  it('materialize 导出抛错时 state 不变、runtime 保持 SQLite 权威（失败原子性）', async () => {
+    const state = makeCheckpointData();
+    const original = structuredClone(state);
+    const dispose = vi.fn();
+    const loadedRuntime = {
+      loaded: true,
+      mode: 'sqlite_loaded',
+      engine: { dispose },
+      syncBridge: {
+        exportToTableData: () => { throw new Error('导出中途失败'); },
+      },
     };
 
     await expect(applyTableOperationV2_ACU(state, {
-      kind: 'sheet_replace',
-      sheetKey: 'sheet_0',
-      sheet: invalidSheet,
-      reason: 'system',
-    } as any, loadedRuntime as any)).rejects.toThrow();
+      kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '新行'],
+    } as any, loadedRuntime as any)).rejects.toThrow('导出中途失败');
 
+    // 导出失败：state 未被替换，runtime 仍保持 SQLite 权威（loaded/mode 不变），
+    // 且不 dispose（导出失败不应破坏可重试的 SQLite 权威状态）。
     expect(state).toEqual(original);
     expect(loadedRuntime.loaded).toBe(true);
-    expect(oldDispose).not.toHaveBeenCalled();
-    expect(loadedRuntime.engine).toEqual({ dispose: oldDispose });
-    expect(loadedRuntime.syncBridge.exportToTableData()).toEqual(exported);
+    expect(loadedRuntime.mode).toBe('sqlite_loaded');
+    expect(dispose).not.toHaveBeenCalled();
   });
+
+
+  it('SQL→JS→SQL 多段回放只 hydrate 2 次并 dispose 1 次（单 Database 峰值）', async () => {
+    const state = makeCheckpointData();
+    const init = vi.fn().mockResolvedValue(undefined);
+    const runBatch = vi.fn();
+    const dispose = vi.fn();
+    const loadFromTableData = vi.fn();
+    const exportToTableData = vi.fn(() => structuredClone(state));
+    const loadedRuntime = {
+      loaded: false,
+      mode: 'js_materialized',
+      engine: { init, runBatch, dispose },
+      syncBridge: { loadFromTableData, exportToTableData },
+    };
+
+    // 第一段：SQL hydrate 一次
+    await applyTableOperationV2_ACU(state, {
+      kind: 'sql_batch',
+      statements: ["UPDATE inventory SET name = '钢剑' WHERE row_id = 1"],
+    } as any, loadedRuntime as any);
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(loadFromTableData).toHaveBeenCalledTimes(1);
+    expect(loadedRuntime.mode).toBe('sqlite_loaded');
+
+    // 第二段：JS-native 操作先 materialize（导出 + dispose），不再 hydrate
+    await applyTableOperationV2_ACU(state, {
+      kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '新行'],
+    } as any, loadedRuntime as any);
+    expect(exportToTableData).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(init).toHaveBeenCalledTimes(1); // 不重建 Database
+    expect(loadedRuntime.loaded).toBe(false);
+    expect(loadedRuntime.mode).toBe('js_materialized');
+
+    // 第三段：回到 SQL 再次 hydrate（第二次）
+    await applyTableOperationV2_ACU(state, {
+      kind: 'sql_batch',
+      statements: ["UPDATE inventory SET name = '木剑' WHERE row_id = 1"],
+    } as any, loadedRuntime as any);
+    expect(init).toHaveBeenCalledTimes(2);
+    expect(loadFromTableData).toHaveBeenCalledTimes(2);
+    expect(loadedRuntime.mode).toBe('sqlite_loaded');
+
+    // 峰值不变量：任意时刻最多一个活跃 Database（dispose 后 init，不叠加）
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
 
   it('legacy meta_update 携带 sourceData.ddl 时明确拒绝，并且不推进 entry tracking 或提交 state', async () => {
     const previousIndependentStates = independentTableStates_ACU;

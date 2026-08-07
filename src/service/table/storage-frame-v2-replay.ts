@@ -729,6 +729,16 @@ interface SqlReplayRuntime_ACU {
   engine: SqliteEngine;
   syncBridge: SyncBridge;
   loaded: boolean;
+  /**
+   * replay 状态机当前权威状态：
+   * - `sqlite_loaded`：SQLite 是当前权威状态；离开 SQL 段时须先 materialize 到 `state`。
+   * - `js_materialized`：`state` 是当前权威状态；SQLite 已 dispose/未加载；连续
+   *   JS-native operations 直接修改 candidate，不重复 hydrate。
+   *
+   * 单一转换入口：materializeSqlRuntimeToState_ACU（SQLite → JS）与
+   * ensureSqlReplayRuntime_ACU（仅进入下一 SQL 段时 JS → SQLite）。
+   */
+  mode: 'sqlite_loaded' | 'js_materialized';
 }
 
 function normalizeReplayState_ACU(state: TableDataObject_ACU, context: string): void {
@@ -889,12 +899,34 @@ function normalizeLegacyDuplicateCheckpointState_ACU(state: TableDataObject_ACU)
   );
 }
 
+/**
+ * 幂等 dispose：统一维护 runtime 生命周期收尾。
+ * 任何路径（materialize 成功后、operation 失败 finally、ownedRuntime 收尾）
+ * 都经此收敛，避免底层 dispose 非幂等时出现双释放；loaded/mode 状态同步。
+ */
+function disposeSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU): void {
+  if (!runtime) return;
+  try {
+    runtime.engine.dispose();
+  } finally {
+    runtime.loaded = false;
+    runtime.mode = 'js_materialized';
+  }
+}
+
 async function ensureSqlReplayRuntime_ACU(
   runtime: SqlReplayRuntime_ACU,
   state: TableDataObject_ACU,
   options: { legacyDuplicateRowIds?: boolean } = {},
 ): Promise<void> {
-  if (runtime.loaded) return;
+  // 惰性 hydrate：仅在进入下一 SQL 段时从最新 `state` 加载一次。
+  // SQLite 已是当前权威状态时直接复用，禁止在每 operation 后重建。
+  if (runtime.mode === 'sqlite_loaded') return;
+  if (runtime.mode === 'js_materialized' && runtime.loaded) {
+    // 状态机不变量：js_materialized 时 SQLite 必须已 dispose（见 materialize），
+    // 因此这里的 loaded 只可能来自未 materialize 的初始构造，按未加载处理。
+    disposeSqlReplayRuntime_ACU(runtime);
+  }
   // The snapshot handed to SQLite comes from persisted history, so legacy
   // identity must be restored before strict hydrate. The export path below
   // stays strict: by then every row has an identity, and a defect there would
@@ -904,6 +936,7 @@ async function ensureSqlReplayRuntime_ACU(
   if (options.legacyDuplicateRowIds) runtime.syncBridge.loadSpv79LegacyDuplicateRowIdHistory(state);
   else runtime.syncBridge.loadFromTableData(state, { strict: true });
   runtime.loaded = true;
+  runtime.mode = 'sqlite_loaded';
 }
 
 function getExportedSqlReplayRuntimeState_ACU(
@@ -929,30 +962,21 @@ function exportSqlReplayRuntime_ACU(
   replaceState_ACU(state, getExportedSqlReplayRuntimeState_ACU(runtime, state, options));
 }
 
-async function reloadSqlReplayRuntime_ACU(
+/**
+ * 单一转换入口（SQLite → JS）：严格导出 SQLite 到 `state`，成功后 dispose Database
+ * 并将 runtime 标记为未加载。任何离开 SQL 段的路径（JS-native operation、sheet
+ * checkpoint、replay 结束）都必须先经过这里，确保不再出现新旧双 Database 同时存活。
+ */
+async function materializeSqlRuntimeToState_ACU(
   runtime: SqlReplayRuntime_ACU,
   state: TableDataObject_ACU,
   options: { legacyDuplicateRowIds?: boolean } = {},
 ): Promise<void> {
-  if (!runtime.loaded) return;
-  const nextEngine = new SqliteEngine();
-  const nextRuntime: SqlReplayRuntime_ACU = {
-    engine: nextEngine,
-    syncBridge: new SyncBridge(nextEngine),
-    loaded: false,
-  };
-  try {
-    await ensureSqlReplayRuntime_ACU(nextRuntime, state, options);
-  } catch (error) {
-    nextEngine.dispose();
-    throw error;
-  }
-
-  const previousEngine = runtime.engine;
-  runtime.engine = nextRuntime.engine;
-  runtime.syncBridge = nextRuntime.syncBridge;
-  runtime.loaded = true;
-  previousEngine.dispose();
+  if (runtime.mode !== 'sqlite_loaded' || !runtime.loaded) return;
+  const exported = getExportedSqlReplayRuntimeState_ACU(runtime, state, options);
+  // 先导出成功再 dispose：导出抛错时保持 SQLite 权威状态不变，由上层 finally 清理。
+  replaceState_ACU(state, exported);
+  disposeSqlReplayRuntime_ACU(runtime);
 }
 
 function buildReplayCandidate_ACU(
@@ -960,29 +984,11 @@ function buildReplayCandidate_ACU(
   state: TableDataObject_ACU,
   options: { legacyDuplicateRowIds?: boolean } = {},
 ): TableDataObject_ACU {
+  // SQLite 已加载时返回 SQLite 权威状态（不 dispose；dispose 由
+  // materializeSqlRuntimeToState_ACU 在 JS 路径的提交前统一执行）。
   return runtime?.loaded
     ? getExportedSqlReplayRuntimeState_ACU(runtime, state, options)
     : deepClone_ACU(state);
-}
-
-async function commitReplayCandidate_ACU(
-  runtime: SqlReplayRuntime_ACU | null,
-  state: TableDataObject_ACU,
-  candidate: TableDataObject_ACU,
-  context: string,
-  options: { historical?: boolean; legacyDuplicateRowIds?: boolean } = {},
-): Promise<void> {
-  // Every operation funnels through here, so this is the single place where the
-  // historical/strict split is decided. Candidates derived from persisted
-  // operations get legacy identity restored; candidates we construct ourselves
-  // (template baselines) stay strict so new writes cannot regress the format.
-  if (options.legacyDuplicateRowIds) {
-    // SPv7.9 过渡回放必须逐项保留旧状态；此阶段的重复身份会在快照一次性重编号。
-    // 这里绝不能调用 restore/normalize，否则会在旧 operation 的中途改变匹配语义。
-  } else if (options.historical) normalizeHistoricalReplayState_ACU(candidate, context);
-  else normalizeReplayState_ACU(candidate, context);
-  if (runtime?.loaded) await reloadSqlReplayRuntime_ACU(runtime, candidate, options);
-  replaceState_ACU(state, candidate);
 }
 
 async function applySheetCheckpointsForReplay_ACU(
@@ -991,7 +997,9 @@ async function applySheetCheckpointsForReplay_ACU(
   runtime: SqlReplayRuntime_ACU,
 ): Promise<void> {
   if (checkpoints.length === 0) return;
-  const candidate = buildReplayCandidate_ACU(runtime, state);
+  // sheet checkpoint 属 JS 语义：离开 SQL 段先 materialize（导出并 dispose）。
+  await materializeSqlRuntimeToState_ACU(runtime, state);
+  const candidate = deepClone_ACU(state);
   for (const checkpoint of checkpoints) {
     if (checkpoint.timeline?.kind === 'sheet_hide') {
       // hide：从 active replay state 移除该表的可见性（数据仍留存于 checkpoint.data 供后续 reveal）。
@@ -1001,7 +1009,7 @@ async function applySheetCheckpointsForReplay_ACU(
       candidate[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
     }
   }
-  await commitReplayCandidate_ACU(runtime, state, candidate, '单表 checkpoint', { historical: true });
+  replaceState_ACU(state, candidate);
 }
 
 function buildReplaySqlTableAliases_ACU(
@@ -1409,15 +1417,20 @@ async function applyTableOperationV2Core_ACU(
     throw new Error('[V2 Replay] operation 缺少有效 kind。');
   }
   const ownedRuntime = !runtime && (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch')
-    ? { engine: new SqliteEngine(), syncBridge: null as unknown as SyncBridge, loaded: false }
+    ? { engine: new SqliteEngine(), syncBridge: null as unknown as SyncBridge, loaded: false, mode: 'js_materialized' as const }
     : null;
   if (ownedRuntime) ownedRuntime.syncBridge = new SyncBridge(ownedRuntime.engine);
   const effectiveRuntime = runtime || ownedRuntime || null;
 
   try {
     if (operation.kind === 'data_replace') {
+      // JS-native 提交：先退出 SQL 段（materialize + dispose），再以 JS state 提交全量替换。
+      if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
       const candidate = deepClone_ACU(operation.data);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace', { historical: true, ...options });
+      if (options.legacyDuplicateRowIds) {
+        // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize；由上层 finally dispose。
+      } else normalizeHistoricalReplayState_ACU(candidate, 'data_replace');
+      replaceState_ACU(state, candidate);
       return;
     }
     if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
@@ -1427,37 +1440,53 @@ async function applyTableOperationV2Core_ACU(
       return;
     }
     if (operation.kind === 'sheet_schema_migrate') {
+      if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
       const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       const candidate = await applySheetSchemaMigrationOperation_ACU(sourceState, operation);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate', { historical: true, ...options });
+      if (options.legacyDuplicateRowIds) {
+        // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
+      } else normalizeHistoricalReplayState_ACU(candidate, 'sheet_schema_migrate');
+      replaceState_ACU(state, candidate);
       return;
     }
     if (operation.kind === 'sheet_replace') {
+      if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       candidate[operation.sheetKey] = deepClone_ACU(operation.sheet);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace', { historical: true, ...options });
+      if (options.legacyDuplicateRowIds) {
+        // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
+      } else normalizeHistoricalReplayState_ACU(candidate, 'sheet_replace');
+      replaceState_ACU(state, candidate);
       return;
     }
     if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
       if (operation.kind === 'meta_update') {
         assertMetaUpdateDoesNotChangeDdl_ACU(operation);
       }
+      if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       if (options.legacyDuplicateRowIds) applyTablePatchLegacyDuplicateRowIds_ACU(candidate, operation);
       else applyTablePatchV2_ACU(candidate, operation);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind, { historical: true, ...options });
+      if (options.legacyDuplicateRowIds) {
+        // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
+      } else normalizeHistoricalReplayState_ACU(candidate, operation.kind);
+      replaceState_ACU(state, candidate);
       return;
     }
     if (operation.kind === 'table_edit_dsl') {
+      if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       applyTableEditDslOperationV2_ACU(candidate, operation.text);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl', { historical: true, ...options });
+      if (options.legacyDuplicateRowIds) {
+        // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
+      } else normalizeHistoricalReplayState_ACU(candidate, 'table_edit_dsl');
+      replaceState_ACU(state, candidate);
       return;
     }
 
     throw new Error(`[V2 Replay] 不支持的 operation kind: ${(operation as any).kind}`);
   } finally {
-    if (ownedRuntime) ownedRuntime.engine.dispose();
+    if (ownedRuntime) disposeSqlReplayRuntime_ACU(ownedRuntime);
   }
 }
 
@@ -1594,6 +1623,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
     engine: new SqliteEngine(),
     syncBridge: null as unknown as SyncBridge,
     loaded: false,
+    mode: 'js_materialized',
   };
   const compatibilityRepairs: TableReplayCompatibilityRepairV2_ACU[] = [];
   let headerOnlyTemplate: TableDataObject_ACU | null | undefined;
@@ -1663,9 +1693,12 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
                   && !Object.prototype.hasOwnProperty.call(state, operation.sheetKey)) {
                   const templateSheet = headerOnlyTemplate?.[operation.sheetKey];
                   if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
-                    const candidate = buildReplayCandidate_ACU(runtime, state);
+                    // 补锚是 JS 语义（模板 header-only 快照），先退出 SQL 段再合并。
+                    await materializeSqlRuntimeToState_ACU(runtime, state);
+                    const candidate = deepClone_ACU(state);
                     candidate[operation.sheetKey] = deepClone_ACU(templateSheet) as Sheet_ACU;
-                    await commitReplayCandidate_ACU(runtime, state, candidate, 'temporary sheet anchor');
+                    normalizeHistoricalReplayState_ACU(candidate, 'temporary sheet anchor');
+                    replaceState_ACU(state, candidate);
                     compatibilityRepairs.push({
                       kind: 'temporary_sheet_anchor',
                       severity: 'provisional',
@@ -1696,12 +1729,15 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
             if (transitionRef && !isEntryAfterSpv79TransitionCutoff_ACU(
               ref.messageIndex, entry.seq, transitionRef.checkpoint,
             )) continue;
-            const candidate = buildReplayCandidate_ACU(runtime, state);
+            // legacy patches 是 JS 语义：先退出 SQL 段再应用补丁。
+            await materializeSqlRuntimeToState_ACU(runtime, state);
+            const candidate = deepClone_ACU(state);
             // 兼容旧版 derived patch log；新 V2 不再写 patches。
             for (const patch of entry.patches || []) {
               applyTablePatchV2_ACU(candidate, patch);
             }
-            await commitReplayCandidate_ACU(runtime, state, candidate, 'legacy patches', { historical: true });
+            normalizeHistoricalReplayState_ACU(candidate, 'legacy patches');
+            replaceState_ACU(state, candidate);
           }
           const shouldReplayEntryEvent = !transitionRef || isEntryAfterSpv79TransitionCutoff_ACU(
             ref.messageIndex, entry.seq, transitionRef.checkpoint,
@@ -1717,7 +1753,8 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
       await applyDueIntroductions(Number.POSITIVE_INFINITY);
     }
 
-    if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
+    // replay 结束：SQLite 仍为权威状态时最后导出一次并 dispose，保持单 Database 峰值。
+    await materializeSqlRuntimeToState_ACU(runtime, state);
     return {
       data: state,
       baseKind,
@@ -1725,7 +1762,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
       ...(compatibilityRepairs.length > 0 ? { requiresCheckpointConvergence: true } : {}),
     };
   } finally {
-    runtime.engine.dispose();
+    disposeSqlReplayRuntime_ACU(runtime);
   }
 }
 

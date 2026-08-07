@@ -126,7 +126,7 @@ export function buildRuntimeFallbackDDL_ACU(
   diagnostic = 'DDL 缺失，已使用运行时 fallback schema。',
 ): EffectiveDDLResult_ACU {
   const headers = Array.isArray(sheet.content?.[0]) && sheet.content[0].length > 0
-    ? sheet.content[0].map(header => String(header ?? ''))
+    ? sheet.content[0].map(header => (header === null || header === undefined ? null : String(header)))
     : ['row_id'];
   const fallbackTable = sanitizeIdentifier(fallbackTableName || sheet.uid || 'unknown_table');
   return {
@@ -138,14 +138,14 @@ export function buildRuntimeFallbackDDL_ACU(
   };
 }
 
-function buildFallbackColumnMap_ACU(headers: readonly string[]): EffectiveDDLColumnMap_ACU {
+function buildFallbackColumnMap_ACU(headers: readonly (string | null)[]): EffectiveDDLColumnMap_ACU {
   const { mappings } = mapSqlColumnIdentifiers_ACU(headers);
   if (!mappings[0]?.isRowId) {
     throw new Error('fallback schema 需要首列表头为 row_id，且所有表头必须可安全映射');
   }
   return {
-    mappings: mappings.map(mapping => ({ sourceIndex: mapping.index, displayName: mapping.displayName, sqlName: mapping.sqlName, required: mapping.isRowId })),
-    sqlToDisplay: new Map(mappings.map(mapping => [mapping.sqlName, mapping.displayName])),
+    mappings: mappings.map(mapping => ({ sourceIndex: mapping.index, displayName: String(mapping.displayName), sqlName: mapping.sqlName, required: mapping.isRowId })),
+    sqlToDisplay: new Map(mappings.map(mapping => [mapping.sqlName, String(mapping.displayName)])),
   };
 }
 
@@ -169,6 +169,9 @@ function buildExplicitColumnMap_ACU(sheet: Sheet_ACU, ddl: string, headers: read
  * 从 content[0] 表头自动生成全 TEXT 的 fallback DDL
  * 第一列 "row_id" 映射为 INTEGER PRIMARY KEY
  * 其余列全部为 TEXT
+ * 生成与验证共享同一份列身份契约：表头先规范化（NFKC/trim），
+ * 空/空白/重复规范化列名、row_id 缺失或非首位一律 fail-closed，
+ * 绝不把空表头掩盖成 col_N 物理列。
  *
  * @param tableName 英文表名
  * @param headers content[0] 表头行
@@ -176,8 +179,14 @@ function buildExplicitColumnMap_ACU(sheet: Sheet_ACU, ddl: string, headers: read
  */
 export function generateFallbackDDL(tableName: string, headers: (string | null)[]): string {
   const lines: string[] = [];
-  const normalizedHeaders = headers.length > 0 ? headers : ['row_id'];
-  const { mappings } = mapSqlColumnIdentifiers_ACU(normalizedHeaders);
+  const rawHeaders = Array.isArray(headers) ? headers : [];
+  const normalizedHeaders = rawHeaders.length > 0 ? rawHeaders : ['row_id'];
+  const { mappings, diagnostics } = mapSqlColumnIdentifiers_ACU(normalizedHeaders);
+  if (diagnostics.length > 0) {
+    throw new Error(`fallback DDL 表头不合法：${diagnostics
+      .map(diagnostic => `第 ${diagnostic.index + 1} 列「${diagnostic.originalName}」${diagnostic.code}`)
+      .join('；')}`);
+  }
   if (!mappings[0]?.isRowId) {
     throw new Error('fallback DDL 需要首列表头为 row_id，且所有表头必须唯一且非空');
   }
@@ -292,7 +301,10 @@ interface InsertColumnMapping {
 function resolveInsertColumnMappings(sheet: Sheet_ACU, headers: readonly string[], ddlOverride?: string): InsertColumnMapping[] {
   const ddl = ddlOverride || sheet.sourceData?.ddl?.trim();
   if (!ddl) {
-    return createSheetInsertPlan(sheet, buildFallbackColumnMap_ACU(headers.map(header => String(header ?? '')))).mappings.slice();
+    // 与 buildRuntimeFallbackDDL_ACU 保持一致：保留首列不可编辑的 null row_id 占位，
+    // 不把它拍扁成空串（否则会被映射器判为非法空列而 fail-closed）。
+    const nullPreservingHeaders = headers.map(header => (header === null || header === undefined ? null : String(header)));
+    return createSheetInsertPlan(sheet, buildFallbackColumnMap_ACU(nullPreservingHeaders)).mappings.slice();
   }
 
   const columns = parseDDLColumnInfos_ACU(ddl);
@@ -403,7 +415,11 @@ export function validateDDLAgainstHeaders(
   ddl: string,
   headers: (string | null)[]
 ): { valid: boolean; mismatches: string[] } {
-  const normalizedHeaders = headers.filter(h => h !== null).map(h => String(h ?? ''));
+  // 保序传给统一契约校验；不再 filter 剔除 null，避免改变列位置
+  // （中间空列由 validator 按“第 N 列为空”fail-closed）。
+  // 首列 null 占位（visualizer 不可编辑 row_id）必须原样传递给统一契约，
+  // 不能拍扁成空串——否则会被误判为“空表头”fail-closed。
+  const normalizedHeaders = Array.isArray(headers) ? headers.map(h => (h === null || h === undefined ? null : String(h))) : [];
   const result = validateDDLTextAgainstHeaders_ACU(ddl, normalizedHeaders);
   return {
     valid: result.valid,

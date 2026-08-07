@@ -131,7 +131,7 @@ export interface ManualUpdateResult {
     /** terminal manualRefillProgress 是否已严格保存。 */
     terminalProgressSaved?: boolean;
     /** 面向 UI/恢复诊断的稳定失败分类；不得依赖错误文案解析。 */
-    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'catch_up_runtime_changed_after_confirmation' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required';
+    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'catch_up_runtime_changed_after_confirmation' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required' | 'stale_bucket_after_boundary_checkpoint';
     catchUpPlan?: ManualCatchUpPlan_ACU;
 }
 
@@ -1716,11 +1716,9 @@ async function processGroupedRuntimeChunkCore_ACU(
         manualCatchUpRun?: boolean;
         /** 手动追平 run 的 runId，用于 provisional bridge 写入准入（t5）。 */
         manualCatchUpRunId?: string;
-        /**
-         * 跳过回放根准入（Task 4）。仅手动重填（clearBeforeUpdate）使用：该路径先清空
-         * 范围内旧数据再重写，范围末尾成为新根，bucket 写入天然合法；准入应在清理后的
-         * 拓扑上评估，而不是清理前。
-         */
+        /** 手动重填专用豁免：清旧数据后从头重填，中间 bucket 目标早于
+         *  清理前保留的旧 full checkpoint 是预期行为（commitManualRefillSheetSnapshotInRangeAtomic_ACU
+         *  在全部 bucket 提交后才原子写新 checkpoint）。豁免仅限重填路径。 */
         skipWriteTargetAdmission?: boolean;
         performanceRunId?: string;
         performanceParentSpanId?: string;
@@ -1974,6 +1972,9 @@ async function processGroupedRuntimeChunkCore_ACU(
             // orchestrateManualCatchUp_ACU 的 ensureManualCatchUpAnchorBeforeTarget_ACU 预检
             // 与 persist 层 bridge 写入授权（persist.ts:2293-2295）双层保证，且此处依赖的
             // readActiveProvisionalBridge_ACU 在编排层无法可靠读取（bridge 状态在 persist 事务内）。
+            // 手动重填（clearBeforeUpdate）也跳过此处：重填先清旧增量，中间 bucket 目标
+            // 早于清理后保留的旧 full checkpoint 是预期（末尾 commitManualRefillSheetSnapshotInRangeAtomic_ACU
+            // 才原子写新 checkpoint）；清理前 refillAdmission 已对范围末尾做准入。
             if (!options.manualCatchUpRunId && !options.skipWriteTargetAdmission) {
                 for (const job of jobs) {
                     const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
@@ -3947,6 +3948,44 @@ export async function orchestrateManualUpdate_ACU(
                 });
                 break;
             }
+            // Task 4 二次准入（boundary checkpoint 后，仅普通手动更新路径）：
+            // loadAllChatMessages_ACU 与 ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ save: true }) 可能已把
+            // replay root 推进到 bucket 目标之后（现场 target=1/root=69 时序）。这里的
+            // bucket 目标由 planning 时的 prompt index 派生，不能直接假定等于刷新后 live
+            // chat 的物理索引。必须用「最新」聊天重新解析 root 并对 chunk 内全部目标索引
+            // 再次准入；任一目标早于新 root 时，在 AI 调用前结构化阻断（零 token 消耗），
+            // 返回 stale_bucket_after_boundary_checkpoint 要求重新 planning。
+            // 例外：重填路径（clearBeforeUpdate）不做此处准入——其清理前目标由 refillAdmission
+            // （清理前对范围末尾楼层）校验，清理后范围末尾成为新根、bucket 目标天然合法，
+            // bucket 内逐 job 准入（processGroupedRuntimeChunkCore_ACU）已不再豁免。
+            if (!manualRefillEnabled) {
+                const liveChatAfterBoundary = getChatArray_ACU() || [];
+                const chunkTargetIndices = [
+                    ...new Set(groupedChunk.flatMap(group => group.indices || [])),
+                ];
+                let staleTarget: number | null = null;
+                let staleReason = '';
+                for (const targetIndex of chunkTargetIndices) {
+                    const admission = assertWriteTargetNotBeforeReplayRoot_ACU({
+                        chat: liveChatAfterBoundary,
+                        isolationKey: getCurrentIsolationKey_ACU(),
+                        targetMessageIndex: targetIndex,
+                    });
+                    if (!admission.allow) {
+                        staleTarget = targetIndex;
+                        staleReason = admission.reason;
+                        break;
+                    }
+                }
+                if (staleTarget !== null) {
+                    logWarn_ACU(`[Manual Update] 边界 checkpoint 后写目标已陈旧，已阻止第 ${chunkIndex} 批 AI 调用：target=${staleTarget}, ${staleReason}`);
+                    return {
+                        success: false,
+                        error: `手动更新在边界 checkpoint 后写目标陈旧，请重新发起更新：${staleReason}`,
+                        diagnosticCode: 'stale_bucket_after_boundary_checkpoint',
+                    };
+                }
+            }
             // 最终复检（每个 chunk 紧邻 AI 调用）：loadAllChatMessages_ACU 与
             // ensureV2BoundaryCheckpointForRetainedBuffer_ACU 都是异步边界，等待期间
             // runtime 可能被 purge/表集合变化。必须在 processGroupedRuntimeChunk_ACU
@@ -3966,10 +4005,11 @@ export async function orchestrateManualUpdate_ACU(
             try {
                 const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
                     onProgress: options.onProgress,
+                    // 重填路径：中间 bucket 目标早于清理后保留的旧 full checkpoint 是预期，
+                    // 由清理前 refillAdmission 与末尾原子完整 checkpoint 契约保证安全。
+                    skipWriteTargetAdmission: manualRefillEnabled,
                     // 范围内旧增量已在预清理中删除，提交时无需再做增量替换。
                     replaceExistingIncremental: false,
-                    // 手动重填先清空范围内旧数据再重写，范围末尾成为新根，bucket 写入天然合法。
-                    skipWriteTargetAdmission: true,
                 });
                 committedBucketCount += chunkResult.committedBucketCount;
                 if (!chunkResult.success) {

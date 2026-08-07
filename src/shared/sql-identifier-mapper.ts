@@ -34,7 +34,10 @@ export function mapSqlColumnIdentifiers_ACU(headers: readonly unknown[]): SqlCol
   const mappings: SqlColumnMapping_ACU[] = [];
   const diagnostics: SqlIdentifierDiagnostic_ACU[] = [];
   const firstHeaderCanonicalName = canonicalizeDisplayName_ACU(headers[0]);
-  if (firstHeaderCanonicalName !== 'row_id') {
+  // visualizer 的不可编辑 row_id 占位也是 null（content[0][0] === null），
+  // 与 row_id 精确匹配等价，视为 row_id 身份。
+  const firstIsRowIdPlaceholder = headers[0] === null || headers[0] === undefined;
+  if (!firstIsRowIdPlaceholder && firstHeaderCanonicalName !== 'row_id') {
     diagnostics.push({
       code: 'missing_row_id', index: 0, originalName: String(headers[0] ?? ''),
       normalizedDisplayName: String(headers[0] ?? '').normalize('NFKC').trim(),
@@ -46,9 +49,11 @@ export function mapSqlColumnIdentifiers_ACU(headers: readonly unknown[]): SqlCol
     const originalName = String(header ?? '');
     const displayName = originalName.normalize('NFKC').trim();
     const canonicalName = canonicalizeDisplayName_ACU(displayName);
-    const isRowId = index === 0 && canonicalName === 'row_id';
+    const isRowId = index === 0 && (canonicalName === 'row_id' || header === null || header === undefined);
     const firstIndex = canonicalName ? firstCanonicalIndex.get(canonicalName) : undefined;
-    if (!canonicalName) {
+    // 首列 null 占位视为合法 row_id 身份，不报 empty_column_name；
+    // 其余列（含非首列的空/空白）仍 fail-closed。
+    if (!canonicalName && !isRowId) {
       diagnostics.push({ code: 'empty_column_name', index, originalName, normalizedDisplayName: displayName, canonicalName, candidateSqlName: null });
     } else if (firstIndex === undefined) {
       firstCanonicalIndex.set(canonicalName, index);
