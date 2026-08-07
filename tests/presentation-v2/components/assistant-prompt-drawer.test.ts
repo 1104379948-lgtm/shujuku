@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { type App, createApp, defineComponent, h, nextTick } from 'vue';
 import AssistantPromptDrawer from '../../../src/presentation-v2/components/AssistantPromptDrawer.vue';
+import { TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU } from '../../../src/service/template-assistant/service';
 
 const apps: Array<{ app: App<Element>; el: HTMLElement }> = [];
 
@@ -27,6 +28,7 @@ function mountDrawer(props: Record<string, unknown>): {
         ...props,
         onUpdate: (index: number, patch: unknown) => emitted.push({ event: 'update', args: [index, patch] }),
         onClose: () => emitted.push({ event: 'close', args: [] }),
+        onLoadPseudoRole: () => emitted.push({ event: 'load-pseudo-role', args: [] }),
       });
     },
   });
@@ -96,5 +98,44 @@ describe('AssistantPromptDrawer update 事件透传', () => {
     expect(emitted).toHaveLength(1);
     expect(emitted[0]?.event).toBe('update');
     expect(emitted[0]?.args).toEqual([0, { role: 'USER' }]);
+  });
+});
+
+describe('AssistantPromptDrawer 占位符清单与载入伪 role', () => {
+  it('占位符清单渲染条数 === TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU.length，且元数据驱动无硬编码', async () => {
+    const { el } = mountDrawer({
+      isOpen: true,
+      segments: [{ role: 'SYSTEM', content: '规则', deletable: true }],
+      dirty: false,
+      message: null,
+    });
+    await nextTick();
+
+    const items = el.querySelectorAll('.acu-assistant-prompt-drawer__placeholder-item code');
+    expect(items).toHaveLength(TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU.length);
+    const tokens = Array.from(items).map((item) => item.textContent?.trim());
+    TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU.forEach((doc) => {
+      expect(tokens).toContain(doc.token);
+    });
+  });
+
+  it('点击「载入伪 role 模板」按钮 emit load-pseudo-role', async () => {
+    const { el, emitted } = mountDrawer({
+      isOpen: true,
+      segments: [{ role: 'SYSTEM', content: '规则', deletable: true }],
+      dirty: false,
+      message: null,
+    });
+    await nextTick();
+
+    const button = Array.from(el.querySelectorAll('button'))
+      .find((btn) => btn.textContent?.includes('载入伪 role 模板'));
+    expect(button).not.toBeNull();
+    (button as HTMLButtonElement).click();
+    await nextTick();
+
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.event).toBe('load-pseudo-role');
+    expect(emitted[0]?.args).toEqual([]);
   });
 });

@@ -10,11 +10,39 @@
       {{ message.text }}
     </AcuMessage>
 
-    <AcuInfoBanner tone="info">
-      提示词段按顺序拼接进 AI 请求。可用占位符：
-      <code>{{ placeholder }}</code>
-      表示在运行时替换为两份本地语法文档的原文嵌入内容。
-    </AcuInfoBanner>
+    <details class="acu-assistant-prompt-drawer__placeholders">
+      <summary>可用占位符（{{ placeholderDocs.length }}）</summary>
+      <div class="acu-assistant-prompt-drawer__placeholder-group">
+        <p class="acu-assistant-prompt-drawer__placeholder-note">
+          提示词中出现任一数据占位符即视为你接管数据注入，系统不再自动追加数据消息；真实历史上下文会插入在最后一个
+          <code>{{ userRequestToken }}</code> 之前。
+        </p>
+        <ul class="acu-assistant-prompt-drawer__placeholder-list">
+          <li
+            v-for="doc in dataDocs"
+            :key="doc.token"
+            class="acu-assistant-prompt-drawer__placeholder-item"
+          >
+            <code>{{ doc.token }}</code>
+            <strong>{{ doc.label }}</strong>
+            <span>{{ doc.description }}</span>
+          </li>
+        </ul>
+      </div>
+      <div v-if="referenceDocs.length > 0" class="acu-assistant-prompt-drawer__placeholder-group">
+        <ul class="acu-assistant-prompt-drawer__placeholder-list">
+          <li
+            v-for="doc in referenceDocs"
+            :key="doc.token"
+            class="acu-assistant-prompt-drawer__placeholder-item"
+          >
+            <code>{{ doc.token }}</code>
+            <strong>{{ doc.label }}</strong>
+            <span>{{ doc.description }}</span>
+          </li>
+        </ul>
+      </div>
+    </details>
 
     <div class="acu-assistant-prompt-drawer__toolbar">
       <AcuFileButton size="sm" accept="application/json,.json" @file="$emit('import-file', $event)">
@@ -24,6 +52,7 @@
         <i class="fa-solid fa-upload"></i> 导出 JSON
       </AcuButton>
       <AcuButton size="sm" @click="$emit('reset')">载入默认提示词</AcuButton>
+      <AcuButton size="sm" variant="primary" @click="$emit('load-pseudo-role')">载入伪 role 模板</AcuButton>
     </div>
 
     <AcuPromptSegments
@@ -51,7 +80,11 @@ import AcuInfoBanner from './_lib/AcuInfoBanner.vue';
 import AcuMessage from './_lib/AcuMessage.vue';
 import AcuPromptSegments, { type PromptSegment } from './_lib/AcuPromptSegments.vue';
 import { useDialogStore } from '../stores/dialog-store';
-import { TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU } from '../../service/template-assistant/service';
+import { computed } from 'vue';
+import {
+  TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU,
+  TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU,
+} from '../../service/template-assistant/service';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -64,6 +97,7 @@ const emit = defineEmits<{
   (e: 'close'): void;
   (e: 'save'): void;
   (e: 'reset'): void;
+  (e: 'load-pseudo-role'): void;
   (e: 'import-file', file: File): void;
   (e: 'export'): void;
   (e: 'add', position: 'top' | 'bottom'): void;
@@ -71,7 +105,10 @@ const emit = defineEmits<{
   (e: 'update', index: number, patch: Partial<PromptSegment>): void;
 }>();
 
-const placeholder = TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU;
+const placeholderDocs = TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU;
+const dataDocs = computed(() => placeholderDocs.filter((doc) => doc.kind === 'data'));
+const referenceDocs = computed(() => placeholderDocs.filter((doc) => doc.kind === 'reference'));
+const userRequestToken = TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU;
 const dialogStore = useDialogStore();
 
 async function confirmIfDirty(): Promise<boolean> {
@@ -90,6 +127,53 @@ async function requestClose(): Promise<void> {
 </script>
 
 <style scoped>
+.acu-assistant-prompt-drawer__placeholders {
+  margin-bottom: 12px;
+}
+
+.acu-assistant-prompt-drawer__placeholders summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--acu-text-2);
+  user-select: none;
+}
+
+.acu-assistant-prompt-drawer__placeholder-group {
+  margin-top: 8px;
+}
+
+.acu-assistant-prompt-drawer__placeholder-note {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--acu-text-2);
+}
+
+.acu-assistant-prompt-drawer__placeholder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.acu-assistant-prompt-drawer__placeholder-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--acu-text-1);
+}
+
+.acu-assistant-prompt-drawer__placeholder-item code {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.acu-assistant-prompt-drawer__placeholder-item span {
+  color: var(--acu-text-2);
+}
+
 .acu-assistant-prompt-drawer__toolbar {
   display: flex;
   flex-wrap: wrap;

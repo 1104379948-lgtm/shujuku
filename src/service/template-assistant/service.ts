@@ -316,6 +316,67 @@ export interface TemplateAssistantFailureInfo_ACU {
 
 export const TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU = '{{assistant.referenceDocs}}';
 
+export const TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU = '$1';
+export const TEMPLATE_ASSISTANT_PLACEHOLDER_CURRENT_SHEET_ACU = '$2';
+export const TEMPLATE_ASSISTANT_PLACEHOLDER_ALL_SHEETS_ACU = '$3';
+export const TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU = '$4';
+
+/**
+ * 改表助手占位符扫描正则。
+ *
+ * **注意**：本常量带 `g` 标志，拥有 `lastIndex` 状态。
+ * 仅允许通过 `String.prototype.replace` 使用（replace 内部会重置 lastIndex）；
+ * **禁止**对本常量调用 `.test()` / `.exec()`，否则会因 lastIndex 泄漏产生非确定性结果。
+ */
+export const TEMPLATE_ASSISTANT_PLACEHOLDER_PATTERN_ACU = /\$[1-4]|\{\{assistant\.referenceDocs\}\}/g;
+
+export interface TemplateAssistantPlaceholderDoc_ACU {
+    token: string;
+    label: string;
+    description: string;
+    /** data = 表格数据载荷；reference = 语法文档 */
+    kind: 'data' | 'reference';
+}
+
+/**
+ * 占位符元数据（单一事实来源，UI 清单据此渲染，不得在组件内硬编码占位符字面量）。
+ * 顺序：$1 → $4 → referenceDocs。
+ */
+export const TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU: TemplateAssistantPlaceholderDoc_ACU[] = [
+    {
+        token: TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU,
+        label: '用户输入',
+        description:
+            '本轮改表需求原文。删除后 AI 收不到需求，且历史上下文将追加到提示词末尾。',
+        kind: 'data',
+    },
+    {
+        token: TEMPLATE_ASSISTANT_PLACEHOLDER_CURRENT_SHEET_ACU,
+        label: '当前表格结构',
+        description: '当前选中表的 sheetKey 与结构快照。',
+        kind: 'data',
+    },
+    {
+        token: TEMPLATE_ASSISTANT_PLACEHOLDER_ALL_SHEETS_ACU,
+        label: '全局表格结构',
+        description: '全部表格结构快照、表数量与全局注入配置。',
+        kind: 'data',
+    },
+    {
+        token: TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU,
+        label: '表格结构协议（规则）',
+        description: '表格结构指纹与协议约束。删除后 AI 拿不到结构指纹，草稿校验将失败。',
+        kind: 'data',
+    },
+    {
+        token: TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
+        label: '语法参考文档',
+        description: '两份本地语法文档原文嵌入。删除后系统会自动追加到最后一张 SYSTEM 卡末尾。',
+        kind: 'reference',
+    },
+];
+
+
 function clone_ACU<T>(value: T): T {
     return JSON.parse(JSON.stringify(value));
 }
@@ -351,6 +412,116 @@ export function buildDefaultTemplateAssistantPromptSegments_ACU(): TemplateAssis
     return [{ role: 'SYSTEM', content: buildDefaultSystemPrompt_ACU(), deletable: false }];
 }
 
+/**
+ * 伪 role 对话式默认模板（10 卡）。
+ *
+ * 结构：SYSTEM 指令 / 协议卡 / 全局结构卡 / 当前表卡 + assistant 应答示范，
+ * 第 9 张是唯一含 `$1` 的卡（构成 priorTurns 插入锚点），第 10 张是 AI 应答预填充卡（必须为最后一条）。
+ *
+ * **预填充卡内容硬约束**：
+ * - 禁止包含 `<templateAssistantDraft>` 字面量（含尖括号）——否则 AI 以为标签已开，只补闭合部分，
+ *   响应无开标签，解析链击穿（extractFallbackDraftJson 会拿内部嵌套 `{` 瞎截取）；
+ * - 禁止包含未闭合的 `{`——同理破坏配对逻辑。
+ * 表述上用「draft 标签」而非字面量，以冒号结尾不换行，引导 AI 直接输出完整标签对。
+ *
+ * 全模板不含世界书占位符。
+ */
+export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(): TemplateAssistantPromptSegment_ACU[] {
+    return [
+        {
+            role: 'SYSTEM',
+            content:
+                '你是 visualizer 内的模板改表助手。你只能输出一个被 draft 标签包裹的 JSON 对象，不输出解释文本。严格使用 protocolVersion=2、mode="modify_current_template_incremental"、atomic=true。',
+            deletable: false,
+        },
+        {
+            role: 'assistant',
+            content: '收到，我将只输出合法的 draft JSON，不输出任何解释文本。',
+            deletable: true,
+        },
+        {
+            role: 'USER',
+            content:
+                `以下是表格结构协议与规则，必须严格遵守：${TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU}；语法参考文档：${TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU}`,
+            deletable: true,
+        },
+        {
+            role: 'assistant',
+            content: '收到，我已阅读协议约束与语法文档，将严格在协议范围内生成操作。',
+            deletable: true,
+        },
+        {
+            role: 'USER',
+            content: `以下是全局表格结构：${TEMPLATE_ASSISTANT_PLACEHOLDER_ALL_SHEETS_ACU}`,
+            deletable: true,
+        },
+        {
+            role: 'assistant',
+            content: '收到，我已了解全部表格的结构与全局注入配置。',
+            deletable: true,
+        },
+        {
+            role: 'USER',
+            content: `以下是当前选中表：${TEMPLATE_ASSISTANT_PLACEHOLDER_CURRENT_SHEET_ACU}`,
+            deletable: true,
+        },
+        {
+            role: 'assistant',
+            content: '收到，我已聚焦当前选中表，随时可以按需求生成增量改动。',
+            deletable: true,
+        },
+        {
+            role: 'USER',
+            content: `现在请按照我的需求立刻开始工作：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`,
+            deletable: false,
+        },
+        {
+            role: 'assistant',
+            content: '收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：',
+            deletable: true,
+        },
+    ];
+}
+
+
+/**
+ * 将占位符值序列化为字符串，供替换进提示词。
+ * - string 原样返回；
+ * - number / boolean 走 String()；
+ * - 其余（对象/数组等）走 safeJsonStringify，失败回退 '{}'。
+ */
+export function stringifyPlaceholderValue_ACU(value: unknown): string {
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    return safeJsonStringify_ACU(value, '{}');
+}
+
+/**
+ * 单次扫描替换占位符。
+ *
+ * **禁止**改回以下两种写法：
+ * 1. `content.replace('$1', value)` —— value 含 `$&` / `` $` `` / `$'` / `$1` / `$<name>` 时会被当替换模式展开；
+ * 2. 逐 token 顺序替换（无论 replace 还是 split/join）—— 前一个 token 的值里若含后一个 token 字面量，会被二次替换（跨 token 污染）。
+ *
+ * 反面参照：`src/service/ai/prompt-builder/prompt-api-call.ts:125-132` 的顺序 replace 缺陷。
+ *
+ * 两个安全性质：
+ * - 回调形式的 replace 不解释返回值中的 `$` 序列（ECMAScript 规范：仅当 replacement 为字符串时才执行 GetSubstitution）；
+ * - 单次扫描：正则 lastIndex 持续前进，已替换内容不再被扫描，值内 token 不会被误替换。
+ *
+ * valueMap 中不存在的 key 保留原 token 字面量，不替换为空串——用户能从提示词直观看到「这个占位符没生效」。
+ */
+export function applyTemplateAssistantPlaceholders_ACU(
+    content: string,
+    valueMap: Record<string, string>,
+): string {
+    return String(content || '').replace(
+        TEMPLATE_ASSISTANT_PLACEHOLDER_PATTERN_ACU,
+        (matched) => (Object.prototype.hasOwnProperty.call(valueMap, matched) ? valueMap[matched] : matched),
+    );
+}
+
+
 function normalizePositiveInteger_ACU(value: any, fallback: number) {
     const normalized = Number(value);
     if (!Number.isFinite(normalized)) return fallback;
@@ -383,18 +554,57 @@ function normalizePriorTurns_ACU(priorTurns: TemplateAssistantPriorTurn_ACU[] | 
         .filter((turn) => !!turn.user || !!turn.assistant);
 }
 
-function buildTemplateAssistantMessages_ACU(input: TemplateAssistantGenerateInput_ACU, baseFingerprint: string) {
-    const systemMessages = resolveAssistantSystemPrompt_ACU(settings_ACU.templateAssistantPromptSegments);
-    const messages: Array<{ role: string; content: string }> = [...systemMessages];
-    normalizePriorTurns_ACU(input.priorTurns).forEach((turn) => {
-        if (turn.user) {
-            messages.push({ role: 'user', content: turn.user });
+export function buildTemplateAssistantMessages_ACU(input: TemplateAssistantGenerateInput_ACU, baseFingerprint: string) {
+    const payload = buildUserPromptPayload_ACU(input, baseFingerprint);
+    const normalized = normalizeAssistantPromptSegments_ACU(settings_ACU.templateAssistantPromptSegments);
+    const referenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
+    const valueMap = buildAssistantPlaceholderContext_ACU(payload, referenceText);
+    const resolved = resolveAssistantSystemPrompt_ACU(normalized, valueMap);
+    const fullPayloadText = safeJsonStringify_ACU(payload, '{}');
+
+    const messages: Array<{ role: string; content: string }> = [];
+
+    if (normalized.length === 0) {
+        // 存量路径：与旧版字节级一致（role 小写 system 单条 + priorTurns + 完整 payload）。
+        messages.push(...resolved);
+        normalizePriorTurns_ACU(input.priorTurns).forEach((turn) => {
+            if (turn.user) messages.push({ role: 'user', content: turn.user });
+            if (turn.assistant) messages.push({ role: 'assistant', content: turn.assistant });
+        });
+        messages.push({ role: 'user', content: fullPayloadText });
+        return messages;
+    }
+
+    // 锚点：最后一张「含 $1 的卡」。必须在替换前（normalized）判定，
+    // 因为 resolved 中的 $1 已被替换成 userRequest 值，若该值本身含 "$1" 会污染判定。
+    const anchorIndex = normalized.reduce<number>(
+        (last, seg, i) =>
+            String(seg.content || '').includes(TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU) ? i : last,
+        -1,
+    );
+    // 是否出现任一数据占位符（$1-$4）；出现任一即视为用户接管数据注入，不再自动追加 payload。
+    const hasAnyDataToken = normalized.some((seg) => /\$[1-4]/.test(String(seg.content || '')));
+
+    const pushPriorTurns = () => {
+        normalizePriorTurns_ACU(input.priorTurns).forEach((turn) => {
+            if (turn.user) messages.push({ role: 'user', content: turn.user });
+            if (turn.assistant) messages.push({ role: 'assistant', content: turn.assistant });
+        });
+    };
+
+    if (anchorIndex >= 0) {
+        // 伪 role / 自定义：真实历史插入到最后一张含 $1 的卡之前。
+        messages.push(...resolved.slice(0, anchorIndex));
+        pushPriorTurns();
+        messages.push(...resolved.slice(anchorIndex));
+    } else {
+        messages.push(...resolved);
+        pushPriorTurns();
+        // 无任何数据占位符 → 追加完整 payload user 消息，与现状等价。
+        if (!hasAnyDataToken) {
+            messages.push({ role: 'user', content: fullPayloadText });
         }
-        if (turn.assistant) {
-            messages.push({ role: 'assistant', content: turn.assistant });
-        }
-    });
-    messages.push({ role: 'user', content: buildUserPrompt_ACU(input, baseFingerprint) });
+    }
     return messages;
 }
 
@@ -1028,7 +1238,6 @@ export function validateTemplateAssistantDraft_ACU(draft: any): TemplateAssistan
 }
 
 function buildDefaultSystemPrompt_ACU() {
-    const embeddedReferenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
     return [
         '你是 visualizer 内的模板改表助手。',
         '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。',
@@ -1071,15 +1280,19 @@ function buildDefaultSystemPrompt_ACU() {
 /**
  * 解析 assistant 系统提示词：
  * - segments 为空（settings 无自定义或全空）→ 使用默认提示词（与旧硬编码一致，含占位符）。
- * - 每个卡片按 {role, content} 生成消息；content 中的占位符在运行时替换为引用文档全文。
+ * - 每个卡片按 {role, content} 生成消息；content 中的占位符在运行时替换为签名映射的值。
  * - 若没有任何卡片包含占位符，则在最后一个 SYSTEM 卡末尾自动追加引用文档（防呆，避免用户删掉占位符后引用静默丢失）。
  * - 默认回退路径的 role 输出小写 'system'，与旧版 buildTemplateAssistantMessages_ACU 的消息结构字节级一致，
  *   保证存量用户（settings 无 templateAssistantPromptSegments）发送给 AI 的 messages 完全不变。
  *   自定义 segments 路径保留用户选择的 role 大小写（SYSTEM/USER/assistant），
  *   该路径仅被主动编辑过提示词的用户触发，不涉及存量兼容。
+ *
+ * 占位符 `$1`-`$4` 语义见 TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU。valueMap 缺失的 key
+ * 保留原 token 字面量（不替换为空串），用户可从提示词直观看到「这个占位符没生效」。
  */
 export function resolveAssistantSystemPrompt_ACU(
     segments?: TemplateAssistantPromptSegment_ACU[] | null,
+    valueMap?: Record<string, string> | null,
 ): Array<{ role: string; content: string }> {
     const normalized = normalizeAssistantPromptSegments_ACU(segments);
     if (normalized.length === 0) {
@@ -1092,12 +1305,13 @@ export function resolveAssistantSystemPrompt_ACU(
     }
     const cards = normalized;
     const referenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
+    const effectiveValueMap =
+        valueMap && typeof valueMap === 'object'
+            ? valueMap
+            : { [TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU]: referenceText };
     const resolved = cards.map((seg) => ({
         role: seg.role,
-        content: String(seg.content || '').replace(
-            TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
-            referenceText,
-        ),
+        content: applyTemplateAssistantPlaceholders_ACU(seg.content, effectiveValueMap),
     }));
     const hasPlaceholder = cards.some((seg) =>
         String(seg.content || '').includes(TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU),
@@ -1113,9 +1327,16 @@ export function resolveAssistantSystemPrompt_ACU(
     return resolved;
 }
 
-function buildUserPrompt_ACU(input: TemplateAssistantGenerateInput_ACU, baseFingerprint: string) {
+/**
+ * 产出改表助手 user payload 对象（8 个顶层键，constraints 内容冻结）。
+ * 占位符 `$1`-`$4` 是这 8 个键的完备划分（见 TEMPLATE_ASSISTANT_PAYLOAD_PARTITION_ACU）。
+ */
+export function buildUserPromptPayload_ACU(
+    input: TemplateAssistantGenerateInput_ACU,
+    baseFingerprint: string,
+): AnyRecord {
     const tempData = input.tempData;
-    const payload = {
+    return {
         userRequest: String(input.userRequest || '').trim(),
         baseFingerprint,
         selectedSheetKey: input.currentSheetKey || '',
@@ -1147,7 +1368,48 @@ function buildUserPrompt_ACU(input: TemplateAssistantGenerateInput_ACU, baseFing
             redactExistingSourceDataDdlFromSnapshots: true,
         },
     };
-    return safeJsonStringify_ACU(payload, '{}');
+}
+
+/**
+ * 占位符 → payload 键的完备划分（无重复、无遗漏）。
+ * 测试据此断言四组字段名并集 === payload 键集，防止未来 payload 新增字段静默丢失。
+ */
+export const TEMPLATE_ASSISTANT_PAYLOAD_PARTITION_ACU = {
+    [TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU]: ['userRequest'],
+    [TEMPLATE_ASSISTANT_PLACEHOLDER_CURRENT_SHEET_ACU]: ['selectedSheetKey', 'selectedSheet'],
+    [TEMPLATE_ASSISTANT_PLACEHOLDER_ALL_SHEETS_ACU]: ['sheetCount', 'allSheets', 'globalInjectionConfig'],
+    [TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU]: ['baseFingerprint', 'constraints'],
+} as const;
+
+/**
+ * 由 payload 与语法参考文本构建占位符 valueMap。
+ * 键为占位符 token，值为待替换进提示词的字符串。
+ */
+export function buildAssistantPlaceholderContext_ACU(
+    payload: AnyRecord,
+    referenceText: string,
+): Record<string, string> {
+    return {
+        [TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU]: stringifyPlaceholderValue_ACU(payload.userRequest),
+        [TEMPLATE_ASSISTANT_PLACEHOLDER_CURRENT_SHEET_ACU]: stringifyPlaceholderValue_ACU({
+            selectedSheetKey: payload.selectedSheetKey,
+            selectedSheet: payload.selectedSheet,
+        }),
+        [TEMPLATE_ASSISTANT_PLACEHOLDER_ALL_SHEETS_ACU]: stringifyPlaceholderValue_ACU({
+            sheetCount: payload.sheetCount,
+            allSheets: payload.allSheets,
+            globalInjectionConfig: payload.globalInjectionConfig,
+        }),
+        [TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU]: stringifyPlaceholderValue_ACU({
+            baseFingerprint: payload.baseFingerprint,
+            constraints: payload.constraints,
+        }),
+        [TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU]: referenceText,
+    };
+}
+
+function buildUserPrompt_ACU(input: TemplateAssistantGenerateInput_ACU, baseFingerprint: string) {
+    return safeJsonStringify_ACU(buildUserPromptPayload_ACU(input, baseFingerprint), '{}');
 }
 
 function buildSessionRoundUserRequest_ACU(options: {

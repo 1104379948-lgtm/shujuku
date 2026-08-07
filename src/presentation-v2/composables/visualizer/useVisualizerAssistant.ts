@@ -4,6 +4,7 @@ import { settings_ACU } from '../../../service/runtime/state-manager';
 import {
   buildTemplateAssistantFingerprint_ACU,
   buildDefaultTemplateAssistantPromptSegments_ACU,
+  buildPseudoRoleTemplateAssistantPromptSegments_ACU,
   createTemplateAssistantSessionGuard_ACU,
   getTemplateAssistantApplyBaselineFingerprint_ACU,
   runTemplateAssistantSession_ACU,
@@ -336,6 +337,11 @@ export function useVisualizerAssistant() {
     promptDirty.value = true;
   }
 
+  function loadPseudoRolePrompt(): void {
+    promptSegments.value = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    promptDirty.value = true;
+  }
+
   function addPromptSegment(position: 'top' | 'bottom'): void {
     const seg: TemplateAssistantPromptSegment_ACU = { role: 'SYSTEM', content: '', deletable: true };
     const next = promptSegments.value.slice();
@@ -655,6 +661,7 @@ export function useVisualizerAssistant() {
     loadPromptSegments,
     savePrompt,
     resetPrompt,
+    loadPseudoRolePrompt,
     addPromptSegment,
     deletePromptSegment,
     updatePromptSegment,
