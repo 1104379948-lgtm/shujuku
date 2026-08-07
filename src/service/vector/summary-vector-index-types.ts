@@ -65,6 +65,10 @@ export interface SummaryVectorIndexChunkRef_ACU {
 
 export interface SummaryVectorIndexPackRef_ACU {
     packKey: string;
+    /** P4 新协议：pack 所属 canonical scope（V2 scope token），旧 ref 缺省。 */
+    packScope?: string;
+    /** P4 新协议：pack schema 版本，旧 ref 缺省。 */
+    schemaVersion?: number;
     path: string;
     checksum: string;
     byteSize: number;
@@ -96,6 +100,37 @@ export interface SummaryVectorIndexCheckpoint_ACU {
     chunkCount: number;
     activeRowKeys: string[];
     createdAt: string;
+}
+
+
+/**
+ * P4 内容寻址 pack 协议（T8+）。
+ * 设计约束：pack 内容必须与 indexId/revision/时间戳无关，才能跨 revision 复用；
+ * chunk 排序与行序由读取端从 manifest.snapshot.activeChunkIds 与 snapshot rows 复原。
+ */
+export const SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU = 'content_addressed_vector_pack';
+export const SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU = 1;
+
+export interface SummaryVectorIndexContentPackChunk_ACU {
+    chunkKey: string;
+    chunkId: string;
+    rowKey: string;
+    text: string;
+    /** f32b64 编码字符串（非 number[]）。 */
+    vector: string;
+    vectorEncoding: 'f32b64';
+    sourceFingerprint?: string;
+    textHash?: string;
+}
+
+export interface SummaryVectorIndexContentPackBlob_ACU {
+    version: number;
+    schema: typeof SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU;
+    packKey: string;
+    packScope: string;
+    embeddingModel: string;
+    dimension: number;
+    chunks: SummaryVectorIndexContentPackChunk_ACU[];
 }
 
 export interface ChatSummaryVectorIndexRow_ACU {
@@ -368,7 +403,7 @@ export interface SummaryVectorIndexReachabilityReport_ACU {
 
 export interface SummaryVectorIndexHealthIssue_ACU {
     severity: 'warning' | 'error';
-    code: 'missing_file' | 'checksum_mismatch' | 'identity_mismatch' | 'path_identity_collision' | 'legacy_manifest' | 'unreachable_registered_file' | 'read_error' | 'pack_chunk_missing';
+    code: 'missing_file' | 'checksum_mismatch' | 'identity_mismatch' | 'path_identity_collision' | 'legacy_manifest' | 'unreachable_registered_file' | 'read_error' | 'pack_chunk_missing' | 'pack_chunk_duplicated' | 'pack_chunk_unexpected';
     path: string;
     role?: SummaryVectorIndexExternalFileRole_ACU;
     rowKey?: string;

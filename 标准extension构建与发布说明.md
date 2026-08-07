@@ -45,6 +45,7 @@ extension-only
 
 - `index.js`
 - `manifest.json`
+- `sql-wasm.wasm`（SQLite wasm 引擎产物，v1.1.0+ 必须随包分发）
 
 SillyTavern 通过仓库地址安装时，会直接读取：
 
@@ -72,9 +73,11 @@ SillyTavern 通过仓库地址安装时，会直接读取：
 ```text
 dist/extension/index.js
 dist/extension/manifest.json
+dist/extension/sql-wasm.wasm
 ```
 
 其中 `dist/extension/manifest.json` 的内容来自根目录 `manifest.json` 的复制结果。
+`dist/extension/sql-wasm.wasm` 由构建期从 `node_modules/sql.js/dist/sql-wasm.wasm` 复制并做 SHA-256 校验（见 `scripts/sql-wasm-assets.mjs`）。
 
 ---
 
@@ -151,6 +154,7 @@ Get-ChildItem .\dist\extension
 ```text
 index.js
 manifest.json
+sql-wasm.wasm
 ```
 
 ### 第 5 步：确认 manifest 正常
@@ -259,12 +263,13 @@ git clone --branch extension-only --single-branch https://github.com/niccolecant
 ```powershell
 Copy-Item "$SrcRepo\dist\extension\index.js" "$PublishDir\index.js" -Force
 Copy-Item "$SrcRepo\dist\extension\manifest.json" "$PublishDir\manifest.json" -Force
+Copy-Item "$SrcRepo\dist\extension\sql-wasm.wasm" "$PublishDir\sql-wasm.wasm" -Force
 ```
 
 ### 第 5 步：看这次是否真的有变化
 
 ```powershell
-git -C $PublishDir diff -- index.js manifest.json
+git -C $PublishDir diff -- index.js manifest.json sql-wasm.wasm
 ```
 
 如果这里没有任何 diff，说明这次发布其实是 **no-op**，就没必要再提交。
@@ -272,7 +277,7 @@ git -C $PublishDir diff -- index.js manifest.json
 也可以用静默判断：
 
 ```powershell
-git -C $PublishDir diff --quiet -- index.js manifest.json
+git -C $PublishDir diff --quiet -- index.js manifest.json sql-wasm.wasm
 if ($LASTEXITCODE -eq 0) {
     Write-Host 'NO_CHANGES_TO_PUBLISH'
 }
@@ -281,7 +286,7 @@ if ($LASTEXITCODE -eq 0) {
 ### 第 6 步：提交直装仓库
 
 ```powershell
-git -C $PublishDir add index.js manifest.json
+git -C $PublishDir add index.js manifest.json sql-wasm.wasm
 
 git -C $PublishDir `
   -c user.name="Niccole" `
@@ -341,6 +346,7 @@ gh api repos/niccolecantdoit-rgb/shujuku-extension-only/contents?ref=extension-o
 
 - `index.js`
 - `manifest.json`
+- `sql-wasm.wasm`
 
 ### 3）验证直装仓库地址
 
@@ -464,9 +470,10 @@ git clone --branch extension-only --single-branch https://github.com/niccolecant
 # 5. 覆盖产物
 Copy-Item "$SrcRepo\dist\extension\index.js" "$PublishDir\index.js" -Force
 Copy-Item "$SrcRepo\dist\extension\manifest.json" "$PublishDir\manifest.json" -Force
+Copy-Item "$SrcRepo\dist\extension\sql-wasm.wasm" "$PublishDir\sql-wasm.wasm" -Force
 
 # 6. 提交并推送
-git -C $PublishDir add index.js manifest.json
+git -C $PublishDir add index.js manifest.json sql-wasm.wasm
 git -C $PublishDir -c user.name="Niccole" -c user.email="234573773+niccolecantdoit-rgb@users.noreply.github.com" commit -m "build: refresh extension-only from ${SourceSha}-dirty" -m "Source-Ref: standard dist/extension from working-tree over $SourceSha"
 git -C $PublishDir push origin extension-only
 ```

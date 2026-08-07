@@ -13,6 +13,7 @@ import {
   openAcuV2Shell_ACU,
   openVisualizerSurface_ACU,
   requestVisualizerExternalRefresh_ACU,
+  isVisualizerSurfaceActive_ACU,
 } from '../surfaces/visualizer/open-visualizer-surface';
 
 export { openAcuV2App, closeAcuV2App } from './mount';
@@ -23,6 +24,7 @@ export function bootstrapAcuV2(): void {
     openSettings: openAcuV2Shell_ACU,
     openVisualizer: () => openVisualizerSurface_ACU({ source: 'external-api' }),
     refreshVisualizer: requestVisualizerExternalRefresh_ACU,
+    isVisualizerActive: isVisualizerSurfaceActive_ACU,
   });
   installAutoCardUpdaterV2Api_ACU();
   registerAcuV2MenuButton();

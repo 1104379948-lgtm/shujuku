@@ -9,9 +9,12 @@
  * - 不涉及业务逻辑（业务逻辑在 sync-bridge.ts 和 schema-mapper.ts）
  */
 
-// sql.js asm 版本（纯 JS，不依赖 WASM，适合油猴环境）
-import initSqlJs from 'sql.js/dist/sql-asm-memory-growth.js';
+// 引擎选择由构建开关 ACU_SQLITE_ENGINE 决定（rollup 把占位符替换为具体模块）：
+//   wasm（默认）：sql.js/dist/sql-wasm.js + 构建期复制分发 sql-wasm.wasm；
+//   asm（回滚）：sql.js/dist/sql-asm-memory-growth.js（纯 JS，无 wasm）。
+import initSqlJs from '__ACU_SQLITE_ENGINE_IMPORT__';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+import { resolveSqlWasmUrl_ACU } from './sql-wasm-locator';
 
 /** 列信息（PRAGMA table_info 返回的结构） */
 export interface ColumnInfo {
@@ -48,10 +51,59 @@ export interface BatchResult<T = void> {
 export class SqliteEngine {
   private db: SqlJsDatabase | null = null;
   private sqlJs: SqlJsStatic | null = null;
+  /**
+   * 单一运行时初始化 Promise：并发调用 init()/loadFromBinary() 时只初始化一次 sql.js。
+   * 失败后置 null，保证下次调用可重试（不会把失败的 Promise 永久缓存）。
+   */
+  private sqlJsInitPromise: Promise<SqlJsStatic> | null = null;
 
   /** 是否已初始化 */
   get isReady(): boolean {
     return this.db !== null;
+  }
+
+
+  /**
+   * 初始化 sql.js 运行时（单一入口，init/loadFromBinary 共用）。
+   * - 已初始化过运行时直接返回；
+   * - 否则复用/创建 sqlJsInitPromise，并发调用只初始化一次；
+   * - 失败时把 Promise 置 null 后重抛，保证下次可重试。
+   */
+  private async initializeRuntime(): Promise<SqlJsStatic> {
+    if (this.sqlJs) return this.sqlJs;
+
+    // [6.7.2] 检测 sql.js 是否可用（CDN @require 可能加载失败）
+    if (typeof initSqlJs !== 'function') {
+      throw new Error(
+        'sql.js 引擎未加载：initSqlJs 函数不存在。' +
+        '请检查构建产物是否正确打包 sql-wasm.js 与 sql-wasm.wasm（URL/MIME/CSP/跨域），' +
+        '或 CDN 是否可达。将自动 fallback 到原生模式。'
+      );
+    }
+
+    if (!this.sqlJsInitPromise) {
+      this.sqlJsInitPromise = (async () => {
+        try {
+          logDebug_ACU('[SQLite引擎] 正在初始化 sql.js...');
+          const runtime = await initSqlJs({ locateFile: (file: string) => resolveSqlWasmUrl_ACU(file) });
+          logDebug_ACU('[SQLite引擎] sql.js 初始化成功');
+          return runtime;
+        } catch (e: any) {
+          logError_ACU('[SQLite引擎] sql.js 初始化失败:', e?.message || String(e));
+          throw new Error(
+            `sql.js 初始化失败: ${e?.message || String(e)}。将自动 fallback 到原生模式。`
+          );
+        }
+      })();
+    }
+
+    try {
+      this.sqlJs = await this.sqlJsInitPromise;
+    } catch (error) {
+      this.sqlJsInitPromise = null;
+      throw error;
+    }
+    return this.sqlJs;
   }
 
   /**
@@ -62,28 +114,8 @@ export class SqliteEngine {
     // 销毁旧实例（如果有）
     this.dispose();
 
-    // [6.7.2] 检测 sql.js 是否可用（CDN @require 可能加载失败）
-    if (typeof initSqlJs !== 'function') {
-      throw new Error(
-        'sql.js 引擎未加载：initSqlJs 函数不存在。' +
-        '请检查油猴脚本的 @require 是否正确引入了 sql-asm-memory-growth.js，' +
-        '或 CDN 是否可达。将自动 fallback 到原生模式。'
-      );
-    }
-
-    // 初始化 sql.js（asm 版本不需要 locateFile 配置）
-    if (!this.sqlJs) {
-      try {
-        logDebug_ACU('[SQLite引擎] 正在初始化 sql.js...');
-        this.sqlJs = await initSqlJs();
-        logDebug_ACU('[SQLite引擎] sql.js 初始化成功');
-      } catch (e: any) {
-        logError_ACU('[SQLite引擎] sql.js 初始化失败:', e?.message || String(e));
-        throw new Error(
-          `sql.js 初始化失败: ${e?.message || String(e)}。将自动 fallback 到原生模式。`
-        );
-      }
-    }
+    // 统一走单一运行时初始化入口（并发安全 + 失败可重试，见 initializeRuntime）
+    this.sqlJs = await this.initializeRuntime();
 
     // 创建空的内存数据库
     this.db = new this.sqlJs.Database();
@@ -298,6 +330,8 @@ export class SqliteEngine {
   /**
    * 销毁数据库实例，释放内存
    * 销毁后 isReady 变为 false，需要重新 init() 才能使用
+   * 注意：不销毁 sql.js 运行时本身——运行时初始化代价高且可复用，
+   * 只有 db 实例随聊天切换销毁重建（复用运行时是有意行为）。
    */
   dispose(): void {
     if (this.db) {
@@ -322,9 +356,9 @@ export class SqliteEngine {
    */
   async loadFromBinary(data: Uint8Array): Promise<void> {
     logDebug_ACU(`[SQLite引擎] 从二进制数据恢复数据库 (${data.byteLength} bytes)`);
-    if (!this.sqlJs) {
-      this.sqlJs = await initSqlJs();
-    }
+    // 统一走单一运行时初始化入口（T5：消除 loadFromBinary 独立 initSqlJs 旁路，
+    // 确保与 init() 共用同一运行时与失败重试语义）
+    this.sqlJs = await this.initializeRuntime();
     this.dispose();
     this.db = new this.sqlJs.Database(data);
     this.db.run('PRAGMA foreign_keys = ON;');

@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  buildVectorIndexContentPackPathV2_ACU,
   buildVectorIndexSingleSnapshotV2FilePath_ACU,
+  buildVectorIndexSingleSnapshotV2ScopeToken_ACU,
   buildVectorIndexStableDirectory_ACU,
+  extractVectorIndexContentPackScopeTokenFromPath_ACU,
+  isVectorIndexContentPackPathV2_ACU,
   registerVectorIndexFiles_ACU,
 } from '../../../src/data/storage/vector-index-st-files-storage';
 
@@ -9,6 +13,80 @@ import { buildVectorIndexSnapshotWriteGeneration_ACU } from '../../../src/servic
 
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe('P4 内容寻址 pack 路径 (T10)', () => {
+  const packBase = {
+    chatKey: 'chat-main',
+    isolationKey: 'profile-a',
+    sourceTableKey: 'sheet_summary',
+    packKey: 'pack_abcdef1234567890',
+  };
+
+  it('中文 chatKey 的两个不同聊天生成不同 pack 路径（不坍缩为 default）', () => {
+    const chatA = '中文聊天甲';
+    const chatB = '中文聊天乙';
+    const pathA = buildVectorIndexContentPackPathV2_ACU({
+      chatKey: chatA,
+      isolationKey: 'iso',
+      sourceTableKey: 'sheet_x',
+      packKey: 'pack_same',
+    });
+    const pathB = buildVectorIndexContentPackPathV2_ACU({
+      chatKey: chatB,
+      isolationKey: 'iso',
+      sourceTableKey: 'sheet_x',
+      packKey: 'pack_same',
+    });
+    expect(pathA).not.toBe(pathB);
+    expect(pathA).not.toContain('default');
+    expect(pathB).not.toContain('default');
+    expect(pathA.startsWith('TavernDB_ACU_vector_v2pack_')).toBe(true);
+  });
+
+  it('同 scope 同 packKey 生成稳定路径；packKey 变化路径变化', () => {
+    const a = buildVectorIndexContentPackPathV2_ACU(packBase);
+    expect(buildVectorIndexContentPackPathV2_ACU(packBase)).toBe(a);
+    expect(buildVectorIndexContentPackPathV2_ACU({ ...packBase, packKey: 'pack_other' })).not.toBe(a);
+  });
+
+  it('路径不含 indexId/revision（跨 revision 复用前提）', () => {
+    const path = buildVectorIndexContentPackPathV2_ACU(packBase);
+    expect(path).not.toContain('snap_');
+    expect(path).not.toContain('_snapshot');
+  });
+
+  it('超长 chatKey 抛错且文案含缩短建议', () => {
+    const longChatKey = '超长'.repeat(200);
+    expect(() => buildVectorIndexContentPackPathV2_ACU({
+      chatKey: longChatKey,
+      isolationKey: 'iso',
+      sourceTableKey: 'sheet_x',
+      packKey: 'pack_x',
+    })).toThrow(/路径超长/);
+  });
+
+  it('前缀识别函数不把 snapshot 路径判成 pack，pack 路径可识别', () => {
+    const snapshotPath = buildVectorIndexSingleSnapshotV2FilePath_ACU({
+      chatKey: 'chat-main',
+      isolationKey: 'profile-a',
+      sourceTableKey: 'sheet_summary',
+      indexId: 'snap_one',
+      writeGeneration: 'write_one',
+    });
+    expect(isVectorIndexContentPackPathV2_ACU(snapshotPath)).toBe(false);
+    expect(isVectorIndexContentPackPathV2_ACU('TavernDB_ACU_vector_v2pack_scope_pack_x')).toBe(true);
+    expect(isVectorIndexContentPackPathV2_ACU('')).toBe(false);
+  });
+
+  it('extractVectorIndexContentPackScopeTokenFromPath_ACU 提取 scope token，非 pack 路径返回 null', () => {
+    const packPath = buildVectorIndexContentPackPathV2_ACU(packBase);
+    const scopeToken = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(packBase);
+    expect(extractVectorIndexContentPackScopeTokenFromPath_ACU(packPath)).toBe(scopeToken);
+    expect(extractVectorIndexContentPackScopeTokenFromPath_ACU('TavernDB_ACU_vector_v2_scope_snap_x_snapshot')).toBe(null);
+    expect(extractVectorIndexContentPackScopeTokenFromPath_ACU('')).toBe(null);
+  });
+});
+
 
 const base = {
   chatKey: 'chat-main',

@@ -37,18 +37,24 @@ vi.mock('../../../src/data/storage/vector-index-st-files-storage', () => ({
   unregisterVectorIndexFiles_ACU: (...args: any[]) => h.unregister(...args),
   buildVectorIndexSingleSnapshotV2ScopeToken_ACU: (parts: any) => `scope:${parts.chatKey}|${parts.isolationKey}|${parts.sourceTableKey}`,
   buildVectorIndexSingleSnapshotV2FilePath_ACU: (parts: any) => `TavernDB_ACU_vector_v2_scope:${parts.chatKey}|${parts.isolationKey}|${parts.sourceTableKey}_${parts.indexId}_${parts.writeGeneration}_snapshot`,
+  isVectorIndexContentPackPathV2_ACU: (path: any) => String(path || '').startsWith('TavernDB_ACU_vector_v2pack_'),
   buildVectorIndexFileName_ACU: vi.fn(), buildVectorIndexSnapshotFilePath_ACU: vi.fn(),
   buildVectorIndexStableDirectory_ACU: vi.fn(), buildVectorIndexStableFilePath_ACU: vi.fn(),
   deleteRegisteredVectorIndexFilesWhere_ACU: vi.fn(), loadVectorIndexRegistry_ACU: (...args: any[]) => h.registry(...args),
   sha256Text_ACU: vi.fn(async (value: string) => `sha:${value.length}`),
 }));
-vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
-  getSummaryVectorHotCacheChunks_ACU: (...args: any[]) => h.getHot(...args),
-  putSummaryVectorHotCacheChunks_ACU: (...args: any[]) => h.putHot(...args),
-  estimateSummaryVectorFlushTasks_ACU: (...args: any[]) => h.flush(...args),
-  estimateSummaryVectorHotCache_ACU: vi.fn(),
-  deleteSummaryVectorHotCacheByIndex_ACU: vi.fn(),
-}));
+vi.mock('../../../src/data/storage/vector-index-hot-cache', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/data/storage/vector-index-hot-cache')>();
+  return {
+    ...actual,
+    getSummaryVectorHotCacheChunks_ACU: (...args: any[]) => h.getHot(...args),
+    putSummaryVectorHotCacheChunks_ACU: (...args: any[]) => h.putHot(...args),
+    estimateSummaryVectorFlushTasks_ACU: (...args: any[]) => h.flush(...args),
+    estimateSummaryVectorHotCache_ACU: vi.fn(),
+    deleteSummaryVectorHotCacheByIndex_ACU: vi.fn(),
+  };
+});
+
 vi.mock('../../../src/data/storage/vector-index-temp-cache', () => ({
   deleteVectorIndexCacheByIndex_ACU: vi.fn(),
   estimateVectorIndexTempCache_ACU: vi.fn(),
@@ -95,6 +101,17 @@ function blob_ACU(manifest: any): any {
   };
 }
 
+// 与源码 encodeVectorToF32B64_ACU 语义一致：Float32LE -> base64（T15 测试用）
+function encodeF32B64(values: number[]): string {
+  const bytes = new Uint8Array(values.length * 4);
+  const view = new DataView(bytes.buffer);
+  values.forEach((value, index) => view.setFloat32(index * 4, value, true));
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+
 describe('summary-vector-index-storage-service V2 单文件读取', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -109,38 +126,42 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
     h.unregister.mockResolvedValue(undefined);
   });
 
-  it('完整 V2 identity 一致时加载并回填热缓存', async () => {
+  it('T4：完整 V2 identity 读取时跳过热缓存查询与回填，只回源一次', async () => {
     const manifest = manifest_ACU();
     h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true })).resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
     expect(h.read).toHaveBeenCalledWith(manifest.manifestFile);
-    expect(h.putHot).toHaveBeenCalledWith(expect.objectContaining({ manifest }));
+    // V2 不可变快照：不查缓存、不回填缓存
+    expect(h.getHot).not.toHaveBeenCalled();
+    expect(h.putHot).not.toHaveBeenCalled();
   });
 
-  it('T8：V2 默认读取先查热缓存，writeGeneration 校验由缓存层负责，命中直接返回', async () => {
+  it('T4：V2 默认读取（不带 preferExternalFiles）同样跳过热缓存', async () => {
     const manifest = manifest_ACU();
     h.getHot.mockResolvedValue([{ chunkId: 'cached-chunk', vector: [3, 4] }]);
+    h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest))
-      .resolves.toMatchObject([{ chunkId: 'cached-chunk', vector: [3, 4] }]);
-    // T8b 放开闸门后，V2 manifest（带 storageIdentity）默认读取也会查热缓存。
-    expect(h.getHot).toHaveBeenCalledWith({ manifest });
-    // 缓存命中时不回源。
-    expect(h.read).not.toHaveBeenCalled();
+      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+    // 即使缓存有数据，V2 不可变快照也直接回源，不查询缓存
+    expect(h.getHot).not.toHaveBeenCalled();
+    expect(h.read).toHaveBeenCalledTimes(1);
+    expect(h.putHot).not.toHaveBeenCalled();
   });
 
-  it('T8：V2 默认读取缓存未命中（null）时回源并回填热缓存', async () => {
+  it('T4：V2 默认读取回源后不回填热缓存', async () => {
     const manifest = manifest_ACU();
     h.getHot.mockResolvedValue(null);
     h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest))
       .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
-    expect(h.getHot).toHaveBeenCalledWith({ manifest });
+    expect(h.getHot).not.toHaveBeenCalled();
     expect(h.read).toHaveBeenCalledWith(manifest.manifestFile);
-    expect(h.putHot).toHaveBeenCalledWith(expect.objectContaining({ manifest }));
+    expect(h.putHot).not.toHaveBeenCalled();
   });
+
 
   it('T8：preferExternalFiles: true 始终跳过热缓存直接回源', async () => {
     const manifest = manifest_ACU();
@@ -666,6 +687,262 @@ describe('summary-vector-index-storage-service 安全 GC', () => {
       }),
     ]));
   });
+
+  it('T14：pack 被任一楼层 manifest 引用 -> 保留，不删除', async () => {
+    const manifest = manifest_ACU();
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    manifest.contentAddressed = {
+      version: 1, mode: 'content_addressed_packs', chunkRefs: [],
+      activeChunkKeys: ['key-c1'], packRefs: [{ packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary', schemaVersion: 1, path: packPath, checksum: 'sha:1', byteSize: 1, chunkKeys: ['key-c1'], chunkCount: 1, rowCount: 1, embeddingModel: 'model-a', dimension: 2, createdAt: '', updatedAt: '', status: 'ready' }],
+    };
+    h.snapshot.value = {
+      layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest }, tagData: {} }],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z', checksum: '' }] });
+
+    const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+      scopeHints: [{ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' }],
+    });
+
+    expect(result.deletedPaths).toEqual([]);
+    expect(result.blockedByReachability).toContain(packPath);
+    expect(h.remove).not.toHaveBeenCalled();
+  });
+
+  it('T14：pack 不可达但 grace 未到 -> 保留且不下载 blob（h.read 未被调用）', async () => {
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    h.registry.mockResolvedValue({ files: [{ path: packPath, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), checksum: '' }] });
+    h.read.mockClear();
+
+    const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+      scopeHints: [{ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' }],
+    });
+
+    expect(result.deletedPaths).toEqual([]);
+    expect(result.blockedByReachability).toContain(packPath);
+    expect(h.read).not.toHaveBeenCalled();
+  });
+
+  it('T14：pack 不可达、grace 已过且校验通过 -> 删除', async () => {
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    const packBlob = {
+      version: 1, schema: 'content_addressed_vector_pack', packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary',
+      embeddingModel: 'model-a', dimension: 2, chunks: [],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z', checksum: '' }] });
+    h.read.mockResolvedValue({ ok: true, data: packBlob });
+
+    const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+      scopeHints: [{ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' }],
+    });
+
+    expect(result.deletedPaths).toContain(packPath);
+    expect(h.remove).toHaveBeenCalledWith(packPath);
+  });
+
+  it('T14：pack 的 packScope 与 scope 不符 -> quarantine', async () => {
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    const packBlob = {
+      version: 1, schema: 'content_addressed_vector_pack', packKey: 'pack_abc', packScope: 'scope:chat-a|iso-b|other',
+      embeddingModel: 'model-a', dimension: 2, chunks: [],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z', checksum: '' }] });
+    h.read.mockResolvedValue({ ok: true, data: packBlob });
+
+    const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+      scopeHints: [{ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' }],
+    });
+
+    expect(result.deletedPaths).toEqual([]);
+    expect(result.blockedByReachability).toContain(packPath);
+    expect(h.remove).not.toHaveBeenCalled();
+  });
+
+  it('T14：registry 无可信时间 -> quarantine，不下载 blob', async () => {
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    h.registry.mockResolvedValue({ files: [{ path: packPath, createdAt: '', updatedAt: '', checksum: '' }] });
+    h.read.mockClear();
+
+    const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+      scopeHints: [{ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' }],
+    });
+
+    expect(result.deletedPaths).toEqual([]);
+    expect(result.blockedByReachability).toContain(packPath);
+    expect(h.read).not.toHaveBeenCalled();
+  });
+
+  it('T14：pack 不可达但 registry checksum 与内容不符 -> quarantine', async () => {
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    const packBlob = {
+      version: 1, schema: 'content_addressed_vector_pack', packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary',
+      embeddingModel: 'model-a', dimension: 2, chunks: [],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z', checksum: 'sha:999' }] });
+    h.read.mockResolvedValue({ ok: true, data: packBlob });
+
+    const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+      scopeHints: [{ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' }],
+    });
+
+    expect(result.deletedPaths).toEqual([]);
+    expect(result.blockedByReachability).toContain(packPath);
+    expect(h.remove).not.toHaveBeenCalled();
+  });
+
+  it('T14：prepared 未 finalize 的 pack -> 保留', async () => {
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    const packBlob = {
+      version: 1, schema: 'content_addressed_vector_pack', packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary',
+      embeddingModel: 'model-a', dimension: 2, chunks: [],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z', checksum: '', publicationState: 'prepared' }] });
+    h.read.mockResolvedValue({ ok: true, data: packBlob });
+
+    const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+      scopeHints: [{ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' }],
+    });
+
+    // pending 发布窗口内的对象不能被 GC 删除（prepared 未 finalize）
+    expect(result.deletedPaths).toEqual([]);
+    expect(result.blockedByReachability).toContain(packPath);
+    expect(h.remove).not.toHaveBeenCalled();
+  });
+
+
+  it('T15：新 content pack 健康 -> identityMismatchCount 为 0', async () => {
+    const manifest = manifest_ACU();
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    const packBlob = {
+      version: 1, schema: 'content_addressed_vector_pack', packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary',
+      embeddingModel: 'model-a', dimension: 2,
+      chunks: [
+        { chunkKey: 'key-c1', chunkId: 'chunk-a', rowKey: 'row-a', text: 'text1', vector: encodeF32B64([1, 2]), vectorEncoding: 'f32b64' },
+      ],
+    };
+    manifest.contentAddressed = {
+      version: 1, mode: 'content_addressed_packs', chunkRefs: [],
+      activeChunkKeys: ['key-c1'], packRefs: [{ packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary', schemaVersion: 1, path: packPath, checksum: '', byteSize: 1, chunkKeys: ['key-c1'], chunkCount: 1, rowCount: 1, embeddingModel: 'model-a', dimension: 2, createdAt: '', updatedAt: '', status: 'ready' }],
+    };
+    h.snapshot.value = {
+      layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest }, tagData: {} }],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, role: 'vector_pack', checksum: '' }] });
+    h.read.mockImplementation(async (path: string) => path === packPath ? { ok: true, data: packBlob } : { ok: true, data: blob_ACU(manifest) });
+
+    const report = await inspectSummaryVectorIndexHealth_ACU();
+
+    expect(report.identityMismatchCount).toBe(0);
+    expect(report.status).toBe('healthy');
+    expect(report.issues.filter((issue) => issue.path === packPath)).toEqual([]);
+  });
+
+  it('T15：篡改 packScope -> 1 条 identity_mismatch', async () => {
+    const manifest = manifest_ACU();
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    const packBlob = {
+      version: 1, schema: 'content_addressed_vector_pack', packKey: 'pack_abc', packScope: 'scope:chat-a|iso-b|other',
+      embeddingModel: 'model-a', dimension: 2,
+      chunks: [{ chunkKey: 'key-c1', chunkId: 'chunk-a', rowKey: 'row-a', text: 'text1', vector: encodeF32B64([1, 2]), vectorEncoding: 'f32b64' }],
+    };
+    manifest.contentAddressed = {
+      version: 1, mode: 'content_addressed_packs', chunkRefs: [],
+      activeChunkKeys: ['key-c1'], packRefs: [{ packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary', schemaVersion: 1, path: packPath, checksum: '', byteSize: 1, chunkKeys: ['key-c1'], chunkCount: 1, rowCount: 1, embeddingModel: 'model-a', dimension: 2, createdAt: '', updatedAt: '', status: 'ready' }],
+    };
+    h.snapshot.value = {
+      layers: [{ messageIndex:0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest }, tagData: {} }],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, role: 'vector_pack', checksum: '' }] });
+    h.read.mockImplementation(async (path: string) => path === packPath ? { ok: true, data: packBlob } : { ok: true, data: blob_ACU(manifest) });
+
+    const report = await inspectSummaryVectorIndexHealth_ACU();
+
+    expect(report.identityMismatchCount).toBe(1);
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'identity_mismatch', path: packPath }),
+    ]));
+  });
+
+  it('T15：删掉一个 chunk -> pack_chunk_missing', async () => {
+    const manifest = manifest_ACU();
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    const packBlob = {
+      version: 1, schema: 'content_addressed_vector_pack', packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary',
+      embeddingModel: 'model-a', dimension: 2,
+      chunks: [], // 删掉全部 chunk
+    };
+    manifest.contentAddressed = {
+      version: 1, mode: 'content_addressed_packs', chunkRefs: [],
+      activeChunkKeys: ['key-c1'], packRefs: [{ packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary', schemaVersion: 1, path: packPath, checksum: '', byteSize: 1, chunkKeys: ['key-c1'], chunkCount: 1, rowCount: 1, embeddingModel: 'model-a', dimension: 2, createdAt: '', updatedAt: '', status: 'ready' }],
+    };
+    h.snapshot.value = {
+      layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest }, tagData: {} }],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, role: 'vector_pack', checksum: '' }] });
+    h.read.mockImplementation(async (path: string) => path === packPath ? { ok: true, data: packBlob } : { ok: true, data: blob_ACU(manifest) });
+
+    const report = await inspectSummaryVectorIndexHealth_ACU();
+
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'pack_chunk_missing', path: packPath, chunkId: 'chunk-a' }),
+    ]));
+  });
+
+  it('T15：重复 chunk -> pack_chunk_duplicated', async () => {
+    const manifest = manifest_ACU();
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    const packBlob = {
+      version: 1, schema: 'content_addressed_vector_pack', packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary',
+      embeddingModel: 'model-a', dimension: 2,
+      chunks: [
+        { chunkKey: 'key-c1', chunkId: 'chunk-a', rowKey: 'row-a', text: 'text1', vector: encodeF32B64([1, 2]), vectorEncoding: 'f32b64' },
+        { chunkKey: 'key-c1b', chunkId: 'chunk-a', rowKey: 'row-a', text: 'text1b', vector: encodeF32B64([1, 2]), vectorEncoding: 'f32b64' },
+      ],
+    };
+    manifest.contentAddressed = {
+      version: 1, mode: 'content_addressed_packs', chunkRefs: [],
+      activeChunkKeys: ['key-c1'], packRefs: [{ packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary', schemaVersion: 1, path: packPath, checksum: '', byteSize: 1, chunkKeys: ['key-c1'], chunkCount: 1, rowCount: 1, embeddingModel: 'model-a', dimension: 2, createdAt: '', updatedAt: '', status: 'ready' }],
+    };
+    h.snapshot.value = {
+      layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest }, tagData: {} }],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, role: 'vector_pack', checksum: '' }] });
+    h.read.mockImplementation(async (path: string) => path === packPath ? { ok: true, data: packBlob } : { ok: true, data: blob_ACU(manifest) });
+
+    const report = await inspectSummaryVectorIndexHealth_ACU();
+
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'pack_chunk_duplicated', path: packPath, chunkId: 'chunk-a' }),
+    ]));
+  });
+
+  it('T15：legacy pack fixture（VectorIndexPackBlob_ACU 形态）仍走旧分支，不误报 identity_mismatch', async () => {
+    // 旧协议：pack 有 indexId、chunks[].vector 是数组、无 packScope，无 schema 字段。
+    // 新分流只在 schema === 'content_addressed_vector_pack' 时生效（:2720），否则落回 legacy 分支。
+    const manifest = manifest_ACU();
+    const packPath = 'TavernDB_ACU_vector_v2pack_scope:chat-a|iso-a|summary_pack_abc';
+    const legacyPackBlob = {
+      version: 1, packKey: 'pack_abc', indexId: 'snap-a', embeddingModel: 'model-a', dimension: 2,
+      chunkKeys: ['key-c1'], createdAt: '2025-01-01T00:00:00.000Z', updatedAt: '2025-01-01T00:00:00.000Z',
+      chunks: [{ chunkKey: 'key-c1', chunkId: 'chunk-a', rowKey: 'row-a', rowOrder: 0, sequence: 0, text: 'text1', textHash: 'text-a', vector: [1, 2] }],
+    };
+    manifest.contentAddressed = {
+      version: 1, mode: 'content_addressed_packs', chunkRefs: [],
+      activeChunkKeys: ['key-c1'], packRefs: [{ packKey: 'pack_abc', packScope: 'scope:chat-a|iso-a|summary', schemaVersion: 1, path: packPath, checksum: '', byteSize: 1, chunkKeys: ['key-c1'], chunkCount: 1, rowCount: 1, embeddingModel: 'model-a', dimension: 2, createdAt: '', updatedAt: '', status: 'ready' }],
+    };
+    h.snapshot.value = {
+      layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest }, tagData: {} }],
+    };
+    h.registry.mockResolvedValue({ files: [{ path: packPath, role: 'vector_pack', checksum: '' }] });
+    // 旧分支按 indexId 判身份，pack 的 indexId 与 manifest 一致，且 chunk vector 是数组 -> 健康
+    h.read.mockImplementation(async (path: string) => path === packPath ? { ok: true, data: legacyPackBlob } : { ok: true, data: blob_ACU(manifest) });
+
+    const report = await inspectSummaryVectorIndexHealth_ACU();
+
+    expect(report.identityMismatchCount).toBe(0);
+    expect(report.issues.filter((issue) => issue.path === packPath)).toEqual([]);
+  });
+
 });
 
 describe('summary-vector-index-storage-service legacy layout classification', () => {

@@ -15,6 +15,7 @@ import vueScriptTranspiler from './src/presentation-v2/build/rollup-vue-script-t
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { ACU_SQLITE_ENGINE, SQL_WASM_IMPORT_ID, copySqlWasmTo } from './scripts/sql-wasm-assets.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -72,6 +73,8 @@ function createReplacePlugin() {
     values: {
       'process.env.NODE_ENV': JSON.stringify('production'),
       'globalThis.__ACU_BUILD_VERSION__': JSON.stringify(ACU_BUILD_VERSION),
+      'globalThis.__ACU_SQLITE_ENGINE__': JSON.stringify(ACU_SQLITE_ENGINE),
+      '__ACU_SQLITE_ENGINE_IMPORT__': SQL_WASM_IMPORT_ID,
       __VUE_OPTIONS_API__: 'true',
       __VUE_PROD_DEVTOOLS__: 'false',
       __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false',
@@ -136,6 +139,9 @@ const userscriptConfig = {
         }
 
         copyFileSync(distBundle, rootIndex);
+
+        // 复制 sql.js wasm 到 dist/（userscript 构建产物目录）
+        copySqlWasmTo(join(__dirname, 'dist'));
       },
     },
   ],
@@ -183,6 +189,9 @@ const extensionConfig = {
         }
 
         copyFileSync(distManifest, rootManifest);
+
+        // 复制 sql.js wasm 到 dist/extension/（随 manifest.json 一起发布）
+        copySqlWasmTo(distExtensionDir);
       },
     },
   ],

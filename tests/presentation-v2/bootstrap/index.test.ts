@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   openShell: vi.fn(async () => true),
   openVisualizer: vi.fn(async () => true),
   refreshVisualizer: vi.fn(async () => undefined),
+  isVisualizerActive: vi.fn(() => true),
 }));
 
 vi.mock('../../../src/shared/ui-surface-registry', () => ({
@@ -20,6 +21,7 @@ vi.mock('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surfac
   openAcuV2Shell_ACU: h.openShell,
   openVisualizerSurface_ACU: h.openVisualizer,
   requestVisualizerExternalRefresh_ACU: h.refreshVisualizer,
+  isVisualizerSurfaceActive_ACU: h.isVisualizerActive,
 }));
 
 describe('bootstrapAcuV2', () => {

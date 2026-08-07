@@ -223,6 +223,10 @@ export const defaultVectorMemoryConfig_ACU = {
   summaryIndexRollingDeltaEnabled: false,
   // 折叠阈值 K：滚动增量累计达到 K 个不同纪要行时，把增量折叠进基线。
   summaryIndexRollingDeltaFoldThreshold: 15,
+  // P4 内容寻址 pack 写入开关（首版默认关闭，只发布读取能力；关闭只阻止新写入，已生成 pack 保留可读）。
+  summaryIndexContentPackWriteEnabled: false,
+  // 非空时仅允许列出的 canonical scope fingerprint 启用 pack 写入灰度；空数组表示不额外限制。
+  summaryIndexContentPackWriteScopeAllowlist: [] as string[],
   summaryPromptGroup: [
     {
       role: 'system',

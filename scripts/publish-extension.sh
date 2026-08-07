@@ -113,13 +113,17 @@ BUILD_MODE=extension npx rollup -c
 
 [ -f "$DIST_DIR/index.js" ] || fail "构建失败：缺少 $DIST_DIR/index.js"
 [ -f "$DIST_DIR/manifest.json" ] || fail "构建失败：缺少 $DIST_DIR/manifest.json"
+[ -f "$DIST_DIR/sql-wasm.wasm" ] || fail "构建失败：缺少 $DIST_DIR/sql-wasm.wasm（wasm 引擎产物）"
 
 INDEX_SIZE=$(wc -c < "$DIST_DIR/index.js" | tr -d ' ')
+WASM_SIZE=$(wc -c < "$DIST_DIR/sql-wasm.wasm" | tr -d ' ')
 ok "构建完成: index.js (${INDEX_SIZE} bytes)"
+ok "构建完成: sql-wasm.wasm (${WASM_SIZE} bytes)"
 
 info "Step 4/6: 备份产物到临时目录..."
 cp "$DIST_DIR/index.js" "$TMP_DIR/index.js"
 cp "$DIST_DIR/manifest.json" "$TMP_DIR/manifest.json"
+cp "$DIST_DIR/sql-wasm.wasm" "$TMP_DIR/sql-wasm.wasm"
 ok "产物已备份到 $TMP_DIR"
 
 info "Step 5/6: 更新 release 分支产物..."
@@ -128,10 +132,11 @@ ok "已切换到 $RELEASE_BRANCH 分支"
 
 cp "$TMP_DIR/index.js" "$PROJECT_ROOT/index.js"
 cp "$TMP_DIR/manifest.json" "$PROJECT_ROOT/manifest.json"
+cp "$TMP_DIR/sql-wasm.wasm" "$PROJECT_ROOT/sql-wasm.wasm"
 
-git add index.js manifest.json
+git add index.js manifest.json sql-wasm.wasm
 
-if git diff --cached --quiet -- index.js manifest.json; then
+if git diff --cached --quiet -- index.js manifest.json sql-wasm.wasm; then
     warn "产物内容无变化，跳过提交。"
 else
     git commit \

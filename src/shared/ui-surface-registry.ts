@@ -2,6 +2,7 @@ export interface UiSurfaceHandlers_ACU {
     openSettings: () => Promise<boolean>;
     openVisualizer: () => Promise<boolean>;
     refreshVisualizer: () => Promise<void>;
+    isVisualizerActive?: () => boolean;
 }
 
 let registeredUiSurface_ACU: UiSurfaceHandlers_ACU | null = null;

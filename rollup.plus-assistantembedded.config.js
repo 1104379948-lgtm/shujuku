@@ -8,6 +8,7 @@ import vueScriptTranspiler from './src/presentation-v2/build/rollup-vue-script-t
 import { copyFileSync, mkdirSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { ACU_SQLITE_ENGINE, SQL_WASM_IMPORT_ID, copySqlWasmTo } from './scripts/sql-wasm-assets.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -43,6 +44,8 @@ function createReplacePlugin() {
     values: {
       'process.env.NODE_ENV': JSON.stringify('production'),
       'globalThis.__ACU_BUILD_VERSION__': JSON.stringify(ACU_BUILD_VERSION),
+      'globalThis.__ACU_SQLITE_ENGINE__': JSON.stringify(ACU_SQLITE_ENGINE),
+      '__ACU_SQLITE_ENGINE_IMPORT__': SQL_WASM_IMPORT_ID,
       __VUE_OPTIONS_API__: 'true',
       __VUE_PROD_DEVTOOLS__: 'false',
       __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false',
@@ -103,6 +106,9 @@ const config = {
         } catch (e) {
           console.warn('复制 plus-assistantembedded manifest 失败:', e.message);
         }
+        // 复制 sql.js wasm 到产物目录（随 manifest.json 一起分发）。
+        // wasm 复制失败必须让构建失败（hash 不一致/源缺失属于致命错误），不能吞掉。
+        copySqlWasmTo(join(__dirname, 'dist', 'plus-assistantembedded'));
       },
     },
   ],

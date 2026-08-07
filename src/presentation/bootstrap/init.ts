@@ -2,7 +2,7 @@
 // 从 05_core_tail.js 迁入
 
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
-import { chatMutationDebounceTimer_ACU, _set_chatMutationDebounceTimer_ACU } from '../../service/runtime/state-manager';
+import { cancelPendingChatMutationRefresh_ACU, scheduleChatMutationRefresh_ACU } from './chat-mutation-scheduler';
 import { showToastr_ACU } from '../theme/toast';
 import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { ensureInitialSeedCheckpoint_ACU, handleChatCompletionReady_ACU, loadPresetAndCleanCharacterData_ACU } from '../../service/runtime/helpers-remaining';
@@ -26,8 +26,6 @@ import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
 import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
-import { markSummaryVectorIndexDirtyForRealign_ACU } from '../../service/vector/summary-vector-index-realign-state';
-import { buildSummaryVectorIndexArchiveScopeKey_ACU, findSummaryTable_ACU } from '../../service/vector/summary-vector-index-archive-service';
 import { topLevelWindow_ACU } from '../../shared/env';
 import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
 
@@ -174,6 +172,7 @@ export   function mainInitialize_ACU() {
           if (hasValidChatFileName_ACU) {
             clearDerivedRuntimeState_ACU();
             notifyRuntimeTableCleared_ACU();
+            cancelPendingChatMutationRefresh_ACU();
             if (isSqliteMode()) logDebug_ACU('[SQLite] CHAT_CHANGED: 立即销毁旧数据库实例');
           }
 
@@ -523,34 +522,7 @@ export   function mainInitialize_ACU() {
             if (SillyTavern_API_ACU.eventTypes[evName as keyof typeof SillyTavern_API_ACU.eventTypes]) {
                 SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes[evName as keyof typeof SillyTavern_API_ACU.eventTypes], async (data: any) => {
                     logDebug_ACU(`ACU ${evName} event detected. Triggering data reload and merge from chat history.`);
-                    clearTimeout(chatMutationDebounceTimer_ACU);
-                    _set_chatMutationDebounceTimer_ACU(setTimeout(async () => {
-                        // [6.7.3] SQLite 模式下，楼层删除/滑动后需要重建内存数据库
-                        if (isSqliteMode()) {
-                            logDebug_ACU(`[SQLite] ${evName}: 重建内存数据库...`);
-                            try {
-                                await reloadStorageProvider();
-                                logDebug_ACU(`[SQLite] ${evName}: 内存数据库重建完成`);
-                            } catch (e: any) {
-                                logError_ACU(`[SQLite] ${evName}: 数据库重建失败: ${e?.message}`);
-                            }
-                        }
-                        // [修复] 重新合并数据并更新UI和世界书
-                        await refreshMergedDataAndNotifyWithUI_ACU();
-                        const realignDirtyReason = evName === 'MESSAGE_DELETED'
-                            ? 'chat_modified_deleted'
-                            : 'chat_modified_swiped';
-                        const summaryTable = findSummaryTable_ACU();
-                        if (currentChatFileIdentifier_ACU && summaryTable?.summaryKey) {
-                            const scopeKey = buildSummaryVectorIndexArchiveScopeKey_ACU({
-                                chatKey: currentChatFileIdentifier_ACU,
-                                isolationKey: getCurrentIsolationKey_ACU(),
-                                sourceTableKey: summaryTable.summaryKey,
-                            });
-                            markSummaryVectorIndexDirtyForRealign_ACU(scopeKey, realignDirtyReason);
-                            logDebug_ACU(`[交火向量索引] ${evName}: 已标记 scope=${scopeKey} 下一次归档后执行懒对齐。`);
-                        }
-                    }, 500)); // 使用防抖处理快速滑动
+                    scheduleChatMutationRefresh_ACU(evName === 'MESSAGE_DELETED' ? 'chat_modified_deleted' : 'chat_modified_swiped');
                 });
             }
         });

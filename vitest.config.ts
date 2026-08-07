@@ -42,6 +42,8 @@ export default defineConfig({
       '@service': path.resolve(__dirname, 'src/service'),
       '@presentation': path.resolve(__dirname, 'src/presentation'),
       '@presentation-v2': path.resolve(__dirname, 'src/presentation-v2'),
+      // 构建期由 rollup replace 注入；vitest 直接解析到 wasm 引擎（测试通过 mock 替换）
+      '__ACU_SQLITE_ENGINE_IMPORT__': 'sql.js/dist/sql-wasm.js',
     },
   },
   define: {

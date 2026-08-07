@@ -69,6 +69,8 @@ export interface VectorMemoryConfig_ACU {
     summaryIndexV2WriteScopeAllowlist: string[];
     summaryIndexRollingDeltaEnabled: boolean;
     summaryIndexRollingDeltaFoldThreshold: number;
+    summaryIndexContentPackWriteEnabled: boolean;
+    summaryIndexContentPackWriteScopeAllowlist: string[];
 }
 
 function normalizeArchiveTriggerCount_ACU(value: any, fallbackValue: number): number {
@@ -216,6 +218,10 @@ export function normalizeVectorMemoryConfig_ACU(rawConfig: any): VectorMemoryCon
             (source as any).summaryIndexRollingDeltaFoldThreshold,
             (defaults as any).summaryIndexRollingDeltaFoldThreshold || 15,
         ),
+        summaryIndexContentPackWriteEnabled: typeof (source as any).summaryIndexContentPackWriteEnabled === 'boolean'
+            ? (source as any).summaryIndexContentPackWriteEnabled
+            : defaults.summaryIndexContentPackWriteEnabled === true,
+        summaryIndexContentPackWriteScopeAllowlist: normalizeSummaryIndexV2WriteScopeAllowlist_ACU((source as any).summaryIndexContentPackWriteScopeAllowlist),
     };
 }
 
@@ -378,6 +384,8 @@ export interface SummaryVectorIndexEffectiveConfig_ACU extends VectorMemoryConfi
     summaryIndexV2WriteScopeAllowlist: string[];
     summaryIndexRollingDeltaEnabled: boolean;
     summaryIndexRollingDeltaFoldThreshold: number;
+    summaryIndexContentPackWriteEnabled: boolean;
+    summaryIndexContentPackWriteScopeAllowlist: string[];
 }
 
 export function getEffectiveSummaryVectorIndexConfig_ACU(configInput?: any): SummaryVectorIndexEffectiveConfig_ACU {
@@ -443,6 +451,8 @@ export function getEffectiveSummaryVectorIndexConfig_ACU(configInput?: any): Sum
         summaryIndexV2WriteScopeAllowlist: normalizeSummaryIndexV2WriteScopeAllowlist_ACU((config as any).summaryIndexV2WriteScopeAllowlist),
         summaryIndexRollingDeltaEnabled: (config as any).summaryIndexRollingDeltaEnabled === true,
         summaryIndexRollingDeltaFoldThreshold,
+        summaryIndexContentPackWriteEnabled: config.summaryIndexContentPackWriteEnabled === true,
+        summaryIndexContentPackWriteScopeAllowlist: normalizeSummaryIndexV2WriteScopeAllowlist_ACU((config as any).summaryIndexContentPackWriteScopeAllowlist),
     };
 }
 

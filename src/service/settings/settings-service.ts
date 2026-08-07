@@ -532,6 +532,10 @@ export   function loadSettings_ACU() {
               shouldPersistSettingsAfterLoad_ACU = true;
           }
           fillMissing_ACU('summaryIndexV2WriteScopeAllowlist', (defaultVectorMemoryConfig_ACU as any).summaryIndexV2WriteScopeAllowlist || []);
+          // P4 内容寻址 pack 写入：默认关闭。**不加**强制开启 marker（V2 writer 曾用一次性强制反转，
+          // 但 pack 写入属于灰度能力，只允许显式开启，绝不自动打开）。
+          fillMissing_ACU('summaryIndexContentPackWriteEnabled', (defaultVectorMemoryConfig_ACU as any).summaryIndexContentPackWriteEnabled === true);
+          fillMissing_ACU('summaryIndexContentPackWriteScopeAllowlist', (defaultVectorMemoryConfig_ACU as any).summaryIndexContentPackWriteScopeAllowlist || []);
           if (vectorConfig.defaultsRefreshVersion !== VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU) {
               const fillMissingPromptGroup_ACU = (key: string, value: any[]) => {
                   if (!Array.isArray(vectorConfig[key]) || vectorConfig[key].length === 0) {

@@ -84,6 +84,8 @@ export interface VectorIndexForm {
   summaryIndexRollingDeltaFoldThreshold: number;
   summaryIndexV2WriteEnabled: boolean;
   summaryIndexV2WriteScopeAllowlistText: string;
+  summaryIndexContentPackWriteEnabled: boolean;
+  summaryIndexContentPackWriteScopeAllowlistText: string;
   // 关键词生成
   keywordApiPreset: string;
   keywordContextPairCount: number;
@@ -147,6 +149,8 @@ function createEmptyForm(): VectorIndexForm {
     summaryIndexRollingDeltaFoldThreshold: defaults.summaryIndexRollingDeltaFoldThreshold,
     summaryIndexV2WriteEnabled: defaults.summaryIndexV2WriteEnabled === true,
     summaryIndexV2WriteScopeAllowlistText: Array.isArray(defaults.summaryIndexV2WriteScopeAllowlist) ? defaults.summaryIndexV2WriteScopeAllowlist.join('\n') : '',
+    summaryIndexContentPackWriteEnabled: defaults.summaryIndexContentPackWriteEnabled === true,
+    summaryIndexContentPackWriteScopeAllowlistText: Array.isArray(defaults.summaryIndexContentPackWriteScopeAllowlist) ? defaults.summaryIndexContentPackWriteScopeAllowlist.join('\n') : '',
     keywordApiPreset: defaults.keywordApiPreset || '',
     keywordContextPairCount: defaults.keywordContextPairCount,
     keywordGenerationMaxAttempts: defaults.keywordGenerationMaxAttempts,
@@ -243,6 +247,8 @@ export function useVectorIndexConfig() {
     form.summaryIndexRollingDeltaFoldThreshold = config.summaryIndexRollingDeltaFoldThreshold;
     form.summaryIndexV2WriteEnabled = config.summaryIndexV2WriteEnabled === true;
     form.summaryIndexV2WriteScopeAllowlistText = Array.isArray(config.summaryIndexV2WriteScopeAllowlist) ? config.summaryIndexV2WriteScopeAllowlist.join('\n') : '';
+    form.summaryIndexContentPackWriteEnabled = config.summaryIndexContentPackWriteEnabled === true;
+    form.summaryIndexContentPackWriteScopeAllowlistText = Array.isArray(config.summaryIndexContentPackWriteScopeAllowlist) ? config.summaryIndexContentPackWriteScopeAllowlist.join('\n') : '';
     form.keywordApiPreset = config.keywordApiPreset || '';
     form.keywordContextPairCount = config.keywordContextPairCount;
     form.keywordGenerationMaxAttempts = config.keywordGenerationMaxAttempts;
@@ -338,7 +344,7 @@ export function useVectorIndexConfig() {
   }
 
   function setBooleanField<
-    K extends 'summaryIndexRollingDeltaEnabled' | 'summaryIndexV2WriteEnabled',
+    K extends 'summaryIndexRollingDeltaEnabled' | 'summaryIndexV2WriteEnabled' | 'summaryIndexContentPackWriteEnabled',
   >(key: K, value: boolean): void {
     const next = value === true;
     (form as any)[key] = next;

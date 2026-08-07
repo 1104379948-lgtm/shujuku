@@ -19,15 +19,20 @@ import { loadPlotSettingsToUI_ACU } from '../pages/popup-helpers';
  * 刷新合并数据后自动通知前端 + 刷新可视化编辑器 + 刷新 UI 选择器和状态面板
  * presentation 层唯一入口：所有需要"刷新数据+刷新UI"的地方都调这个。
  */
+/** 通知前端后等待其完成数据读取的窗口；仅在确实发出通知时才等待。 */
+const FRONTEND_READBACK_WAIT_MS_ACU = 800;
+
 export async function refreshMergedDataAndNotifyWithUI_ACU(
     { skipNotify = false }: { skipNotify?: boolean } = {},
 ) {
     const result = await refreshMergedDataAndNotify_ACU();
 
     // 1. 通知前端 (iframe context)
+    let didNotifyFrontend = false;
     try {
         if (!skipNotify && (topLevelWindow_ACU as any).AutoCardUpdaterAPI) {
             (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate();
+            didNotifyFrontend = true;
             logDebug_ACU('Notified frontend to refresh UI after data merge.');
         } else if (skipNotify) {
             logDebug_ACU('Skipped frontend table update notification after data merge.');
@@ -35,14 +40,23 @@ export async function refreshMergedDataAndNotifyWithUI_ACU(
     } catch (_) {}
 
     // 2. 刷新已注册的 V2 可视化界面
-    setTimeout(() => {
-        try {
-            const surface = getUiSurface_ACU();
-            if (surface) void surface.refreshVisualizer();
-        } catch (error) {
-            logDebug_ACU('Failed to request V2 visualizer refresh:', error);
-        }
-    }, 200);
+    const visualizerActive = getUiSurface_ACU()?.isVisualizerActive?.() === true;
+    if (visualizerActive) {
+        setTimeout(() => {
+            try {
+                const surface = getUiSurface_ACU();
+                if (surface) {
+                    void surface.refreshVisualizer().catch((error: unknown) => {
+                        logDebug_ACU('V2 visualizer refresh rejected:', error);
+                    });
+                }
+            } catch (error) {
+                logDebug_ACU('Failed to request V2 visualizer refresh:', error);
+            }
+        }, 200);
+    } else {
+        logDebug_ACU('Skipped V2 visualizer refresh: surface inactive or not registered.');
+    }
 
     // 3. UI 选择器刷新
     if ($manualTableSelector_ACU) {
@@ -52,11 +66,15 @@ export async function refreshMergedDataAndNotifyWithUI_ACU(
         try { renderImportTableSelector_ACU(); } catch (_) {}
     }
     if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
-        updateCardUpdateStatusDisplay_ACU();
+        try { updateCardUpdateStatusDisplay_ACU(); } catch (error) {
+            logDebug_ACU('Failed to refresh card update status display:', error);
+        }
     }
 
-    // 4. 等待前端完成数据读取（保持原有 800ms 等待行为）
-    await new Promise(resolve => setTimeout(resolve, 800));
+    // 4. 仅当本次确实通知了前端读取方时才等待回读窗口，避免无读取方时白等
+    if (didNotifyFrontend) {
+        await new Promise(resolve => setTimeout(resolve, FRONTEND_READBACK_WAIT_MS_ACU));
+    }
 
     return result;
 }
@@ -107,7 +125,11 @@ export function refreshPresetUIAfterSwitch_ACU(
     // 4. V2 数据库编辑器
     try {
         const surface = getUiSurface_ACU();
-        if (surface) void surface.refreshVisualizer();
+        if (surface) {
+            void surface.refreshVisualizer().catch((error: unknown) => {
+                logDebug_ACU('[refreshPresetUI] V2 可视化编辑器刷新被拒绝:', error);
+            });
+        }
     } catch (error) {
         logDebug_ACU('[refreshPresetUI] V2 可视化编辑器刷新失败:', error);
     }

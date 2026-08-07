@@ -3,11 +3,13 @@ import { hashUserInput_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils
 import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 import {
     buildVectorIndexFileName_ACU,
+    buildVectorIndexContentPackPathV2_ACU,
     buildVectorIndexSingleSnapshotV2ScopeToken_ACU,
     buildVectorIndexSingleSnapshotV2FilePath_ACU,
     buildVectorIndexStableDirectory_ACU,
     buildVectorIndexSnapshotFilePath_ACU,
     deleteVectorIndexFile_ACU,
+    isVectorIndexContentPackPathV2_ACU,
     loadVectorIndexRegistry_ACU,
     readVectorIndexJsonFile_ACU,
     registerVectorIndexFiles_ACU,
@@ -15,6 +17,12 @@ import {
     unregisterVectorIndexFiles_ACU,
     uploadVectorIndexJsonFile_ACU,
 } from '../../data/storage/vector-index-st-files-storage';
+import {
+    buildContentPackBlob_ACU,
+    buildContentPackKey_ACU,
+    planContentPackGroups_ACU,
+    serializeContentPackForHash_ACU,
+} from './summary-vector-index-content-pack';
 import {
     deleteVectorIndexCacheByIndex_ACU,
     estimateVectorIndexTempCache_ACU,
@@ -26,6 +34,7 @@ import {
     estimateSummaryVectorFlushTasks_ACU,
     estimateSummaryVectorHotCache_ACU,
     getSummaryVectorHotCacheChunks_ACU,
+    isImmutableV2SnapshotManifest_ACU,
     putSummaryVectorHotCacheChunks_ACU,
 } from '../../data/storage/vector-index-hot-cache';
 import type {
@@ -35,6 +44,8 @@ import type {
     ChatSummaryVectorIndexState_ACU,
     SummaryVectorIndexBatchRef_ACU,
     SummaryVectorIndexChunkRef_ACU,
+    SummaryVectorIndexContentPackBlob_ACU,
+    SummaryVectorIndexContentPackChunk_ACU,
     SummaryVectorIndexExternalFileRef_ACU,
     SummaryVectorIndexHealthReport_ACU,
     SummaryVectorIndexPackRef_ACU,
@@ -49,7 +60,11 @@ import type {
     SummaryVectorIndexStorageIdentity_ACU,
     SummaryVectorIndexTombstone_ACU,
 } from './summary-vector-index-types';
-import { SUMMARY_VECTOR_INDEX_MANIFEST_VERSION_ACU } from './summary-vector-index-types';
+import {
+    SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU,
+    SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU,
+    SUMMARY_VECTOR_INDEX_MANIFEST_VERSION_ACU,
+} from './summary-vector-index-types';
 import { getAllSummaryVectorIndexSnapshotLayers_ACU } from './summary-vector-index-state-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU } from './vector-memory-config';
 
@@ -711,7 +726,11 @@ async function cleanupManifestFilesExcept_ACU(
 ): Promise<void> {
     const previousPaths = collectManifestFilePaths_ACU(previousManifest);
     if (previousPaths.size === 0) return;
-    const removablePaths = Array.from(previousPaths).filter((path) => path && !retainedPaths.has(path));
+    // T14：pack 跨 revision 共享，按单 manifest 清理会误删其它楼层仍引用的对象；
+    // 物理删除只归安全 GC（cleanupUnreachableSummaryVectorIndexFiles_ACU 的 pack 分支）。
+    const removablePaths = Array.from(previousPaths).filter((path) => path
+        && !retainedPaths.has(path)
+        && !isVectorIndexContentPackPathV2_ACU(path));
     const deletedPaths: string[] = [];
     for (const path of removablePaths) {
         const result = await deleteVectorIndexFile_ACU(path);
@@ -897,6 +916,70 @@ export async function cleanupUnreachableSummaryVectorIndexFiles_ACU(options: Sum
             reachableFileCount += 1;
             retainedPaths.push(path);
             blockedByReachability.push(path);
+            continue;
+        }
+        // T14：P4 内容寻址 pack 独立 GC 流程。
+        // pack 跨 revision 共享（路径不含 indexId/revision），绝不能被单 manifest 清理
+        // （cleanupManifestFilesExcept_ACU 已排除）；此处只处理不可达对象：
+        // 1) scope 前缀筛选（不匹配任何 eligible scope -> quarantine）
+        // 2) grace 判定前置：不可信/未超时 -> quarantine 且不下载 blob（34MB 快照场景避免浪费）
+        // 3) 回读校验 schema/version/packScope/packKey/checksum -> 全通过才删除
+        if (isVectorIndexContentPackPathV2_ACU(path)) {
+            if (eligibleScopes.length === 0) {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                continue;
+            }
+            // prepared 未 finalize 的 pack 无论是否可达都必须保留：
+            // finalize 前的 registry 发布窗口内，pointer 可能尚未 durable 落盘，
+            // 删除会让上层 finalize 时找不到对象（计划 §T14）。
+            if (String(file.publicationState || '') === 'prepared') {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                continue;
+            }
+            const scopeTokenFromPath = String(path.slice('TavernDB_ACU_vector_v2pack_'.length).split('_')[0] || '');
+            const candidatePackScopes = eligibleScopes.filter((scope) => scopeTokenFromPath === buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope));
+            if (candidatePackScopes.length === 0) {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                continue;
+            }
+            // grace 前置：registry 上传时间不可信或未超窗口 -> quarantine，不下载 blob。
+            const registeredAt = Date.parse(String(file.createdAt || file.updatedAt || ''));
+            if (!Number.isFinite(registeredAt) || Date.now() - registeredAt < SUMMARY_VECTOR_INDEX_SAFE_GC_GRACE_PERIOD_MS_ACU) {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                continue;
+            }
+            const packLoaded = await readVectorIndexJsonFile_ACU<SummaryVectorIndexContentPackBlob_ACU>(path);
+            const packData = packLoaded.ok ? packLoaded.data : null;
+            const packKeyFromPath = scopeTokenFromPath
+                ? path.slice(`TavernDB_ACU_vector_v2pack_${scopeTokenFromPath}_`.length)
+                : '';
+            const scope = candidatePackScopes[0];
+            const packMatches = !!packData
+                && packData.schema === SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU
+                && Number(packData.version) === SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU
+                && String(packData.packScope || '') === buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope)
+                && String(packData.packKey || '') === packKeyFromPath
+                && (!file.checksum || (await sha256Text_ACU(JSON.stringify(packData))) === file.checksum);
+            if (!packMatches) {
+                retainedPaths.push(path);
+                blockedByReachability.push(path);
+                logSummaryVectorIndexIdentityEvent_ACU('warn', 'gc', 'quarantined_identity_unverified', {
+                    path,
+                    scopeFingerprint: buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope),
+                });
+                continue;
+            }
+            const packDelete = await deleteVectorIndexFile_ACU(path);
+            if (packDelete.ok) {
+                pendingSummaryVectorIndexPublicationPaths_ACU.delete(path);
+                deletedPaths.push(packDelete.path || path);
+            } else {
+                failedDeletes.push({ path, error: packDelete.error || '删除失败' });
+            }
             continue;
         }
         // 旧路径没有足够的持久化 identity 可供 GC 验证。仅凭历史文件名前缀删除，
@@ -1527,6 +1610,16 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         logSummaryVectorIndexIdentityEvent_ACU('warn', 'persist', 'rejected_scope_not_allowlisted', { scopeFingerprint });
         throw new Error(`交火向量索引 V2 写入未向当前 scope 灰度开放：scope=${scopeFingerprint}`);
     }
+    // P4 内容寻址 pack 写入开关（T11）。默认关闭；当显式开启且命中 allowlist 时才走 pack 链路，
+    // 否则保持现路径逐字节不变。
+    const contentPackWriteAllowlist = Array.isArray(summaryVectorIndexConfig.summaryIndexContentPackWriteScopeAllowlist)
+        ? summaryVectorIndexConfig.summaryIndexContentPackWriteScopeAllowlist
+        : [];
+    const contentPackWriteEnabled = summaryVectorIndexConfig.summaryIndexContentPackWriteEnabled === true
+        && (contentPackWriteAllowlist.length === 0 || contentPackWriteAllowlist.includes(scopeFingerprint));
+    if (summaryVectorIndexConfig.summaryIndexContentPackWriteEnabled === true && !contentPackWriteEnabled) {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'persist', 'content_pack_scope_not_allowlisted', { scopeFingerprint });
+    }
     const indexedAt = options.indexedAt || new Date().toISOString();
     const snapshotRevision = Math.max(1, Math.floor(Number(options.snapshotRevision) || 0) + 1);
     const indexId = buildVersionedSnapshotIndexId_ACU({ chatKey, isolationKey, sourceTableKey, snapshotRevision });
@@ -1558,6 +1651,7 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
 
     const rowsByKey = new Map(rows.map((row) => [row.rowKey, row]));
     const chunkKeysByChunkId = new Map<string, string>();
+    const chunkKeyToChunkId = new Map<string, string>();
     // T6：仅需 chunkKey，不再序列化 blob / 计算 SHA256 / 分配 Blob（结果全部被丢弃）。
     // 输入与 prepareVectorChunkBlob_ACU 的 chunkKey 计算完全一致，写出的 manifest/blob 逐字节不变。
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
@@ -1570,6 +1664,16 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
             rowKey: chunk.rowKey,
             text: chunk.text,
         });
+        // T12：唯一性校验——同 chunkKey 对应不同 chunkId、或 chunkId 重复，直接拒绝。
+        // 旧代码用 chunkKeysByChunkId 单向映射，重复不会被发现，pack 复用时会读到歧义内容。
+        const existingChunkId = chunkKeyToChunkId.get(chunkKey);
+        if (existingChunkId !== undefined && existingChunkId !== chunk.chunkId) {
+            throw new Error(`交火向量快照 chunkKey 冲突：chunkKey=${chunkKey} 同时映射到 chunkId=${existingChunkId} 与 ${chunk.chunkId}，拒绝写入外置文件。`);
+        }
+        if (chunkKeysByChunkId.has(chunk.chunkId)) {
+            throw new Error(`交火向量快照 chunkId 重复：chunkId=${chunk.chunkId} 出现多次，拒绝写入外置文件。`);
+        }
+        chunkKeyToChunkId.set(chunkKey, chunk.chunkId);
         chunkKeysByChunkId.set(chunk.chunkId, chunkKey);
     }
 
@@ -1656,6 +1760,189 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         batchRefs: [],
         checkpoint,
     };
+    // ═══ P4 内容寻址 pack（T12）：开关关闭时下方所有逻辑不执行，保持现路径逐字节不变 ═══
+    let contentPackPlan: Array<{
+        packKey: string;
+        path: string;
+        blob: SummaryVectorIndexContentPackBlob_ACU;
+        checksum: string;
+        byteSize: number;
+        chunkKeys: string[];
+        chunkIds: string[];
+        reused: boolean;
+    }> = [];
+    const contentPackRefs: SummaryVectorIndexPackRef_ACU[] = [];
+    let contentPackTotalBytes = 0;
+    let contentPackReusedBytes = 0;
+    let contentPackUploadedBytes = 0;
+    const newlyUploadedFiles: SummaryVectorIndexExternalFileRef_ACU[] = [];
+    try {
+        if (contentPackWriteEnabled) {
+        // 1) 按 chunks 顺序取 chunkKey 列表 -> 分组
+        const chunkKeyList = chunks.map((chunk) => chunkKeysByChunkId.get(chunk.chunkId) || `chunk_${chunk.chunkId}`);
+        const groups = planContentPackGroups_ACU(chunkKeyList);
+        const previousPackRefs = Array.isArray(options.previousManifest?.contentAddressed?.packRefs)
+            ? options.previousManifest!.contentAddressed!.packRefs!
+            : [];
+        // 2) 为每组构造 pack blob（packKey 暂为空，hash 后再回填）
+        for (const group of groups) {
+            const groupChunks: SummaryVectorIndexContentPackChunk_ACU[] = group.map((chunkKey) => {
+                const chunkId = chunkKeyToChunkId.get(chunkKey) || '';
+                const chunk = chunks.find((item) => item.chunkId === chunkId);
+                const row = rowsByKey.get(chunk?.rowKey || '');
+                return {
+                    chunkKey,
+                    chunkId,
+                    rowKey: chunk?.rowKey || '',
+                    text: chunk?.text || '',
+                    vector: encodeVectorToF32B64_ACU(chunk?.vector || []),
+                    vectorEncoding: 'f32b64',
+                    ...(row?.sourceFingerprint ? { sourceFingerprint: row.sourceFingerprint } : {}),
+                    ...(chunk?.textHash ? { textHash: chunk.textHash } : {}),
+                };
+            });
+            const blobDraft = buildContentPackBlob_ACU({
+                packKey: '',
+                packScope: scopeFingerprint,
+                embeddingModel: options.embeddingModel,
+                dimension,
+                chunks: groupChunks,
+            });
+            const packHash = await sha256Text_ACU(serializeContentPackForHash_ACU(blobDraft));
+            const packKey = buildContentPackKey_ACU(packHash);
+            const packPath = buildVectorIndexContentPackPathV2_ACU({
+                chatKey, isolationKey, sourceTableKey, packKey,
+            });
+            const finalBlob = buildContentPackBlob_ACU({
+                packKey,
+                packScope: scopeFingerprint,
+                embeddingModel: options.embeddingModel,
+                dimension,
+                chunks: groupChunks,
+            });
+            const json = JSON.stringify(finalBlob);
+            const checksum = await sha256Text_ACU(json);
+            const byteSize = json.length;
+
+            // 3) 复用判定：previous packRefs 命中全部条件才复用
+            const reusableRef = previousPackRefs.find((ref) => (
+                ref.packKey === packKey
+                && String(ref.packScope || '') === scopeFingerprint
+                && Number(ref.schemaVersion) === SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU
+                && String(ref.embeddingModel || '') === options.embeddingModel
+                && Number(ref.dimension) === dimension
+                && ref.path === packPath
+                && !!ref.checksum
+                && ref.checksum === checksum
+            ));
+            if (reusableRef) {
+                contentPackRefs.push({ ...reusableRef, status: 'ready' });
+                contentPackTotalBytes += byteSize;
+                contentPackReusedBytes += byteSize;
+                contentPackPlan.push({ packKey, path: packPath, blob: finalBlob, checksum, byteSize, chunkKeys: group, chunkIds: group.map((key) => chunkKeyToChunkId.get(key) || ''), reused: true });
+                continue;
+            }
+
+            // 4) 幂等冲突处理：目标 path 已存在且内容一致 -> 视为已存在（不计入本次新建）
+            const existing = await readVectorIndexJsonFile_ACU<SummaryVectorIndexContentPackBlob_ACU>(packPath);
+            if (existing.ok && existing.data) {
+                const existingPackKey = String(existing.data.packKey || '');
+                const existingChecksum = await sha256Text_ACU(JSON.stringify(existing.data));
+                if (existingPackKey === packKey && existingChecksum === checksum) {
+                    const existingRef: SummaryVectorIndexPackRef_ACU = {
+                        packKey,
+                        packScope: scopeFingerprint,
+                        schemaVersion: SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU,
+                        path: packPath,
+                        checksum,
+                        byteSize,
+                        chunkKeys: group,
+                        chunkCount: group.length,
+                        rowCount: group.length,
+                        embeddingModel: options.embeddingModel,
+                        dimension,
+                        createdAt: indexedAt,
+                        updatedAt: indexedAt,
+                        status: 'ready',
+                    };
+                    contentPackRefs.push(existingRef);
+                    contentPackTotalBytes += byteSize;
+                    contentPackReusedBytes += byteSize;
+                    contentPackPlan.push({ packKey, path: packPath, blob: finalBlob, checksum, byteSize, chunkKeys: group, chunkIds: group.map((key) => chunkKeyToChunkId.get(key) || ''), reused: true });
+                    continue;
+                }
+                // 存在但内容不一致 -> collision，禁止覆盖
+                throw new Error(`交火向量内容寻址 pack 路径冲突：path=${packPath} 已存在但内容与本次 packKey=${packKey} 不一致，拒绝覆盖。`);
+            }
+
+            // 5) 上传 pack（新对象）
+            const uploadResult = await uploadVectorIndexJsonFile_ACU({
+                path: packPath,
+                role: 'vector_pack',
+                data: finalBlob,
+                chunkCount: group.length,
+                rowCount: group.length,
+                status: 'ready',
+            });
+            if (!uploadResult.ok || !uploadResult.ref) {
+                throw new Error(uploadResult.error || `内容寻址 pack 上传失败: ${packPath}`);
+            }
+            // 先登记再校验：若 checksum 不一致需回滚本对象，必须已进入 newlyUploadedFiles，
+            // 否则物理写入的对象不在回滚集合内会泄漏为孤儿（计划 §T12.4）。
+            newlyUploadedFiles.push(uploadResult.ref);
+            if (uploadResult.ref.checksum && uploadResult.ref.checksum !== checksum) {
+                throw new Error(`内容寻址 pack 上传后 checksum 不一致: expected=${checksum} actual=${uploadResult.ref.checksum}`);
+            }
+            const packRef: SummaryVectorIndexPackRef_ACU = {
+                packKey,
+                packScope: scopeFingerprint,
+                schemaVersion: SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU,
+                path: packPath,
+                checksum,
+                byteSize,
+                chunkKeys: group,
+                chunkCount: group.length,
+                rowCount: group.length,
+                embeddingModel: options.embeddingModel,
+                dimension,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                status: 'ready',
+            };
+            contentPackRefs.push(packRef);
+            contentPackTotalBytes += byteSize;
+            contentPackUploadedBytes += byteSize;
+            contentPackPlan.push({ packKey, path: packPath, blob: finalBlob, checksum, byteSize, chunkKeys: group, chunkIds: group.map((key) => chunkKeyToChunkId.get(key) || ''), reused: false });
+        }
+        // 结构化日志：packTotal / packReused / packUploaded / bytesUploaded / bytesReused
+        logSummaryVectorIndexIdentityEvent_ACU('debug', 'persist', 'content_pack_planned', {
+            manifest: manifestDraft,
+            path: snapshotPath,
+            scopeFingerprint,
+        });
+        logDebug_ACU(`[纪要向量索引] content pack 计划: packTotal=${contentPackRefs.length} packReused=${contentPackRefs.length - newlyUploadedFiles.length} packUploaded=${newlyUploadedFiles.length} bytesUploaded=${contentPackUploadedBytes} bytesReused=${contentPackReusedBytes}`);
+        }
+    } catch (error) {
+        // pack 阶段任何失败（上传失败 / checksum 不一致 / collision / 幂等读取异常）
+        // 都必须回滚已上传的 pack，否则多 pack 场景下先成功的 pack 会泄漏为孤儿对象。
+        throw buildRollbackAwareError_ACU(
+            error,
+            await rollbackUploadedFiles_ACU(newlyUploadedFiles),
+        );
+    }
+    // 6) 开关开启时：manifest 携带 contentAddressed 引用，snapshot 不再内联 chunks。
+    //    chunkRefs 留空是有意的：新协议的 chunk 级定位由 pack 内 chunkKey + manifest.activeChunkIds 完成。
+    if (contentPackWriteEnabled) {
+        manifestDraft.contentAddressed = {
+            version: SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU,
+            mode: 'content_addressed_packs',
+            chunkRefs: [],
+            activeChunkKeys: chunks.map((chunk) => chunkKeysByChunkId.get(chunk.chunkId) || `chunk_${chunk.chunkId}`),
+            packRefs: contentPackRefs,
+        };
+    }
+
+
     const snapshotBlob: VectorIndexSingleSnapshotBlob_ACU = {
         version: SUMMARY_VECTOR_INDEX_MANIFEST_VERSION_ACU,
         schema: 'single_file_snapshot',
@@ -1672,7 +1959,9 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         storageIdentity,
         manifest: manifestDraft,
         rows: rowsWithShardIds,
-        chunks: chunks.map((chunk) => encodeChunkVectorForStorage_ACU({ ...chunk, chunkKeys: chunkKeysByChunkId.get(chunk.chunkId) ? [chunkKeysByChunkId.get(chunk.chunkId)!] : chunk.chunkKeys })),
+        chunks: contentPackWriteEnabled
+            ? []
+            : chunks.map((chunk) => encodeChunkVectorForStorage_ACU({ ...chunk, chunkKeys: chunkKeysByChunkId.get(chunk.chunkId) ? [chunkKeysByChunkId.get(chunk.chunkId)!] : chunk.chunkKeys })),
         tombstone,
     };
     const written = await uploadVectorIndexJsonFile_ACU({
@@ -1700,7 +1989,7 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         verificationError = error;
     }
     if (verificationError) {
-        const rollback = await rollbackUploadedFiles_ACU([written.ref]);
+        const rollback = await rollbackUploadedFiles_ACU([...newlyUploadedFiles, written.ref]);
         logSummaryVectorIndexIdentityEvent_ACU('warn', 'persist', 'read_after_write_identity_rejected', {
             manifest: manifestDraft,
             path: snapshotPath,
@@ -1714,9 +2003,12 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
 
     const finalManifest: ChatSummaryVectorIndexManifest_ACU = {
         ...manifestDraft,
-        files: [written.ref],
-        externalTotalBytes: written.ref.byteSize,
+        files: [...newlyUploadedFiles, written.ref],
+        externalTotalBytes: written.ref.byteSize + contentPackTotalBytes,
     };
+    // prepared / register 必须覆盖 snapshot + 本次新建 pack：
+    // pendingSummaryVectorIndexPublicationPaths_ACU 只覆盖这些对象时，GC 才不会在发布窗口内删除 pack。
+    const publicationFiles = [...newlyUploadedFiles, written.ref];
     logSummaryVectorIndexIdentityEvent_ACU('debug', 'persist', 'canonical_scope_written', {
         manifest: finalManifest,
         path: snapshotPath,
@@ -1736,21 +2028,24 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         rows: rowsWithShardIds,
         manifest: finalManifest,
     };
+    // 热缓存写入口已对不可变 V2 快照内部早退（vector-index-hot-cache.ts 的
+    // isImmutableV2SnapshotManifest_ACU），此处保持统一调用即可，避免各调用方
+    // 各自复制 V2 判定逻辑导致判定漂移。
     await putSummaryVectorHotCacheChunks_ACU({ manifest: finalManifest, chunks });
-    markSummaryVectorIndexSnapshotPrepared_ACU([written.ref]);
+    markSummaryVectorIndexSnapshotPrepared_ACU(publicationFiles);
     try {
-        await registerVectorIndexFiles_ACU([{ ...written.ref, publicationState: 'prepared' }]);
+        await registerVectorIndexFiles_ACU(publicationFiles.map((file) => ({ ...file, publicationState: 'prepared' })));
     } catch (error) {
         throw buildRollbackAwareError_ACU(
             error,
-            await rollbackUploadedFiles_ACU([written.ref]),
+            await rollbackUploadedFiles_ACU(publicationFiles),
         );
     }
     logSummaryVectorIndexIdentityEvent_ACU('debug', 'persist', 'prepared', {
         manifest: finalManifest,
         path: snapshotPath,
     });
-    return { state, manifest: finalManifest, uploadedFiles: [written.ref] };
+    return { state, manifest: finalManifest, uploadedFiles: publicationFiles };
 }
 
 async function loadOneShardChunks_ACU(
@@ -1814,6 +2109,11 @@ async function loadChunksFromContentAddressedRefs_ACU(
     manifest: ChatSummaryVectorIndexManifest_ACU,
     options: LoadSummaryVectorIndexChunksOptions_ACU = {},
 ): Promise<ChatSummaryVectorIndexChunk_ACU[]> {
+    // T13 注：这是旧 content_addressed_chunks 协议分支（按 indexId 校验、逐 chunk 单独 hash），
+    // 不支持跨 revision 内容复用。P4 新协议（content_addressed_packs）走独立的
+    // loadChunksFromContentPackRefs_ACU 分支：pack 级 checksum 已覆盖整包、packScope 用
+    // canonical scope token（非 indexId）、按 manifest.snapshot.activeChunkIds 复原顺序。
+    // 本分支保持不动，保证旧格式（chunkRefs 非空）继续可读。
     const info = manifest.contentAddressed;
     if (!info?.chunkRefs?.length) return [];
     const activeChunkKeys = new Set((info.activeChunkKeys || []).map((item) => String(item)));
@@ -2026,6 +2326,7 @@ function isSingleFileSnapshotManifest_ACU(manifest: ChatSummaryVectorIndexManife
 
 async function loadChunksFromSingleFileSnapshot_ACU(
     manifest: ChatSummaryVectorIndexManifest_ACU,
+    options: LoadSummaryVectorIndexChunksOptions_ACU = {},
 ): Promise<ChatSummaryVectorIndexChunk_ACU[]> {
     const snapshotPath = String(manifest.manifestFile || manifest.files?.[0]?.path || '').trim();
     if (!snapshotPath) throw new Error('交火向量单文件快照缺少 manifestFile 路径。');
@@ -2047,8 +2348,18 @@ async function loadChunksFromSingleFileSnapshot_ACU(
         });
         throw error;
     }
-    const decodedChunks = decodeChunkVectorsInPlace_ACU(Array.isArray(blob.chunks) ? blob.chunks : []);
-    const chunks = sortAndDedupeVectorChunks_ACU(decodedChunks);
+    // T13：P4 内容寻址 pack 分流——snapshot 不再内联 chunks，chunk 由 packRefs 提供。
+    // 判定：blob.chunks 为空数组 且 manifest.contentAddressed.mode === 'content_addressed_packs'
+    // 且 packRefs 非空 → 走新分支；blob.chunks 非空 → 现有内联分支；
+    // 两者皆无而 chunkCount > 0 → 协议损坏（下方统一抛错）。
+    const contentAddressed = manifest.contentAddressed;
+    const packRefs = Array.isArray(contentAddressed?.packRefs) ? contentAddressed!.packRefs! : [];
+    const useContentPackRefs = (Array.isArray(blob.chunks) ? blob.chunks : []).length === 0
+        && contentAddressed?.mode === 'content_addressed_packs'
+        && packRefs.length > 0;
+    const chunks = useContentPackRefs
+        ? await loadChunksFromContentPackRefs_ACU(manifest, blob, packRefs, options)
+        : sortAndDedupeVectorChunks_ACU(decodeChunkVectorsInPlace_ACU(Array.isArray(blob.chunks) ? blob.chunks : []));
     if (manifest.chunkCount > 0 && chunks.length === 0) {
         throw new Error(`交火向量单文件快照缺少有效 chunks: ${snapshotPath}`);
     }
@@ -2060,6 +2371,136 @@ async function loadChunksFromSingleFileSnapshot_ACU(
     });
     return chunks;
 }
+
+/**
+ * T13：P4 内容寻址 pack 读取分支。
+ * snapshot 不再内联 chunks，chunk 由 manifest.contentAddressed.packRefs 提供的 pack 恢复。
+ * 逐 pack 校验（schema/version/packScope/packKey/checksum/embeddingModel/dimension）后
+ * 按 manifest.snapshot.activeChunkIds 复原 sequence 与 rowOrder。
+ * 任意一项校验失败即整体抛错，绝不返回部分结果（计划 §T13.4）。
+ */
+async function loadChunksFromContentPackRefs_ACU(
+    manifest: ChatSummaryVectorIndexManifest_ACU,
+    blob: VectorIndexSingleSnapshotBlob_ACU,
+    packRefs: SummaryVectorIndexPackRef_ACU[],
+    options: LoadSummaryVectorIndexChunksOptions_ACU = {},
+): Promise<ChatSummaryVectorIndexChunk_ACU[]> {
+    // 缺 activeChunkIds 时直接 incompatible：静默猜序会改变召回顺序，属于难以察觉的正确性事故。
+    const activeChunkIds = Array.isArray(manifest.snapshot?.activeChunkIds) ? manifest.snapshot.activeChunkIds : [];
+    if (activeChunkIds.length === 0) {
+        throw new Error('交火向量内容寻址 pack 快照缺少 snapshot.activeChunkIds，协议不兼容，拒绝猜测 chunk 顺序。');
+    }
+    const expectedScope = buildVectorIndexSingleSnapshotV2ScopeToken_ACU({
+        chatKey: manifest.chatKey,
+        isolationKey: manifest.isolationKey,
+        sourceTableKey: manifest.sourceTableKey,
+    });
+    const rows = Array.isArray(blob.rows) ? blob.rows : [];
+    const rowOrderByRowKey = new Map<string, number>();
+    for (const row of rows) {
+        const rowKey = String(row?.rowKey || '');
+        if (!rowKey) continue;
+        rowOrderByRowKey.set(rowKey, Number(row.rowOrder) || 0);
+    }
+    const sequenceByChunkId = new Map<string, number>();
+    activeChunkIds.forEach((chunkId, index) => sequenceByChunkId.set(chunkId, index));
+
+    const concurrency = Math.max(1, Math.min(24, Math.floor(Number(options.shardReadConcurrency) || 6)));
+    const collected: Array<{ chunk: SummaryVectorIndexContentPackChunk_ACU }> = [];
+    const seenChunkIds = new Set<string>();
+    const seenChunkKeys = new Set<string>();
+
+    for (let offset = 0; offset < packRefs.length; offset += concurrency) {
+        const batch = packRefs.slice(offset, offset + concurrency);
+        const results = await Promise.all(batch.map(async (ref) => {
+            const loaded = await readVectorIndexJsonFile_ACU<SummaryVectorIndexContentPackBlob_ACU>(ref.path);
+            if (!loaded.ok || !loaded.data) {
+                throw new Error(`交火向量内容寻址 pack 读取失败: ${ref.path} ${loaded.error || ''}`.trim());
+            }
+            const pack = loaded.data;
+            if (pack.schema !== SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU) {
+                throw new Error(`交火向量内容寻址 pack 协议不匹配: ${ref.path} schema=${pack.schema}`);
+            }
+            if (Number(pack.version) !== SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU) {
+                throw new Error(`交火向量内容寻址 pack 版本不受支持: ${ref.path} version=${pack.version}`);
+            }
+            if (String(pack.packScope || '') !== expectedScope) {
+                throw new Error(`交火向量内容寻址 pack 所属 scope 不匹配: ${ref.path} expected=${expectedScope} actual=${pack.packScope}`);
+            }
+            if (String(pack.packKey || '') !== String(ref.packKey || '')) {
+                throw new Error(`交火向量内容寻址 pack packKey 不匹配: ${ref.path} expected=${ref.packKey} actual=${pack.packKey}`);
+            }
+            const actualChecksum = await sha256Text_ACU(JSON.stringify(pack));
+            if (!ref.checksum || actualChecksum !== ref.checksum) {
+                throw new Error(`交火向量内容寻址 pack checksum 不匹配: ${ref.path} expected=${ref.checksum} actual=${actualChecksum}`);
+            }
+            if (String(pack.embeddingModel || '') !== String(manifest.embeddingModel || '')) {
+                throw new Error(`交火向量内容寻址 pack 模型不匹配: ${ref.path} expected=${manifest.embeddingModel} actual=${pack.embeddingModel}`);
+            }
+            if (Number(pack.dimension) !== Number(manifest.dimension)) {
+                throw new Error(`交火向量内容寻址 pack 维度不匹配: ${ref.path} expected=${manifest.dimension} actual=${pack.dimension}`);
+            }
+            return { pack, ref };
+        }));
+        for (const { pack, ref } of results) {
+            for (const chunk of Array.isArray(pack.chunks) ? pack.chunks : []) {
+                const chunkId = String(chunk.chunkId || '');
+                const chunkKey = String(chunk.chunkKey || '');
+                if (!chunkId || !chunkKey) {
+                    throw new Error(`交火向量内容寻址 pack 缺少 chunkId/chunkKey: ${ref.path}`);
+                }
+                if (seenChunkIds.has(chunkId)) {
+                    throw new Error(`交火向量内容寻址 pack chunkId 重复: ${chunkId}`);
+                }
+                if (seenChunkKeys.has(chunkKey)) {
+                    throw new Error(`交火向量内容寻址 pack chunkKey 重复: ${chunkKey}`);
+                }
+                seenChunkIds.add(chunkId);
+                seenChunkKeys.add(chunkKey);
+                collected.push({ chunk });
+            }
+        }
+    }
+
+    // 组装校验：activeChunkIds 每项恰好命中一次；不接受之外的 chunk；rowKey 必须存在于 blob.rows。
+    const byChunkId = new Map<string, ChatSummaryVectorIndexChunk_ACU>();
+    for (const { chunk } of collected) {
+        const chunkId = String(chunk.chunkId || '');
+        if (!sequenceByChunkId.has(chunkId)) {
+            throw new Error(`交火向量内容寻址 pack 含 activeChunkIds 之外的 chunk: ${chunkId}`);
+        }
+        const rowKey = String(chunk.rowKey || '');
+        if (!rowOrderByRowKey.has(rowKey)) {
+            throw new Error(`交火向量内容寻址 pack chunk 的 rowKey 不存在于快照 rows: ${rowKey}`);
+        }
+        const vector = decodeF32B64ToVector_ACU(String(chunk.vector || ''));
+        if (vector.length !== Number(manifest.dimension)) {
+            throw new Error(`交火向量内容寻址 pack chunk 维度不符: ${chunkId} expected=${manifest.dimension} actual=${vector.length}`);
+        }
+        if (!vector.every((value) => Number.isFinite(value))) {
+            throw new Error(`交火向量内容寻址 pack chunk 含非有限数值: ${chunkId}`);
+        }
+        byChunkId.set(chunkId, {
+            chunkId,
+            rowKey,
+            rowOrder: rowOrderByRowKey.get(rowKey) || 0,
+            text: String(chunk.text || ''),
+            vector,
+            sequence: sequenceByChunkId.get(chunkId) || 0,
+            ...(chunk.sourceFingerprint ? { sourceFingerprint: chunk.sourceFingerprint } : {}),
+            ...(chunk.textHash ? { textHash: chunk.textHash } : {}),
+        });
+    }
+    for (const chunkId of activeChunkIds) {
+        if (!byChunkId.has(chunkId)) {
+            throw new Error(`交火向量内容寻址 pack 缺少 activeChunkIds 中的 chunk: ${chunkId}`);
+        }
+    }
+    // 按 activeChunkIds 顺序输出，保证召回顺序稳定。
+    return activeChunkIds.map((chunkId) => byChunkId.get(chunkId)!);
+}
+
+
 
 export function isLegacySummaryVectorIndexManifest_ACU(manifest: ChatSummaryVectorIndexManifest_ACU | null | undefined): boolean {
     const normalized = normalizeSummaryVectorIndexManifestForRead_ACU(manifest);
@@ -2079,10 +2520,10 @@ export async function loadSummaryVectorIndexChunksFromManifest_ACU(
     manifest = normalizeSummaryVectorIndexManifestForRead_ACU(manifest);
     if (!manifest) return [];
     if (isSingleFileSnapshotManifest_ACU(manifest)) {
-        // V2 immutable snapshot 的 authority 是外置 blob。热缓存已绑定 writeGeneration
-        // （T8a），读侧强校验 record.writeGeneration === manifest.storageIdentity.writeGeneration，
-        // 身份不匹配或旧 record（无该字段）一律判不兼容并回落远端。
-        if (options.preferExternalFiles !== true) {
+        // V2 immutable snapshot 的 authority 是外置 blob：存储内容逐字节不可变，
+        // 外部文件本身就是权威，热缓存查询与回填只会产生无效 IDB 扫描与虚假日志。
+        const immutableV2 = isImmutableV2SnapshotManifest_ACU(manifest);
+        if (!immutableV2 && options.preferExternalFiles !== true) {
             const cachedChunks = await getSummaryVectorHotCacheChunks_ACU({ manifest });
             if (cachedChunks?.length) {
                 logSummaryVectorIndexIdentityEvent_ACU('debug', 'load', 'legacy_hot_cache_fallback', {
@@ -2093,9 +2534,13 @@ export async function loadSummaryVectorIndexChunksFromManifest_ACU(
                 return cachedChunks;
             }
         }
-        const chunks = await loadChunksFromSingleFileSnapshot_ACU(manifest);
-        await putSummaryVectorHotCacheChunks_ACU({ manifest, chunks });
-        logDebug_ACU('[交火向量索引] 已按单文件快照加载向量块并回填热缓存。');
+        const chunks = await loadChunksFromSingleFileSnapshot_ACU(manifest, options);
+        if (!immutableV2) {
+            await putSummaryVectorHotCacheChunks_ACU({ manifest, chunks });
+            logDebug_ACU('[交火向量索引] 已按单文件快照加载向量块并回填热缓存。');
+        } else {
+            logDebug_ACU('[交火向量索引] 已按不可变 V2 快照加载向量块（跳过热缓存）。');
+        }
         return chunks;
     }
     if (manifest.contentAddressed?.chunkRefs?.length) {
@@ -2269,6 +2714,122 @@ export async function inspectSummaryVectorIndexHealth_ACU(): Promise<SummaryVect
             }
         }
         if (file.role === 'vector_pack') {
+            // T15：P4 内容寻址 pack（content_addressed_vector_pack）与 legacy pack 分流。
+            // 新 pack 无 indexId、vector 是 f32b64 字符串，legacy 校验会逐个误报 identity_mismatch。
+            const rawPack = loaded.data as any;
+            if (rawPack?.schema === SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU) {
+                const pack = rawPack as SummaryVectorIndexContentPackBlob_ACU;
+                const packChunks = Array.isArray(pack.chunks) ? pack.chunks : [];
+                const expectedScope = buildVectorIndexSingleSnapshotV2ScopeToken_ACU({
+                    chatKey: file.expectedIdentity?.chatKey || file.manifest?.chatKey || '',
+                    isolationKey: file.expectedIdentity?.isolationKey || file.manifest?.isolationKey || '',
+                    sourceTableKey: file.expectedIdentity?.sourceTableKey || file.manifest?.sourceTableKey || '',
+                });
+                const expectedEmbeddingModel = file.manifest?.embeddingModel || '';
+                const expectedDimension = Number(file.manifest?.dimension || 0);
+                const activeChunkIds = Array.isArray(file.manifest?.snapshot?.activeChunkIds) ? file.manifest!.snapshot!.activeChunkIds.map((item) => String(item)) : [];
+                const packKeyFromPath = String(rawPack.packKey || '');
+                const identityMismatch = Number(pack.version) !== SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU
+                    || !packKeyFromPath
+                    || String(pack.packScope || '') !== expectedScope
+                    || String(pack.embeddingModel || '') !== expectedEmbeddingModel
+                    || Number(pack.dimension) !== expectedDimension
+                    || packChunks.length === 0
+                    || packChunks.some((chunk) => !chunk?.chunkKey || !chunk.chunkId || !chunk.rowKey
+                        || chunk.vectorEncoding !== 'f32b64'
+                        || typeof chunk.vector !== 'string'
+                        || chunk.vector.length === 0);
+                if (identityMismatch) {
+                    issues.push({
+                        severity: 'error',
+                        code: 'identity_mismatch',
+                        path: file.path,
+                        role: file.role,
+                        messageIndex: file.messageIndex,
+                        isolationKey: file.isolationKey,
+                        expected: `${expectedScope}/${expectedEmbeddingModel}/${expectedDimension}`,
+                        actual: `${String(pack.packScope || '')}/${String(pack.embeddingModel || '')}/${Number(pack.dimension || 0)}`,
+                        message: '内容寻址 pack 身份与 manifest 引用不一致，或包内缺少有效向量',
+                    });
+                }
+                // 缺块 / 重复 / 多余 chunk 检查：activeChunkIds 每项必须恰好命中一次。
+                const chunkIdsInPack = new Set(packChunks.map((chunk) => String(chunk.chunkId || '')));
+                if (activeChunkIds.length > 0) {
+                    const chunkIdCount = new Map<string, number>();
+                    packChunks.forEach((chunk) => {
+                        const id = String(chunk.chunkId || '');
+                        chunkIdCount.set(id, (chunkIdCount.get(id) || 0) + 1);
+                    });
+                    for (const chunkId of chunkIdCount.keys()) {
+                        if ((chunkIdCount.get(chunkId) || 0) > 1) {
+                            issues.push({
+                                severity: 'error',
+                                code: 'pack_chunk_duplicated',
+                                path: file.path,
+                                role: 'vector_pack',
+                                messageIndex: file.messageIndex,
+                                isolationKey: file.isolationKey,
+                                chunkKey: String(packChunks.find((c) => String(c.chunkId || '') === chunkId)?.chunkKey || ''),
+                                chunkId,
+                                rowKey: String(packChunks.find((c) => String(c.chunkId || '') === chunkId)?.rowKey || ''),
+                                expected: 'unique',
+                                actual: String(chunkIdCount.get(chunkId) || 0),
+                                message: '内容寻址 pack 内出现重复 chunkId',
+                            });
+                        }
+                    }
+                    for (const chunkId of activeChunkIds) {
+                        if (!chunkIdsInPack.has(chunkId)) {
+                            issues.push({
+                                severity: 'error',
+                                code: 'pack_chunk_missing',
+                                path: file.path,
+                                role: 'vector_pack',
+                                messageIndex: file.messageIndex,
+                                isolationKey: file.isolationKey,
+                                chunkId,
+                                expected: chunkId,
+                                actual: 'missing_in_pack',
+                                message: 'manifest activeChunkIds 指向的内容块在内容寻址 pack 内不存在',
+                            });
+                        }
+                    }
+                    for (const chunkId of chunkIdsInPack.keys()) {
+                        if (!activeChunkIds.includes(chunkId)) {
+                            issues.push({
+                                severity: 'error',
+                                code: 'pack_chunk_unexpected',
+                                path: file.path,
+                                role: 'vector_pack',
+                                messageIndex: file.messageIndex,
+                                isolationKey: file.isolationKey,
+                                chunkId,
+                                expected: 'not_in_active',
+                                actual: chunkId,
+                                message: '内容寻址 pack 含 activeChunkIds 之外的 chunk',
+                            });
+                        }
+                    }
+                }
+                // 注释（计划 §T15）：新协议 chunkRefs 为空，chunkRefsForPack 循环自然跳过。
+                if (file.checksum) {
+                    const actualChecksum = await sha256Text_ACU(JSON.stringify(pack));
+                    if (actualChecksum !== file.checksum) {
+                        issues.push({
+                            severity: 'error',
+                            code: 'checksum_mismatch',
+                            path: file.path,
+                            role: file.role,
+                            messageIndex: file.messageIndex,
+                            isolationKey: file.isolationKey,
+                            expected: file.checksum,
+                            actual: actualChecksum,
+                            message: '内容寻址 pack checksum 与实际内容不一致',
+                        });
+                    }
+                }
+                continue;
+            }
             const pack = loaded.data as VectorIndexPackBlob_ACU;
             const chunks = Array.isArray(pack.chunks) ? pack.chunks : [];
             const chunksByKey = new Map(chunks.map((chunk) => [String(chunk?.chunkKey || ''), chunk]));

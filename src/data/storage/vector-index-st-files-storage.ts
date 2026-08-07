@@ -179,6 +179,57 @@ export function buildVectorIndexSingleSnapshotV2FilePath_ACU(parts: {
     return path;
 }
 
+/**
+ * P4 内容寻址 pack 路径（T10）。
+ * 用 V2 scope token（完整 JSON tuple base64url 编码）替代 buildVectorPackPath_ACU 走的
+ * buildVectorIndexStableDirectory_ACU —— 后者会把中文 chatKey 清成 default，导致不同聊天共享路径。
+ * 路径刻意不含 indexId/revision，这是跨 revision 复用 pack 的前提。
+ * 前缀用 v2pack_ 而非 v2_，避免与 snapshot 前缀 TavernDB_ACU_vector_v2_ 互相误判。
+ */
+export function buildVectorIndexContentPackPathV2_ACU(parts: {
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+    packKey: string;
+}): string {
+    const scopeToken = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(parts);
+    const packKey = normalizePathSegment_ACU(parts.packKey || 'pack_unknown');
+    const path = `TavernDB_ACU_vector_v2pack_${scopeToken}_${packKey}`;
+    if (path.length > VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU) {
+        const excess = path.length - VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU;
+        const chineseCharsToShorten = Math.ceil(excess / 4);
+        throw new Error(
+            `[纪要向量索引] 内容寻址 pack 对象路径超长: length=${path.length}, max=${VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU}，`
+            + `超出 ${excess} 字符。其中 scopeToken 占用 ${scopeToken.length} 字符，`
+            + `packKey 占用 ${packKey.length} 字符，其余固定前缀共 ${path.length - scopeToken.length - packKey.length} 字符。`
+            + `请缩短当前聊天名约 ${chineseCharsToShorten} 个中文字（或缩短数据隔离码），使路径回到上限内。`
+            + 'pack 路径不含 indexId/revision，跨 revision 复用；若仍超长，请检查 scope 是否过大。',
+        );
+    }
+    return path;
+}
+
+const VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU = 'TavernDB_ACU_vector_v2pack_';
+
+/** 判断路径是否为 P4 内容寻址 pack 路径（前缀判断，不解析内容）。 */
+export function isVectorIndexContentPackPathV2_ACU(path: string): boolean {
+    return String(path || '').startsWith(VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU);
+}
+
+/**
+ * 从 pack 路径提取 scope token。非 pack 路径返回 null。
+ * scopeToken 是 base64url 编码，只含 [A-Za-z0-9_-]，可用首个下划线之前的部分提取。
+ */
+export function extractVectorIndexContentPackScopeTokenFromPath_ACU(path: string): string | null {
+    const normalized = String(path || '');
+    if (!isVectorIndexContentPackPathV2_ACU(normalized)) return null;
+    const remainder = normalized.slice(VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU.length);
+    const separatorIndex = remainder.indexOf('_');
+    if (separatorIndex < 0) return null;
+    const scopeToken = remainder.slice(0, separatorIndex);
+    return scopeToken || null;
+}
+
 export function buildVectorIndexSingleSnapshotFilePath_ACU(parts: {
     chatKey: string;
     isolationKey: string;

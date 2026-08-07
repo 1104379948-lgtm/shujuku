@@ -68,6 +68,18 @@ export async function requestVisualizerExternalRefresh_ACU(): Promise<void> {
   useVisualizerStore(pinia).requestExternalRefresh();
 }
 
+/**
+ * 返回 V2 可视化表面当前是否处于激活（打开）状态。
+ * 供 presentation 层在数据合并后决定是否需要刷新可视化编辑器，
+ * 避免面板未打开时仍触发 200ms 延迟刷新与 800ms 前端读取等待。
+ * 无 pinia（应用未挂载）时视为未激活。
+ */
+export function isVisualizerSurfaceActive_ACU(): boolean {
+  const pinia = getAcuV2PiniaForBridge();
+  if (!pinia) return false;
+  return useVisualizerStore(pinia).isActive;
+}
+
 function installAutoCardUpdaterV2ApiOnTarget_ACU(target: any): void {
   if (!target) return;
   const previous = target.AutoCardUpdaterV2API || {};

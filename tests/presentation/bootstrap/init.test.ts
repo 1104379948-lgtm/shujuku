@@ -145,7 +145,7 @@ describe('mainInitialize_ACU CHAT_CHANGED 向量 flush 恢复编排', () => {
 });
 
 describe('mainInitialize_ACU 聊天变更防抖', () => {
-  it('删除或滑动事件仅设置聊天变更 timer', async () => {
+  it('删除或滑动事件仅设置聊天变更 timer，并在 trailing 窗口后执行一轮', async () => {
     vi.useFakeTimers();
     expect(m.chatMutationHandler).toBeTypeOf('function');
 
@@ -153,7 +153,10 @@ describe('mainInitialize_ACU 聊天变更防抖', () => {
 
     expect(m.setChatMutationTimer).toHaveBeenCalledOnce();
     expect(m.refresh).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(500);
+    // T2 调度器 trailing 窗口为 1200ms（旧行为 500ms）
+    await vi.advanceTimersByTimeAsync(1199);
+    expect(m.refresh).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(m.refresh).toHaveBeenCalledOnce();
     vi.useRealTimers();
   });

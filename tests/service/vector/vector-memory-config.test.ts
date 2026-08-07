@@ -93,3 +93,45 @@ describe('vector-memory-config hybrid retrieval fields', () => {
     expect(after.summaryIndexCandidateLimit).toBeGreaterThanOrEqual(7);
   });
 });
+
+describe('T11: content pack 写入开关链路', () => {
+  it('缺字段时默认关闭 pack 写入，显式 true/false 均被尊重', () => {
+    const defaults = normalizeVectorMemoryConfig_ACU({});
+    const enabled = normalizeVectorMemoryConfig_ACU({
+      summaryIndexContentPackWriteEnabled: true,
+    });
+    const disabled = normalizeVectorMemoryConfig_ACU({
+      summaryIndexContentPackWriteEnabled: false,
+    });
+
+    expect(defaults.summaryIndexContentPackWriteEnabled).toBe(false);
+    expect(enabled.summaryIndexContentPackWriteEnabled).toBe(true);
+    expect(disabled.summaryIndexContentPackWriteEnabled).toBe(false);
+  });
+
+  it('allowlist 去重去空', () => {
+    const config = normalizeVectorMemoryConfig_ACU({
+      summaryIndexContentPackWriteScopeAllowlist: [' scope-a ', '', 'scope-a', 1, 'scope-b'],
+    });
+    expect(config.summaryIndexContentPackWriteScopeAllowlist).toEqual(['scope-a', 'scope-b']);
+  });
+
+  it('effective config 暴露 pack 开关与 allowlist', () => {
+    const config = getEffectiveSummaryVectorIndexConfig_ACU({
+      embeddingEndpoint: 'https://embedding.test',
+      embeddingModel: 'model',
+      summaryIndexContentPackWriteEnabled: true,
+      summaryIndexContentPackWriteScopeAllowlist: ['scope-x', ' scope-x ', ''],
+    });
+
+    expect(config.summaryIndexContentPackWriteEnabled).toBe(true);
+    expect(config.summaryIndexContentPackWriteScopeAllowlist).toEqual(['scope-x']);
+  });
+
+  it('effective config 未显式开启时 pack 写入保持关闭', () => {
+    const config = getEffectiveSummaryVectorIndexConfig_ACU({ embeddingEndpoint: 'https://e', embeddingModel: 'm' });
+    expect(config.summaryIndexContentPackWriteEnabled).toBe(false);
+    expect(config.summaryIndexContentPackWriteScopeAllowlist).toEqual([]);
+  });
+});
+

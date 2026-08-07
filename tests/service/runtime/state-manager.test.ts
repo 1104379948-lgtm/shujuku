@@ -25,6 +25,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   DEFAULT_AUTO_UPDATE_FREQUENCY_ACU: 3,
   DEFAULT_AUTO_UPDATE_THRESHOLD_ACU: 5,
   DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU: 1000,
+  defaultVectorMemoryConfig_ACU: {},
 }));
 
 import {

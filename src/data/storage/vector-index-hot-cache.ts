@@ -154,6 +154,25 @@ function isSingleFileSnapshotManifest_ACU(manifest: ChatSummaryVectorIndexManife
     return manifest.snapshot?.mode === 'single_file_snapshot';
 }
 
+/**
+ * 判定是否为「不可变 V2 单文件快照」。
+ * 这类快照的存储内容是逐字节不可变的（同一 manifest 内容永远产出同一文件），
+ * 外部文件本身就是权威存储，热缓存（IndexedDB 副本）只会增加无效扫描与虚假日志。
+ *
+ * 判定必须显式要求 snapshot.mode，不能复用 isSingleFileSnapshotManifest_ACU 的
+ * 路径推断回退（storage-service:2020-2025），否则 legacy 单文件会被误判为 V2。
+ */
+export function isImmutableV2SnapshotManifest_ACU(
+    manifest: ChatSummaryVectorIndexManifest_ACU | null | undefined,
+): boolean {
+    if (manifest?.snapshot?.mode !== 'single_file_snapshot') return false;
+    const identity = manifest.storageIdentity;
+    if (!identity || identity.layoutVersion !== 2) return false;
+    if (!String(identity.scopeFingerprint || '').trim()) return false;
+    if (!String(identity.writeGeneration || '').trim()) return false;
+    return Number.isInteger(identity.revision) && Number(identity.revision) > 0;
+}
+
 function isRecordCompatible_ACU(record: VectorIndexHotCacheChunkRecord_ACU | null | undefined, manifest: ChatSummaryVectorIndexManifest_ACU, ref: ReturnType<typeof getActiveChunkRefs_ACU>[number]): boolean {
     if (!record?.chunk) return false;
     if (record.chatKey !== normalizeKeyPart_ACU(manifest.chatKey)) return false;
@@ -176,6 +195,9 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
         const manifest = options.manifest;
         if (!manifest?.indexId || manifest.status !== 'ready') return;
         if (!Array.isArray(options.chunks) || options.chunks.length === 0) return;
+
+        // 不可变 V2 快照：外部文件即权威，写入热缓存只会产生无效 IDB 扫描。
+        if (isImmutableV2SnapshotManifest_ACU(manifest)) return;
 
         // ── 单文件快照模式：直接写入所有 chunks，不依赖 contentAddressed.chunkRefs ──
         if (isSingleFileSnapshotManifest_ACU(manifest)) {
@@ -282,6 +304,9 @@ export async function getSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
     try {
         const manifest = options.manifest;
         if (!manifest?.indexId || manifest.status !== 'ready') return null;
+
+        // 不可变 V2 快照：直接读外部文件，热缓存命中与否都不需要查询 IDB。
+        if (isImmutableV2SnapshotManifest_ACU(manifest)) return null;
 
         // ── 单文件快照模式：通过 indexId 索引扫描所有匹配记录 ──
         if (isSingleFileSnapshotManifest_ACU(manifest)) {
