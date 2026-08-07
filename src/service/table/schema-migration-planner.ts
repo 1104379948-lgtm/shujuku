@@ -1,5 +1,5 @@
 import type { Sheet_ACU } from '../../shared/models/table-data';
-import { parseDDLColumnInfos_ACU, parseDDLSafeDefaultLiteral_ACU } from '../../shared/ddl-utils';
+import { parseDDLColumnInfos_ACU, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
 import type { TableSheetSchemaMigrateOperationV2Contract_ACU } from './storage-frame-v2-types';
 import { getSheetSchemaDescriptorV2Contract_ACU } from './table-schema-migration';
 
@@ -30,6 +30,28 @@ function withoutNotNull_ACU(definition: string): string {
 }
 
 export function planSheetSchemaMigration_ACU(before: Sheet_ACU, after: Sheet_ACU): SchemaMigrationPlanDecision_ACU {
+  // 首次定义 schema 定义边界：baseline 没有 DDL 时不存在需要迁移的历史 schema
+  // （无物理列搬迁、无列值转换、无列丢弃），候选本身即新边界快照 → rebase。
+  // 严格三条同时成立才放行，任一不成立走原有路径：
+  //   1. baseline DDL 为空/缺失；
+  //   2. candidate DDL 自身合法（含 row_id INTEGER PRIMARY KEY、与 headers 精确映射）；
+  //   3. headers 未发生变化（只补定义，不改结构）。
+  const beforeDdl = String(before?.sourceData?.ddl || '').trim();
+  const afterDdl = String(after?.sourceData?.ddl || '').trim();
+  if (!beforeDdl && afterDdl) {
+    const beforeHeaders = Array.isArray(before?.content?.[0]) ? before.content[0].map((value: any) => String(value ?? '')) : [];
+    const afterHeaders = Array.isArray(after?.content?.[0]) ? after.content[0].map((value: any) => String(value ?? '')) : [];
+    const headersUnchanged = beforeHeaders.length === afterHeaders.length
+      && beforeHeaders.every((value, index) => value === afterHeaders[index]);
+    const afterValidation = validateDDLTextAgainstHeaders_ACU(afterDdl, afterHeaders);
+    if (headersUnchanged && afterValidation.valid) {
+      return {
+        status: 'rebase_available',
+        code: 'UNSUPPORTED_SCHEMA_CHANGE',
+        message: '该表原本没有 DDL 定义，本次为首次定义 schema；不存在需要迁移的历史 schema，按候选整表 rebase。',
+      };
+    }
+  }
   let beforeSchema: ReturnType<typeof getSheetSchemaDescriptorV2Contract_ACU>;
   let targetSchema: ReturnType<typeof getSheetSchemaDescriptorV2Contract_ACU>;
   try {

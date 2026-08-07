@@ -606,10 +606,31 @@ export function buildTemplateAssistantMessages_ACU(input: TemplateAssistantGener
     };
 
     if (anchorIndex >= 0) {
-        // 伪 role / 自定义：真实历史插入到最后一张含 $1 的卡之前。
-        messages.push(...resolved.slice(0, anchorIndex));
-        pushPriorTurns();
-        messages.push(...resolved.slice(anchorIndex));
+        const priorTurns = normalizePriorTurns_ACU(input.priorTurns);
+        // 首轮：完整伪 role 结构（卡1-8 + 卡9 包装语含 $1 + 卡10 预填充）。
+        if (priorTurns.length === 0) {
+            messages.push(...resolved);
+        } else if (anchorIndex >= 8 && resolved.length > anchorIndex) {
+            // 后续轮：卡1-8 系统骨架 → 真实历史 → 本轮需求作为普通 user 消息
+            // → 卡10 预填充仍在末尾（输出格式引导，不是历史内容）。
+            // 不再重复注入卡9 的仪式性包装语，避免在正常对话中途插入初始化指令。
+            messages.push(...resolved.slice(0, anchorIndex));
+            priorTurns.forEach((turn) => {
+                if (turn.user) messages.push({ role: 'user', content: turn.user });
+                if (turn.assistant) messages.push({ role: 'assistant', content: turn.assistant });
+            });
+            messages.push({ role: 'USER', content: String(input.userRequest || '').trim() });
+            messages.push(...resolved.slice(anchorIndex + 1));
+        } else {
+            // 非伪 role 模板（自定义模板、卡数少）：保持原有插入语义，
+            // priorTurns 照旧插在最后一张含 $1 的卡之前，不引入裸 USER 需求替换。
+            messages.push(...resolved.slice(0, anchorIndex));
+            priorTurns.forEach((turn) => {
+                if (turn.user) messages.push({ role: 'user', content: turn.user });
+                if (turn.assistant) messages.push({ role: 'assistant', content: turn.assistant });
+            });
+            messages.push(...resolved.slice(anchorIndex));
+        }
     } else {
         messages.push(...resolved);
         pushPriorTurns();

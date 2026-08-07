@@ -101,6 +101,7 @@
       <section
         ref="workspaceRef"
         class="acu-visualizer-surface__workspace"
+        :class="{ 'acu-visualizer-surface__workspace--assistant': visualizer.mode === 'assistant' }"
         aria-label="数据库编辑工作区"
       >
         <div
@@ -1517,6 +1518,11 @@ watch(rowCount, () => {
   gap: 12px;
   overflow: auto;
   padding: 16px;
+}
+
+.acu-visualizer-surface__workspace--assistant {
+  overflow: hidden;
+  padding: 0;
 }
 
 .acu-visualizer-surface__loading {

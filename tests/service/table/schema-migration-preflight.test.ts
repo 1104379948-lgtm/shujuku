@@ -332,3 +332,51 @@ describe('schema migration preflight', () => {
     expect(result.operations).toEqual([]);
     expect(result.blockers.join('\n')).toContain('完整 candidate SQLite hydrate 失败');
   });
+
+  it('首次定义 DDL：baseline 无 DDL + candidate 合法 + headers 未变 → 按候选整表 rebase 放行', async () => {
+    const baseline = state(sheet({ sourceData: {} }));
+    const candidate = state(sheet({
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);' },
+    }));
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.decisions).toEqual([expect.objectContaining({ status: 'auto_apply', code: 'REBASE_AVAILABLE' })]);
+    expect(result.applyModes).toEqual({ sheet_inventory: 'rebase' });
+  });
+
+  it('首次定义防放宽：candidate DDL 非法时仍为 blocker', async () => {
+    const baseline = state(sheet({ sourceData: {} }));
+    const candidate = state(sheet({ sourceData: { ddl: 'not sql' } }));
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    expect(result.operations).toEqual([]);
+    expect(result.blockers.join('\n')).toContain('DDL/表头不一致');
+  });
+
+  it('首次定义防放宽：headers 同时变化时仍走原规划路径（不被首次定义分支放行）', async () => {
+    const baseline = state(sheet({ sourceData: {} }));
+    // candidate headers 增加一列 quality，结构确实变化，不能借首次定义绕过
+    const candidate = state(sheet({
+      content: [['row_id', 'name', 'quality'], ['1', 'iron sword', null]],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT, quality TEXT);' },
+    }));
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    expect(result.blockers).not.toEqual([]);
+  });
+
+  it('首次定义防放宽：baseline 已有 DDL 时不进入新分支，行为与改动前一致', async () => {
+    const baseline = state(sheet());
+    const candidate = state(sheet({
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT, quality TEXT);' },
+    }));
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    // baseline 有 DDL 且 candidate 新增列，走原路径（存在可推导 mapping 时要求确认或 rebase），不因新增列被首次定义分支放行为 rebase
+    expect(result.blockers).not.toEqual([]);
+  });

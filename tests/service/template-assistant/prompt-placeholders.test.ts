@@ -383,3 +383,58 @@ describe('buildTemplateAssistantMessages_ACU 消息组装', () => {
     expect(result).not.toBeInstanceOf(Promise);
   });
 });
+
+  it('首轮（无 priorTurns）：完整伪 role 结构，含卡 9 包装语，末条为预填充卡', () => {
+    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    const messages = buildTemplateAssistantMessages_ACU(
+      { ...buildInput_ACU(), priorTurns: [] } as any,
+      'acu-struct:fp',
+    );
+    // 首轮：完整 10 卡结构，不额外追加 payload
+    expect(messages).toHaveLength(10);
+    // 卡 9 包装语只出现一次（$1 替换后是本轮需求）
+    const wrapperCount = messages.filter((m) => m.content.includes('现在请按照我的需求立刻开始工作')).length;
+    expect(wrapperCount).toBe(1);
+    // 末条为预填充卡
+    const last = messages[messages.length - 1]!;
+    expect(last.role).toBe('assistant');
+    expect(last.content).toBe('收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：');
+  });
+
+  it('多轮：不重复注入卡 9 包装语，真实历史按 user→assistant 顺序，本轮需求作为独立 USER 消息，末条仍为预填充', () => {
+    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    const messages = buildTemplateAssistantMessages_ACU(
+      {
+        ...buildInput_ACU(),
+        priorTurns: [
+          { user: '第一轮需求', assistant: '<templateAssistantDraft>{}</templateAssistantDraft>' },
+        ],
+        userRequest: '第二轮需求',
+      } as any,
+      'acu-struct:fp',
+    );
+    // 结构：卡1-8(8) + 真实历史(2) + 本轮 USER(1) + 预填充(1) = 12
+    expect(messages).toHaveLength(12);
+    // 卡 9 包装语不再重复出现
+    const wrapperCount = messages.filter((m) => m.content.includes('现在请按照我的需求立刻开始工作')).length;
+    expect(wrapperCount).toBe(0);
+    // 真实历史按 user→assistant 顺序出现在卡 1-8 之后（下标 8、9）
+    expect(messages[8]?.role).toBe('user');
+    expect(messages[8]?.content).toBe('第一轮需求');
+    expect(messages[9]?.role).toBe('assistant');
+    expect(messages[9]?.content).toBe('<templateAssistantDraft>{}</templateAssistantDraft>');
+    // 本轮需求作为独立 USER 消息（下标 10），且内容为替换后的 userRequest
+    expect(messages[10]?.role).toBe('USER');
+    expect(messages[10]?.content).toBe('第二轮需求');
+    // 末条仍为预填充卡
+    const last = messages[messages.length - 1]!;
+    expect(last.role).toBe('assistant');
+    expect(last.content).toBe('收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：');
+  });
+
+  it('多轮：不追加完整 payload（不存在含 userRequest 的 JSON 消息）', () => {
+    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    const messages = buildTemplateAssistantMessages_ACU(buildInput_ACU() as any, 'acu-struct:fp');
+    const userPayloadCount = messages.filter((m) => m.role === 'user' && m.content.includes('"userRequest"')).length;
+    expect(userPayloadCount).toBe(0);
+  });

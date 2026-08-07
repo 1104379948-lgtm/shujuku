@@ -129679,6 +129679,50 @@ Expected function or array of functions, received type ${typeof value}.`
                 this.assistantTurns = [];
                 this.assistantRiskConfirmations = {};
             },
+            /** 删除单条 assistant turn，并清理它名下的风险确认键与悬空 latestResult。 */
+            removeAssistantTurn(turnId) {
+                const target = String(turnId || '');
+                if (!target)
+                    return;
+                const removed = this.assistantTurns.find(turn => turn.id === target);
+                if (!removed)
+                    return;
+                this.assistantTurns = this.assistantTurns.filter(turn => turn.id !== target);
+                this.pruneAssistantRiskConfirmations();
+                this.syncAssistantLatestResult(removed);
+            },
+            /** 从指定 turn（含）起截断，用于「重新生成」丢弃后续历史。 */
+            truncateAssistantTurnsFrom(turnId) {
+                const target = String(turnId || '');
+                const index = this.assistantTurns.findIndex(turn => turn.id === target);
+                if (index < 0)
+                    return;
+                const dropped = this.assistantTurns.slice(index);
+                this.assistantTurns = this.assistantTurns.slice(0, index);
+                this.pruneAssistantRiskConfirmations();
+                dropped.forEach(turn => this.syncAssistantLatestResult(turn));
+            },
+            /** 丢弃所有不再对应存活 turn 的风险确认键（复合键格式 `${turnId}:${index}`）。 */
+            pruneAssistantRiskConfirmations() {
+                const aliveIds = new Set(this.assistantTurns.map(turn => turn.id));
+                const next = {};
+                Object.keys(this.assistantRiskConfirmations || {}).forEach(key => {
+                    const turnId = key.slice(0, key.lastIndexOf(':'));
+                    if (turnId && aliveIds.has(turnId))
+                        next[key] = this.assistantRiskConfirmations[key];
+                });
+                this.assistantRiskConfirmations = next;
+            },
+            /** 被删除的 turn 若正是 latestResult 的来源，则回退到最后一张存活 final turn。 */
+            syncAssistantLatestResult(removedTurn) {
+                if (removedTurn.type !== 'final')
+                    return;
+                if (this.assistantLatestResult !== removedTurn.result)
+                    return;
+                const lastFinal = [...this.assistantTurns].reverse().find(turn => turn.type === 'final');
+                this.assistantLatestResult = lastFinal?.result || null;
+                this.assistantRounds = Array.isArray(lastFinal?.result?.rounds) ? [...lastFinal.result.rounds] : [];
+            },
             clearExternalRefreshConflict() {
                 this.externalRevisionChanged = false;
             },
@@ -141848,7 +141892,7 @@ Expected function or array of functions, received type ${typeof value}.`
     	class: "acu-v2-data-mgmt-page__checkpoint-section acu-v2-data-mgmt-page__sqlite-runtime-section",
     	"aria-labelledby": "acu-sqlite-runtime-title"
     };
-    const _hoisted_23$3 = {
+    const _hoisted_23$2 = {
     	id: "acu-sqlite-runtime-title",
     	class: "acu-v2-data-mgmt-page__section-title"
     };
@@ -141865,7 +141909,7 @@ Expected function or array of functions, received type ${typeof value}.`
     	key: 5,
     	class: "acu-v2-data-mgmt-page__checkpoint-actions"
     };
-    const _hoisted_28$2 = { class: "acu-v2-data-mgmt-page__panel-stack" };
+    const _hoisted_28$1 = { class: "acu-v2-data-mgmt-page__panel-stack" };
     const _hoisted_29$1 = {
     	class: "acu-v2-data-mgmt-page__cleanup-section",
     	"aria-labelledby": "acu-cleanup-auto-title"
@@ -142288,7 +142332,7 @@ Expected function or array of functions, received type ${typeof value}.`
     				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("section", _hoisted_22$3, [
     					createBaseVNode(
     						"h3",
-    						_hoisted_23$3,
+    						_hoisted_23$2,
     						toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.title),
     						1
     						/* TEXT */
@@ -142430,7 +142474,7 @@ Expected function or array of functions, received type ${typeof value}.`
     				])])) : createCommentVNode("v-if", true)
     			]),
     			_: 1
-    		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_28$2, [createVNode($setup["AcuPanel"], {
+    		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_28$1, [createVNode($setup["AcuPanel"], {
     			title: $setup.dataMgmtCopy.panels.cleanup.title,
     			description: $setup.dataMgmtCopy.panels.cleanup.description
     		}, {
@@ -144518,7 +144562,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_20$2 = { class: "acu-v2-advanced-tools-page__log-control-main" };
     const _hoisted_21$2 = { class: "acu-v2-advanced-tools-page__log-actions" };
     const _hoisted_22$2 = { class: "acu-v2-advanced-tools-page__toggles" };
-    const _hoisted_23$2 = { class: "acu-v2-advanced-tools-page__hint" };
+    const _hoisted_23$1 = { class: "acu-v2-advanced-tools-page__hint" };
     const _hoisted_24$1 = {
 	ref: "logListRef",
 	class: "acu-v2-advanced-tools-page__log-list",
@@ -144531,7 +144575,7 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_26$1 = { class: "acu-v2-advanced-tools-page__log-meta" };
     const _hoisted_27$1 = { class: "acu-v2-advanced-tools-page__log-time" };
-    const _hoisted_28$1 = { class: "acu-v2-advanced-tools-page__log-tag" };
+    const _hoisted_28 = { class: "acu-v2-advanced-tools-page__log-tag" };
     const _hoisted_29 = { class: "acu-v2-advanced-tools-page__log-message acu-v2-advanced-tools-page__log-body" };
     function _sfc_render$c(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$c, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], {
@@ -144904,7 +144948,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value", "onUpdate:modelValue"])
 				])]), createBaseVNode(
 					"p",
-					_hoisted_23$2,
+					_hoisted_23$1,
 					" 最多保留最近 2000 条；当前显示 " + toDisplayString($setup.logFlow.filteredCount.value) + " / " + toDisplayString($setup.logFlow.totalCount.value) + " 条。" + toDisplayString($setup.logFlow.pendingCount.value ? `${$setup.logFlow.pendingCount.value} 条暂停期间新增日志等待显示。` : "没有暂停期间积压的日志。"),
 					1
 					/* TEXT */
@@ -144940,7 +144984,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, 1032, ["variant"]),
 									createBaseVNode(
 										"span",
-										_hoisted_28$1,
+										_hoisted_28,
 										toDisplayString(entry.tag),
 										1
 										/* TEXT */
@@ -146473,6 +146517,28 @@ Expected function or array of functions, received type ${typeof value}.`
         return definition.replace(/\bNOT\s+NULL\b/gi, ' ').replace(/\s+/g, ' ').trim();
     }
     function planSheetSchemaMigration_ACU(before, after) {
+        // 首次定义 schema 定义边界：baseline 没有 DDL 时不存在需要迁移的历史 schema
+        // （无物理列搬迁、无列值转换、无列丢弃），候选本身即新边界快照 → rebase。
+        // 严格三条同时成立才放行，任一不成立走原有路径：
+        //   1. baseline DDL 为空/缺失；
+        //   2. candidate DDL 自身合法（含 row_id INTEGER PRIMARY KEY、与 headers 精确映射）；
+        //   3. headers 未发生变化（只补定义，不改结构）。
+        const beforeDdl = String(before?.sourceData?.ddl || '').trim();
+        const afterDdl = String(after?.sourceData?.ddl || '').trim();
+        if (!beforeDdl && afterDdl) {
+            const beforeHeaders = Array.isArray(before?.content?.[0]) ? before.content[0].map((value) => String(value ?? '')) : [];
+            const afterHeaders = Array.isArray(after?.content?.[0]) ? after.content[0].map((value) => String(value ?? '')) : [];
+            const headersUnchanged = beforeHeaders.length === afterHeaders.length
+                && beforeHeaders.every((value, index) => value === afterHeaders[index]);
+            const afterValidation = validateDDLTextAgainstHeaders_ACU(afterDdl, afterHeaders);
+            if (headersUnchanged && afterValidation.valid) {
+                return {
+                    status: 'rebase_available',
+                    code: 'UNSUPPORTED_SCHEMA_CHANGE',
+                    message: '该表原本没有 DDL 定义，本次为首次定义 schema；不存在需要迁移的历史 schema，按候选整表 rebase。',
+                };
+            }
+        }
         let beforeSchema;
         let targetSchema;
         try {
@@ -148791,10 +148857,37 @@ Expected function or array of functions, received type ${typeof value}.`
             });
         };
         if (anchorIndex >= 0) {
-            // 伪 role / 自定义：真实历史插入到最后一张含 $1 的卡之前。
-            messages.push(...resolved.slice(0, anchorIndex));
-            pushPriorTurns();
-            messages.push(...resolved.slice(anchorIndex));
+            const priorTurns = normalizePriorTurns_ACU(input.priorTurns);
+            // 首轮：完整伪 role 结构（卡1-8 + 卡9 包装语含 $1 + 卡10 预填充）。
+            if (priorTurns.length === 0) {
+                messages.push(...resolved);
+            }
+            else if (anchorIndex >= 8 && resolved.length > anchorIndex) {
+                // 后续轮：卡1-8 系统骨架 → 真实历史 → 本轮需求作为普通 user 消息
+                // → 卡10 预填充仍在末尾（输出格式引导，不是历史内容）。
+                // 不再重复注入卡9 的仪式性包装语，避免在正常对话中途插入初始化指令。
+                messages.push(...resolved.slice(0, anchorIndex));
+                priorTurns.forEach((turn) => {
+                    if (turn.user)
+                        messages.push({ role: 'user', content: turn.user });
+                    if (turn.assistant)
+                        messages.push({ role: 'assistant', content: turn.assistant });
+                });
+                messages.push({ role: 'USER', content: String(input.userRequest || '').trim() });
+                messages.push(...resolved.slice(anchorIndex + 1));
+            }
+            else {
+                // 非伪 role 模板（自定义模板、卡数少）：保持原有插入语义，
+                // priorTurns 照旧插在最后一张含 $1 的卡之前，不引入裸 USER 需求替换。
+                messages.push(...resolved.slice(0, anchorIndex));
+                priorTurns.forEach((turn) => {
+                    if (turn.user)
+                        messages.push({ role: 'user', content: turn.user });
+                    if (turn.assistant)
+                        messages.push({ role: 'assistant', content: turn.assistant });
+                });
+                messages.push(...resolved.slice(anchorIndex));
+            }
         }
         else {
             messages.push(...resolved);
@@ -150729,6 +150822,33 @@ Expected function or array of functions, received type ${typeof value}.`
                 visualizer.assistantIsRunning = false;
             }
         }
+        /** 删除一条会话记录。运行中禁止删除，避免与 in-flight 会话写入竞争。 */
+        function deleteTurn(turnId) {
+            if (isRunning.value) {
+                toastStore.warning('会话运行中，暂不能删除记录。', { muteable: false });
+                return false;
+            }
+            visualizer.removeAssistantTurn(turnId);
+            return true;
+        }
+        /**
+         * 从某条用户需求重新生成：丢弃该条及其后的全部记录，用原需求重新发起会话。
+         * 复用 run() 的全部前置校验与闸门，不新增旁路。
+         */
+        async function regenerateFromUserTurn(turn) {
+            if (isRunning.value) {
+                toastStore.warning('会话运行中，暂不能重新生成。', { muteable: false });
+                return false;
+            }
+            if (turn.type !== 'user')
+                return false;
+            const request = String(turn.userRequest || '').trim();
+            if (!request)
+                return false;
+            visualizer.truncateAssistantTurnsFrom(turn.id);
+            userRequest.value = request;
+            return run();
+        }
         function cancel() {
             guardController.cancel();
         }
@@ -150845,6 +150965,22 @@ Expected function or array of functions, received type ${typeof value}.`
                 return turn.roundData.draft.summary || '无摘要';
             return turn.result.draft.summary || '无摘要';
         }
+        /** 对 final turn 生成会话摘要（读 turn.result.session，而非 latestResult）。 */
+        function getTurnSessionSummary(turn) {
+            if (turn.type !== 'final')
+                return '';
+            const session = turn.result.session;
+            if (!session)
+                return '';
+            const stopReasonLabel = {
+                empty_operations: '空操作停止',
+                repeated_working_fingerprint: '重复状态停止',
+                repair_retry_capped: '修复重试已达上限',
+                max_rounds: '达到轮次上限',
+            };
+            const repairPart = session.repairRetriesUsed > 0 ? ` · 修复 ${session.repairRetriesUsed} 次` : '';
+            return `会话${session.roundsExecuted}轮${repairPart} · ${stopReasonLabel[session.stopReason] || session.stopReason}`;
+        }
         function getTurnWarnings(turn) {
             if (turn.type === 'round')
                 return asList(turn.roundData.draft.warnings).map(item => String(item));
@@ -150909,9 +151045,12 @@ Expected function or array of functions, received type ${typeof value}.`
             applyTurnDraft,
             syncApiPresetFromCurrentSheet,
             runWithRepairFeedback,
+            deleteTurn,
+            regenerateFromUserTurn,
             getTurnRawText,
             getTurnValidationError,
             getTurnSummary,
+            getTurnSessionSummary,
             getTurnWarnings,
             getTurnDiffGroups,
         };
@@ -150922,41 +151061,52 @@ Expected function or array of functions, received type ${typeof value}.`
         setup(__props, { expose: __expose }) {
             __expose();
             const assistant = useVisualizerAssistant();
-            const transcriptExpanded = ref(true);
-            const draftExpanded = ref(true);
             const promptDrawerOpen = ref(false);
-            const repairFeedback = ref('');
-            function submitRepair() {
-                assistant.runWithRepairFeedback(repairFeedback.value);
-                repairFeedback.value = '';
+            // 按 turn 隔离的「查看 AI 原始输出」展开状态（AcuDisclosureGroup 是受控组件，展开必须由父级维护）。
+            const rawExpandedByTurn = ref({});
+            function toggleRawExpanded(turnId) {
+                // 用新对象赋值而非原地改属性，保证 Vue 响应式可靠触发。
+                rawExpandedByTurn.value = {
+                    ...rawExpandedByTurn.value,
+                    [turnId]: rawExpandedByTurn.value[turnId] !== true,
+                };
             }
             function updateMaxRounds(value) {
                 const next = Math.max(1, Math.min(6, Math.floor(Number(value) || 1)));
                 assistant.maxRounds.value = next;
             }
-            watch(() => assistant.latestResult.value, value => {
-                if (value)
-                    draftExpanded.value = true;
+            // 会话列表唯一滚动区：新 turn 到达时若用户已在底部附近则自动滚到底，
+            // 避免打断向上翻阅历史。
+            const streamRef = ref(null);
+            watch(() => assistant.turns.value.length, async () => {
+                const el = streamRef.value;
+                if (!el)
+                    return;
+                const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+                if (!nearBottom)
+                    return;
+                await nextTick();
+                el.scrollTop = el.scrollHeight;
             });
-            const __returned__ = { assistant, transcriptExpanded, draftExpanded, promptDrawerOpen, repairFeedback, submitRepair, updateMaxRounds, AssistantPromptDrawer, AcuBadge, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInfoBanner, AcuInput, AcuPanel, AcuSelect, AcuTextarea };
+            const __returned__ = { assistant, promptDrawerOpen, rawExpandedByTurn, toggleRawExpanded, updateMaxRounds, streamRef, AssistantPromptDrawer, AcuBadge, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuFormRow, AcuInfoBanner, AcuInput, AcuPanel, AcuSelect, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-viz-assistant[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  gap: 12px;\n}\n.acu-viz-assistant__controls[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);\n  gap: 10px;\n}\n.acu-viz-assistant__disclosure[data-v-009d88ce] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__disclosure[data-v-009d88ce] .acu-disclosure-group__header {\n  min-height: 38px;\n  padding: 8px 12px;\n}\n[data-v-009d88ce] .acu-viz-assistant__disclosure-body {\n  padding: 0;\n}\n.acu-viz-assistant__folded-panel[data-v-009d88ce] {\n  border: 0;\n  border-radius: 0;\n}\n.acu-viz-assistant__action-row[data-v-009d88ce],\n.acu-viz-assistant__summary[data-v-009d88ce],\n.acu-viz-assistant__running[data-v-009d88ce],\n.acu-viz-assistant__turn-head[data-v-009d88ce] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  gap: 8px;\n}\n.acu-viz-assistant__repair[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__apply-reason[data-v-009d88ce] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.4;\n}\n.acu-viz-assistant__action-row[data-v-009d88ce],\n.acu-viz-assistant__summary[data-v-009d88ce] {\n  flex-wrap: wrap;\n}\n.acu-viz-assistant__failure-msg[data-v-009d88ce] {\n  margin: 4px 0 0;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  overflow-wrap: anywhere;\n}\n.acu-viz-assistant__raw-disclosure[data-v-009d88ce] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__raw-text[data-v-009d88ce] {\n  margin: 0;\n  max-height: 260px;\n  overflow: auto;\n  padding: 10px;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n  font-family: var(--acu-font-mono);\n  font-size: 11px;\n  line-height: 1.5;\n  color: var(--acu-text-2);\n  background: var(--acu-bg-1);\n  border-radius: var(--acu-radius-sm);\n}\n.acu-viz-assistant__running[data-v-009d88ce] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-viz-assistant__empty[data-v-009d88ce] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__turns[data-v-009d88ce],\n.acu-viz-assistant__risk-list[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__turn[data-v-009d88ce],\n.acu-viz-assistant__risk-item[data-v-009d88ce],\n.acu-viz-assistant__diff-group[data-v-009d88ce] {\n  min-width: 0;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__turn strong[data-v-009d88ce],\n.acu-viz-assistant__diff-group h4[data-v-009d88ce],\n.acu-viz-assistant__risk-list h4[data-v-009d88ce] {\n  min-width: 0;\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.35;\n}\n.acu-viz-assistant__turn[data-v-009d88ce] {\n  display: grid;\n  gap: 6px;\n}\n.acu-viz-assistant__turn--user[data-v-009d88ce] {\n  box-shadow: inset 3px 0 0 var(--acu-accent);\n}\n.acu-viz-assistant__turn--round[data-v-009d88ce] {\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__turn--error[data-v-009d88ce] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__turn-head[data-v-009d88ce] {\n  justify-content: space-between;\n}\n.acu-viz-assistant__turn-head strong[data-v-009d88ce] {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-viz-assistant__turn p[data-v-009d88ce] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__diff-grid[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-viz-assistant__turn-diff[data-v-009d88ce] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group[data-v-009d88ce] {\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group--warning[data-v-009d88ce] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__diff-group ul[data-v-009d88ce],\n.acu-viz-assistant__inline-list[data-v-009d88ce] {\n  margin: 0;\n  padding-left: 18px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__risk-list[data-v-009d88ce] {\n  padding-top: 10px;\n  border-top: 1px solid var(--acu-border-2);\n}\n@media (max-width: 860px) {\n.acu-viz-assistant__controls[data-v-009d88ce],\n  .acu-viz-assistant__diff-grid[data-v-009d88ce] {\n    grid-template-columns: 1fr;\n}\n[data-v-009d88ce] .acu-viz-assistant__disclosure-body {\n    max-height: min(68vh, 620px);\n    overflow-y: auto;\n}\n}\n@media (max-width: 767px) {\n.acu-viz-assistant__action-row[data-v-009d88ce] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-viz-assistant__action-row[data-v-009d88ce] .acu-btn {\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-viz-assistant__turn-head[data-v-009d88ce] {\n    align-items: flex-start;\n    flex-direction: column;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerAssistantPanel.vue#style-0-009d88ce");
-    var VisualizerAssistantPanel_vue_vue_type_style_index_0_scoped_009d88ce_lang = null;
+    injectSfcStyle("\n.acu-viz-assistant[data-v-4cc562f9] {\n  min-width: 0;\n  min-height: 0;\n  height: 100%;\n  display: flex;\n  flex-direction: column;\n  gap: 0;\n}\n.acu-viz-assistant__head[data-v-4cc562f9] {\n  flex: 0 0 auto;\n  min-width: 0;\n}\n.acu-viz-assistant__controls[data-v-4cc562f9] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);\n  gap: 10px;\n}\n.acu-viz-assistant__stream[data-v-4cc562f9] {\n  flex: 1 1 auto;\n  min-width: 0;\n  min-height: 0;\n  overflow-y: auto;\n  padding: 12px;\n  display: grid;\n  gap: 8px;\n  align-content: start;\n}\n.acu-viz-assistant__composer[data-v-4cc562f9] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: flex-end;\n  gap: 8px;\n  padding: 10px 12px;\n  border-top: 1px solid var(--acu-border);\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__composer-input[data-v-4cc562f9] {\n  flex: 1 1 auto;\n  min-width: 0;\n}\n.acu-viz-assistant__composer-actions[data-v-4cc562f9] {\n  flex: 0 0 auto;\n  display: flex;\n  gap: 6px;\n}\n.acu-viz-assistant__turn-ops[data-v-4cc562f9] {\n  margin-left: auto;\n  display: flex;\n  gap: 4px;\n  flex: 0 0 auto;\n}\n.acu-viz-assistant__apply-reason[data-v-4cc562f9] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.4;\n}\n.acu-viz-assistant__raw-disclosure[data-v-4cc562f9] {\n  min-width: 0;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__raw-text[data-v-4cc562f9] {\n  margin: 0;\n  max-height: 260px;\n  overflow: auto;\n  padding: 10px;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n  font-family: var(--acu-font-mono);\n  font-size: 11px;\n  line-height: 1.5;\n  color: var(--acu-text-2);\n  background: var(--acu-bg-1);\n  border-radius: var(--acu-radius-sm);\n}\n.acu-viz-assistant__running[data-v-4cc562f9] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-viz-assistant__empty[data-v-4cc562f9] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__turns[data-v-4cc562f9],\n.acu-viz-assistant__risk-list[data-v-4cc562f9] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__turn[data-v-4cc562f9],\n.acu-viz-assistant__risk-item[data-v-4cc562f9],\n.acu-viz-assistant__diff-group[data-v-4cc562f9] {\n  min-width: 0;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-viz-assistant__turn strong[data-v-4cc562f9],\n.acu-viz-assistant__diff-group h4[data-v-4cc562f9],\n.acu-viz-assistant__risk-list h4[data-v-4cc562f9] {\n  min-width: 0;\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.35;\n}\n.acu-viz-assistant__turn[data-v-4cc562f9] {\n  display: grid;\n  gap: 6px;\n}\n.acu-viz-assistant__turn--user[data-v-4cc562f9] {\n  box-shadow: inset 3px 0 0 var(--acu-accent);\n}\n.acu-viz-assistant__turn--round[data-v-4cc562f9] {\n  background: var(--acu-bg-1);\n}\n.acu-viz-assistant__turn--error[data-v-4cc562f9] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__turn-head[data-v-4cc562f9] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  justify-content: flex-start;\n}\n.acu-viz-assistant__turn-head strong[data-v-4cc562f9] {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-viz-assistant__turn p[data-v-4cc562f9] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__turn-diff[data-v-4cc562f9] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr);\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group[data-v-4cc562f9] {\n  display: grid;\n  gap: 8px;\n}\n.acu-viz-assistant__diff-group--warning[data-v-4cc562f9] {\n  box-shadow: inset 3px 0 0 var(--acu-warning);\n}\n.acu-viz-assistant__diff-group ul[data-v-4cc562f9],\n.acu-viz-assistant__inline-list[data-v-4cc562f9] {\n  margin: 0;\n  padding-left: 18px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-viz-assistant__risk-list[data-v-4cc562f9] {\n  padding-top: 10px;\n  border-top: 1px solid var(--acu-border-2);\n}\n@media (max-width: 860px) {\n.acu-viz-assistant__controls[data-v-4cc562f9] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 767px) {\n.acu-viz-assistant__composer[data-v-4cc562f9] {\n    flex-direction: column;\n    align-items: stretch;\n}\n.acu-viz-assistant__composer-actions[data-v-4cc562f9] {\n    justify-content: flex-end;\n}\n}\n@media (max-width: 480px) {\n.acu-viz-assistant__turn-head[data-v-4cc562f9] {\n    align-items: flex-start;\n    flex-direction: column;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerAssistantPanel.vue#style-0-4cc562f9");
+    var VisualizerAssistantPanel_vue_vue_type_style_index_0_scoped_4cc562f9_lang = null;
 
     const _hoisted_1$7 = {
 	class: "acu-viz-assistant",
 	"data-acu-visualizer-assistant": ""
     };
-    const _hoisted_2$6 = { class: "acu-viz-assistant__controls" };
-    const _hoisted_3$6 = {
-	key: 0,
-	class: "acu-viz-assistant__repair"
+    const _hoisted_2$6 = { class: "acu-viz-assistant__head" };
+    const _hoisted_3$6 = { class: "acu-viz-assistant__controls" };
+    const _hoisted_4$5 = {
+	ref: "streamRef",
+	class: "acu-viz-assistant__stream"
     };
-    const _hoisted_4$5 = { class: "acu-viz-assistant__action-row" };
     const _hoisted_5$5 = {
 	key: 0,
 	class: "acu-viz-assistant__running"
@@ -150971,41 +151121,34 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_10$3 = { key: 1 };
     const _hoisted_11$3 = { key: 2 };
     const _hoisted_12$3 = { key: 3 };
-    const _hoisted_13$3 = { class: "acu-viz-assistant__raw-text" };
-    const _hoisted_14$3 = { class: "acu-viz-assistant__inline-list" };
-    const _hoisted_15$3 = {
+    const _hoisted_13$3 = { class: "acu-viz-assistant__turn-ops" };
+    const _hoisted_14$3 = { class: "acu-viz-assistant__raw-text" };
+    const _hoisted_15$3 = { class: "acu-viz-assistant__inline-list" };
+    const _hoisted_16$3 = {
 	key: 3,
 	class: "acu-viz-assistant__turn-diff"
     };
-    const _hoisted_16$3 = {
+    const _hoisted_17$2 = {
 	key: 4,
 	class: "acu-viz-assistant__turn-apply"
     };
-    const _hoisted_17$2 = {
+    const _hoisted_18$2 = {
 	key: 0,
 	class: "acu-viz-assistant__turn-risk"
     };
-    const _hoisted_18$2 = {
+    const _hoisted_19$2 = {
 	key: 2,
 	class: "acu-viz-assistant__apply-reason"
     };
-    const _hoisted_19$2 = {
+    const _hoisted_20$1 = {
 	key: 3,
 	class: "acu-viz-assistant__apply-reason"
     };
-    const _hoisted_20$1 = { class: "acu-viz-assistant__summary" };
-    const _hoisted_21$1 = { class: "acu-viz-assistant__inline-list" };
-    const _hoisted_22$1 = {
-	key: 1,
-	class: "acu-viz-assistant__diff-grid"
-    };
-    const _hoisted_23$1 = {
-	key: 2,
-	class: "acu-viz-assistant__empty"
-    };
+    const _hoisted_21$1 = { class: "acu-viz-assistant__composer" };
+    const _hoisted_22$1 = { class: "acu-viz-assistant__composer-actions" };
     function _sfc_render$7(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$7, [
-		createVNode($setup["AcuPanel"], {
+		createBaseVNode("div", _hoisted_2$6, [createVNode($setup["AcuPanel"], {
 			title: "AI 改表助手",
 			description: "用自然语言让助手生成改表草稿。它可能改多张表或全局配置；应用前先检查变更，不满意就改写需求重来。"
 		}, {
@@ -151013,7 +151156,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				key: 0,
 				variant: "warning"
 			}, {
-				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
+				default: withCtx(() => [..._cache[8] || (_cache[8] = [createTextVNode(
 					"运行中",
 					-1
 					/* CACHED */
@@ -151023,7 +151166,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				key: 1,
 				variant: "accent"
 			}, {
-				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
+				default: withCtx(() => [..._cache[9] || (_cache[9] = [createTextVNode(
 					"有草稿",
 					-1
 					/* CACHED */
@@ -151033,198 +151176,109 @@ Expected function or array of functions, received type ${typeof value}.`
 				key: 2,
 				variant: "neutral"
 			}, {
-				default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
+				default: withCtx(() => [..._cache[10] || (_cache[10] = [createTextVNode(
 					"待输入",
 					-1
 					/* CACHED */
 				)])]),
 				_: 1
 			}))]),
-			default: withCtx(() => [
-				createBaseVNode("div", _hoisted_2$6, [
-					createVNode($setup["AcuFormRow"], { label: "API 预设" }, {
-						default: withCtx(() => [createVNode($setup["AcuSelect"], {
-							"model-value": $setup.assistant.tableApiPreset.value,
-							options: $setup.assistant.apiPresetOptions.value,
-							disabled: $setup.assistant.isRunning.value,
-							"onUpdate:modelValue": _cache[0] || (_cache[0] = (value) => $setup.assistant.tableApiPreset.value = value)
-						}, null, 8, [
-							"model-value",
-							"options",
-							"disabled"
-						])]),
-						_: 1
-					}),
-					createVNode($setup["AcuButton"], {
-						size: "sm",
-						variant: "secondary",
+			default: withCtx(() => [createBaseVNode("div", _hoisted_3$6, [
+				createVNode($setup["AcuFormRow"], { label: "API 预设" }, {
+					default: withCtx(() => [createVNode($setup["AcuSelect"], {
+						"model-value": $setup.assistant.tableApiPreset.value,
+						options: $setup.assistant.apiPresetOptions.value,
 						disabled: $setup.assistant.isRunning.value,
-						onClick: _cache[1] || (_cache[1] = ($event) => $setup.promptDrawerOpen = true)
-					}, {
-						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
-							"i",
-							{ class: "fa-solid fa-pen-to-square" },
-							null,
-							-1
-							/* CACHED */
-						), createTextVNode(
-							" 编辑提示词 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, ["disabled"]),
-					createVNode($setup["AcuFormRow"], { label: "最大轮次" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							type: "number",
-							"model-value": $setup.assistant.maxRounds.value,
-							min: 1,
-							max: 6,
-							step: 1,
-							disabled: $setup.assistant.isRunning.value,
-							"onUpdate:modelValue": $setup.updateMaxRounds
-						}, null, 8, ["model-value", "disabled"])]),
-						_: 1
-					})
-				]),
-				createVNode($setup["AcuFormRow"], { label: "改表需求" }, {
-					default: withCtx(() => [createVNode($setup["AcuTextarea"], {
-						"model-value": $setup.assistant.userRequest.value,
-						rows: 4,
-						disabled: $setup.assistant.isRunning.value,
-						placeholder: "例如：给当前角色状态表新增“短期目标”和“风险提示”两列，并把世界书条目改成更适合长期记忆的说明。",
-						"onUpdate:modelValue": _cache[2] || (_cache[2] = (value) => $setup.assistant.userRequest.value = value)
-					}, null, 8, ["model-value", "disabled"])]),
+						"onUpdate:modelValue": _cache[0] || (_cache[0] = (value) => $setup.assistant.tableApiPreset.value = value)
+					}, null, 8, [
+						"model-value",
+						"options",
+						"disabled"
+					])]),
 					_: 1
 				}),
-				$setup.assistant.lastFailure.value ? (openBlock(), createElementBlock("div", _hoisted_3$6, [createVNode($setup["AcuTextarea"], {
-					modelValue: $setup.repairFeedback,
-					"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.repairFeedback = $event),
-					rows: 2,
-					placeholder: "说明你希望 AI 如何修正（可选），例如：不要输出解释文字，直接给改表 JSON。",
-					disabled: $setup.assistant.isRunning.value
-				}, null, 8, ["modelValue", "disabled"]), createVNode($setup["AcuButton"], {
-					variant: "primary",
+				createVNode($setup["AcuButton"], {
 					size: "sm",
+					variant: "secondary",
 					disabled: $setup.assistant.isRunning.value,
-					onClick: $setup.submitRepair
+					onClick: _cache[1] || (_cache[1] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
-					default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
+					default: withCtx(() => [..._cache[11] || (_cache[11] = [createBaseVNode(
 						"i",
-						{ class: "fa-solid fa-rotate" },
+						{ class: "fa-solid fa-pen-to-square" },
 						null,
 						-1
 						/* CACHED */
 					), createTextVNode(
-						" 携带修改意见重试 ",
+						" 编辑提示词 ",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
-				}, 8, ["disabled"])])) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_4$5, [$setup.assistant.isRunning.value ? (openBlock(), createBlock($setup["AcuButton"], {
-					key: 0,
-					variant: "danger",
-					onClick: $setup.assistant.cancel
-				}, {
-					default: withCtx(() => [..._cache[16] || (_cache[16] = [createBaseVNode(
-						"i",
-						{ class: "fa-solid fa-stop" },
-						null,
-						-1
-						/* CACHED */
-					), createTextVNode(
-						" 停止会话 ",
-						-1
-						/* CACHED */
-					)])]),
+				}, 8, ["disabled"]),
+				createVNode($setup["AcuFormRow"], { label: "最大轮次" }, {
+					default: withCtx(() => [createVNode($setup["AcuInput"], {
+						type: "number",
+						"model-value": $setup.assistant.maxRounds.value,
+						min: 1,
+						max: 6,
+						step: 1,
+						disabled: $setup.assistant.isRunning.value,
+						"onUpdate:modelValue": $setup.updateMaxRounds
+					}, null, 8, ["model-value", "disabled"])]),
 					_: 1
-				}, 8, ["onClick"])) : (openBlock(), createBlock($setup["AcuButton"], {
-					key: 1,
-					variant: "primary",
-					disabled: !$setup.assistant.userRequest.value.trim(),
-					onClick: $setup.assistant.run
-				}, {
-					default: withCtx(() => [..._cache[17] || (_cache[17] = [createBaseVNode(
-						"i",
-						{ class: "fa-solid fa-wand-magic-sparkles" },
-						null,
-						-1
-						/* CACHED */
-					), createTextVNode(
-						" 生成改表草稿 ",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, ["disabled", "onClick"]))]),
-				$setup.assistant.errorMessage.value ? (openBlock(), createBlock($setup["AcuInfoBanner"], {
-					key: 1,
-					tone: "warning"
-				}, {
-					default: withCtx(() => [createTextVNode(
-						toDisplayString($setup.assistant.errorMessage.value),
-						1
-						/* TEXT */
-					)]),
-					_: 1
-				})) : createCommentVNode("v-if", true)
-			]),
-			_: 1
-		}),
-		createVNode($setup["AcuDisclosureGroup"], {
-			label: "会话过程",
-			expanded: $setup.transcriptExpanded,
-			"body-id": "acu-viz-assistant-transcript",
-			"body-mode": "show",
-			"body-max-height": "min(72vh, 680px)",
-			"root-class": "acu-viz-assistant__disclosure",
-			"body-class": "acu-viz-assistant__disclosure-body",
-			onToggle: _cache[4] || (_cache[4] = ($event) => $setup.transcriptExpanded = !$setup.transcriptExpanded)
-		}, {
-			meta: withCtx(() => [createTextVNode(
-				toDisplayString($setup.assistant.turns.value.length || $setup.assistant.rounds.value.length) + " 条 ",
-				1
-				/* TEXT */
-			)]),
-			default: withCtx(() => [createVNode($setup["AcuPanel"], {
-				class: "acu-viz-assistant__folded-panel",
-				title: "会话过程",
-				description: "用于查看 AI 每轮做了什么。正常只看最终草稿；结果奇怪或报错时再展开排查。"
+				})
+			]), $setup.assistant.errorMessage.value ? (openBlock(), createBlock($setup["AcuInfoBanner"], {
+				key: 0,
+				tone: "warning"
 			}, {
-				default: withCtx(() => [
-					$setup.assistant.isRunning.value ? (openBlock(), createElementBlock("div", _hoisted_5$5, [_cache[18] || (_cache[18] = createBaseVNode(
-						"i",
-						{ class: "fa-solid fa-spinner fa-spin" },
-						null,
-						-1
-						/* CACHED */
-					)), createBaseVNode(
-						"span",
-						null,
-						"正在生成草稿，已完成 " + toDisplayString($setup.assistant.rounds.value.length) + " 轮。",
-						1
-						/* TEXT */
-					)])) : createCommentVNode("v-if", true),
-					!$setup.assistant.turns.value.length && !$setup.assistant.rounds.value.length ? (openBlock(), createElementBlock("p", _hoisted_6$4, " 还没有会话。输入需求后，助手会返回摘要、警告、分组 diff 和需要确认的风险项。 ")) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_7$3, [(openBlock(true), createElementBlock(
-						Fragment,
-						null,
-						renderList($setup.assistant.turns.value, (turn) => {
-							return openBlock(), createElementBlock(
-								"article",
-								{
-									key: turn.id,
-									class: normalizeClass(["acu-viz-assistant__turn", `acu-viz-assistant__turn--${turn.type}`])
-								},
-								[
-									createBaseVNode("header", _hoisted_8$3, [turn.type === "user" ? (openBlock(), createElementBlock("strong", _hoisted_9$3, "你提出的需求")) : turn.type === "round" ? (openBlock(), createElementBlock(
+				default: withCtx(() => [createTextVNode(
+					toDisplayString($setup.assistant.errorMessage.value),
+					1
+					/* TEXT */
+				)]),
+				_: 1
+			})) : createCommentVNode("v-if", true)]),
+			_: 1
+		})]),
+		createBaseVNode(
+			"div",
+			_hoisted_4$5,
+			[
+				$setup.assistant.isRunning.value ? (openBlock(), createElementBlock("div", _hoisted_5$5, [_cache[12] || (_cache[12] = createBaseVNode(
+					"i",
+					{ class: "fa-solid fa-spinner fa-spin" },
+					null,
+					-1
+					/* CACHED */
+				)), createBaseVNode(
+					"span",
+					null,
+					"正在生成草稿，已完成 " + toDisplayString($setup.assistant.rounds.value.length) + " 轮。",
+					1
+					/* TEXT */
+				)])) : createCommentVNode("v-if", true),
+				!$setup.assistant.turns.value.length && !$setup.assistant.rounds.value.length ? (openBlock(), createElementBlock("p", _hoisted_6$4, " 还没有会话。输入需求后，助手会返回摘要、警告、分组 diff 和需要确认的风险项。 ")) : createCommentVNode("v-if", true),
+				createBaseVNode("div", _hoisted_7$3, [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.assistant.turns.value, (turn) => {
+						return openBlock(), createElementBlock(
+							"article",
+							{
+								key: turn.id,
+								class: normalizeClass(["acu-viz-assistant__turn", `acu-viz-assistant__turn--${turn.type}`])
+							},
+							[
+								createBaseVNode("header", _hoisted_8$3, [
+									turn.type === "user" ? (openBlock(), createElementBlock("strong", _hoisted_9$3, "你提出的需求")) : turn.type === "round" ? (openBlock(), createElementBlock(
 										"strong",
 										_hoisted_10$3,
 										"AI 助手 · 第 " + toDisplayString(turn.round) + " / " + toDisplayString(turn.maxRounds) + " 轮",
 										1
 										/* TEXT */
-									)) : turn.type === "final" ? (openBlock(), createElementBlock("strong", _hoisted_11$3, "AI 助手 · 最终草稿")) : (openBlock(), createElementBlock("strong", _hoisted_12$3, "执行错误")), turn.type === "final" ? (openBlock(), createBlock(
+									)) : turn.type === "final" ? (openBlock(), createElementBlock("strong", _hoisted_11$3, "AI 助手 · 最终草稿")) : (openBlock(), createElementBlock("strong", _hoisted_12$3, "执行错误")),
+									turn.type === "final" ? (openBlock(), createBlock(
 										$setup["AcuBadge"],
 										{
 											key: 4,
@@ -151232,7 +151286,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										},
 										{
 											default: withCtx(() => [createTextVNode(
-												toDisplayString(turn.result.session.roundsExecuted) + " 轮 ",
+												toDisplayString($setup.assistant.getTurnSessionSummary(turn) || `${turn.result.session.roundsExecuted} 轮`),
 												1
 												/* TEXT */
 											)]),
@@ -151244,7 +151298,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										key: 5,
 										variant: "neutral"
 									}, {
-										default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
+										default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
 											"过程记录",
 											-1
 											/* CACHED */
@@ -151254,7 +151308,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										key: 6,
 										variant: "warning"
 									}, {
-										default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
+										default: withCtx(() => [..._cache[14] || (_cache[14] = [createTextVNode(
 											"需要处理",
 											-1
 											/* CACHED */
@@ -151264,314 +151318,284 @@ Expected function or array of functions, received type ${typeof value}.`
 										key: 7,
 										variant: "neutral"
 									}, {
-										default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
+										default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
 											"请求",
 											-1
 											/* CACHED */
 										)])]),
 										_: 1
-									}))]),
-									createBaseVNode(
-										"p",
-										null,
-										toDisplayString($setup.assistant.getTurnSummary(turn)),
-										1
-										/* TEXT */
-									),
-									$setup.assistant.getTurnValidationError(turn) ? (openBlock(), createBlock(
-										$setup["AcuInfoBanner"],
-										{
-											key: 0,
-											tone: "warning"
-										},
-										{
-											default: withCtx(() => [createTextVNode(
-												" 校验失败：" + toDisplayString($setup.assistant.getTurnValidationError(turn)),
-												1
-												/* TEXT */
-											)]),
-											_: 2
-										},
-										1024
-										/* DYNAMIC_SLOTS */
-									)) : createCommentVNode("v-if", true),
-									$setup.assistant.getTurnRawText(turn) ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
-										key: 1,
-										label: "查看 AI 原始输出",
-										expanded: false,
-										"body-id": `acu-viz-assistant-raw-turn-${turn.id}`,
-										"body-mode": "show",
-										"root-class": "acu-viz-assistant__raw-disclosure"
+									})),
+									createBaseVNode("div", _hoisted_13$3, [turn.type === "user" ? (openBlock(), createBlock($setup["AcuButton"], {
+										key: 0,
+										size: "sm",
+										"icon-only": "",
+										title: "从这条需求重新生成（将丢弃它之后的记录）",
+										disabled: $setup.assistant.isRunning.value,
+										onClick: ($event) => $setup.assistant.regenerateFromUserTurn(turn)
 									}, {
-										default: withCtx(() => [createBaseVNode(
-											"pre",
-											_hoisted_13$3,
-											toDisplayString($setup.assistant.getTurnRawText(turn)),
+										default: withCtx(() => [..._cache[16] || (_cache[16] = [createBaseVNode(
+											"i",
+											{ class: "fa-solid fa-rotate-right" },
+											null,
+											-1
+											/* CACHED */
+										)])]),
+										_: 1
+									}, 8, ["disabled", "onClick"])) : createCommentVNode("v-if", true), createVNode($setup["AcuButton"], {
+										size: "sm",
+										"icon-only": "",
+										title: "删除这条记录",
+										disabled: $setup.assistant.isRunning.value,
+										onClick: ($event) => $setup.assistant.deleteTurn(turn.id)
+									}, {
+										default: withCtx(() => [..._cache[17] || (_cache[17] = [createBaseVNode(
+											"i",
+											{ class: "fa-solid fa-trash" },
+											null,
+											-1
+											/* CACHED */
+										)])]),
+										_: 1
+									}, 8, ["disabled", "onClick"])])
+								]),
+								createBaseVNode(
+									"p",
+									null,
+									toDisplayString($setup.assistant.getTurnSummary(turn)),
+									1
+									/* TEXT */
+								),
+								$setup.assistant.getTurnValidationError(turn) ? (openBlock(), createBlock(
+									$setup["AcuInfoBanner"],
+									{
+										key: 0,
+										tone: "warning"
+									},
+									{
+										default: withCtx(() => [createTextVNode(
+											" 校验失败：" + toDisplayString($setup.assistant.getTurnValidationError(turn)),
 											1
 											/* TEXT */
 										)]),
 										_: 2
-									}, 1032, ["body-id"])) : createCommentVNode("v-if", true),
-									$setup.assistant.getTurnWarnings(turn).length ? (openBlock(), createBlock(
-										$setup["AcuInfoBanner"],
-										{
-											key: 2,
-											tone: "warning"
-										},
-										{
-											default: withCtx(() => [createBaseVNode("ul", _hoisted_14$3, [(openBlock(true), createElementBlock(
+									},
+									1024
+									/* DYNAMIC_SLOTS */
+								)) : createCommentVNode("v-if", true),
+								$setup.assistant.getTurnRawText(turn) ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
+									key: 1,
+									label: "查看 AI 原始输出",
+									expanded: $setup.rawExpandedByTurn[turn.id] === true,
+									"body-id": `acu-viz-assistant-raw-turn-${turn.id}`,
+									"body-mode": "show",
+									"root-class": "acu-viz-assistant__raw-disclosure",
+									onToggle: ($event) => $setup.toggleRawExpanded(turn.id)
+								}, {
+									default: withCtx(() => [createBaseVNode(
+										"pre",
+										_hoisted_14$3,
+										toDisplayString($setup.assistant.getTurnRawText(turn)),
+										1
+										/* TEXT */
+									)]),
+									_: 2
+								}, 1032, [
+									"expanded",
+									"body-id",
+									"onToggle"
+								])) : createCommentVNode("v-if", true),
+								$setup.assistant.getTurnWarnings(turn).length ? (openBlock(), createBlock(
+									$setup["AcuInfoBanner"],
+									{
+										key: 2,
+										tone: "warning"
+									},
+									{
+										default: withCtx(() => [createBaseVNode("ul", _hoisted_15$3, [(openBlock(true), createElementBlock(
+											Fragment,
+											null,
+											renderList($setup.assistant.getTurnWarnings(turn), (warning) => {
+												return openBlock(), createElementBlock(
+													"li",
+													{ key: warning },
+													toDisplayString(warning),
+													1
+													/* TEXT */
+												);
+											}),
+											128
+											/* KEYED_FRAGMENT */
+										))])]),
+										_: 2
+									},
+									1024
+									/* DYNAMIC_SLOTS */
+								)) : createCommentVNode("v-if", true),
+								$setup.assistant.getTurnDiffGroups(turn).length ? (openBlock(), createElementBlock("div", _hoisted_16$3, [(openBlock(true), createElementBlock(
+									Fragment,
+									null,
+									renderList($setup.assistant.getTurnDiffGroups(turn), (group) => {
+										return openBlock(), createElementBlock(
+											"section",
+											{
+												key: `${turn.id}-${group.key}`,
+												class: normalizeClass(["acu-viz-assistant__diff-group", { "acu-viz-assistant__diff-group--warning": group.tone === "warning" }])
+											},
+											[createBaseVNode(
+												"h4",
+												null,
+												toDisplayString(group.title),
+												1
+												/* TEXT */
+											), createBaseVNode("ul", null, [(openBlock(true), createElementBlock(
 												Fragment,
 												null,
-												renderList($setup.assistant.getTurnWarnings(turn), (warning) => {
+												renderList(group.items, (item) => {
 													return openBlock(), createElementBlock(
 														"li",
-														{ key: warning },
-														toDisplayString(warning),
+														{ key: item },
+														toDisplayString(item),
 														1
 														/* TEXT */
 													);
 												}),
 												128
 												/* KEYED_FRAGMENT */
-											))])]),
-											_: 2
-										},
-										1024
-										/* DYNAMIC_SLOTS */
-									)) : createCommentVNode("v-if", true),
-									$setup.assistant.getTurnDiffGroups(turn).length ? (openBlock(), createElementBlock("div", _hoisted_15$3, [(openBlock(true), createElementBlock(
-										Fragment,
-										null,
-										renderList($setup.assistant.getTurnDiffGroups(turn), (group) => {
-											return openBlock(), createElementBlock(
-												"section",
-												{
-													key: `${turn.id}-${group.key}`,
-													class: normalizeClass(["acu-viz-assistant__diff-group", { "acu-viz-assistant__diff-group--warning": group.tone === "warning" }])
-												},
-												[createBaseVNode(
-													"h4",
-													null,
-													toDisplayString(group.title),
-													1
-													/* TEXT */
-												), createBaseVNode("ul", null, [(openBlock(true), createElementBlock(
-													Fragment,
-													null,
-													renderList(group.items, (item) => {
-														return openBlock(), createElementBlock(
-															"li",
-															{ key: item },
-															toDisplayString(item),
-															1
-															/* TEXT */
-														);
-													}),
-													128
-													/* KEYED_FRAGMENT */
-												))])],
-												2
-												/* CLASS */
-											);
-										}),
-										128
-										/* KEYED_FRAGMENT */
-									))])) : createCommentVNode("v-if", true),
-									turn.type === "round" || turn.type === "final" ? (openBlock(), createElementBlock("div", _hoisted_16$3, [
-										$setup.assistant.getTurnHighRiskItems(turn).length ? (openBlock(), createElementBlock("div", _hoisted_17$2, [_cache[22] || (_cache[22] = createBaseVNode(
-											"h4",
-											null,
-											"高风险确认",
-											-1
-											/* CACHED */
-										)), (openBlock(true), createElementBlock(
-											Fragment,
-											null,
-											renderList($setup.assistant.getTurnHighRiskItems(turn), (item, index) => {
-												return openBlock(), createElementBlock("article", {
-													key: `${turn.id}-${item.type}-${index}`,
-													class: "acu-viz-assistant__risk-item"
-												}, [createVNode($setup["AcuCheckbox"], {
-													"model-value": $setup.assistant.riskConfirmations.value[`${turn.id}:${index}`] === true,
-													"onUpdate:modelValue": (value) => $setup.assistant.setRiskConfirmation(turn.id, index, value)
-												}, {
-													default: withCtx(() => [createTextVNode(
-														toDisplayString(item.label),
-														1
-														/* TEXT */
-													)]),
-													_: 2
-												}, 1032, ["model-value", "onUpdate:modelValue"])]);
-											}),
-											128
-											/* KEYED_FRAGMENT */
-										))])) : createCommentVNode("v-if", true),
-										$setup.assistant.getTurnApplyPayload(turn) ? (openBlock(), createBlock($setup["AcuButton"], {
-											key: 1,
-											disabled: !$setup.assistant.canApplyTurn(turn),
-											title: $setup.assistant.getTurnApplyBlockReason(turn),
-											onClick: ($event) => $setup.assistant.applyTurnDraft(turn)
-										}, {
-											default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
-												" 应用到编辑器草稿 ",
-												-1
-												/* CACHED */
-											)])]),
-											_: 1
-										}, 8, [
-											"disabled",
-											"title",
-											"onClick"
-										])) : createCommentVNode("v-if", true),
-										$setup.assistant.getTurnApplyPayload(turn) && $setup.assistant.getTurnApplyBlockReason(turn) ? (openBlock(), createElementBlock(
-											"p",
-											_hoisted_18$2,
-											toDisplayString($setup.assistant.getTurnApplyBlockReason(turn)),
-											1
-											/* TEXT */
-										)) : createCommentVNode("v-if", true),
-										turn.type === "round" && $setup.assistant.getTurnApplyPayload(turn) ? (openBlock(), createElementBlock("p", _hoisted_19$2, " 应用此轮结果将不包含后续轮次改动。 ")) : createCommentVNode("v-if", true)
-									])) : createCommentVNode("v-if", true)
-								],
-								2
-								/* CLASS */
-							);
-						}),
-						128
-						/* KEYED_FRAGMENT */
-					))])
-				]),
-				_: 1
-			})]),
-			_: 1
-		}, 8, ["expanded"]),
-		$setup.assistant.latestResult.value ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
-			key: 0,
-			label: "草稿检查",
-			expanded: $setup.draftExpanded,
-			"body-id": "acu-viz-assistant-draft",
-			"body-mode": "show",
-			"body-max-height": "min(72vh, 680px)",
-			"root-class": "acu-viz-assistant__disclosure",
-			"body-class": "acu-viz-assistant__disclosure-body",
-			onToggle: _cache[5] || (_cache[5] = ($event) => $setup.draftExpanded = !$setup.draftExpanded)
-		}, {
-			meta: withCtx(() => [createTextVNode(
-				toDisplayString($setup.assistant.highRiskItems.value.length ? `高风险 ${$setup.assistant.highRiskItems.value.length} 项` : "可检查"),
-				1
-				/* TEXT */
-			)]),
-			default: withCtx(() => [createVNode($setup["AcuPanel"], {
-				class: "acu-viz-assistant__folded-panel",
-				title: "草稿检查",
-				description: "应用前检查每组变更。涉及删表、跨表、排序、锁、全局配置等高风险项时，需要逐项确认。"
-			}, {
-				default: withCtx(() => [
-					createBaseVNode("div", _hoisted_20$1, [createVNode($setup["AcuBadge"], { variant: "neutral" }, {
-						default: withCtx(() => [createTextVNode(
-							toDisplayString($setup.assistant.sessionSummary.value || "会话完成"),
-							1
-							/* TEXT */
-						)]),
-						_: 1
-					}), $setup.assistant.highRiskItems.value.length ? (openBlock(), createBlock($setup["AcuBadge"], {
-						key: 0,
-						variant: "warning"
-					}, {
-						default: withCtx(() => [createTextVNode(
-							" 高风险 " + toDisplayString($setup.assistant.highRiskItems.value.length) + " 项 ",
-							1
-							/* TEXT */
-						)]),
-						_: 1
-					})) : (openBlock(), createBlock($setup["AcuBadge"], {
-						key: 1,
-						variant: "accent"
-					}, {
-						default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
-							"无高风险项",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}))]),
-					$setup.assistant.latestResult.value.draft.warnings.length ? (openBlock(), createBlock($setup["AcuInfoBanner"], {
-						key: 0,
-						tone: "warning"
-					}, {
-						default: withCtx(() => [createBaseVNode("ul", _hoisted_21$1, [(openBlock(true), createElementBlock(
-							Fragment,
-							null,
-							renderList($setup.assistant.latestResult.value.draft.warnings, (warning) => {
-								return openBlock(), createElementBlock(
-									"li",
-									{ key: warning },
-									toDisplayString(warning),
-									1
-									/* TEXT */
-								);
-							}),
-							128
-							/* KEYED_FRAGMENT */
-						))])]),
-						_: 1
-					})) : createCommentVNode("v-if", true),
-					$setup.assistant.diffGroups.value.length ? (openBlock(), createElementBlock("div", _hoisted_22$1, [(openBlock(true), createElementBlock(
-						Fragment,
-						null,
-						renderList($setup.assistant.diffGroups.value, (group) => {
-							return openBlock(), createElementBlock(
-								"section",
-								{
-									key: group.key,
-									class: normalizeClass(["acu-viz-assistant__diff-group", { "acu-viz-assistant__diff-group--warning": group.tone === "warning" }])
-								},
-								[createBaseVNode(
-									"h4",
-									null,
-									toDisplayString(group.title),
-									1
-									/* TEXT */
-								), createBaseVNode("ul", null, [(openBlock(true), createElementBlock(
-									Fragment,
-									null,
-									renderList(group.items, (item) => {
-										return openBlock(), createElementBlock(
-											"li",
-											{ key: item },
-											toDisplayString(item),
-											1
-											/* TEXT */
+											))])],
+											2
+											/* CLASS */
 										);
 									}),
 									128
 									/* KEYED_FRAGMENT */
-								))])],
-								2
-								/* CLASS */
-							);
-						}),
-						128
-						/* KEYED_FRAGMENT */
-					))])) : (openBlock(), createElementBlock("p", _hoisted_23$1, " 草稿没有声明具体变更。通常表示助手认为需求不够明确，或本次无需修改。 "))
-				]),
-				_: 1
-			})]),
+								))])) : createCommentVNode("v-if", true),
+								turn.type === "round" || turn.type === "final" ? (openBlock(), createElementBlock("div", _hoisted_17$2, [
+									$setup.assistant.getTurnHighRiskItems(turn).length ? (openBlock(), createElementBlock("div", _hoisted_18$2, [_cache[18] || (_cache[18] = createBaseVNode(
+										"h4",
+										null,
+										"高风险确认",
+										-1
+										/* CACHED */
+									)), (openBlock(true), createElementBlock(
+										Fragment,
+										null,
+										renderList($setup.assistant.getTurnHighRiskItems(turn), (item, index) => {
+											return openBlock(), createElementBlock("article", {
+												key: `${turn.id}-${item.type}-${index}`,
+												class: "acu-viz-assistant__risk-item"
+											}, [createVNode($setup["AcuCheckbox"], {
+												"model-value": $setup.assistant.riskConfirmations.value[`${turn.id}:${index}`] === true,
+												"onUpdate:modelValue": (value) => $setup.assistant.setRiskConfirmation(turn.id, index, value)
+											}, {
+												default: withCtx(() => [createTextVNode(
+													toDisplayString(item.label),
+													1
+													/* TEXT */
+												)]),
+												_: 2
+											}, 1032, ["model-value", "onUpdate:modelValue"])]);
+										}),
+										128
+										/* KEYED_FRAGMENT */
+									))])) : createCommentVNode("v-if", true),
+									$setup.assistant.getTurnApplyPayload(turn) ? (openBlock(), createBlock($setup["AcuButton"], {
+										key: 1,
+										disabled: !$setup.assistant.canApplyTurn(turn),
+										title: $setup.assistant.getTurnApplyBlockReason(turn),
+										onClick: ($event) => $setup.assistant.applyTurnDraft(turn)
+									}, {
+										default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
+											" 应用到编辑器草稿 ",
+											-1
+											/* CACHED */
+										)])]),
+										_: 1
+									}, 8, [
+										"disabled",
+										"title",
+										"onClick"
+									])) : createCommentVNode("v-if", true),
+									$setup.assistant.getTurnApplyPayload(turn) && $setup.assistant.getTurnApplyBlockReason(turn) ? (openBlock(), createElementBlock(
+										"p",
+										_hoisted_19$2,
+										toDisplayString($setup.assistant.getTurnApplyBlockReason(turn)),
+										1
+										/* TEXT */
+									)) : createCommentVNode("v-if", true),
+									turn.type === "round" && $setup.assistant.getTurnApplyPayload(turn) ? (openBlock(), createElementBlock("p", _hoisted_20$1, " 应用此轮结果将不包含后续轮次改动。 ")) : createCommentVNode("v-if", true)
+								])) : createCommentVNode("v-if", true)
+							],
+							2
+							/* CLASS */
+						);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])
+			],
+			512
+			/* NEED_PATCH */
+		),
+		createBaseVNode("div", _hoisted_21$1, [createVNode($setup["AcuTextarea"], {
+			class: "acu-viz-assistant__composer-input",
+			"model-value": $setup.assistant.userRequest.value,
+			rows: 2,
+			"max-rows": 8,
+			"auto-resize": "",
+			disabled: $setup.assistant.isRunning.value,
+			placeholder: "描述你想怎么改表。例如：给角色状态表新增“短期目标”和“风险提示”两列。",
+			"onUpdate:modelValue": _cache[2] || (_cache[2] = (value) => $setup.assistant.userRequest.value = value)
+		}, null, 8, ["model-value", "disabled"]), createBaseVNode("div", _hoisted_22$1, [$setup.assistant.isRunning.value ? (openBlock(), createBlock($setup["AcuButton"], {
+			key: 0,
+			variant: "danger",
+			size: "sm",
+			onClick: $setup.assistant.cancel
+		}, {
+			default: withCtx(() => [..._cache[20] || (_cache[20] = [createBaseVNode(
+				"i",
+				{ class: "fa-solid fa-stop" },
+				null,
+				-1
+				/* CACHED */
+			), createTextVNode(
+				" 停止 ",
+				-1
+				/* CACHED */
+			)])]),
 			_: 1
-		}, 8, ["expanded"])) : createCommentVNode("v-if", true),
+		}, 8, ["onClick"])) : (openBlock(), createBlock($setup["AcuButton"], {
+			key: 1,
+			variant: "primary",
+			size: "sm",
+			disabled: !$setup.assistant.userRequest.value.trim(),
+			onClick: $setup.assistant.run
+		}, {
+			default: withCtx(() => [..._cache[21] || (_cache[21] = [createBaseVNode(
+				"i",
+				{ class: "fa-solid fa-paper-plane" },
+				null,
+				-1
+				/* CACHED */
+			), createTextVNode(
+				" 发送 ",
+				-1
+				/* CACHED */
+			)])]),
+			_: 1
+		}, 8, ["disabled", "onClick"]))])]),
 		createVNode($setup["AssistantPromptDrawer"], {
 			"is-open": $setup.promptDrawerOpen,
 			segments: $setup.assistant.promptSegments.value,
 			dirty: $setup.assistant.promptDirty.value,
 			message: null,
-			onClose: _cache[6] || (_cache[6] = ($event) => $setup.promptDrawerOpen = false),
+			onClose: _cache[3] || (_cache[3] = ($event) => $setup.promptDrawerOpen = false),
 			onSave: $setup.assistant.savePrompt,
 			onReset: $setup.assistant.resetPrompt,
-			onImportFile: _cache[7] || (_cache[7] = ($event) => $setup.assistant.importPromptFile($event)),
+			onImportFile: _cache[4] || (_cache[4] = ($event) => $setup.assistant.importPromptFile($event)),
 			onExport: $setup.assistant.exportPrompt,
-			onAdd: _cache[8] || (_cache[8] = ($event) => $setup.assistant.addPromptSegment($event)),
-			onDelete: _cache[9] || (_cache[9] = ($event) => $setup.assistant.deletePromptSegment($event)),
-			onUpdate: _cache[10] || (_cache[10] = (index, patch) => $setup.assistant.updatePromptSegment(index, patch))
+			onAdd: _cache[5] || (_cache[5] = ($event) => $setup.assistant.addPromptSegment($event)),
+			onDelete: _cache[6] || (_cache[6] = ($event) => $setup.assistant.deletePromptSegment($event)),
+			onUpdate: _cache[7] || (_cache[7] = (index, patch) => $setup.assistant.updatePromptSegment(index, patch))
 		}, null, 8, [
 			"is-open",
 			"segments",
@@ -151582,7 +151606,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var VisualizerAssistantPanel = /*#__PURE__*/ _export_sfc(_sfc_main$7, [["render", _sfc_render$7], ["__scopeId", "data-v-009d88ce"]]);
+    var VisualizerAssistantPanel = /*#__PURE__*/ _export_sfc(_sfc_main$7, [["render", _sfc_render$7], ["__scopeId", "data-v-4cc562f9"]]);
 
     var _sfc_main$6 = /*@__PURE__*/ defineComponent({
         __name: 'VisualizerPlacementEditor',
@@ -153227,8 +153251,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-visualizer-surface[data-v-feb3f59e] {\n  flex: 1 1 auto;\n  min-width: 0;\n  min-height: 0;\n  display: grid;\n  grid-template-columns: 260px minmax(0, 1fr);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__sidebar[data-v-feb3f59e] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 1px solid var(--acu-border-2);\n  background: var(--acu-sidebar-bg);\n}\n.acu-visualizer-surface__main[data-v-feb3f59e] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  overflow: hidden;\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  min-height: 50px;\n  padding: 8px 12px 8px 16px;\n  border-bottom: 1px solid var(--acu-border-2);\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar-context[data-v-feb3f59e] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  gap: 10px;\n}\n.acu-visualizer-surface__mobile-menu[data-v-feb3f59e] {\n  display: none;\n  flex: 0 0 auto;\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-visualizer-surface__mobile-menu[data-v-feb3f59e]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__context-items[data-v-feb3f59e] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  justify-content: flex-start;\n  gap: 16px;\n}\n.acu-visualizer-surface__context-item[data-v-feb3f59e] {\n  min-width: 0;\n  display: grid;\n  gap: 2px;\n}\n.acu-visualizer-surface__context-item[data-v-feb3f59e]:first-child {\n  flex: 0 1 auto;\n  max-width: min(560px, 42vw);\n}\n.acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  max-width: min(260px, 20vw);\n}\n.acu-visualizer-surface__context-item span[data-v-feb3f59e] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.2;\n}\n.acu-visualizer-surface__context-item strong[data-v-feb3f59e] {\n  min-width: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.25;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__context-item:first-child strong[data-v-feb3f59e] {\n  overflow: visible;\n  text-overflow: clip;\n  white-space: normal;\n  word-break: break-word;\n}\n.acu-visualizer-surface__context-badge[data-v-feb3f59e] {\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__conflict[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  margin: 12px 16px 0;\n}\n.acu-visualizer-surface__conflict-actions[data-v-feb3f59e] {\n  display: inline-flex;\n  flex-wrap: wrap;\n  gap: 6px;\n  margin-left: 8px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-feb3f59e],\n.acu-visualizer-surface__data-toolbar-actions[data-v-feb3f59e],\n.acu-visualizer-surface__database-toolbar[data-v-feb3f59e],\n.acu-visualizer-surface__pagination[data-v-feb3f59e],\n.acu-visualizer-surface__pagination-pages[data-v-feb3f59e],\n.acu-visualizer-surface__card-header[data-v-feb3f59e] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n.acu-visualizer-surface__workspace[data-v-feb3f59e] {\n  flex: 1 1 auto;\n  min-height: 0;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  overflow: auto;\n  padding: 16px;\n}\n.acu-visualizer-surface__loading[data-v-feb3f59e] {\n  min-height: 140px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  gap: 8px;\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__mode-tabs[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  width: min(360px, 42vw);\n}\n.acu-visualizer-surface__close[data-v-feb3f59e] {\n  width: 30px;\n  height: 30px;\n  flex: 0 0 auto;\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-visualizer-surface__close[data-v-feb3f59e]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__data-toolbar[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  justify-content: space-between;\n  padding: 4px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  justify-content: flex-end;\n}\n.acu-visualizer-surface__pagination[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  justify-content: center;\n  gap: 14px;\n  padding: 6px 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-visualizer-surface__pagination-pages[data-v-feb3f59e] {\n  min-width: 0;\n  flex-wrap: wrap;\n  justify-content: center;\n  gap: 8px;\n}\n.acu-visualizer-surface__page-button[data-v-feb3f59e] {\n  width: 34px;\n  min-width: 34px;\n  height: 34px;\n  padding: 0;\n  border: 1px solid var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n}\n.acu-visualizer-surface__page-button[data-v-feb3f59e]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__page-button--active[data-v-feb3f59e],\n.acu-visualizer-surface__page-button--active[data-v-feb3f59e]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n}\n.acu-visualizer-surface__page-button[data-v-feb3f59e]:disabled:not(\n    .acu-visualizer-surface__page-button--active\n  ) {\n  border-color: var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-2);\n  opacity: 1;\n  cursor: default;\n}\n.acu-visualizer-surface__page-jump[data-v-feb3f59e] {\n  flex: 0 0 64px;\n  width: 64px;\n}\n.acu-visualizer-surface__page-jump[data-v-feb3f59e] .acu-input {\n  min-height: 34px;\n  border: 1px solid var(--acu-border) !important;\n  background: var(--acu-bg-0) !important;\n  text-align: center;\n  font-size: var(--acu-font-size-body-lg, 13px) !important;\n  font-variant-numeric: tabular-nums;\n}\n.acu-visualizer-surface__data-range[data-v-feb3f59e] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__database-toolbar[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  padding: 0 0 4px;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__database-toolbar h2[data-v-feb3f59e] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n}\n.acu-visualizer-surface__database-toolbar p[data-v-feb3f59e] {\n  margin: 5px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-readable, 1.55);\n}\n.acu-visualizer-surface__empty[data-v-feb3f59e] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-visualizer-surface__card-grid[data-v-feb3f59e] {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));\n  gap: 12px;\n}\n.acu-visualizer-surface__data-card[data-v-feb3f59e] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  height: 100%;\n  padding: 16px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-visualizer-surface__card-header strong[data-v-feb3f59e] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-panel-title, 15px);\n}\n.acu-visualizer-surface__card-header span[data-v-feb3f59e] {\n  min-width: 0;\n  margin-right: auto;\n  overflow: hidden;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__card-header[data-v-feb3f59e] .acu-icon-btn {\n  background: transparent;\n}\n.acu-visualizer-surface__card-header[data-v-feb3f59e]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n}\n.acu-visualizer-surface__card-header[data-v-feb3f59e] .acu-icon-btn--accent {\n  background: var(--acu-accent-glow);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__card-header[data-v-feb3f59e]\n  .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-visualizer-surface__fields[data-v-feb3f59e] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-visualizer-surface__field-row[data-v-feb3f59e] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  align-items: stretch;\n}\n.acu-visualizer-surface__field-row.is-wide[data-v-feb3f59e] {\n  grid-template-columns: minmax(0, 1fr);\n}\n.acu-visualizer-surface__field[data-v-feb3f59e] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  padding: 2px;\n  border: 1px solid transparent;\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n  transition:\n    background 0.15s ease,\n    border-color 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field[data-v-feb3f59e] .acu-textarea {\n  flex: 1 1 auto;\n  min-height: 34px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n}\n.acu-visualizer-surface__field-preview[data-v-feb3f59e] {\n  width: 100%;\n  min-height: 34px;\n  box-sizing: border-box;\n  padding: 8px 10px;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-1);\n  cursor: text;\n  display: block;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n  transition:\n    background 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field-preview[data-v-feb3f59e]:hover,\n.acu-visualizer-surface__field-preview[data-v-feb3f59e]:focus-visible {\n  outline: none;\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    var(--acu-bg-2);\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-visualizer-surface__field-preview.is-empty[data-v-feb3f59e] {\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__field-label[data-v-feb3f59e] {\n  min-width: 0;\n  min-height: 24px;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 6px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-visualizer-surface__field-label > span[data-v-feb3f59e]:first-child {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  min-width: 51px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  opacity: 0.44;\n  transition: opacity 0.15s ease;\n}\n.acu-visualizer-surface__field:hover .acu-visualizer-surface__field-locks[data-v-feb3f59e],\n.acu-visualizer-surface__field:focus-within\n  .acu-visualizer-surface__field-locks[data-v-feb3f59e],\n.acu-visualizer-surface__field.is-actions-active\n  .acu-visualizer-surface__field-locks[data-v-feb3f59e],\n.acu-visualizer-surface__field.is-locked .acu-visualizer-surface__field-locks[data-v-feb3f59e],\n.acu-visualizer-surface__field.is-special-index\n  .acu-visualizer-surface__field-locks[data-v-feb3f59e] {\n  opacity: 1;\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e] .acu-icon-btn {\n  --acu-icon-btn-size: 24px;\n  --acu-icon-btn-font-size: 11px;\n  width: 24px;\n  height: 24px;\n  background: transparent !important;\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e] .acu-icon-btn--accent {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 16%, transparent) !important;\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e]\n  .acu-icon-btn--accent:hover:not(:disabled) {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 22%, transparent) !important;\n}\n.acu-visualizer-surface__field.is-locked[data-v-feb3f59e] {\n  border-color: var(--acu-border);\n  background: color-mix(in srgb, var(--acu-warning) 8%, transparent);\n}\n.acu-visualizer-surface__field.is-actions-active[data-v-feb3f59e]:not(.is-locked) {\n  background: color-mix(in srgb, var(--acu-accent) 6%, transparent);\n}\n.acu-visualizer-surface__footer[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 16px;\n  border-top: 1px solid var(--acu-border-2);\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__footer-actions[data-v-feb3f59e] {\n  display: flex;\n  gap: 8px;\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__footer-actions[data-v-feb3f59e] .acu-btn {\n  min-width: 132px;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-feb3f59e] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9350;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: visualizer-mobile-nav-layer-in-feb3f59e 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing[data-v-feb3f59e] {\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-layer-out-feb3f59e 0.15s ease-in both;\n}\n.acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n  width: 360px;\n  max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 360px;\n  display: flex;\n  flex-direction: column;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 0;\n  background: var(--acu-sidebar-bg);\n  box-shadow: var(--acu-shadow);\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-drawer-in-feb3f59e 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing\n  .acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n  animation: visualizer-mobile-nav-drawer-out-feb3f59e 0.15s ease-in both;\n}\n@supports (width: min(360px, calc(100% - 24px))) {\n.acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n    width: min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n    max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n@keyframes visualizer-mobile-nav-layer-in-feb3f59e {\nfrom {\n    opacity: 0;\n}\nto {\n    opacity: 1;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-in-feb3f59e {\nfrom {\n    transform: translateX(-100%);\n}\nto {\n    transform: translateX(0);\n}\n}\n@keyframes visualizer-mobile-nav-layer-out-feb3f59e {\nfrom {\n    opacity: 1;\n}\nto {\n    opacity: 0;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-out-feb3f59e {\nfrom {\n    transform: translateX(0);\n}\nto {\n    transform: translateX(-100%);\n}\n}\n@media (max-width: 1024px) {\n.acu-visualizer-surface[data-v-feb3f59e] {\n    grid-template-columns: 220px minmax(0, 1fr);\n}\n.acu-visualizer-surface__card-grid[data-v-feb3f59e] {\n    grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));\n}\n.acu-visualizer-surface__topbar[data-v-feb3f59e] {\n    flex-wrap: wrap;\n}\n.acu-visualizer-surface__mode-tabs[data-v-feb3f59e] {\n    order: 3;\n    width: min(420px, 100%);\n}\n}\n@media (max-width: 767px) {\n.acu-visualizer-surface[data-v-feb3f59e] {\n    grid-template-columns: 1fr;\n    grid-template-rows: minmax(0, 1fr);\n}\n.acu-visualizer-surface__sidebar[data-v-feb3f59e] {\n    display: none;\n}\n.acu-visualizer-surface__topbar[data-v-feb3f59e] {\n    display: grid;\n    grid-template-columns: minmax(0, 1fr) auto;\n    gap: 8px;\n    min-height: 0;\n    padding: 8px;\n}\n.acu-visualizer-surface__topbar-context[data-v-feb3f59e] {\n    grid-column: 1;\n    display: grid;\n    grid-template-columns: auto minmax(0, 1fr) auto;\n    align-items: center;\n    gap: 8px;\n    min-width: 0;\n}\n.acu-visualizer-surface__mobile-menu[data-v-feb3f59e] {\n    display: inline-flex;\n}\n.acu-visualizer-surface__context-items[data-v-feb3f59e] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n.acu-visualizer-surface__context-item[data-v-feb3f59e]:first-child,\n  .acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-feb3f59e] {\n    max-width: none;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-feb3f59e] {\n    display: flex;\n}\n.acu-visualizer-surface__close[data-v-feb3f59e] {\n    grid-column: 2;\n    grid-row: 1;\n    align-self: center;\n}\n.acu-visualizer-surface__mode-tabs[data-v-feb3f59e] {\n    grid-column: 1 / -1;\n    width: 100%;\n}\n.acu-visualizer-surface__workspace[data-v-feb3f59e] {\n    padding: 10px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-feb3f59e],\n  .acu-visualizer-surface__database-toolbar[data-v-feb3f59e] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__data-toolbar[data-v-feb3f59e] .acu-btn,\n  .acu-visualizer-surface__database-toolbar[data-v-feb3f59e] .acu-btn {\n    width: 100%;\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-feb3f59e] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__pagination[data-v-feb3f59e] {\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 6px;\n    padding: 2px 0 6px;\n}\n.acu-visualizer-surface__pagination-pages[data-v-feb3f59e] {\n    flex: 0 1 auto;\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n.acu-visualizer-surface__page-button[data-v-feb3f59e] {\n    width: 36px;\n    min-width: 36px;\n    height: 34px;\n    flex: 0 0 36px;\n}\n.acu-visualizer-surface__page-jump[data-v-feb3f59e] {\n    flex: 0 0 54px;\n    width: 54px;\n}\n.acu-visualizer-surface__footer[data-v-feb3f59e] {\n    display: grid;\n    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);\n    align-items: center;\n    gap: 8px;\n    padding: 8px;\n}\n.acu-visualizer-surface__footer > span[data-v-feb3f59e] {\n    min-width: 0;\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n.acu-visualizer-surface__footer-actions[data-v-feb3f59e] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n.acu-visualizer-surface__footer-actions[data-v-feb3f59e] .acu-btn {\n    min-width: 0;\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-visualizer-surface__card-grid[data-v-feb3f59e] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__fields[data-v-feb3f59e] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__mode-tabs[data-v-feb3f59e] {\n    width: 100%;\n}\n.acu-visualizer-surface__conflict-actions[data-v-feb3f59e] {\n    display: flex;\n    margin: 8px 0 0;\n}\n.acu-visualizer-surface__footer[data-v-feb3f59e] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__footer > span[data-v-feb3f59e] {\n    display: none;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue#style-0-feb3f59e");
-    var VisualizerSurface_vue_vue_type_style_index_0_scoped_feb3f59e_lang = null;
+    injectSfcStyle("\n.acu-visualizer-surface[data-v-95a112c0] {\n  flex: 1 1 auto;\n  min-width: 0;\n  min-height: 0;\n  display: grid;\n  grid-template-columns: 260px minmax(0, 1fr);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__sidebar[data-v-95a112c0] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 1px solid var(--acu-border-2);\n  background: var(--acu-sidebar-bg);\n}\n.acu-visualizer-surface__main[data-v-95a112c0] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  overflow: hidden;\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar[data-v-95a112c0] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  min-height: 50px;\n  padding: 8px 12px 8px 16px;\n  border-bottom: 1px solid var(--acu-border-2);\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar-context[data-v-95a112c0] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  gap: 10px;\n}\n.acu-visualizer-surface__mobile-menu[data-v-95a112c0] {\n  display: none;\n  flex: 0 0 auto;\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-visualizer-surface__mobile-menu[data-v-95a112c0]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__context-items[data-v-95a112c0] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  justify-content: flex-start;\n  gap: 16px;\n}\n.acu-visualizer-surface__context-item[data-v-95a112c0] {\n  min-width: 0;\n  display: grid;\n  gap: 2px;\n}\n.acu-visualizer-surface__context-item[data-v-95a112c0]:first-child {\n  flex: 0 1 auto;\n  max-width: min(560px, 42vw);\n}\n.acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-95a112c0] {\n  flex: 0 0 auto;\n  max-width: min(260px, 20vw);\n}\n.acu-visualizer-surface__context-item span[data-v-95a112c0] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.2;\n}\n.acu-visualizer-surface__context-item strong[data-v-95a112c0] {\n  min-width: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.25;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__context-item:first-child strong[data-v-95a112c0] {\n  overflow: visible;\n  text-overflow: clip;\n  white-space: normal;\n  word-break: break-word;\n}\n.acu-visualizer-surface__context-badge[data-v-95a112c0] {\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__conflict[data-v-95a112c0] {\n  flex: 0 0 auto;\n  margin: 12px 16px 0;\n}\n.acu-visualizer-surface__conflict-actions[data-v-95a112c0] {\n  display: inline-flex;\n  flex-wrap: wrap;\n  gap: 6px;\n  margin-left: 8px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-95a112c0],\n.acu-visualizer-surface__data-toolbar-actions[data-v-95a112c0],\n.acu-visualizer-surface__database-toolbar[data-v-95a112c0],\n.acu-visualizer-surface__pagination[data-v-95a112c0],\n.acu-visualizer-surface__pagination-pages[data-v-95a112c0],\n.acu-visualizer-surface__card-header[data-v-95a112c0] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n.acu-visualizer-surface__workspace[data-v-95a112c0] {\n  flex: 1 1 auto;\n  min-height: 0;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  overflow: auto;\n  padding: 16px;\n}\n.acu-visualizer-surface__workspace--assistant[data-v-95a112c0] {\n  overflow: hidden;\n  padding: 0;\n}\n.acu-visualizer-surface__loading[data-v-95a112c0] {\n  min-height: 140px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  gap: 8px;\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__mode-tabs[data-v-95a112c0] {\n  flex: 0 0 auto;\n  width: min(360px, 42vw);\n}\n.acu-visualizer-surface__close[data-v-95a112c0] {\n  width: 30px;\n  height: 30px;\n  flex: 0 0 auto;\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-visualizer-surface__close[data-v-95a112c0]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__data-toolbar[data-v-95a112c0] {\n  flex: 0 0 auto;\n  justify-content: space-between;\n  padding: 4px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-95a112c0] {\n  flex: 0 0 auto;\n  justify-content: flex-end;\n}\n.acu-visualizer-surface__pagination[data-v-95a112c0] {\n  flex: 0 0 auto;\n  justify-content: center;\n  gap: 14px;\n  padding: 6px 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-visualizer-surface__pagination-pages[data-v-95a112c0] {\n  min-width: 0;\n  flex-wrap: wrap;\n  justify-content: center;\n  gap: 8px;\n}\n.acu-visualizer-surface__page-button[data-v-95a112c0] {\n  width: 34px;\n  min-width: 34px;\n  height: 34px;\n  padding: 0;\n  border: 1px solid var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n}\n.acu-visualizer-surface__page-button[data-v-95a112c0]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__page-button--active[data-v-95a112c0],\n.acu-visualizer-surface__page-button--active[data-v-95a112c0]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n}\n.acu-visualizer-surface__page-button[data-v-95a112c0]:disabled:not(\n    .acu-visualizer-surface__page-button--active\n  ) {\n  border-color: var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-2);\n  opacity: 1;\n  cursor: default;\n}\n.acu-visualizer-surface__page-jump[data-v-95a112c0] {\n  flex: 0 0 64px;\n  width: 64px;\n}\n.acu-visualizer-surface__page-jump[data-v-95a112c0] .acu-input {\n  min-height: 34px;\n  border: 1px solid var(--acu-border) !important;\n  background: var(--acu-bg-0) !important;\n  text-align: center;\n  font-size: var(--acu-font-size-body-lg, 13px) !important;\n  font-variant-numeric: tabular-nums;\n}\n.acu-visualizer-surface__data-range[data-v-95a112c0] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__database-toolbar[data-v-95a112c0] {\n  flex: 0 0 auto;\n  padding: 0 0 4px;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__database-toolbar h2[data-v-95a112c0] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n}\n.acu-visualizer-surface__database-toolbar p[data-v-95a112c0] {\n  margin: 5px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-readable, 1.55);\n}\n.acu-visualizer-surface__empty[data-v-95a112c0] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-visualizer-surface__card-grid[data-v-95a112c0] {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));\n  gap: 12px;\n}\n.acu-visualizer-surface__data-card[data-v-95a112c0] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  height: 100%;\n  padding: 16px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-visualizer-surface__card-header strong[data-v-95a112c0] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-panel-title, 15px);\n}\n.acu-visualizer-surface__card-header span[data-v-95a112c0] {\n  min-width: 0;\n  margin-right: auto;\n  overflow: hidden;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__card-header[data-v-95a112c0] .acu-icon-btn {\n  background: transparent;\n}\n.acu-visualizer-surface__card-header[data-v-95a112c0]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n}\n.acu-visualizer-surface__card-header[data-v-95a112c0] .acu-icon-btn--accent {\n  background: var(--acu-accent-glow);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__card-header[data-v-95a112c0]\n  .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-visualizer-surface__fields[data-v-95a112c0] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-visualizer-surface__field-row[data-v-95a112c0] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  align-items: stretch;\n}\n.acu-visualizer-surface__field-row.is-wide[data-v-95a112c0] {\n  grid-template-columns: minmax(0, 1fr);\n}\n.acu-visualizer-surface__field[data-v-95a112c0] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  padding: 2px;\n  border: 1px solid transparent;\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n  transition:\n    background 0.15s ease,\n    border-color 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field[data-v-95a112c0] .acu-textarea {\n  flex: 1 1 auto;\n  min-height: 34px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n}\n.acu-visualizer-surface__field-preview[data-v-95a112c0] {\n  width: 100%;\n  min-height: 34px;\n  box-sizing: border-box;\n  padding: 8px 10px;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-1);\n  cursor: text;\n  display: block;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n  transition:\n    background 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field-preview[data-v-95a112c0]:hover,\n.acu-visualizer-surface__field-preview[data-v-95a112c0]:focus-visible {\n  outline: none;\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    var(--acu-bg-2);\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-visualizer-surface__field-preview.is-empty[data-v-95a112c0] {\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__field-label[data-v-95a112c0] {\n  min-width: 0;\n  min-height: 24px;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 6px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-visualizer-surface__field-label > span[data-v-95a112c0]:first-child {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__field-locks[data-v-95a112c0] {\n  flex: 0 0 auto;\n  min-width: 51px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  opacity: 0.44;\n  transition: opacity 0.15s ease;\n}\n.acu-visualizer-surface__field:hover .acu-visualizer-surface__field-locks[data-v-95a112c0],\n.acu-visualizer-surface__field:focus-within\n  .acu-visualizer-surface__field-locks[data-v-95a112c0],\n.acu-visualizer-surface__field.is-actions-active\n  .acu-visualizer-surface__field-locks[data-v-95a112c0],\n.acu-visualizer-surface__field.is-locked .acu-visualizer-surface__field-locks[data-v-95a112c0],\n.acu-visualizer-surface__field.is-special-index\n  .acu-visualizer-surface__field-locks[data-v-95a112c0] {\n  opacity: 1;\n}\n.acu-visualizer-surface__field-locks[data-v-95a112c0] .acu-icon-btn {\n  --acu-icon-btn-size: 24px;\n  --acu-icon-btn-font-size: 11px;\n  width: 24px;\n  height: 24px;\n  background: transparent !important;\n}\n.acu-visualizer-surface__field-locks[data-v-95a112c0]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__field-locks[data-v-95a112c0] .acu-icon-btn--accent {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 16%, transparent) !important;\n}\n.acu-visualizer-surface__field-locks[data-v-95a112c0]\n  .acu-icon-btn--accent:hover:not(:disabled) {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 22%, transparent) !important;\n}\n.acu-visualizer-surface__field.is-locked[data-v-95a112c0] {\n  border-color: var(--acu-border);\n  background: color-mix(in srgb, var(--acu-warning) 8%, transparent);\n}\n.acu-visualizer-surface__field.is-actions-active[data-v-95a112c0]:not(.is-locked) {\n  background: color-mix(in srgb, var(--acu-accent) 6%, transparent);\n}\n.acu-visualizer-surface__footer[data-v-95a112c0] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 16px;\n  border-top: 1px solid var(--acu-border-2);\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__footer-actions[data-v-95a112c0] {\n  display: flex;\n  gap: 8px;\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__footer-actions[data-v-95a112c0] .acu-btn {\n  min-width: 132px;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-95a112c0] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9350;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: visualizer-mobile-nav-layer-in-95a112c0 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing[data-v-95a112c0] {\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-layer-out-95a112c0 0.15s ease-in both;\n}\n.acu-visualizer-surface__mobile-nav[data-v-95a112c0] {\n  width: 360px;\n  max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 360px;\n  display: flex;\n  flex-direction: column;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 0;\n  background: var(--acu-sidebar-bg);\n  box-shadow: var(--acu-shadow);\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-drawer-in-95a112c0 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing\n  .acu-visualizer-surface__mobile-nav[data-v-95a112c0] {\n  animation: visualizer-mobile-nav-drawer-out-95a112c0 0.15s ease-in both;\n}\n@supports (width: min(360px, calc(100% - 24px))) {\n.acu-visualizer-surface__mobile-nav[data-v-95a112c0] {\n    width: min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-visualizer-surface__mobile-nav[data-v-95a112c0] {\n    max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-visualizer-surface__mobile-nav[data-v-95a112c0] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n@keyframes visualizer-mobile-nav-layer-in-95a112c0 {\nfrom {\n    opacity: 0;\n}\nto {\n    opacity: 1;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-in-95a112c0 {\nfrom {\n    transform: translateX(-100%);\n}\nto {\n    transform: translateX(0);\n}\n}\n@keyframes visualizer-mobile-nav-layer-out-95a112c0 {\nfrom {\n    opacity: 1;\n}\nto {\n    opacity: 0;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-out-95a112c0 {\nfrom {\n    transform: translateX(0);\n}\nto {\n    transform: translateX(-100%);\n}\n}\n@media (max-width: 1024px) {\n.acu-visualizer-surface[data-v-95a112c0] {\n    grid-template-columns: 220px minmax(0, 1fr);\n}\n.acu-visualizer-surface__card-grid[data-v-95a112c0] {\n    grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));\n}\n.acu-visualizer-surface__topbar[data-v-95a112c0] {\n    flex-wrap: wrap;\n}\n.acu-visualizer-surface__mode-tabs[data-v-95a112c0] {\n    order: 3;\n    width: min(420px, 100%);\n}\n}\n@media (max-width: 767px) {\n.acu-visualizer-surface[data-v-95a112c0] {\n    grid-template-columns: 1fr;\n    grid-template-rows: minmax(0, 1fr);\n}\n.acu-visualizer-surface__sidebar[data-v-95a112c0] {\n    display: none;\n}\n.acu-visualizer-surface__topbar[data-v-95a112c0] {\n    display: grid;\n    grid-template-columns: minmax(0, 1fr) auto;\n    gap: 8px;\n    min-height: 0;\n    padding: 8px;\n}\n.acu-visualizer-surface__topbar-context[data-v-95a112c0] {\n    grid-column: 1;\n    display: grid;\n    grid-template-columns: auto minmax(0, 1fr) auto;\n    align-items: center;\n    gap: 8px;\n    min-width: 0;\n}\n.acu-visualizer-surface__mobile-menu[data-v-95a112c0] {\n    display: inline-flex;\n}\n.acu-visualizer-surface__context-items[data-v-95a112c0] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n.acu-visualizer-surface__context-item[data-v-95a112c0]:first-child,\n  .acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-95a112c0] {\n    max-width: none;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-95a112c0] {\n    display: flex;\n}\n.acu-visualizer-surface__close[data-v-95a112c0] {\n    grid-column: 2;\n    grid-row: 1;\n    align-self: center;\n}\n.acu-visualizer-surface__mode-tabs[data-v-95a112c0] {\n    grid-column: 1 / -1;\n    width: 100%;\n}\n.acu-visualizer-surface__workspace[data-v-95a112c0] {\n    padding: 10px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-95a112c0],\n  .acu-visualizer-surface__database-toolbar[data-v-95a112c0] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__data-toolbar[data-v-95a112c0] .acu-btn,\n  .acu-visualizer-surface__database-toolbar[data-v-95a112c0] .acu-btn {\n    width: 100%;\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-95a112c0] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__pagination[data-v-95a112c0] {\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 6px;\n    padding: 2px 0 6px;\n}\n.acu-visualizer-surface__pagination-pages[data-v-95a112c0] {\n    flex: 0 1 auto;\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n.acu-visualizer-surface__page-button[data-v-95a112c0] {\n    width: 36px;\n    min-width: 36px;\n    height: 34px;\n    flex: 0 0 36px;\n}\n.acu-visualizer-surface__page-jump[data-v-95a112c0] {\n    flex: 0 0 54px;\n    width: 54px;\n}\n.acu-visualizer-surface__footer[data-v-95a112c0] {\n    display: grid;\n    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);\n    align-items: center;\n    gap: 8px;\n    padding: 8px;\n}\n.acu-visualizer-surface__footer > span[data-v-95a112c0] {\n    min-width: 0;\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n.acu-visualizer-surface__footer-actions[data-v-95a112c0] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n.acu-visualizer-surface__footer-actions[data-v-95a112c0] .acu-btn {\n    min-width: 0;\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-visualizer-surface__card-grid[data-v-95a112c0] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__fields[data-v-95a112c0] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__mode-tabs[data-v-95a112c0] {\n    width: 100%;\n}\n.acu-visualizer-surface__conflict-actions[data-v-95a112c0] {\n    display: flex;\n    margin: 8px 0 0;\n}\n.acu-visualizer-surface__footer[data-v-95a112c0] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__footer > span[data-v-95a112c0] {\n    display: none;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue#style-0-95a112c0");
+    var VisualizerSurface_vue_vue_type_style_index_0_scoped_95a112c0_lang = null;
 
     const _hoisted_1$1 = {
 	class: "acu-visualizer-surface__sidebar",
@@ -153254,57 +153278,52 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_8$1 = { class: "acu-visualizer-surface__conflict-actions" };
     const _hoisted_9$1 = {
-	ref: "workspaceRef",
-	class: "acu-visualizer-surface__workspace",
-	"aria-label": "数据库编辑工作区"
-    };
-    const _hoisted_10$1 = {
 	key: 0,
 	class: "acu-visualizer-surface__loading"
     };
-    const _hoisted_11$1 = { class: "acu-visualizer-surface__empty" };
-    const _hoisted_12$1 = { class: "acu-visualizer-surface__database-toolbar" };
-    const _hoisted_13$1 = {
+    const _hoisted_10$1 = { class: "acu-visualizer-surface__empty" };
+    const _hoisted_11$1 = { class: "acu-visualizer-surface__database-toolbar" };
+    const _hoisted_12$1 = {
 	key: 0,
 	class: "acu-visualizer-surface__empty"
     };
-    const _hoisted_14$1 = {
+    const _hoisted_13$1 = {
 	key: 1,
 	ref: "paginationRef",
 	class: "acu-visualizer-surface__pagination",
 	"aria-label": "数据分页"
     };
-    const _hoisted_15$1 = {
+    const _hoisted_14$1 = {
 	class: "acu-visualizer-surface__pagination-pages",
 	"aria-label": "页码"
     };
-    const _hoisted_16$1 = {
+    const _hoisted_15$1 = {
 	key: 2,
 	class: "acu-visualizer-surface__card-grid"
     };
-    const _hoisted_17$1 = { class: "acu-visualizer-surface__card-header" };
-    const _hoisted_18$1 = { class: "acu-visualizer-surface__fields" };
-    const _hoisted_19$1 = ["data-acu-visualizer-field-row-layout"];
-    const _hoisted_20 = [
+    const _hoisted_16$1 = { class: "acu-visualizer-surface__card-header" };
+    const _hoisted_17$1 = { class: "acu-visualizer-surface__fields" };
+    const _hoisted_18$1 = ["data-acu-visualizer-field-row-layout"];
+    const _hoisted_19$1 = [
 	"data-acu-visualizer-field-layout",
 	"onPointerdown",
 	"onFocusin"
     ];
-    const _hoisted_21 = { class: "acu-visualizer-surface__field-label" };
-    const _hoisted_22 = { class: "acu-visualizer-surface__field-locks" };
-    const _hoisted_23 = [
+    const _hoisted_20 = { class: "acu-visualizer-surface__field-label" };
+    const _hoisted_21 = { class: "acu-visualizer-surface__field-locks" };
+    const _hoisted_22 = [
 	"onPointerdown",
 	"onClick",
 	"onKeydown"
     ];
-    const _hoisted_24 = { class: "acu-visualizer-surface__data-toolbar" };
-    const _hoisted_25 = { class: "acu-visualizer-surface__data-range" };
-    const _hoisted_26 = { class: "acu-visualizer-surface__data-toolbar-actions" };
-    const _hoisted_27 = {
+    const _hoisted_23 = { class: "acu-visualizer-surface__data-toolbar" };
+    const _hoisted_24 = { class: "acu-visualizer-surface__data-range" };
+    const _hoisted_25 = { class: "acu-visualizer-surface__data-toolbar-actions" };
+    const _hoisted_26 = {
 	class: "acu-visualizer-surface__footer",
 	"aria-label": "保存操作"
     };
-    const _hoisted_28 = { class: "acu-visualizer-surface__footer-actions" };
+    const _hoisted_27 = { class: "acu-visualizer-surface__footer-actions" };
     function _sfc_render$1(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"main",
@@ -153439,8 +153458,12 @@ Expected function or array of functions, received type ${typeof value}.`
 				})) : createCommentVNode("v-if", true),
 				createBaseVNode(
 					"section",
-					_hoisted_9$1,
-					[$setup.visualizer.isLoading ? (openBlock(), createElementBlock("div", _hoisted_10$1, [..._cache[9] || (_cache[9] = [createBaseVNode(
+					{
+						ref: "workspaceRef",
+						class: normalizeClass(["acu-visualizer-surface__workspace", { "acu-visualizer-surface__workspace--assistant": $setup.visualizer.mode === "assistant" }]),
+						"aria-label": "数据库编辑工作区"
+					},
+					[$setup.visualizer.isLoading ? (openBlock(), createElementBlock("div", _hoisted_9$1, [..._cache[9] || (_cache[9] = [createBaseVNode(
 						"i",
 						{ class: "fa-solid fa-spinner fa-spin" },
 						null,
@@ -153459,7 +153482,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, {
 						default: withCtx(() => [createBaseVNode(
 							"p",
-							_hoisted_11$1,
+							_hoisted_10$1,
 							toDisplayString($setup.visualizer.loadError),
 							1
 							/* TEXT */
@@ -153476,7 +153499,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						Fragment,
 						{ key: 2 },
 						[
-							createBaseVNode("div", _hoisted_12$1, [_cache[12] || (_cache[12] = createBaseVNode(
+							createBaseVNode("div", _hoisted_11$1, [_cache[12] || (_cache[12] = createBaseVNode(
 								"div",
 								null,
 								[createBaseVNode("h2", null, "数据库管理")],
@@ -153517,11 +153540,11 @@ Expected function or array of functions, received type ${typeof value}.`
 							Fragment,
 							{ key: 0 },
 							[
-								$setup.rowCount === 0 ? (openBlock(), createElementBlock("p", _hoisted_13$1, " 当前表还没有数据行。可以先新增行，再逐个字段填写内容。 ")) : createCommentVNode("v-if", true),
+								$setup.rowCount === 0 ? (openBlock(), createElementBlock("p", _hoisted_12$1, " 当前表还没有数据行。可以先新增行，再逐个字段填写内容。 ")) : createCommentVNode("v-if", true),
 								$setup.isDataPaginated ? (openBlock(), createElementBlock(
 									"div",
-									_hoisted_14$1,
-									[createBaseVNode("div", _hoisted_15$1, [(openBlock(true), createElementBlock(
+									_hoisted_13$1,
+									[createBaseVNode("div", _hoisted_14$1, [(openBlock(true), createElementBlock(
 										Fragment,
 										null,
 										renderList($setup.dataPaginationItems, (item) => {
@@ -153564,14 +153587,14 @@ Expected function or array of functions, received type ${typeof value}.`
 									512
 									/* NEED_PATCH */
 								)) : createCommentVNode("v-if", true),
-								$setup.rowCount > 0 ? (openBlock(), createElementBlock("div", _hoisted_16$1, [(openBlock(true), createElementBlock(
+								$setup.rowCount > 0 ? (openBlock(), createElementBlock("div", _hoisted_15$1, [(openBlock(true), createElementBlock(
 									Fragment,
 									null,
 									renderList($setup.rows, (row) => {
 										return openBlock(), createElementBlock("article", {
 											key: row.index,
 											class: "acu-visualizer-surface__data-card"
-										}, [createBaseVNode("header", _hoisted_17$1, [
+										}, [createBaseVNode("header", _hoisted_16$1, [
 											createBaseVNode(
 												"strong",
 												null,
@@ -153607,7 +153630,7 @@ Expected function or array of functions, received type ${typeof value}.`
 												title: "删除这一行",
 												onClick: ($event) => $setup.deleteRow(row.index)
 											}, null, 8, ["onClick"])
-										]), createBaseVNode("div", _hoisted_18$1, [(openBlock(true), createElementBlock(
+										]), createBaseVNode("div", _hoisted_17$1, [(openBlock(true), createElementBlock(
 											Fragment,
 											null,
 											renderList(row.fieldRows, (fieldRow) => {
@@ -153629,13 +153652,13 @@ Expected function or array of functions, received type ${typeof value}.`
 															"data-acu-visualizer-field-layout": fieldRow.wide ? "wide" : "half",
 															onPointerdown: ($event) => $setup.setActiveFieldActions(row.index, field.columnIndex),
 															onFocusin: ($event) => $setup.setActiveFieldActions(row.index, field.columnIndex)
-														}, [createBaseVNode("span", _hoisted_21, [createBaseVNode(
+														}, [createBaseVNode("span", _hoisted_20, [createBaseVNode(
 															"span",
 															null,
 															toDisplayString(field.header),
 															1
 															/* TEXT */
-														), createBaseVNode("span", _hoisted_22, [field.specialIndexLocked ? (openBlock(), createBlock($setup["AcuBadge"], {
+														), createBaseVNode("span", _hoisted_21, [field.specialIndexLocked ? (openBlock(), createBlock($setup["AcuBadge"], {
 															key: 0,
 															variant: "warning",
 															title: "编码索引由系统维护；保存、AI 更新或行数变化时会按 AM 序列重排"
@@ -153704,11 +153727,11 @@ Expected function or array of functions, received type ${typeof value}.`
 															onPointerdown: withModifiers(($event) => $setup.startDataCellEditing(row.index, field.columnIndex), ["stop"]),
 															onClick: ($event) => $setup.startDataCellEditing(row.index, field.columnIndex),
 															onKeydown: [withKeys(withModifiers(($event) => $setup.startDataCellEditing(row.index, field.columnIndex), ["prevent"]), ["enter"]), withKeys(withModifiers(($event) => $setup.startDataCellEditing(row.index, field.columnIndex), ["prevent"]), ["space"])]
-														}, toDisplayString(field.value || "未填写"), 43, _hoisted_23))], 42, _hoisted_20);
+														}, toDisplayString(field.value || "未填写"), 43, _hoisted_22))], 42, _hoisted_19$1);
 													}),
 													128
 													/* KEYED_FRAGMENT */
-												))], 10, _hoisted_19$1);
+												))], 10, _hoisted_18$1);
 											}),
 											128
 											/* KEYED_FRAGMENT */
@@ -153717,13 +153740,13 @@ Expected function or array of functions, received type ${typeof value}.`
 									128
 									/* KEYED_FRAGMENT */
 								))])) : createCommentVNode("v-if", true),
-								createBaseVNode("div", _hoisted_24, [createBaseVNode(
+								createBaseVNode("div", _hoisted_23, [createBaseVNode(
 									"span",
-									_hoisted_25,
+									_hoisted_24,
 									toDisplayString($setup.dataRangeText),
 									1
 									/* TEXT */
-								), createBaseVNode("div", _hoisted_26, [createVNode($setup["AcuButton"], {
+								), createBaseVNode("div", _hoisted_25, [createVNode($setup["AcuButton"], {
 									size: "sm",
 									variant: "primary",
 									onClick: $setup.addRow
@@ -153752,16 +153775,16 @@ Expected function or array of functions, received type ${typeof value}.`
 						64
 						/* STABLE_FRAGMENT */
 					))],
-					512
-					/* NEED_PATCH */
+					2
+					/* CLASS */
 				),
-				createBaseVNode("footer", _hoisted_27, [createBaseVNode(
+				createBaseVNode("footer", _hoisted_26, [createBaseVNode(
 					"span",
 					null,
 					toDisplayString($setup.footerStatus),
 					1
 					/* TEXT */
-				), createBaseVNode("div", _hoisted_28, [
+				), createBaseVNode("div", _hoisted_27, [
 					createVNode($setup["AcuButton"], {
 						disabled: $setup.saveDisabled,
 						loading: $setup.visualizer.isSaving,
@@ -153851,7 +153874,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_HYDRATION */
 	);
     }
-    var VisualizerSurface = /*#__PURE__*/ _export_sfc(_sfc_main$1, [["render", _sfc_render$1], ["__scopeId", "data-v-feb3f59e"]]);
+    var VisualizerSurface = /*#__PURE__*/ _export_sfc(_sfc_main$1, [["render", _sfc_render$1], ["__scopeId", "data-v-95a112c0"]]);
 
     /**
      * appearance-store — 新 UI 外观偏好。

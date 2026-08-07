@@ -295,6 +295,44 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       this.assistantTurns = [];
       this.assistantRiskConfirmations = {};
     },
+    /** 删除单条 assistant turn，并清理它名下的风险确认键与悬空 latestResult。 */
+    removeAssistantTurn(turnId: string): void {
+      const target = String(turnId || '');
+      if (!target) return;
+      const removed = this.assistantTurns.find(turn => turn.id === target);
+      if (!removed) return;
+      this.assistantTurns = this.assistantTurns.filter(turn => turn.id !== target);
+      this.pruneAssistantRiskConfirmations();
+      this.syncAssistantLatestResult(removed);
+    },
+    /** 从指定 turn（含）起截断，用于「重新生成」丢弃后续历史。 */
+    truncateAssistantTurnsFrom(turnId: string): void {
+      const target = String(turnId || '');
+      const index = this.assistantTurns.findIndex(turn => turn.id === target);
+      if (index < 0) return;
+      const dropped = this.assistantTurns.slice(index);
+      this.assistantTurns = this.assistantTurns.slice(0, index);
+      this.pruneAssistantRiskConfirmations();
+      dropped.forEach(turn => this.syncAssistantLatestResult(turn));
+    },
+    /** 丢弃所有不再对应存活 turn 的风险确认键（复合键格式 `${turnId}:${index}`）。 */
+    pruneAssistantRiskConfirmations(): void {
+      const aliveIds = new Set(this.assistantTurns.map(turn => turn.id));
+      const next: Record<string, boolean> = {};
+      Object.keys(this.assistantRiskConfirmations || {}).forEach(key => {
+        const turnId = key.slice(0, key.lastIndexOf(':'));
+        if (turnId && aliveIds.has(turnId)) next[key] = this.assistantRiskConfirmations[key];
+      });
+      this.assistantRiskConfirmations = next;
+    },
+    /** 被删除的 turn 若正是 latestResult 的来源，则回退到最后一张存活 final turn。 */
+    syncAssistantLatestResult(removedTurn: VisualizerAssistantTurnState): void {
+      if (removedTurn.type !== 'final') return;
+      if (this.assistantLatestResult !== (removedTurn as any).result) return;
+      const lastFinal = [...this.assistantTurns].reverse().find(turn => turn.type === 'final') as any;
+      this.assistantLatestResult = lastFinal?.result || null;
+      this.assistantRounds = Array.isArray(lastFinal?.result?.rounds) ? [...lastFinal.result.rounds] : [];
+    },
     clearExternalRefreshConflict(): void {
       this.externalRevisionChanged = false;
     },

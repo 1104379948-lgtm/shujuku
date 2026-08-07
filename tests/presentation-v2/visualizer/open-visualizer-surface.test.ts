@@ -864,12 +864,11 @@ describe('openVisualizerSurface_ACU', () => {
     expect(surfaceSource).toContain('grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr))');
     expect(surfaceSource).toContain('acu-visualizer-surface__footer-actions :deep(.acu-btn)');
     expect(assistantSource).toContain('AcuDisclosureGroup');
-    expect(assistantSource).toContain('body-max-height="min(72vh, 680px)"');
     expect(assistantSource).toMatch(
-      /@media \(max-width: 767px\)[\s\S]*\.acu-viz-assistant__action-row :deep\(\.acu-btn\)[\s\S]*width: 100%;/,
+      /@media \(max-width: 767px\)[\s\S]*\.acu-viz-assistant__composer[\s\S]*flex-direction: column;[\s\S]*justify-content: flex-end;/,
     );
     expect(assistantSource).toMatch(
-      /\.acu-viz-assistant__disclosure\s*\{[\s\S]*?border: 1px solid var\(--acu-border\);[\s\S]*?border-radius: var\(--acu-radius-md\);[\s\S]*?background: var\(--acu-bg-1\);/,
+      /\.acu-viz-assistant__composer\s*\{[\s\S]*?border-top: 1px solid var\(--acu-border\);[\s\S]*?background: var\(--acu-bg-1\);/,
     );
     expect(assistantSource).toContain('@media (max-width: 480px)');
     expect(configSource).toMatch(

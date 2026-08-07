@@ -799,4 +799,156 @@ describe('useVisualizerAssistant', () => {
     };
     expect(getTurnApplyPayload(finalTurn as any)).toBeNull();
   });
+
+  it('deleteTurn 删除 final turn → latestResult 回退到上一张存活 final turn', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      draft: { summary: `草稿-${input.userRequest}` },
+    }));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '第一轮';
+    await assistant.run();
+    assistant.userRequest.value = '第二轮';
+    await assistant.run();
+
+    const finals = assistant.turns.value.filter(turn => turn.type === 'final') as any[];
+    expect(finals).toHaveLength(2);
+    expect((visualizer.assistantLatestResult as any)?.draft?.summary).toBe('草稿-第二轮');
+
+    const firstFinal = finals[0];
+    expect(assistant.deleteTurn(firstFinal.id)).toBe(true);
+    expect(assistant.turns.value.find(turn => turn.id === firstFinal.id)).toBeUndefined();
+    // latestResult 回退到第二张 final（仍存活）
+    expect((visualizer.assistantLatestResult as any)?.draft?.summary).toBe('草稿-第二轮');
+  });
+
+  it('deleteTurn 删除唯一 final turn → latestResult 变为 null、rounds 清空', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '生成';
+    await assistant.run();
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    expect(visualizer.assistantLatestResult).not.toBeNull();
+
+    expect(assistant.deleteTurn(finalTurn.id)).toBe(true);
+    expect(visualizer.assistantLatestResult).toBeNull();
+  });
+
+  it('deleteTurn 后该 turn 的 riskConfirmations 键被清理，其它 turn 的键不受影响', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = 'A轮';
+    await assistant.run();
+    assistant.userRequest.value = 'B轮';
+    await assistant.run();
+
+    const finals = assistant.turns.value.filter(turn => turn.type === 'final') as any[];
+    const [fa, fb] = finals;
+    assistant.setRiskConfirmation(fa.id, 0, true);
+    assistant.setRiskConfirmation(fb.id, 0, true);
+    expect(visualizer.assistantRiskConfirmations[`${fa.id}:0`]).toBe(true);
+    expect(visualizer.assistantRiskConfirmations[`${fb.id}:0`]).toBe(true);
+
+    assistant.deleteTurn(fa.id);
+    expect(visualizer.assistantRiskConfirmations[`${fa.id}:0`]).toBeUndefined();
+    expect(visualizer.assistantRiskConfirmations[`${fb.id}:0`]).toBe(true);
+  });
+
+  it('regenerateFromUserTurn 截断该 user turn 及之后记录，并以原需求重新调用 session runner', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '第二轮';
+    await assistant.run();
+    const beforeCount = assistant.turns.value.length;
+    const secondUser = assistant.turns.value.find(turn => turn.type === 'user') as any;
+    // 该 user turn 是唯一 user turn；截断后 turns 清空，再以原需求重跑
+    mockRunSession.mockClear();
+
+    const ok = await assistant.regenerateFromUserTurn(secondUser);
+    expect(ok).toBe(true);
+    // 截断后原 turn 全部移除，重新发起一次会话
+    expect(assistant.turns.value.find(turn => turn.id === secondUser.id)).toBeUndefined();
+    expect(mockRunSession).toHaveBeenCalledTimes(1);
+    expect(mockRunSession).toHaveBeenCalledWith(expect.objectContaining({ userRequest: '第二轮' }));
+    // 重新生成后产生新的 user + final
+    expect(assistant.turns.value.filter(turn => turn.type === 'user')).toHaveLength(1);
+    expect(beforeCount).toBeGreaterThan(0);
+  });
+
+  it('regenerateFromUserTurn 对非 user turn 返回 false 且不调用 runner', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '生成';
+    await assistant.run();
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    mockRunSession.mockClear();
+
+    expect(await assistant.regenerateFromUserTurn(finalTurn)).toBe(false);
+    expect(mockRunSession).not.toHaveBeenCalled();
+  });
+
+  it('isRunning 为 true 时 deleteTurn / regenerateFromUserTurn 均拒绝且不改动 turns', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '生成';
+    await assistant.run();
+    const before = assistant.turns.value.length;
+    const userTurn = assistant.turns.value.find(turn => turn.type === 'user') as any;
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    // 模拟运行中
+    visualizer.assistantIsRunning = true;
+
+    expect(assistant.deleteTurn(finalTurn.id)).toBe(false);
+    expect(await assistant.regenerateFromUserTurn(userTurn)).toBe(false);
+    expect(assistant.turns.value.length).toBe(before);
+    expect(assistant.turns.value.find(turn => turn.id === finalTurn.id)).toBeDefined();
+  });
+
 });

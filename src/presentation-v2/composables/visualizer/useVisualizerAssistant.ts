@@ -628,6 +628,33 @@ export function useVisualizerAssistant() {
     }
   }
 
+  /** 删除一条会话记录。运行中禁止删除，避免与 in-flight 会话写入竞争。 */
+  function deleteTurn(turnId: string): boolean {
+    if (isRunning.value) {
+      toastStore.warning('会话运行中，暂不能删除记录。', { muteable: false });
+      return false;
+    }
+    visualizer.removeAssistantTurn(turnId);
+    return true;
+  }
+
+  /**
+   * 从某条用户需求重新生成：丢弃该条及其后的全部记录，用原需求重新发起会话。
+   * 复用 run() 的全部前置校验与闸门，不新增旁路。
+   */
+  async function regenerateFromUserTurn(turn: VisualizerAssistantTurn): Promise<boolean> {
+    if (isRunning.value) {
+      toastStore.warning('会话运行中，暂不能重新生成。', { muteable: false });
+      return false;
+    }
+    if (turn.type !== 'user') return false;
+    const request = String(turn.userRequest || '').trim();
+    if (!request) return false;
+    visualizer.truncateAssistantTurnsFrom(turn.id);
+    userRequest.value = request;
+    return run();
+  }
+
   function cancel(): void {
     guardController.cancel();
   }
@@ -753,6 +780,22 @@ export function useVisualizerAssistant() {
     return turn.result.draft.summary || '无摘要';
   }
 
+  /** 对 final turn 生成会话摘要（读 turn.result.session，而非 latestResult）。 */
+  function getTurnSessionSummary(turn: VisualizerAssistantTurn): string {
+    if (turn.type !== 'final') return '';
+    const session = turn.result.session;
+    if (!session) return '';
+    const stopReasonLabel: Record<string, string> = {
+      empty_operations: '空操作停止',
+      repeated_working_fingerprint: '重复状态停止',
+      repair_retry_capped: '修复重试已达上限',
+      max_rounds: '达到轮次上限',
+    };
+    const repairPart =
+      session.repairRetriesUsed > 0 ? ` · 修复 ${session.repairRetriesUsed} 次` : '';
+    return `会话${session.roundsExecuted}轮${repairPart} · ${stopReasonLabel[session.stopReason] || session.stopReason}`;
+  }
+
   function getTurnWarnings(turn: VisualizerAssistantTurn): string[] {
     if (turn.type === 'round') return asList(turn.roundData.draft.warnings).map(item => String(item));
     if (turn.type === 'final') return asList(turn.result.draft.warnings).map(item => String(item));
@@ -827,9 +870,12 @@ export function useVisualizerAssistant() {
     applyTurnDraft,
     syncApiPresetFromCurrentSheet,
     runWithRepairFeedback,
+    deleteTurn,
+    regenerateFromUserTurn,
     getTurnRawText,
     getTurnValidationError,
     getTurnSummary,
+    getTurnSessionSummary,
     getTurnWarnings,
     getTurnDiffGroups,
   };
