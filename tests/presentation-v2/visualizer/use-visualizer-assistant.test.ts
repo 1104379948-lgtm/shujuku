@@ -65,9 +65,9 @@ function buildResult(input: any, overrides: any = {}) {
     session: {
       originalBaseFingerprint: baseFingerprint,
       finalWorkingFingerprint: 'next',
-      stopReason: 'max_rounds',
+      stopReason: 'success',
       roundsExecuted: 1,
-      maxRounds: 3,
+      maxRounds: 1,
       lastFailure: null,
       repairRetriesUsed: 0,
       maxRepairRetries: 1,
@@ -394,9 +394,9 @@ describe('useVisualizerAssistant', () => {
 
     const remountedAssistant = useVisualizerAssistant();
     expect(remountedAssistant.latestResult.value?.draft.summary).toBe('已生成草稿');
-    expect(remountedAssistant.turns.value.map(turn => turn.type)).toEqual(['user', 'round', 'final']);
+    expect(remountedAssistant.turns.value.map(turn => turn.type)).toEqual(['user', 'final']);
     expect(remountedAssistant.getTurnSummary(remountedAssistant.turns.value[0])).toBe('新增状态列');
-    expect(remountedAssistant.getTurnWarnings(remountedAssistant.turns.value[1])).toContain('请检查新增字段是否符合预期');
+    expect(remountedAssistant.getTurnWarnings(remountedAssistant.turns.value[1])).toEqual([]);
     expect(remountedAssistant.getTurnDiffGroups(remountedAssistant.turns.value[1]).map(group => group.title).join('；')).toContain('当前锚点表内容');
     expect(remountedAssistant.canApply.value).toBe(true);
     expect(remountedAssistant.applyLatestDraft()).toBe(true);
@@ -509,7 +509,7 @@ describe('useVisualizerAssistant', () => {
         finalWorkingFingerprint: 'next',
         stopReason: 'repair_retry_capped',
         roundsExecuted: 0,
-        maxRounds: 3,
+        maxRounds: 1,
         repairRetriesUsed: 1,
         maxRepairRetries: 1,
         lastErrorMessage: 'AI 响应中未找到 <templateAssistantDraft> 标签',
@@ -531,6 +531,43 @@ describe('useVisualizerAssistant', () => {
     expect(assistant.lastFailure.value?.rawText).toBe('这只是一段解释文字');
     // 失败时无合法草稿 → 不可应用
     expect(assistant.canApply.value).toBe(false);
+  });
+
+  it('会话被取消（StoppedError）时：不写入 final turn / latestResult，只追加错误 turn（停止按钮语义）', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    const { TemplateAssistantSessionStoppedError_ACU } = await import('../../../src/service/template-assistant/service');
+    // 真实时序：AI 返回 → onRoundComplete 已触发（service 会先写状态）→ 回调后 service 因
+    // guard.cancel 抛出 StoppedError → UI catch。模拟 service 的这一行为。
+    mockRunSession.mockImplementation(async (input: any) => {
+      const round = {
+        round: 1,
+        userRequest: input.userRequest,
+        draft: { protocolVersion: 2, requestId: 'req-cancel', atomic: true, selectedSheetKey: input.currentSheetKey, summary: '取消前草稿', warnings: [] },
+        aiRawText: '<templateAssistantDraft>{"round":1}</templateAssistantDraft>',
+        messages: [],
+        perRoundCompileResult: {},
+        workingFingerprint: 'round-fp',
+      };
+      input.onRoundComplete?.({ round, rounds: [round], maxRounds: 1 });
+      throw new TemplateAssistantSessionStoppedError_ACU('cancelled');
+    });
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '生成草稿';
+    await assistant.run();
+
+    // 真实取消时序下：round 状态可能已同步（assistantRounds），但绝不产生 final turn，
+    // latestResult 保持 null，只追加错误 turn。
+    expect(assistant.turns.value.map(turn => turn.type)).toEqual(['user', 'error']);
+    expect(assistant.latestResult.value).toBeNull();
+    expect(assistant.isRunning.value).toBe(false);
   });
 
   it('runWithRepairFeedback 会把修改意见拼进 userRequest 重新发起会话', async () => {
@@ -622,10 +659,8 @@ describe('useVisualizerAssistant', () => {
 
     const turns = assistant.turns.value;
     const userTurn = turns[0];
-    const roundTurn = turns[1];
-    const finalTurn = turns[2];
+    const finalTurn = turns[1];
     expect(getTurnApplyPayload(userTurn)).toBeNull();
-    expect(getTurnApplyPayload(roundTurn)?.candidateData.sheet_a.content[1][2]).toBe('警觉');
     expect(getTurnApplyPayload(finalTurn)?.candidateData.sheet_a.content[1][2]).toBe('警觉');
 
     // 空 operations 的 final → null

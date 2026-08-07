@@ -69,6 +69,7 @@ import {
   getTemplateAssistantApplyBaselineFingerprint_ACU,
   parseTemplateAssistantDraft_ACU,
   runTemplateAssistantSession_ACU,
+  TemplateAssistantSessionStoppedError_ACU,
   validateTemplateAssistantDraft_ACU,
 } from '../../../src/service/template-assistant/service';
 
@@ -496,164 +497,35 @@ describe('template assistant service', () => {
     }));
   });
 
-  it('session loop 每轮完成后都会触发一次 onRoundComplete', async () => {
-    const tempData = buildTempData_ACU();
-    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
-    const roundOneCandidateData = {
-      ...tempData,
-      sheet_b: {
-        uid: 'sheet_b',
-        name: 'B表',
-        orderNo: 1,
-        content: [['row_id', '标题']],
-        sourceData: { note: 'b', initNode: '', insertNode: '', updateNode: '', deleteNode: '' },
-        updateConfig: { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1, sendLatestRows: -1, groupId: -1 },
-        exportConfig: { enabled: false, splitByRow: false, entryName: 'B表', entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '', extraIndexEnabled: false, extraIndexEntryName: 'B表-索引', extraIndexColumns: [], extraIndexColumnModes: {}, extraIndexInjectionTemplate: '', entryPlacement: { position: 'at_depth_as_system', depth: 2, order: 10000 }, extraIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 10010 }, fixedEntryPlacement: { position: 'at_depth_as_system', depth: 2, order: 99990 }, fixedIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 99991 } },
-      },
-    } as any;
-    const fpAfterRoundOne = buildTemplateAssistantFingerprint_ACU(roundOneCandidateData);
-    const onRoundComplete = vi.fn();
 
-    mockCallAIWithPreset
-      .mockResolvedValueOnce(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-session-round-1","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"第一轮","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_a","patch":{"contextDepth":8}}]}</templateAssistantDraft>`)
-      .mockResolvedValueOnce(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-session-round-2","baseFingerprint":"${fpAfterRoundOne}","atomic":true,"selectedSheetKey":"sheet_b","summary":"第二轮","warnings":[],"operations":[]}</templateAssistantDraft>`);
 
-    mockCompileTemplateAssistantDraft
-      .mockImplementationOnce(() => ({
-        candidateData: roundOneCandidateData,
-        orderedSheetKeys: ['sheet_a', 'sheet_b'],
-        deletedSheetKeys: [],
-        focusSheetKey: 'sheet_b',
-        diff: { addedSheets: [{ sheetKey: 'sheet_b', name: 'B表' }], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-        highRiskItems: [],
-        lockChanges: [],
-        schemaMigrationIntents: {},
-      }))
-      .mockImplementationOnce((input: any) => ({
-        candidateData: input.tempData,
-        orderedSheetKeys: input.sheetOrder || ['sheet_a', 'sheet_b'],
-        deletedSheetKeys: [],
-        focusSheetKey: input.currentSheetKey,
-        diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-        highRiskItems: [],
-        lockChanges: [],
-        schemaMigrationIntents: {},
-      }));
-
-    const result = await runTemplateAssistantSession_ACU({
-      tempData,
-      currentSheetKey: 'sheet_a',
-      sheetOrder: ['sheet_a'],
-      userRequest: '连续处理',
-      priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
-      maxRounds: 3,
-      onRoundComplete,
-    } as any);
-
-    expect(onRoundComplete).toHaveBeenCalledTimes(2);
-    expect(onRoundComplete.mock.calls[0][0].round.round).toBe(1);
-    expect(onRoundComplete.mock.calls[0][0].round.draft.summary).toBe('第一轮');
-    expect(onRoundComplete.mock.calls[0][0].rounds).toHaveLength(1);
-    expect(onRoundComplete.mock.calls[1][0].round.round).toBe(2);
-    expect(onRoundComplete.mock.calls[1][0].round.draft.summary).toBe('第二轮');
-    expect(onRoundComplete.mock.calls[1][0].rounds).toHaveLength(2);
-    expect(result.session.roundsExecuted).toBe(2);
-    expect(result.session.stopReason).toBe('empty_operations');
-  });
-
-  it('第一次对话（无 priorTurns）时，即使 maxRounds=3 也只执行 1 轮', async () => {
+  it('改表助手是一问一答：无论有无 priorTurns，一次提交只执行 1 轮', async () => {
     const tempData = buildTempData_ACU();
     const fp = buildTemplateAssistantFingerprint_ACU(tempData);
     mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-first-round","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"第一轮","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_a","patch":{"contextDepth":8}}]}</templateAssistantDraft>`);
 
+    // 有历史：传入 maxRounds=3 也必须只跑 1 轮
     const result = await runTemplateAssistantSession_ACU({
       tempData,
       currentSheetKey: 'sheet_a',
       sheetOrder: ['sheet_a'],
-      userRequest: '第一次对话需求',
+      userRequest: '第二次对话需求',
+      priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
       maxRounds: 3,
     });
 
-    // 无 priorTurns → 强制单轮，不自动多轮试验
     expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
     expect(result.rounds).toHaveLength(1);
     expect(result.session.roundsExecuted).toBe(1);
     expect(result.session.maxRounds).toBe(1);
-    // 默认 mock compile 返回候选数据与输入一致 → fingerprint 重复而单轮停止
-    expect(result.session.stopReason).toBe('repeated_working_fingerprint');
+    expect(result.session.stopReason).toBe('success');
+    // 单轮：compileResult 直接取该轮结果（与 generateTemplateAssistantDraft_ACU 语义一致）
+    expect(result.compileResult).toBe(result.rounds[0]?.perRoundCompileResult);
+    expect(result.session.finalWorkingFingerprint).toBe(buildTemplateAssistantFingerprint_ACU(result.compileResult.candidateData || tempData));
   });
 
 
-  it('session loop 拒绝同一张表跨轮重复 schema migration', async () => {
-    const tempData = buildTempData_ACU();
-    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
-    const afterRoundOne = {
-      ...tempData,
-      sheet_a: {
-        ...tempData.sheet_a,
-        updateConfig: { ...tempData.sheet_a.updateConfig, contextDepth: 1 },
-      },
-    };
-    const fpAfterRoundOne = buildTemplateAssistantFingerprint_ACU(afterRoundOne);
-    const afterRoundTwo = {
-      ...afterRoundOne,
-      sheet_a: {
-        ...afterRoundOne.sheet_a,
-        updateConfig: { ...afterRoundOne.sheet_a.updateConfig, contextDepth: 2 },
-      },
-    };
-    mockCallAIWithPreset
-      .mockResolvedValueOnce(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-schema-round-1","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"第一轮","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_a","patch":{"contextDepth":1}}]}</templateAssistantDraft>`)
-      .mockResolvedValueOnce(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-schema-round-2","baseFingerprint":"${fpAfterRoundOne}","atomic":true,"selectedSheetKey":"sheet_a","summary":"第二轮","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_a","patch":{"contextDepth":2}}]}</templateAssistantDraft>`);
-    mockCompileTemplateAssistantDraft
-      .mockImplementationOnce(() => ({
-        candidateData: afterRoundOne,
-        orderedSheetKeys: ['sheet_a'],
-        deletedSheetKeys: [],
-        focusSheetKey: 'sheet_a',
-        diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [{ sheetKey: 'sheet_a', name: 'A表', changes: ['第一轮 schema'] }], patchedLockSheets: [], globalInjectionChanged: false },
-        highRiskItems: [],
-        lockChanges: [],
-        schemaMigrationIntents: {},
-      }))
-      .mockImplementationOnce(() => ({
-        candidateData: afterRoundTwo,
-        orderedSheetKeys: ['sheet_a'],
-        deletedSheetKeys: [],
-        focusSheetKey: 'sheet_a',
-        diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [{ sheetKey: 'sheet_a', name: 'A表', changes: ['第二轮 schema'] }], patchedLockSheets: [], globalInjectionChanged: false },
-        highRiskItems: [],
-        lockChanges: [],
-        schemaMigrationIntents: {},
-      }));
 
-    await expect(runTemplateAssistantSession_ACU({
-      tempData,
-      currentSheetKey: 'sheet_a',
-      sheetOrder: ['sheet_a'],
-      userRequest: '分两轮修改结构',
-      priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
-      maxRounds: 2,
-    })).rejects.toThrow(/同一张表跨轮重复 schema migration/);
-  });
-
-  it('session loop 在 working fingerprint 重复时停止', async () => {
-    const tempData = buildTempData_ACU();
-    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
-    mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-session-repeat","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"继续改","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_a","patch":{"contextDepth":8}}]}</templateAssistantDraft>`);
-
-    const result = await runTemplateAssistantSession_ACU({
-      tempData,
-      currentSheetKey: 'sheet_a',
-      sheetOrder: ['sheet_a'],
-      userRequest: '继续优化当前表',
-      maxRounds: 3,
-    });
-
-    expect(result.session.stopReason).toBe('repeated_working_fingerprint');
-    expect(result.session.roundsExecuted).toBe(1);
-    expect(result.rounds[0]?.workingFingerprint).toBe(fp);
-  });
 
   it('session loop 在修复重试耗尽时停止并保留错误信息', async () => {
     mockCallAIWithPreset.mockRejectedValue(new Error('mock ai failure'));
@@ -663,7 +535,7 @@ describe('template assistant service', () => {
       currentSheetKey: 'sheet_a',
       sheetOrder: ['sheet_a'],
       userRequest: '请修复并继续',
-      maxRounds: 2,
+      maxRounds: 1,
       maxRepairRetries: 1,
     });
 
@@ -693,7 +565,7 @@ describe('template assistant service', () => {
         finalWorkingFingerprint: 'acu-struct:working',
         stopReason: 'empty_operations',
         roundsExecuted: 0,
-        maxRounds: 3,
+        maxRounds: 1,
         lastFailure: null,
         repairRetriesUsed: 0,
         maxRepairRetries: 1,
@@ -712,7 +584,7 @@ describe('template assistant service', () => {
         finalWorkingFingerprint: 'acu-struct:working',
         stopReason: 'empty_operations',
         roundsExecuted: 0,
-        maxRounds: 3,
+        maxRounds: 1,
         lastFailure: null,
         repairRetriesUsed: 0,
         maxRepairRetries: 1,
@@ -815,53 +687,19 @@ describe('template assistant service', () => {
   });
 
 
-  it('session loop 在 guard.cancel() 后于下一轮检查点中断（停止按钮语义）', async () => {
+
+
+  it('session loop 在 guard.cancel() 后中断：不返回成功结果，抛出停止错误（停止按钮语义）', async () => {
     const tempData = buildTempData_ACU();
     const fp = buildTemplateAssistantFingerprint_ACU(tempData);
-    const roundOneCandidateData = {
-      ...tempData,
-      sheet_b: {
-        uid: 'sheet_b',
-        name: 'B表',
-        orderNo: 1,
-        content: [['row_id', '标题']],
-        sourceData: { note: 'b', initNode: '', insertNode: '', updateNode: '', deleteNode: '' },
-        updateConfig: { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1, sendLatestRows: -1, groupId: -1 },
-        exportConfig: { enabled: false, splitByRow: false, entryName: 'B表', entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '', extraIndexEnabled: false, extraIndexEntryName: 'B表-索引', extraIndexColumns: [], extraIndexColumnModes: {}, extraIndexInjectionTemplate: '', entryPlacement: { position: 'at_depth_as_system', depth: 2, order: 10000 }, extraIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 10010 }, fixedEntryPlacement: { position: 'at_depth_as_system', depth: 2, order: 99990 }, fixedIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 99991 } },
-      },
-    } as any;
-    const fpAfterRoundOne = buildTemplateAssistantFingerprint_ACU(roundOneCandidateData);
-
-    mockCallAIWithPreset
-      .mockResolvedValueOnce(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-cancel-1","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"第一轮","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_a","patch":{"contextDepth":8}}]}</templateAssistantDraft>`)
-      .mockResolvedValueOnce(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-cancel-2","baseFingerprint":"${fpAfterRoundOne}","atomic":true,"selectedSheetKey":"sheet_b","summary":"第二轮","warnings":[],"operations":[]}</templateAssistantDraft>`);
-
-    mockCompileTemplateAssistantDraft
-      .mockImplementationOnce(() => ({
-        candidateData: roundOneCandidateData,
-        orderedSheetKeys: ['sheet_a', 'sheet_b'],
-        deletedSheetKeys: [],
-        focusSheetKey: 'sheet_b',
-        diff: { addedSheets: [{ sheetKey: 'sheet_b', name: 'B表' }], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-        highRiskItems: [],
-        lockChanges: [],
-        schemaMigrationIntents: {},
-      }))
-      .mockImplementationOnce((input: any) => ({
-        candidateData: input.tempData,
-        orderedSheetKeys: input.sheetOrder || ['sheet_a', 'sheet_b'],
-        deletedSheetKeys: [],
-        focusSheetKey: input.currentSheetKey,
-        diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-        highRiskItems: [],
-        lockChanges: [],
-        schemaMigrationIntents: {},
-      }));
+    mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-cancel-1","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"第一轮","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_a","patch":{"contextDepth":8}}]}</templateAssistantDraft>`);
 
     const guard = createTemplateAssistantSessionGuard_ACU();
     const runGuard = guard.createRunGuard();
     let cancelled = false;
 
+    // 单轮：onRoundComplete 在 AI 返回后触发。回调中 cancel 后，
+    // service 必须在收尾前再次确认会话活动，并抛出停止错误，而不是提交成功结果。
     await expect(runTemplateAssistantSession_ACU({
       tempData,
       currentSheetKey: 'sheet_a',
@@ -870,15 +708,14 @@ describe('template assistant service', () => {
       priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
       maxRounds: 3,
       guard: runGuard,
-      onRoundComplete(_payload: any) {
+      onRoundComplete() {
         if (!cancelled) {
           cancelled = true;
           guard.cancel();
         }
       },
-    } as any)).rejects.toBeInstanceOf(Error);
+    } as any)).rejects.toBeInstanceOf(TemplateAssistantSessionStoppedError_ACU);
 
-    // cancel 后 isCancelled 为 true，且 session 不再继续
     expect(runGuard.isCancelled?.()).toBe(true);
     expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
   });

@@ -62,7 +62,6 @@ type AssistantUiState = {
     transcript: ChatTurn[];
     pendingScrollTop: number;
     pendingScrollMode: 'preserve' | 'stick-bottom';
-    maxRoundsInput: string;
     tableApiPreset: string;
     guardController: TemplateAssistantSessionGuardController_ACU | null;
     runningSessionId: number;
@@ -76,7 +75,6 @@ const assistantUiState_ACU: AssistantUiState = {
     transcript: [],
     pendingScrollTop: 0,
     pendingScrollMode: 'preserve',
-    maxRoundsInput: '3',
     tableApiPreset: '',
     guardController: null,
     runningSessionId: 0,
@@ -88,7 +86,6 @@ function generateTurnId_ACU() {
 
 const NEAR_BOTTOM_THRESHOLD_ACU = 50;
 
-const DEFAULT_MAX_ROUNDS_ACU = 3;
 const MOBILE_VIEWPORT_MAX_ACU = 899;
 const COMPACT_VIEWPORT_MAX_ACU = 1279;
 
@@ -279,13 +276,6 @@ function buildAssistantBubbleStyle_ACU(role: 'user' | 'assistant' | 'error', mod
     return `${base} border-radius:16px 16px 4px 16px; background:color-mix(in srgb, var(--vis-accent) 12%, var(--vis-bg-light)); border:1px solid color-mix(in srgb, var(--vis-accent) 38%, var(--vis-border-color));`;
 }
 
-function normalizeMaxRounds_ACU(input: string): number {
-    const normalized = Number(input);
-    if (!Number.isFinite(normalized)) return DEFAULT_MAX_ROUNDS_ACU;
-    const integer = Math.floor(normalized);
-    return integer > 0 ? integer : DEFAULT_MAX_ROUNDS_ACU;
-}
-
 function isNearBottom_ACU(container: HTMLElement | null | undefined): boolean {
     if (!container) return true;
     const scrollTop = container.scrollTop;
@@ -408,7 +398,8 @@ function buildAssistantRoundProgressLabel_ACU(turn: ChatTurnAssistant) {
     if (isFinalAssistantTurn_ACU(turn)) {
         return buildSessionMetaSummary_ACU(turn.result);
     }
-    return `第 ${turn.roundData.round} / ${turn.maxRounds} 轮`;
+    // 改表助手一问一答：单轮结果即最终结果，round turn 不再显示轮次进度。
+    return 'AI 助手';
 }
 
 function buildPriorTurnsFromTranscript_ACU(transcript: ChatTurn[]): Array<{ user: string; assistant?: string }> {
@@ -492,12 +483,8 @@ function buildSessionStopReasonLabel_ACU(result: TemplateAssistantSessionResult_
     switch (stopReason) {
         case 'empty_operations':
             return '空操作停止';
-        case 'repeated_working_fingerprint':
-            return '重复状态停止';
         case 'repair_retry_capped':
             return '修复重试已达上限';
-        case 'max_rounds':
-            return '达到轮次上限';
         default:
             return '';
     }
@@ -505,10 +492,9 @@ function buildSessionStopReasonLabel_ACU(result: TemplateAssistantSessionResult_
 
 function buildSessionMetaSummary_ACU(result: TemplateAssistantSessionResult_ACU) {
     if (!result.session) return '';
-    const parts = [`会话${result.session.roundsExecuted}轮`];
     const stopReasonLabel = buildSessionStopReasonLabel_ACU(result);
-    if (stopReasonLabel) parts.push(stopReasonLabel);
-    return parts.join(' · ');
+    const repairPart = result.session.repairRetriesUsed > 0 ? ` · 修复 ${result.session.repairRetriesUsed} 次` : '';
+    return `${stopReasonLabel}${repairPart}`;
 }
 
 function countDiffChanges_ACU(diff: TemplateAssistantDiff_ACU): number {
@@ -614,7 +600,7 @@ function buildAssistantDetailContent_ACU(turn: ChatTurnAssistant): string {
     const progressSummary = buildAssistantRoundProgressLabel_ACU(turn);
 
     if (progressSummary) {
-        sections.push(`<div class="acu-assistant-diff-block"><strong>${isFinalAssistantTurn_ACU(turn) ? '会话信息' : '轮次信息'}</strong><div>${escapeHtml_ACU(progressSummary)}${isFinalAssistantTurn_ACU(turn) ? '' : '（中间结果，暂不可应用）'}</div></div>`);
+        sections.push(`<div class="acu-assistant-diff-block"><strong>${isFinalAssistantTurn_ACU(turn) ? '会话信息' : '结果信息'}</strong><div>${escapeHtml_ACU(progressSummary)}${isFinalAssistantTurn_ACU(turn) ? '' : '（中间结果，暂不可应用）'}</div></div>`);
     }
     
     // 警告部分
@@ -657,7 +643,7 @@ function renderAssistantTurn_ACU(turn: ChatTurnAssistant, isLatest: boolean, mod
     const applyHtml = isLatest && isFinalAssistantTurn_ACU(turn)
         ? `<button id="acu-vis-assistant-apply" class="acu-btn-primary" data-turn-id="${escapeHtml_ACU(turn.id)}" ${applyDisabled ? 'disabled' : ''}>应用到编辑器</button>`
         : '';
-    const turnLabel = isFinalAssistantTurn_ACU(turn) ? 'AI 助手' : `AI 助手 · 第 ${turn.roundData.round} / ${turn.maxRounds} 轮`;
+    const turnLabel = 'AI 助手';
 
     return `
         <div class="acu-chat-turn acu-chat-turn-assistant" data-turn-id="${escapeHtml_ACU(turn.id)}" style="display:flex; justify-content:flex-start;">
@@ -748,10 +734,6 @@ function bindEvents_ACU() {
         }
     });
 
-    $host.find('#acu-vis-assistant-max-rounds').on('input', function() {
-        assistantUiState_ACU.maxRoundsInput = String(jQuery_API_ACU(this).val() || '');
-    });
-
     $host.find('#acu-vis-assistant-api-preset').on('change', function() {
         assistantUiState_ACU.tableApiPreset = String(jQuery_API_ACU(this).val() || '').trim();
     });
@@ -789,7 +771,6 @@ function bindEvents_ACU() {
                 userRequest: userRequest,
                 priorTurns: priorTurns,
                 tableApiPreset: assistantUiState_ACU.tableApiPreset,
-                maxRounds: normalizeMaxRounds_ACU(assistantUiState_ACU.maxRoundsInput),
                 guard: assistantUiState_ACU.guardController?.createRunGuard() || null,
                 onRoundComplete: (progress: TemplateAssistantSessionProgress_ACU) => {
                     if (capturedSessionId !== assistantUiState_ACU.runningSessionId) return;
@@ -925,7 +906,6 @@ export function resetVisualizerTemplateAssistantState_ACU() {
     assistantUiState_ACU.isGenerating = false;
     assistantUiState_ACU.pendingScrollTop = 0;
     assistantUiState_ACU.pendingScrollMode = 'preserve';
-    assistantUiState_ACU.maxRoundsInput = '3';
     syncAssistantTableApiPreset_ACU();
     invalidateActiveSession_ACU();
     assistantUiState_ACU.guardController = null;
@@ -1026,10 +1006,6 @@ export function renderVisualizerTemplateAssistantPanel_ACU() {
                 </div>
             </div>
             <div class="acu-vis-assistant-footer" style="${buildAssistantFooterStyle_ACU(mode)}">
-                <div class="acu-assistant-control-row acu-assistant-max-rounds-row" style="${buildAssistantControlRowStyle_ACU(mode)}">
-                    <label for="acu-vis-assistant-max-rounds" style="font-size:12px; opacity:0.78; white-space:nowrap;">最大轮次</label>
-                    <input id="acu-vis-assistant-max-rounds" type="number" min="1" class="acu-form-input" style="${mode === 'fullscreen-overlay' ? 'width:100%; text-align:left;' : 'width:60px; text-align:center;'}" value="${escapeHtml_ACU(assistantUiState_ACU.maxRoundsInput)}">
-                </div>
                 <div class="acu-assistant-control-row acu-assistant-api-preset-row" style="${buildAssistantControlRowStyle_ACU(mode)}">
                     <label for="acu-vis-assistant-api-preset" style="font-size:12px; opacity:0.78; white-space:nowrap;">API预设</label>
                     <select id="acu-vis-assistant-api-preset" class="acu-form-input" style="flex:1; min-width:0; ${mode === 'fullscreen-overlay' ? 'width:100%;' : ''}">

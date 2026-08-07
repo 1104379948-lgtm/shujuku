@@ -102,7 +102,6 @@ interface VisualizerState {
   externalRefreshTick: number;
   entrySnapshot: VisualizerEntrySnapshot | null;
   assistantUserRequest: string;
-  assistantMaxRounds: number;
   assistantTableApiPreset: string;
   assistantIsRunning: boolean;
   assistantErrorMessage: string;
@@ -187,7 +186,6 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
     externalRefreshTick: 0,
     entrySnapshot: null,
     assistantUserRequest: '',
-    assistantMaxRounds: 3,
     assistantTableApiPreset: '',
     assistantIsRunning: false,
     assistantErrorMessage: '',
@@ -583,7 +581,6 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       this.isSaving = false;
       this.entrySnapshot = null;
       this.assistantUserRequest = '';
-      this.assistantMaxRounds = 3;
       this.assistantTableApiPreset = '';
       this.clearAssistantDraftState();
       return {

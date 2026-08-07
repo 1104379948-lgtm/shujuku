@@ -292,10 +292,6 @@ export function useVisualizerAssistant() {
     get: () => visualizer.assistantUserRequest,
     set: value => { visualizer.assistantUserRequest = String(value || ''); },
   });
-  const maxRounds = computed({
-    get: () => visualizer.assistantMaxRounds,
-    set: value => { visualizer.assistantMaxRounds = Math.max(1, Math.floor(Number(value) || 1)); },
-  });
   const tableApiPreset = computed({
     get: () => visualizer.assistantTableApiPreset,
     set: value => { visualizer.assistantTableApiPreset = String(value || ''); },
@@ -370,13 +366,11 @@ export function useVisualizerAssistant() {
     if (!session) return '';
     const stopReasonLabel: Record<string, string> = {
       empty_operations: '空操作停止',
-      repeated_working_fingerprint: '重复状态停止',
       repair_retry_capped: '修复重试已达上限',
-      max_rounds: '达到轮次上限',
     };
     const repairPart =
       session.repairRetriesUsed > 0 ? ` · 修复 ${session.repairRetriesUsed} 次` : '';
-    return `会话${session.roundsExecuted}轮${repairPart} · ${stopReasonLabel[session.stopReason] || session.stopReason}`;
+    return `${stopReasonLabel[session.stopReason] || session.stopReason}${repairPart}`;
   });
 
   const lastFailure = computed<TemplateAssistantFailureInfo_ACU | null>(() => {
@@ -572,21 +566,12 @@ export function useVisualizerAssistant() {
         userRequest: request,
         priorTurns: buildPriorTurns(turns.value, requestSheetKey),
         tableApiPreset: tableApiPreset.value,
-        maxRounds: maxRounds.value,
         guard: guardController.createRunGuard(),
         onRoundComplete(progress) {
           if (requestSheetKey !== visualizer.currentSheetKey) return;
+          // 一问一答：单轮即最终，round 与 final 是同一份成功结果。
+          // 不创建独立 round turn（避免一条请求出现两条 AI 消息），仅同步轮次状态供摘要使用。
           visualizer.assistantRounds = [...progress.rounds];
-          appendTurn({
-            id: createTurnId('round'),
-            type: 'round',
-            round: progress.round.round,
-            maxRounds: progress.maxRounds,
-            roundData: progress.round,
-            anchorSheetKey: getRoundAnchorSheetKey(progress.round) || requestSheetKey,
-            createdAt: Date.now(),
-            baselineFingerprint: sessionBaselineFingerprint,
-          });
         },
       });
       if (requestSheetKey !== visualizer.currentSheetKey) {
@@ -790,13 +775,11 @@ export function useVisualizerAssistant() {
     if (!session) return '';
     const stopReasonLabel: Record<string, string> = {
       empty_operations: '空操作停止',
-      repeated_working_fingerprint: '重复状态停止',
       repair_retry_capped: '修复重试已达上限',
-      max_rounds: '达到轮次上限',
     };
     const repairPart =
       session.repairRetriesUsed > 0 ? ` · 修复 ${session.repairRetriesUsed} 次` : '';
-    return `会话${session.roundsExecuted}轮${repairPart} · ${stopReasonLabel[session.stopReason] || session.stopReason}`;
+    return `${stopReasonLabel[session.stopReason] || session.stopReason}${repairPart}`;
   }
 
   function getTurnWarnings(turn: VisualizerAssistantTurn): string[] {
@@ -835,7 +818,6 @@ export function useVisualizerAssistant() {
 
   return {
     userRequest,
-    maxRounds,
     tableApiPreset,
     apiPresetOptions,
     anchorSheetLabel,

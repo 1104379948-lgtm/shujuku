@@ -218,9 +218,8 @@ export interface TemplateAssistantGenerateResult_ACU {
 }
 
 export type TemplateAssistantSessionStopReason_ACU =
-    | 'max_rounds'
+    | 'success'
     | 'empty_operations'
-    | 'repeated_working_fingerprint'
     | 'repair_retry_capped';
 
 export type TemplateAssistantSessionAbortReason_ACU = 'cancelled' | 'stale';
@@ -241,12 +240,13 @@ export interface TemplateAssistantSessionMeta_ACU {
     stopReason: TemplateAssistantSessionStopReason_ACU;
     /**
      * 会话的最终失败信息。
-     * - 会话最终成功（任一 round 产出可应用 draft）时为 null；
+     * - 会话最终成功（单轮产出可应用 draft）时为 null；
      * - 仅当会话以失败告终（如 repair_retry_capped 或最终 preflight 失败）时携带失败详情。
      * 面板据此决定是否展示失败横幅与「携带修改意见重试」入口。
      */
     lastFailure: TemplateAssistantFailureInfo_ACU | null;
     roundsExecuted: number;
+    /** 固定为 1：改表助手是一问一答，不再自动多轮。 */
     maxRounds: number;
     repairRetriesUsed: number;
     maxRepairRetries: number;
@@ -280,6 +280,9 @@ export interface TemplateAssistantSessionGuardController_ACU {
 }
 
 export interface TemplateAssistantSessionRunInput_ACU extends TemplateAssistantGenerateInput_ACU {
+    /**
+     * @deprecated 改表助手已固定为一问一答（恒 1 轮），此参数被接收但忽略，仅为兼容旧调用方保留。
+     */
     maxRounds?: number;
     maxRepairRetries?: number;
     onRoundComplete?: (progress: TemplateAssistantSessionProgress_ACU) => void;
@@ -296,7 +299,6 @@ export class TemplateAssistantSessionStoppedError_ACU extends Error {
     }
 }
 
-const DEFAULT_TEMPLATE_ASSISTANT_MAX_ROUNDS_ACU = 3;
 const DEFAULT_TEMPLATE_ASSISTANT_MAX_REPAIR_RETRIES_ACU = 1;
 
 /**
@@ -1473,14 +1475,9 @@ function buildUserPrompt_ACU(input: TemplateAssistantGenerateInput_ACU, baseFing
 
 function buildSessionRoundUserRequest_ACU(options: {
     userRequest: string;
-    round: number;
-    maxRounds: number;
     repairReason: string;
 }) {
     const chunks = [String(options.userRequest || '').trim()];
-    if (options.round > 1) {
-        chunks.push(`补充说明：当前是第 ${options.round}/${options.maxRounds} 轮，输入数据已经包含前面轮次产生的内存草稿结果。请只继续未完成的改动；如果已经无需继续修改，请返回空 operations。`);
-    }
     if (options.repairReason) {
         chunks.push(`修复要求：上一轮 assistant 草稿未通过本地校验，原因是：${options.repairReason}。请修复草稿并继续完成需求，仍然只能输出合法 draft JSON。`);
     }
@@ -1552,87 +1549,6 @@ function buildTemplateAssistantNoopDraft_ACU(baseFingerprint: string, selectedSh
     };
 }
 
-function appendUniqueByJson_ACU<T>(target: T[], source: T[]) {
-    const seen = new Set(target.map((item) => safeJsonStringify_ACU(item, 'null')));
-    source.forEach((item) => {
-        const key = safeJsonStringify_ACU(item, 'null');
-        if (seen.has(key)) return;
-        seen.add(key);
-        target.push(clone_ACU(item));
-    });
-}
-
-function aggregateCompileResults_ACU(params: {
-    baselineSheetOrder: string[] | null;
-    currentSheetKey: string | null;
-    rounds: TemplateAssistantSessionRound_ACU[];
-    workingTempData: AnyRecord;
-    workingSheetOrder: string[] | null;
-    workingCurrentSheetKey: string | null;
-}): TemplateAssistantCompileResult_ACU {
-    const aggregated: TemplateAssistantCompileResult_ACU = {
-        candidateData: clone_ACU(params.workingTempData),
-        orderedSheetKeys: Array.isArray(params.workingSheetOrder)
-            ? [...params.workingSheetOrder]
-            : (params.baselineSheetOrder ? [...params.baselineSheetOrder] : []),
-        deletedSheetKeys: [],
-        focusSheetKey: params.workingCurrentSheetKey || params.currentSheetKey,
-        diff: {
-            addedSheets: [],
-            deletedSheets: [],
-            renamedSheets: [],
-            movedSheets: [],
-            patchedSourceDataSheets: [],
-            patchedUpdateConfigSheets: [],
-            patchedExportConfigSheets: [],
-            patchedContentSheets: [],
-            patchedSchemaSheets: [],
-            patchedLockSheets: [],
-            globalInjectionChanged: false,
-        },
-        highRiskItems: [],
-        lockChanges: [],
-        schemaMigrationIntents: {},
-    };
-    params.rounds.forEach((round) => {
-        appendUniqueByJson_ACU(aggregated.deletedSheetKeys, round.perRoundCompileResult.deletedSheetKeys || []);
-        appendUniqueByJson_ACU(aggregated.diff.addedSheets, round.perRoundCompileResult.diff?.addedSheets || []);
-        appendUniqueByJson_ACU(aggregated.diff.deletedSheets, round.perRoundCompileResult.diff?.deletedSheets || []);
-        appendUniqueByJson_ACU(aggregated.diff.renamedSheets, round.perRoundCompileResult.diff?.renamedSheets || []);
-        appendUniqueByJson_ACU(aggregated.diff.movedSheets, round.perRoundCompileResult.diff?.movedSheets || []);
-        appendUniqueByJson_ACU(aggregated.diff.patchedSourceDataSheets, round.perRoundCompileResult.diff?.patchedSourceDataSheets || []);
-        appendUniqueByJson_ACU(aggregated.diff.patchedUpdateConfigSheets, round.perRoundCompileResult.diff?.patchedUpdateConfigSheets || []);
-        appendUniqueByJson_ACU(aggregated.diff.patchedExportConfigSheets, round.perRoundCompileResult.diff?.patchedExportConfigSheets || []);
-        appendUniqueByJson_ACU(aggregated.diff.patchedContentSheets, round.perRoundCompileResult.diff?.patchedContentSheets || []);
-        appendUniqueByJson_ACU(aggregated.diff.patchedSchemaSheets, round.perRoundCompileResult.diff?.patchedSchemaSheets || []);
-        appendUniqueByJson_ACU(aggregated.diff.patchedLockSheets, round.perRoundCompileResult.diff?.patchedLockSheets || []);
-        if (round.perRoundCompileResult.diff?.globalInjectionChanged) {
-            aggregated.diff.globalInjectionChanged = true;
-        }
-        appendUniqueByJson_ACU(aggregated.highRiskItems, round.perRoundCompileResult.highRiskItems || []);
-        appendUniqueByJson_ACU(aggregated.lockChanges, round.perRoundCompileResult.lockChanges || []);
-        const schemaPatchedSheetKeys = new Set((round.perRoundCompileResult.diff?.patchedSchemaSheets || []).map((item) => item.sheetKey));
-        for (const sheetKey of schemaPatchedSheetKeys) {
-            const wasPatchedInEarlierRound = params.rounds
-                .filter((earlierRound) => earlierRound.round < round.round)
-                .some((earlierRound) => (earlierRound.perRoundCompileResult.diff?.patchedSchemaSheets || [])
-                    .some((item) => item.sheetKey === sheetKey));
-            if (wasPatchedInEarlierRound) {
-                throw new Error(`多轮会话不支持同一张表跨轮重复 schema migration：${sheetKey}。请在同一轮完成该表的结构修改。`);
-            }
-        }
-        Object.entries(round.perRoundCompileResult.schemaMigrationIntents || {}).forEach(([sheetKey, intent]) => {
-            aggregated.schemaMigrationIntents[sheetKey] = clone_ACU(intent);
-        });
-        if (round.perRoundCompileResult.focusSheetKey) {
-            aggregated.focusSheetKey = round.perRoundCompileResult.focusSheetKey;
-        }
-    });
-    if (aggregated.focusSheetKey && !aggregated.candidateData?.[aggregated.focusSheetKey]) {
-        aggregated.focusSheetKey = aggregated.orderedSheetKeys[0] || null;
-    }
-    return aggregated;
-}
 
 export function getTemplateAssistantApplyBaselineFingerprint_ACU(result: TemplateAssistantGenerateResult_ACU | null | undefined) {
     const originalBaseFingerprint = String(result?.originalBaseFingerprint || '').trim();
@@ -1767,8 +1683,9 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
     }
 
     const basePriorTurns = normalizePriorTurns_ACU(input?.priorTurns);
-    // 第一次对话（无 priorTurns）只跑 1 轮，不自动试验多轮；有历史时才按 maxRounds 允许续跑。
-    const maxRounds = basePriorTurns.length === 0 ? 1 : normalizePositiveInteger_ACU(input?.maxRounds, DEFAULT_TEMPLATE_ASSISTANT_MAX_ROUNDS_ACU);
+    // 改表助手是一问一答：无论有无历史，固定只跑 1 轮，不自动多轮续跑。
+    // 用户每次提交需求只触发一次 AI 生成；AI 输出解析/校验失败时由 repairRetries 修正重试。
+    const maxRounds = 1;
     const maxRepairRetries = normalizeNonNegativeInteger_ACU(input?.maxRepairRetries, DEFAULT_TEMPLATE_ASSISTANT_MAX_REPAIR_RETRIES_ACU);
     const originalTempData = clone_ACU(tempData);
     const originalSheetOrder = Array.isArray(input?.sheetOrder) ? [...input.sheetOrder] : null;
@@ -1776,136 +1693,102 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
     const rounds: TemplateAssistantSessionRound_ACU[] = [];
     const onRoundComplete = input?.onRoundComplete;
 
-    let workingTempData = clone_ACU(originalTempData);
-    let workingSheetOrder = Array.isArray(originalSheetOrder) ? [...originalSheetOrder] : null;
-    let workingCurrentSheetKey: string | null = currentSheetKey;
-    let workingFingerprint = originalBaseFingerprint;
-    let stopReason: TemplateAssistantSessionStopReason_ACU = 'max_rounds';
+    let stopReason: TemplateAssistantSessionStopReason_ACU = 'success';
     let repairRetriesUsed = 0;
     let lastErrorMessage = '';
     let lastResult: TemplateAssistantGenerateResult_ACU | null = null;
     let lastFailure: TemplateAssistantFailureInfo_ACU | null = null;
 
-    outerLoop:
-    for (let round = 1; round <= maxRounds; round += 1) {
-        let repairReason = '';
-        while (true) {
-            assertTemplateAssistantSessionActive_ACU(input.guard);
-            const roundUserRequest = buildSessionRoundUserRequest_ACU({
-                userRequest,
-                round,
-                maxRounds,
-                repairReason,
+    // 单轮执行：最多 maxRepairRetries 次「解析/校验失败 → 携带错误信息重试」。
+    let repairReason = '';
+    while (true) {
+        assertTemplateAssistantSessionActive_ACU(input.guard);
+        const roundUserRequest = buildSessionRoundUserRequest_ACU({
+            userRequest,
+            repairReason,
+        });
+        try {
+            const historyForRound = [
+                ...basePriorTurns,
+                ...rounds.map((item) => ({
+                    user: item.userRequest,
+                    assistant: item.aiRawText,
+                })),
+            ];
+            const result = await generateTemplateAssistantDraft_ACU({
+                tempData: originalTempData,
+                currentSheetKey,
+                sheetOrder: originalSheetOrder,
+                userRequest: roundUserRequest,
+                priorTurns: historyForRound,
+                tableApiPreset: input.tableApiPreset,
+                guard: input.guard,
             });
-            try {
-                const historyForRound = [
-                    ...basePriorTurns,
-                    ...rounds.map((item) => ({
-                        user: item.userRequest,
-                        assistant: item.aiRawText,
-                    })),
-                ];
-                const result = await generateTemplateAssistantDraft_ACU({
-                    tempData: workingTempData,
-                    currentSheetKey: workingCurrentSheetKey,
-                    sheetOrder: workingSheetOrder,
-                    userRequest: roundUserRequest,
-                    priorTurns: historyForRound,
-                    tableApiPreset: input.tableApiPreset,
-                    guard: input.guard,
-                });
-                assertTemplateAssistantSessionActive_ACU(input.guard);
-                lastResult = result;
-                const hasOperations = result.draft.operations.length > 0;
-                const nextWorkingTempData = hasOperations ? clone_ACU(result.compileResult.candidateData || {}) : clone_ACU(workingTempData);
-                const nextWorkingSheetOrder = hasOperations
-                    ? (Array.isArray(result.compileResult.orderedSheetKeys) ? [...result.compileResult.orderedSheetKeys] : [])
-                    : (Array.isArray(workingSheetOrder) ? [...workingSheetOrder] : null);
-                const nextWorkingFingerprint = hasOperations ? buildTemplateAssistantFingerprint_ACU(nextWorkingTempData) : workingFingerprint;
+            assertTemplateAssistantSessionActive_ACU(input.guard);
+            lastResult = result;
 
-                const roundRecord: TemplateAssistantSessionRound_ACU = {
-                    round,
-                    userRequest: roundUserRequest,
-                    draft: result.draft,
-                    aiRawText: result.aiRawText,
-                    messages: result.messages,
-                    perRoundCompileResult: result.compileResult,
-                    workingFingerprint: nextWorkingFingerprint,
-                };
-                rounds.push(roundRecord);
-                emitTemplateAssistantRoundComplete_ACU(onRoundComplete, roundRecord, rounds, maxRounds);
+            const roundRecord: TemplateAssistantSessionRound_ACU = {
+                round: 1,
+                userRequest: roundUserRequest,
+                draft: result.draft,
+                aiRawText: result.aiRawText,
+                messages: result.messages,
+                perRoundCompileResult: result.compileResult,
+                workingFingerprint: buildTemplateAssistantFingerprint_ACU(result.compileResult.candidateData || originalTempData),
+            };
+            rounds.push(roundRecord);
+            emitTemplateAssistantRoundComplete_ACU(onRoundComplete, roundRecord, rounds, maxRounds);
+            // 单轮没有下一轮检查点：onRoundComplete 回调期间可能触发 cancel/stale，
+            // 必须在收尾前显式确认会话仍然活动，否则停止按钮语义会退化。
+            assertTemplateAssistantSessionActive_ACU(input.guard);
 
-                // 该 round 成功产出可应用 draft：此前任何轮次的失败都不再是「最终失败」。
-                // 清空 lastFailure，避免面板在最终成功的会话上误显示失败横幅（残留风险）。
-                lastFailure = null;
-                lastErrorMessage = '';
-
-                if (!hasOperations) {
-                    stopReason = 'empty_operations';
-                    break outerLoop;
-                }
-
-                workingTempData = nextWorkingTempData;
-                workingSheetOrder = nextWorkingSheetOrder;
-                workingCurrentSheetKey = result.compileResult.focusSheetKey || workingCurrentSheetKey;
-                if (nextWorkingFingerprint === workingFingerprint) {
-                    workingFingerprint = nextWorkingFingerprint;
-                    stopReason = 'repeated_working_fingerprint';
-                    break outerLoop;
-                }
-
-                workingFingerprint = nextWorkingFingerprint;
-                lastErrorMessage = '';
-                if (round === maxRounds) {
-                    stopReason = 'max_rounds';
-                    break outerLoop;
-                }
+            // 单轮成功（无论是否产出可应用 operations）：一问一答结束。
+            // 空 operations 表示 AI 认为无需修改，同样视为成功结论。
+            lastFailure = null;
+            lastErrorMessage = '';
+            stopReason = result.draft.operations.length > 0 ? 'success' : 'empty_operations';
+            break;
+        } catch (error: any) {
+            assertTemplateAssistantSessionActive_ACU(input.guard);
+            lastErrorMessage = error?.message || '未知错误';
+            const failureKind: TemplateAssistantFailureKind_ACU =
+                error?.failureKind === 'parse'
+                || error?.failureKind === 'validate'
+                || error?.failureKind === 'fingerprint'
+                || error?.failureKind === 'preflight'
+                    ? error.failureKind
+                    : 'unknown';
+            lastFailure = { kind: failureKind, message: lastErrorMessage, rawText: error?.failureRawText };
+            if (repairRetriesUsed >= maxRepairRetries) {
+                stopReason = 'repair_retry_capped';
                 break;
-            } catch (error: any) {
-                assertTemplateAssistantSessionActive_ACU(input.guard);
-                lastErrorMessage = error?.message || '未知错误';
-                const failureKind: TemplateAssistantFailureKind_ACU =
-                    error?.failureKind === 'parse'
-                    || error?.failureKind === 'validate'
-                    || error?.failureKind === 'fingerprint'
-                    || error?.failureKind === 'preflight'
-                        ? error.failureKind
-                        : 'unknown';
-                lastFailure = { kind: failureKind, message: lastErrorMessage, rawText: error?.failureRawText };
-                if (repairRetriesUsed >= maxRepairRetries) {
-                    stopReason = 'repair_retry_capped';
-                    break outerLoop;
-                }
-                repairRetriesUsed += 1;
-                repairReason = lastErrorMessage;
             }
+            repairRetriesUsed += 1;
+            repairReason = lastErrorMessage;
         }
     }
 
-    const compileResult = rounds.length
-        ? aggregateCompileResults_ACU({
-            baselineSheetOrder: originalSheetOrder,
-            currentSheetKey,
-            rounds,
-            workingTempData,
-            workingSheetOrder,
-            workingCurrentSheetKey,
-        })
-        : buildTemplateAssistantCumulativeCompileResult_ACU({
+    // 单轮会话：rounds 恒为 0 或 1。
+    // - 成功（rounds=1）：compileResult 直接取该轮结果，与 generateTemplateAssistantDraft_ACU 的语义一致。
+    // - 全部失败（rounds=0）：无可用候选，回退到原始数据的空 diff。
+    const compileResult = lastResult?.compileResult
+        || buildTemplateAssistantCumulativeCompileResult_ACU({
             baselineData: originalTempData,
             baselineSheetOrder: originalSheetOrder,
-            candidateData: workingTempData,
-            candidateSheetOrder: workingSheetOrder,
-            focusSheetKey: workingCurrentSheetKey,
+            candidateData: originalTempData,
+            candidateSheetOrder: originalSheetOrder,
+            focusSheetKey: currentSheetKey,
         });
     const finalPreflight = await preflightSchemaMigrations_ACU({
         baselineData: originalTempData as any,
         candidateData: compileResult.candidateData as any,
         intents: compileResult.schemaMigrationIntents,
     });
+    // 最终 preflight 为异步操作，返回后同样需要再次确认会话未被取消，才能提交成功结果。
+    assertTemplateAssistantSessionActive_ACU(input.guard);
     if (finalPreflight.blockers.length > 0) throw new Error(`schema migration 最终 preflight 失败：${finalPreflight.blockers.join('；')}`);
     const finalDraft = lastResult?.draft || buildTemplateAssistantNoopDraft_ACU(originalBaseFingerprint, currentSheetKey);
-    const finalWorkingFingerprint = buildTemplateAssistantFingerprint_ACU(compileResult.candidateData || workingTempData);
+    const finalWorkingFingerprint = buildTemplateAssistantFingerprint_ACU(compileResult.candidateData || originalTempData);
 
     return {
         draft: finalDraft,

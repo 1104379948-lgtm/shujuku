@@ -23,17 +23,6 @@
           <AcuButton size="sm" variant="secondary" :disabled="assistant.isRunning.value" @click="promptDrawerOpen = true">
             <i class="fa-solid fa-pen-to-square"></i> 编辑提示词
           </AcuButton>
-          <AcuFormRow label="最大轮次">
-            <AcuInput
-              type="number"
-              :model-value="assistant.maxRounds.value"
-              :min="1"
-              :max="6"
-              :step="1"
-              :disabled="assistant.isRunning.value"
-              @update:model-value="updateMaxRounds"
-            />
-          </AcuFormRow>
         </div>
 
         <AcuInfoBanner v-if="assistant.errorMessage.value" tone="warning">
@@ -45,7 +34,7 @@
     <div ref="streamRef" class="acu-viz-assistant__stream">
         <div v-if="assistant.isRunning.value" class="acu-viz-assistant__running">
           <i class="fa-solid fa-spinner fa-spin"></i>
-          <span>正在生成草稿，已完成 {{ assistant.rounds.value.length }} 轮。</span>
+          <span>正在生成草稿…</span>
         </div>
 
         <p v-if="!assistant.turns.value.length && !assistant.rounds.value.length" class="acu-viz-assistant__empty">
@@ -61,13 +50,12 @@
           >
             <header class="acu-viz-assistant__turn-head">
               <strong v-if="turn.type === 'user'">你提出的需求</strong>
-              <strong v-else-if="turn.type === 'round'">AI 助手 · 第 {{ turn.round }} / {{ turn.maxRounds }} 轮</strong>
+              <strong v-else-if="turn.type === 'round'">AI 助手</strong>
               <strong v-else-if="turn.type === 'final'">AI 助手 · 最终草稿</strong>
               <strong v-else>执行错误</strong>
               <AcuBadge v-if="turn.type === 'final'" variant="accent">
-                {{ assistant.getTurnSessionSummary(turn) || `${turn.result.session.roundsExecuted} 轮` }}
+                {{ assistant.getTurnSessionSummary(turn) }}
               </AcuBadge>
-              <AcuBadge v-else-if="turn.type === 'round'" variant="neutral">过程记录</AcuBadge>
               <AcuBadge v-else-if="turn.type === 'error'" variant="warning">需要处理</AcuBadge>
               <AcuBadge v-else variant="neutral">请求</AcuBadge>
               <div class="acu-viz-assistant__turn-ops">
@@ -180,12 +168,6 @@
               >
                 {{ assistant.getTurnApplyBlockReason(turn) }}
               </p>
-              <p
-                v-if="turn.type === 'round' && assistant.getTurnApplyPayload(turn)"
-                class="acu-viz-assistant__apply-reason"
-              >
-                应用此轮结果将不包含后续轮次改动。
-              </p>
             </div>
           </article>
         </div>
@@ -251,7 +233,6 @@ import AcuCheckbox from '../../components/_lib/AcuCheckbox.vue';
 import AcuDisclosureGroup from '../../components/_lib/AcuDisclosureGroup.vue';
 import AcuFormRow from '../../components/_lib/AcuFormRow.vue';
 import AcuInfoBanner from '../../components/_lib/AcuInfoBanner.vue';
-import AcuInput from '../../components/_lib/AcuInput.vue';
 import AcuPanel from '../../components/_lib/AcuPanel.vue';
 import AcuSelect from '../../components/_lib/AcuSelect.vue';
 import AcuTextarea from '../../components/_lib/AcuTextarea.vue';
@@ -268,11 +249,6 @@ function toggleRawExpanded(turnId: string): void {
     ...rawExpandedByTurn.value,
     [turnId]: rawExpandedByTurn.value[turnId] !== true,
   };
-}
-
-function updateMaxRounds(value: string | number): void {
-  const next = Math.max(1, Math.min(6, Math.floor(Number(value) || 1)));
-  assistant.maxRounds.value = next;
 }
 
 // 会话列表唯一滚动区：新 turn 到达时若用户已在底部附近则自动滚到底，

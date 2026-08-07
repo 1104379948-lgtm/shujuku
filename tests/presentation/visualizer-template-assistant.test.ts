@@ -1103,6 +1103,57 @@ describe('visualizer template assistant panel', () => {
       expect(document.body.innerHTML).toContain('网络错误');
     });
 
+    it('会话被取消（StoppedError）时：不写入 final turn、不追加错误 turn（停止按钮语义）', async () => {
+      setVisualizerTemplateAssistantOpen_ACU(true);
+      renderVisualizerTemplateAssistantPanel_ACU();
+      const { TemplateAssistantSessionStoppedError_ACU } = await import('../../src/service/template-assistant/service');
+      // 真实时序：AI 返回 → onRoundComplete 已触发（V1 会写入 round preview）→ 回调后
+      // service 因 guard.cancel 抛出 StoppedError → UI catch 只 toast 并返回。
+      mockRunSession.mockImplementation(async (input: any) => {
+        input.onRoundComplete?.({
+          round: {
+            round: 1,
+            userRequest: input.userRequest,
+            draft: { protocolVersion: 2, requestId: 'req-cancel', atomic: true, selectedSheetKey: input.currentSheetKey, summary: '取消前草稿', warnings: [] },
+            aiRawText: '<templateAssistantDraft>{"round":1}</templateAssistantDraft>',
+            messages: [],
+            perRoundCompileResult: {
+              candidateData: {},
+              orderedSheetKeys: [],
+              deletedSheetKeys: [],
+              focusSheetKey: input.currentSheetKey,
+              diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
+              highRiskItems: [],
+              lockChanges: [],
+              schemaMigrationIntents: {},
+            },
+            workingFingerprint: 'round-fp',
+          },
+          rounds: [],
+          maxRounds: 1,
+        });
+        throw new TemplateAssistantSessionStoppedError_ACU('cancelled');
+      });
+
+      const textarea = document.querySelector('#acu-vis-assistant-input') as HTMLTextAreaElement;
+      textarea.value = '新增战利品表';
+      textarea.dispatchEvent(new Event('input'));
+      (document.querySelector('#acu-vis-assistant-generate') as HTMLButtonElement).click();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // 真实取消时序：preview turn 已写入但无 final turn、无 error turn、无应用按钮
+      const userTurns = document.querySelectorAll('.acu-chat-turn-user');
+      const assistantTurns = document.querySelectorAll('.acu-chat-turn-assistant');
+      const errorTurns = document.querySelectorAll('.acu-chat-turn-error');
+      expect(userTurns.length).toBe(1);
+      // preview 保留（phase: round，不可应用）
+      expect(assistantTurns.length).toBe(1);
+      expect(errorTurns.length).toBe(0);
+      expect(document.querySelector('#acu-vis-assistant-apply')).toBeNull();
+      expect(mockShowToastr).toHaveBeenCalledWith('warning', expect.stringContaining('取消'));
+    });
+
     it('AI操作默认显示为折叠的单行摘要', async () => {
       setVisualizerTemplateAssistantOpen_ACU(true);
       renderVisualizerTemplateAssistantPanel_ACU();
@@ -1461,8 +1512,8 @@ describe('visualizer template assistant panel', () => {
           originalBaseFingerprint: 'acu-struct:base',
           finalWorkingFingerprint: 'acu-struct:final',
           stopReason: 'empty_operations',
-          roundsExecuted: 2,
-          maxRounds: 3,
+          roundsExecuted: 1,
+          maxRounds: 1,
           repairRetriesUsed: 0,
           maxRepairRetries: 1,
           lastErrorMessage: '',
@@ -1477,11 +1528,11 @@ describe('visualizer template assistant panel', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      expect(document.body.innerHTML).toContain('会话2轮');
       expect(document.body.innerHTML).toContain('空操作停止');
     });
 
-    it('session 每轮完成后都会立即显示中间结果，而不是等全部结束', async () => {
+
+    it('session 轮次完成时会立即显示中间结果，而不是等全部结束', async () => {
       setVisualizerTemplateAssistantOpen_ACU(true);
       renderVisualizerTemplateAssistantPanel_ACU();
 
@@ -1510,43 +1561,7 @@ describe('visualizer template assistant panel', () => {
             perRoundCompileResult: { diff: { addedSheets: [{ sheetKey: 'sheet_b', name: 'B表' }], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false }, highRiskItems: [], lockChanges: [] },
             workingFingerprint: 'acu-struct:round-1',
           }],
-          maxRounds: 3,
-        });
-        input.onRoundComplete?.({
-          round: {
-            round: 2,
-            userRequest: '第二轮请求',
-            draft: { protocolVersion: 2, requestId: 'req-round-2', atomic: true, selectedSheetKey: 'sheet_b', summary: '第二轮结果', warnings: [] },
-            aiRawText: '第二轮AI响应',
-            messages: [],
-            perRoundCompileResult: {
-              diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [{ sheetKey: 'sheet_b', name: 'B表', changes: ['修改列'] }], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-              highRiskItems: [],
-              lockChanges: [],
-            },
-            workingFingerprint: 'acu-struct:round-2',
-          },
-          rounds: [
-            {
-              round: 1,
-              userRequest: '第一轮请求',
-              draft: { protocolVersion: 2, requestId: 'req-round-1', atomic: true, selectedSheetKey: 'sheet_a', summary: '第一轮结果', warnings: [] },
-              aiRawText: '第一轮AI响应',
-              messages: [],
-              perRoundCompileResult: { diff: { addedSheets: [{ sheetKey: 'sheet_b', name: 'B表' }], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false }, highRiskItems: [], lockChanges: [] },
-              workingFingerprint: 'acu-struct:round-1',
-            },
-            {
-              round: 2,
-              userRequest: '第二轮请求',
-              draft: { protocolVersion: 2, requestId: 'req-round-2', atomic: true, selectedSheetKey: 'sheet_b', summary: '第二轮结果', warnings: [] },
-              aiRawText: '第二轮AI响应',
-              messages: [],
-              perRoundCompileResult: { diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [{ sheetKey: 'sheet_b', name: 'B表', changes: ['修改列'] }], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false }, highRiskItems: [], lockChanges: [] },
-              workingFingerprint: 'acu-struct:round-2',
-            },
-          ],
-          maxRounds: 3,
+          maxRounds: 1,
         });
 
         return new Promise((resolve) => {
@@ -1561,10 +1576,6 @@ describe('visualizer template assistant panel', () => {
       await Promise.resolve();
 
       expect(document.body.innerHTML).toContain('第一轮结果');
-      expect(document.body.innerHTML).toContain('第二轮结果');
-      expect(document.body.innerHTML).toContain('第 1 / 3 轮');
-      expect(document.body.innerHTML).toContain('第 2 / 3 轮');
-      expect(document.querySelectorAll('.acu-chat-turn-assistant').length).toBe(2);
       expect(document.querySelector('#acu-vis-assistant-apply')).toBeNull();
 
       resolveFinal?.({
@@ -1580,10 +1591,10 @@ describe('visualizer template assistant panel', () => {
         messages: [],
         session: {
           originalBaseFingerprint: 'acu-struct:base',
-          finalWorkingFingerprint: 'acu-struct:round-2',
+          finalWorkingFingerprint: 'acu-struct:round-1',
           stopReason: 'empty_operations',
-          roundsExecuted: 2,
-          maxRounds: 3,
+          roundsExecuted: 1,
+          maxRounds: 1,
           repairRetriesUsed: 0,
           maxRepairRetries: 1,
           lastErrorMessage: '',
@@ -1593,7 +1604,7 @@ describe('visualizer template assistant panel', () => {
       await Promise.resolve();
 
       expect(document.body.innerHTML).toContain('最终结果');
-      expect(document.body.innerHTML).toContain('会话2轮');
+      expect(document.body.innerHTML).toContain('空操作停止');
       expect(document.querySelector('#acu-vis-assistant-apply')).toBeTruthy();
     });
 
@@ -1803,197 +1814,4 @@ describe('visualizer template assistant panel', () => {
     });
   });
 
-  // maxRounds UI control tests
-  describe('maxRounds UI control', () => {
-    it('默认渲染 maxRounds 为 3', () => {
-      setVisualizerTemplateAssistantOpen_ACU(true);
-      renderVisualizerTemplateAssistantPanel_ACU();
-
-      const maxRoundsInput = document.querySelector('#acu-vis-assistant-max-rounds') as HTMLInputElement;
-      expect(maxRoundsInput).toBeTruthy();
-      expect(maxRoundsInput.value).toBe('3');
-    });
-
-    it('配置 passthrough：输入 5 提交验证 maxRounds=5', async () => {
-      setVisualizerTemplateAssistantOpen_ACU(true);
-      renderVisualizerTemplateAssistantPanel_ACU();
-      mockRunSession.mockResolvedValue({
-        draft: { protocolVersion: 2, requestId: 'req-maxrounds-5', atomic: true, summary: '测试', warnings: [] },
-        compileResult: {
-          diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-          highRiskItems: [],
-          lockChanges: [],
-        },
-      });
-
-      const maxRoundsInput = document.querySelector('#acu-vis-assistant-max-rounds') as HTMLInputElement;
-      maxRoundsInput.value = '5';
-      maxRoundsInput.dispatchEvent(new Event('input'));
-
-      const textarea = document.querySelector('#acu-vis-assistant-input') as HTMLTextAreaElement;
-      textarea.value = '测试';
-      textarea.dispatchEvent(new Event('input'));
-      (document.querySelector('#acu-vis-assistant-generate') as HTMLButtonElement).click();
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(mockRunSession).toHaveBeenCalledTimes(1);
-      expect(mockRunSession.mock.calls[0][0].maxRounds).toBe(5);
-    });
-
-    it('invalid-input fallback：空字符串 fallback 到 3', async () => {
-      setVisualizerTemplateAssistantOpen_ACU(true);
-      renderVisualizerTemplateAssistantPanel_ACU();
-      mockRunSession.mockResolvedValue({
-        draft: { protocolVersion: 2, requestId: 'req-maxrounds-empty', atomic: true, summary: '测试', warnings: [] },
-        compileResult: {
-          diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-          highRiskItems: [],
-          lockChanges: [],
-        },
-      });
-
-      const maxRoundsInput = document.querySelector('#acu-vis-assistant-max-rounds') as HTMLInputElement;
-      maxRoundsInput.value = '';
-      maxRoundsInput.dispatchEvent(new Event('input'));
-
-      const textarea = document.querySelector('#acu-vis-assistant-input') as HTMLTextAreaElement;
-      textarea.value = '测试';
-      textarea.dispatchEvent(new Event('input'));
-      (document.querySelector('#acu-vis-assistant-generate') as HTMLButtonElement).click();
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(mockRunSession.mock.calls[0][0].maxRounds).toBe(3);
-    });
-
-    it('invalid-input fallback：0 和负数 fallback 到 3', async () => {
-      setVisualizerTemplateAssistantOpen_ACU(true);
-      renderVisualizerTemplateAssistantPanel_ACU();
-      mockRunSession.mockResolvedValue({
-        draft: { protocolVersion: 2, requestId: 'req-maxrounds-zero', atomic: true, summary: '测试', warnings: [] },
-        compileResult: {
-          diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-          highRiskItems: [],
-          lockChanges: [],
-        },
-      });
-
-      const maxRoundsInput = document.querySelector('#acu-vis-assistant-max-rounds') as HTMLInputElement;
-      maxRoundsInput.value = '0';
-      maxRoundsInput.dispatchEvent(new Event('input'));
-
-      const textarea = document.querySelector('#acu-vis-assistant-input') as HTMLTextAreaElement;
-      textarea.value = '测试';
-      textarea.dispatchEvent(new Event('input'));
-      (document.querySelector('#acu-vis-assistant-generate') as HTMLButtonElement).click();
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(mockRunSession.mock.calls[0][0].maxRounds).toBe(3);
-    });
-
-    it('invalid-input fallback：非数字 fallback 到 3', async () => {
-      setVisualizerTemplateAssistantOpen_ACU(true);
-      renderVisualizerTemplateAssistantPanel_ACU();
-      mockRunSession.mockResolvedValue({
-        draft: { protocolVersion: 2, requestId: 'req-maxrounds-abc', atomic: true, summary: '测试', warnings: [] },
-        compileResult: {
-          diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-          highRiskItems: [],
-          lockChanges: [],
-        },
-      });
-
-      const maxRoundsInput = document.querySelector('#acu-vis-assistant-max-rounds') as HTMLInputElement;
-      maxRoundsInput.value = 'abc';
-      maxRoundsInput.dispatchEvent(new Event('input'));
-
-      const textarea = document.querySelector('#acu-vis-assistant-input') as HTMLTextAreaElement;
-      textarea.value = '测试';
-      textarea.dispatchEvent(new Event('input'));
-      (document.querySelector('#acu-vis-assistant-generate') as HTMLButtonElement).click();
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(mockRunSession.mock.calls[0][0].maxRounds).toBe(3);
-    });
-
-    it('小数 floor：2.5 -> 2', async () => {
-      setVisualizerTemplateAssistantOpen_ACU(true);
-      renderVisualizerTemplateAssistantPanel_ACU();
-      mockRunSession.mockResolvedValue({
-        draft: { protocolVersion: 2, requestId: 'req-maxrounds-decimal', atomic: true, summary: '测试', warnings: [] },
-        compileResult: {
-          diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-          highRiskItems: [],
-          lockChanges: [],
-        },
-      });
-
-      const maxRoundsInput = document.querySelector('#acu-vis-assistant-max-rounds') as HTMLInputElement;
-      maxRoundsInput.value = '2.5';
-      maxRoundsInput.dispatchEvent(new Event('input'));
-
-      const textarea = document.querySelector('#acu-vis-assistant-input') as HTMLTextAreaElement;
-      textarea.value = '测试';
-      textarea.dispatchEvent(new Event('input'));
-      (document.querySelector('#acu-vis-assistant-generate') as HTMLButtonElement).click();
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(mockRunSession.mock.calls[0][0].maxRounds).toBe(2);
-    });
-
-    it('reset 行为：修改后 reset 恢复到 3', async () => {
-      setVisualizerTemplateAssistantOpen_ACU(true);
-      renderVisualizerTemplateAssistantPanel_ACU();
-
-      const maxRoundsInput = document.querySelector('#acu-vis-assistant-max-rounds') as HTMLInputElement;
-      maxRoundsInput.value = '5';
-      maxRoundsInput.dispatchEvent(new Event('input'));
-
-      expect(maxRoundsInput.value).toBe('5');
-
-      resetVisualizerTemplateAssistantState_ACU();
-      setVisualizerTemplateAssistantOpen_ACU(true);
-      renderVisualizerTemplateAssistantPanel_ACU();
-
-      const resetInput = document.querySelector('#acu-vis-assistant-max-rounds') as HTMLInputElement;
-      expect(resetInput.value).toBe('3');
-    });
-
-    it('payload 兼容性：其他字段仍正常传入', async () => {
-      setVisualizerTemplateAssistantOpen_ACU(true);
-      renderVisualizerTemplateAssistantPanel_ACU();
-      mockRunSession.mockResolvedValue({
-        draft: { protocolVersion: 2, requestId: 'req-maxrounds-compat', atomic: true, summary: '测试', warnings: [] },
-        compileResult: {
-          diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
-          highRiskItems: [],
-          lockChanges: [],
-        },
-      });
-
-      const maxRoundsInput = document.querySelector('#acu-vis-assistant-max-rounds') as HTMLInputElement;
-      maxRoundsInput.value = '7';
-      maxRoundsInput.dispatchEvent(new Event('input'));
-
-      const textarea = document.querySelector('#acu-vis-assistant-input') as HTMLTextAreaElement;
-      textarea.value = '测试payload兼容';
-      textarea.dispatchEvent(new Event('input'));
-      (document.querySelector('#acu-vis-assistant-generate') as HTMLButtonElement).click();
-      await Promise.resolve();
-      await Promise.resolve();
-
-      const callArgs = mockRunSession.mock.calls[0][0];
-      expect(callArgs.maxRounds).toBe(7);
-      expect(callArgs.tempData).toBeTruthy();
-      expect(callArgs.currentSheetKey).toBe('sheet_a');
-      expect(callArgs.sheetOrder).toEqual(['sheet_a']);
-      expect(callArgs.userRequest).toBe('测试payload兼容');
-      expect(callArgs.priorTurns).toEqual([]);
-      expect(typeof callArgs.onRoundComplete).toBe('function');
-    });
-  });
 });
