@@ -19,10 +19,12 @@ const {
     createRunGuard: () => ({
       isCancelled: () => false,
       isStale: () => false,
+      get signal() { return new AbortController().signal; },
     }),
     invalidate: vi.fn(),
     cancel: vi.fn(),
     reset: vi.fn(),
+    getSignal: () => new AbortController().signal,
   })),
 }));
 

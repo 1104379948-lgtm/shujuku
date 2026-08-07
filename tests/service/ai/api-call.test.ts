@@ -187,6 +187,39 @@ describe('callAIWithPreset_ACU', () => {
     const result = await callAIWithPreset_ACU([{ role: 'user', content: '你好' }], '预设B');
     expect(result).toBe('预设B回复');
   });
+
+  it('自定义 API 模式把 signal 传给 fetch', async () => {
+    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
+    mockFetch.mockResolvedValue({ ok: true });
+    mockHandleApiResponse.mockResolvedValue('AI 回复');
+    const controller = new AbortController();
+    const result = await callAIWithPreset_ACU([{ role: 'user', content: '你好' }], '', undefined, controller.signal);
+    expect(result).toBe('AI 回复');
+    expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: controller.signal }));
+  });
+
+  it('custom 分支 signal 已 abort 时仍先发请求，handleApiResponse 拒绝中断', async () => {
+    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
+    const controller = new AbortController();
+    controller.abort();
+    mockFetch.mockRejectedValue(new DOMException('aborted', 'AbortError'));
+    await expect(
+      callAIWithPreset_ACU([{ role: 'user', content: '你好' }], '', undefined, controller.signal),
+    ).rejects.toThrow();
+  });
+
+  it('tavern 分支在 signal 已 abort 且返回后抛 AbortError', async () => {
+    mockSettings.apiMode = 'tavern';
+    mockSendConnectionManager.mockResolvedValue({
+      result: { choices: [{ message: { content: 'AI 回复' } }] },
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      callAIWithPreset_ACU([{ role: 'user', content: '你好' }], '', undefined, controller.signal),
+    ).rejects.toThrow('请求已取消');
+  });
+
 });
 
 // ═══ callCustomOpenAI_ACU_Direct ═══

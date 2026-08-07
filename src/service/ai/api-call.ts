@@ -225,7 +225,7 @@ export async function callCustomOpenAI_ACU_Direct(messages: any[]) {
  * @param maxTokensOverride 可选的最大 token 数覆盖，仅允许公开层传入经校验的安全值
  * @returns AI 响应文本，失败返回 null
  */
-export async function callAIWithPreset_ACU(messages: any[], presetName: string = '', maxTokensOverride?: number): Promise<string | null> {
+export async function callAIWithPreset_ACU(messages: any[], presetName: string = '', maxTokensOverride?: number, signal?: AbortSignal | null): Promise<string | null> {
     if (!Array.isArray(messages) || messages.length === 0) {
         logWarn_ACU('[callAIWithPreset] messages 必须是非空数组');
         return null;
@@ -243,6 +243,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
     if (effectiveApiMode === 'tavern') {
         const profileId = effectiveTavernProfile || settings_ACU.tavernProfile;
         const response = await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens);
+        assertNotAborted_ACU(signal);
         if (response?.result?.choices?.[0]?.message?.content) {
             return response.result.choices[0].message.content;
         }
@@ -262,6 +263,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
             should_stream: settings_ACU.streamingEnabled || false,
             max_tokens: maxTokens,
         });
+        assertNotAborted_ACU(signal);
         return typeof response === 'string' ? response.trim() : null;
     }
 
@@ -275,6 +277,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
         method: 'POST',
         headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
         body,
+        signal: signal || undefined,
     });
 
     if (!res.ok) {
@@ -282,6 +285,18 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
         throw new Error(`API请求失败: ${res.status} ${errTxt}`);
     }
 
-    const content = await handleApiResponse_ACU(res);
+    const content = await handleApiResponse_ACU(res, signal);
     return content ? content.trim() : null;
 }
+
+/**
+ * 若 signal 已 abort 则抛出 AbortError，用于宿主 gateway 调用（无法强制中断）返回后立即检查。
+ */
+function assertNotAborted_ACU(signal?: AbortSignal | null): void {
+  if (signal?.aborted) {
+    const err = new Error('请求已取消');
+    (err as any).name = 'AbortError';
+    throw err;
+  }
+}
+

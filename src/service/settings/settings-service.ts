@@ -1058,13 +1058,14 @@ function normalizeAssistantPromptRoleForImport_ACU(raw: unknown): string {
  * 归一化 AI 改表助手提示词段（与 template-assistant service 的 normalize 语义保持一致）
  * 避免导入的脏数据直接进 settings；空内容段会被过滤。
  */
-function normalizeAssistantPromptSegmentsForImport_ACU(input: unknown): Array<{ role: string; content: string; deletable: boolean }> {
+function normalizeAssistantPromptSegmentsForImport_ACU(input: unknown): Array<{ role: string; content: string; deletable: boolean; pinned: boolean }> {
     if (!Array.isArray(input)) return [];
     return input
         .map((item: any) => ({
             role: normalizeAssistantPromptRoleForImport_ACU(item?.role),
             content: String(item?.content ?? ''),
             deletable: item?.deletable !== false,
+            pinned: item?.pinned === true,
         }))
         .filter((seg) => !!seg.content.trim());
 }

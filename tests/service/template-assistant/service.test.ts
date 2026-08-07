@@ -64,6 +64,7 @@ vi.mock('../../../src/service/table/schema-migration-preflight', () => ({
 
 import {
   buildTemplateAssistantFingerprint_ACU,
+  createTemplateAssistantSessionGuard_ACU,
   generateTemplateAssistantDraft_ACU,
   getTemplateAssistantApplyBaselineFingerprint_ACU,
   parseTemplateAssistantDraft_ACU,
@@ -370,6 +371,7 @@ describe('template assistant service', () => {
     expect(systemPrompt).toContain('add_sheet.sourceData 与 patch_sheet_source_data.patch 只允许 note、initNode、insertNode、updateNode、deleteNode 五个字段');
     expect(systemPrompt).toContain('除非用户明确要求 DDL、字段类型、约束或 SQLite 建表语句，否则不要主动输出 patch_sheet_schema.ddl');
     expect(systemPrompt).toContain('即使用户要求“顺便写 SQL/DDL”，也不要把 ddl 或 sql 塞进 add_sheet.sourceData');
+    expect(systemPrompt).toContain('当用户对【已存在的表】明确要求 DDL、字段类型、约束或 SQLite 建表语句时，不得因为表已存在就返回空 operations');
     expect(systemPrompt).toContain('如果当前 headers 主要是中文，自定义 ddl 只有在你能提供英文/ASCII 物理列名');
     expect(systemPrompt).toContain('ASCII/英文 headers 必须由同名物理列匹配；中文 headers 必须使用英文/ASCII 物理列名');
     expect(systemPrompt).toContain('time_span TEXT NOT NULL, -- 时间跨度');
@@ -543,6 +545,7 @@ describe('template assistant service', () => {
       currentSheetKey: 'sheet_a',
       sheetOrder: ['sheet_a'],
       userRequest: '连续处理',
+      priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
       maxRounds: 3,
       onRoundComplete,
     } as any);
@@ -557,6 +560,29 @@ describe('template assistant service', () => {
     expect(result.session.roundsExecuted).toBe(2);
     expect(result.session.stopReason).toBe('empty_operations');
   });
+
+  it('第一次对话（无 priorTurns）时，即使 maxRounds=3 也只执行 1 轮', async () => {
+    const tempData = buildTempData_ACU();
+    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+    mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-first-round","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"第一轮","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_a","patch":{"contextDepth":8}}]}</templateAssistantDraft>`);
+
+    const result = await runTemplateAssistantSession_ACU({
+      tempData,
+      currentSheetKey: 'sheet_a',
+      sheetOrder: ['sheet_a'],
+      userRequest: '第一次对话需求',
+      maxRounds: 3,
+    });
+
+    // 无 priorTurns → 强制单轮，不自动多轮试验
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
+    expect(result.rounds).toHaveLength(1);
+    expect(result.session.roundsExecuted).toBe(1);
+    expect(result.session.maxRounds).toBe(1);
+    // 默认 mock compile 返回候选数据与输入一致 → fingerprint 重复而单轮停止
+    expect(result.session.stopReason).toBe('repeated_working_fingerprint');
+  });
+
 
   it('session loop 拒绝同一张表跨轮重复 schema migration', async () => {
     const tempData = buildTempData_ACU();
@@ -606,6 +632,7 @@ describe('template assistant service', () => {
       currentSheetKey: 'sheet_a',
       sheetOrder: ['sheet_a'],
       userRequest: '分两轮修改结构',
+      priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
       maxRounds: 2,
     })).rejects.toThrow(/同一张表跨轮重复 schema migration/);
   });
@@ -784,5 +811,106 @@ describe('template assistant service', () => {
     expect(result.session.lastErrorMessage).toBe('');
     expect(result.rounds).toHaveLength(1);
     expect(result.rounds[0]?.aiRawText).toBe(okDraft);
+
   });
-});
+
+
+  it('session loop 在 guard.cancel() 后于下一轮检查点中断（停止按钮语义）', async () => {
+    const tempData = buildTempData_ACU();
+    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+    const roundOneCandidateData = {
+      ...tempData,
+      sheet_b: {
+        uid: 'sheet_b',
+        name: 'B表',
+        orderNo: 1,
+        content: [['row_id', '标题']],
+        sourceData: { note: 'b', initNode: '', insertNode: '', updateNode: '', deleteNode: '' },
+        updateConfig: { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1, sendLatestRows: -1, groupId: -1 },
+        exportConfig: { enabled: false, splitByRow: false, entryName: 'B表', entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '', extraIndexEnabled: false, extraIndexEntryName: 'B表-索引', extraIndexColumns: [], extraIndexColumnModes: {}, extraIndexInjectionTemplate: '', entryPlacement: { position: 'at_depth_as_system', depth: 2, order: 10000 }, extraIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 10010 }, fixedEntryPlacement: { position: 'at_depth_as_system', depth: 2, order: 99990 }, fixedIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 99991 } },
+      },
+    } as any;
+    const fpAfterRoundOne = buildTemplateAssistantFingerprint_ACU(roundOneCandidateData);
+
+    mockCallAIWithPreset
+      .mockResolvedValueOnce(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-cancel-1","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"第一轮","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_a","patch":{"contextDepth":8}}]}</templateAssistantDraft>`)
+      .mockResolvedValueOnce(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-cancel-2","baseFingerprint":"${fpAfterRoundOne}","atomic":true,"selectedSheetKey":"sheet_b","summary":"第二轮","warnings":[],"operations":[]}</templateAssistantDraft>`);
+
+    mockCompileTemplateAssistantDraft
+      .mockImplementationOnce(() => ({
+        candidateData: roundOneCandidateData,
+        orderedSheetKeys: ['sheet_a', 'sheet_b'],
+        deletedSheetKeys: [],
+        focusSheetKey: 'sheet_b',
+        diff: { addedSheets: [{ sheetKey: 'sheet_b', name: 'B表' }], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
+        highRiskItems: [],
+        lockChanges: [],
+        schemaMigrationIntents: {},
+      }))
+      .mockImplementationOnce((input: any) => ({
+        candidateData: input.tempData,
+        orderedSheetKeys: input.sheetOrder || ['sheet_a', 'sheet_b'],
+        deletedSheetKeys: [],
+        focusSheetKey: input.currentSheetKey,
+        diff: { addedSheets: [], deletedSheets: [], renamedSheets: [], movedSheets: [], patchedSourceDataSheets: [], patchedUpdateConfigSheets: [], patchedExportConfigSheets: [], patchedContentSheets: [], patchedSchemaSheets: [], patchedLockSheets: [], globalInjectionChanged: false },
+        highRiskItems: [],
+        lockChanges: [],
+        schemaMigrationIntents: {},
+      }));
+
+    const guard = createTemplateAssistantSessionGuard_ACU();
+    const runGuard = guard.createRunGuard();
+    let cancelled = false;
+
+    await expect(runTemplateAssistantSession_ACU({
+      tempData,
+      currentSheetKey: 'sheet_a',
+      sheetOrder: ['sheet_a'],
+      userRequest: '连续处理',
+      priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
+      maxRounds: 3,
+      guard: runGuard,
+      onRoundComplete(_payload: any) {
+        if (!cancelled) {
+          cancelled = true;
+          guard.cancel();
+        }
+      },
+    } as any)).rejects.toBeInstanceOf(Error);
+
+    // cancel 后 isCancelled 为 true，且 session 不再继续
+    expect(runGuard.isCancelled?.()).toBe(true);
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
+  });
+
+
+  it('guard.cancel() 后其 signal 被 abort（AbortController 已接通）', () => {
+    const guard = createTemplateAssistantSessionGuard_ACU();
+    const signal = guard.getSignal();
+    expect(signal?.aborted).toBe(false);
+    guard.cancel();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it('传递 guard 时 generateTemplateAssistantDraft_ACU 将 signal 传给 callAIWithPreset，且 cancel 后 signal 已 abort', async () => {
+    const tempData = buildTempData_ACU();
+    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+    mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-signal","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`);
+
+    const guard = createTemplateAssistantSessionGuard_ACU();
+    // 先初始化 AbortController，使 runGuard.signal 非空
+    guard.getSignal();
+    const runGuard = guard.createRunGuard();
+
+    await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', guard: runGuard });
+
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
+    const signalArg = mockCallAIWithPreset.mock.calls[0][3];
+    expect(signalArg).toBeDefined();
+    expect(signalArg.aborted).toBe(false);
+    guard.cancel();
+    expect(signalArg.aborted).toBe(true);
+    expect(runGuard.isCancelled?.()).toBe(true);
+  });
+
+  });

@@ -426,10 +426,12 @@ vi.mock('../../src/service/template-assistant/service', () => ({
     createRunGuard: () => ({
       isCancelled: () => false,
       isStale: () => false,
+      get signal() { return new AbortController().signal; },
     }),
     invalidate: () => {},
     cancel: () => {},
     reset: () => {},
+    getSignal: () => new AbortController().signal,
   }),
   TemplateAssistantSessionStoppedError_ACU: class extends Error {
     constructor(stopReason: string) {

@@ -362,6 +362,8 @@ function buildAssistantTableApiPresetOptionsHtml_ACU() {
 
 function createNewGuardController_ACU() {
     assistantUiState_ACU.guardController = createTemplateAssistantSessionGuard_ACU();
+    // 初始化 AbortController，使 createRunGuard 产出的 runGuard.signal 可中断 AI 请求
+    assistantUiState_ACU.guardController.getSignal();
     assistantUiState_ACU.runningSessionId += 1;
 }
 

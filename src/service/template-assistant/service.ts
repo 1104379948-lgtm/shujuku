@@ -204,6 +204,7 @@ export interface TemplateAssistantGenerateInput_ACU {
     userRequest: string;
     priorTurns?: TemplateAssistantPriorTurn_ACU[] | null;
     tableApiPreset?: string;
+    guard?: TemplateAssistantSessionRunGuard_ACU | null;
 }
 
 export interface TemplateAssistantGenerateResult_ACU {
@@ -267,6 +268,7 @@ export interface TemplateAssistantSessionProgress_ACU {
 export interface TemplateAssistantSessionRunGuard_ACU {
     isCancelled?: () => boolean;
     isStale?: () => boolean;
+    signal?: AbortSignal | null;
 }
 
 export interface TemplateAssistantSessionGuardController_ACU {
@@ -274,6 +276,7 @@ export interface TemplateAssistantSessionGuardController_ACU {
     invalidate: () => void;
     cancel: () => void;
     reset: () => void;
+    getSignal: () => AbortSignal | null;
 }
 
 export interface TemplateAssistantSessionRunInput_ACU extends TemplateAssistantGenerateInput_ACU {
@@ -304,6 +307,12 @@ export interface TemplateAssistantPromptSegment_ACU {
     role: string;
     content: string;
     deletable?: boolean;
+    /**
+     * 伪 role 提示词组标记。为 true 表示该卡属于「提前准备好的提示词组」。
+     * 仅供代码识别（判定是否整体前置到真实历史之前），不会进入发送给 AI 的提示词内容。
+     * 默认模板的卡全部为 true；用户新增卡片默认不带该标记。
+     */
+    pinned?: boolean;
 }
 
 export type TemplateAssistantFailureKind_ACU = 'parse' | 'validate' | 'fingerprint' | 'preflight' | 'unknown';
@@ -404,6 +413,7 @@ function normalizeAssistantPromptSegments_ACU(input: unknown): TemplateAssistant
             role: normalizeAssistantPromptRole_ACU(item?.role),
             content: String(item?.content ?? ''),
             deletable: item?.deletable !== false,
+            pinned: item?.pinned === true,
         }))
         .filter((seg) => !!seg.content.trim());
 }
@@ -429,6 +439,7 @@ export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(): TemplateAs
     return [
         {
             role: 'SYSTEM',
+            pinned: true,
             content: [
                 '你是 visualizer 内的模板改表助手。',
                 '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
@@ -442,11 +453,13 @@ export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(): TemplateAs
         },
         {
             role: 'assistant',
+            pinned: true,
             content: '收到，我将只输出合法的 draft JSON，不输出任何解释文本。',
             deletable: true,
         },
         {
             role: 'USER',
+            pinned: true,
             content: [
                 `以下是表格结构协议与规则，必须严格遵守：${TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU}；语法参考文档：${TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU}`,
                 '操作白名单（只允许以下 11 种操作名，禁止其他）：add_sheet、rename_sheet、delete_sheet、move_sheet、patch_sheet_source_data、patch_sheet_update_config、patch_sheet_export_config、patch_sheet_content、patch_sheet_schema、patch_sheet_locks、patch_global_injection_config。',
@@ -454,42 +467,50 @@ export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(): TemplateAs
                 'add_sheet 必须同时提供非空 sheetName 和至少一个 headers 项；不要生成 sheetKey，本地会自动生成；应尽量同时提供 sourceData 的 note、initNode、insertNode、updateNode、deleteNode 五段。',
                 'add_sheet.sourceData 与 patch_sheet_source_data.patch 只允许 note、initNode、insertNode、updateNode、deleteNode 五个字段；禁止出现 ddl、sql、schema、createTable 等字段。',
                 '默认不主动输出 patch_sheet_schema.ddl；除非用户明确要求 DDL、字段类型、约束或 SQLite 建表语句。中文 headers 必须使用英文/ASCII 物理列名并配 `-- 中文表头` 注释按原顺序一一对应；第一列必须 row_id INTEGER PRIMARY KEY 并保留 `-- 行号` 注释。',
+                '当用户对【已存在的表】明确要求 DDL、字段类型、约束或 SQLite 建表语句时，不得因为表已存在就返回空 operations；必须通过 patch_sheet_schema.patch.ddl 输出该表的 DDL。',
                 '如果需求信息不足、字段缺失、或当前协议无法安全表达，仍然必须返回合法 draft：summary 简述原因、warnings 写明原因、operations 输出空数组；不要输出追问文本。',
             ].join('\n'),
             deletable: true,
         },
         {
             role: 'assistant',
+            pinned: true,
             content: '收到，我已阅读协议约束与语法文档，将严格在协议范围内生成操作。',
             deletable: true,
         },
         {
             role: 'USER',
+            pinned: true,
             content: `以下是全局表格结构：${TEMPLATE_ASSISTANT_PLACEHOLDER_ALL_SHEETS_ACU}`,
             deletable: true,
         },
         {
             role: 'assistant',
+            pinned: true,
             content: '收到，我已了解全部表格的结构与全局注入配置。',
             deletable: true,
         },
         {
             role: 'USER',
+            pinned: true,
             content: `以下是当前选中表：${TEMPLATE_ASSISTANT_PLACEHOLDER_CURRENT_SHEET_ACU}`,
             deletable: true,
         },
         {
             role: 'assistant',
+            pinned: true,
             content: '收到，我已聚焦当前选中表，随时可以按需求生成增量改动。',
             deletable: true,
         },
         {
             role: 'USER',
+            pinned: true,
             content: `现在请按照我的需求立刻开始工作：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`,
             deletable: false,
         },
         {
             role: 'assistant',
+            pinned: true,
             content: '收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：',
             deletable: true,
         },
@@ -588,6 +609,9 @@ export function buildTemplateAssistantMessages_ACU(input: TemplateAssistantGener
         return messages;
     }
 
+    // 伪 role 提示词组标记：存在任意 pinned 卡即视为「提前准备好的提示词组」。
+    // 判定在 resolved 之前用 normalized 完成；pinned 仅用于消息排序，不进入发送给 AI 的内容。
+    const hasPinned = normalized.some((seg) => seg.pinned === true);
     // 锚点：最后一张「含 $1 的卡」。必须在替换前（normalized）判定，
     // 因为 resolved 中的 $1 已被替换成 userRequest 值，若该值本身含 "$1" 会污染判定。
     const anchorIndex = normalized.reduce<number>(
@@ -605,31 +629,31 @@ export function buildTemplateAssistantMessages_ACU(input: TemplateAssistantGener
         });
     };
 
-    if (anchorIndex >= 0) {
+    if (hasPinned) {
+        // 伪 role 提示词组：整体（含卡9 包装语与卡10 预填充）固定放最前，
+        // 首轮无历史时即完整提示词组；后续轮真实历史与本轮需求紧随其后。
+        messages.push(...resolved);
         const priorTurns = normalizePriorTurns_ACU(input.priorTurns);
-        // 首轮：完整伪 role 结构（卡1-8 + 卡9 包装语含 $1 + 卡10 预填充）。
+        priorTurns.forEach((turn) => {
+            if (turn.user) messages.push({ role: 'user', content: turn.user });
+            if (turn.assistant) messages.push({ role: 'assistant', content: turn.assistant });
+        });
+        if (priorTurns.length > 0) {
+            messages.push({ role: 'USER', content: String(input.userRequest || '').trim() });
+        }
+    } else if (anchorIndex >= 0) {
+        const priorTurns = normalizePriorTurns_ACU(input.priorTurns);
+        // 存量路径（无 pinned 标记）：首轮完整伪 role 结构。
         if (priorTurns.length === 0) {
             messages.push(...resolved);
-        } else if (anchorIndex >= 8 && resolved.length > anchorIndex) {
-            // 后续轮：卡1-8 系统骨架 → 真实历史 → 本轮需求作为普通 user 消息
-            // → 卡10 预填充仍在末尾（输出格式引导，不是历史内容）。
-            // 不再重复注入卡9 的仪式性包装语，避免在正常对话中途插入初始化指令。
-            messages.push(...resolved.slice(0, anchorIndex));
+        } else {
+            // 存量后续轮：含 $1 模板整体前置，历史与本轮需求紧随其后。
+            messages.push(...resolved);
             priorTurns.forEach((turn) => {
                 if (turn.user) messages.push({ role: 'user', content: turn.user });
                 if (turn.assistant) messages.push({ role: 'assistant', content: turn.assistant });
             });
             messages.push({ role: 'USER', content: String(input.userRequest || '').trim() });
-            messages.push(...resolved.slice(anchorIndex + 1));
-        } else {
-            // 非伪 role 模板（自定义模板、卡数少）：保持原有插入语义，
-            // priorTurns 照旧插在最后一张含 $1 的卡之前，不引入裸 USER 需求替换。
-            messages.push(...resolved.slice(0, anchorIndex));
-            priorTurns.forEach((turn) => {
-                if (turn.user) messages.push({ role: 'user', content: turn.user });
-                if (turn.assistant) messages.push({ role: 'assistant', content: turn.assistant });
-            });
-            messages.push(...resolved.slice(anchorIndex));
         }
     } else {
         messages.push(...resolved);
@@ -1287,6 +1311,7 @@ function buildDefaultSystemPrompt_ACU() {
         '当用户只表达“新增某某表”但没有给出表头时，可以根据表名语义生成一组最小、合理、通用、可直接用于后续剧情更新的 headers；自定义表头尽量避免使用带 / 的列名；不要伪造数据行。',
         '物品/战利品/库存类表，优先考虑“物品名称、数量、描述/效果、类别、备注、来源/掉落来源”等能直接支撑后续更新的列；其中应至少包含一个稳定标识列。',
         '默认优先 add_sheet + 完整 sourceData，让新表立刻具备初始化/新增/更新/删除指引；除非用户明确要求 DDL、字段类型、约束或 SQLite 建表语句，否则不要主动输出 patch_sheet_schema.ddl。',
+        '当用户对【已存在的表】明确要求 DDL、字段类型、约束或 SQLite 建表语句时，不得因为表已存在就返回空 operations；必须通过 patch_sheet_schema.patch.ddl 输出该表的 DDL。',
         '即使用户要求“顺便写 SQL/DDL”，也不要把 ddl 或 sql 塞进 add_sheet.sourceData；新建表时优先输出 headers + 合法的五段 sourceData。',
         '如果当前 headers 主要是中文，自定义 ddl 只有在你能提供英文/ASCII 物理列名，并用 `-- 中文表头` 注释按原顺序一一对应时才安全；除非用户明确要求并且已经给出可直接落地的列名方案，否则不要生成 ddl。',
         '示例 add_sheet：{"op":"add_sheet","sheetName":"角色关系表","headers":["角色A","角色B","关系","备注"]}。',
@@ -1478,24 +1503,37 @@ function assertTemplateAssistantSessionActive_ACU(guard?: TemplateAssistantSessi
 export function createTemplateAssistantSessionGuard_ACU(): TemplateAssistantSessionGuardController_ACU {
     let version = 0;
     let cancelled = false;
+    let abortController: AbortController | null = null;
     return {
         createRunGuard() {
             const capturedVersion = version;
             return {
                 isCancelled: () => cancelled,
                 isStale: () => !cancelled && capturedVersion !== version,
+                get signal() { return abortController?.signal ?? null; },
             };
         },
         invalidate() {
             version += 1;
+            abortController?.abort();
+            abortController = null;
         },
         cancel() {
             cancelled = true;
             version += 1;
+            abortController?.abort();
+            abortController = null;
         },
         reset() {
             cancelled = false;
             version += 1;
+            abortController = null;
+        },
+        getSignal() {
+            if (!abortController) {
+                abortController = new AbortController();
+            }
+            return abortController.signal;
         },
     };
 }
@@ -1654,7 +1692,9 @@ export async function generateTemplateAssistantDraft_ACU(input: TemplateAssistan
         }
     }
 
-    const aiRawText = await callAIWithPreset_ACU(messages, effectivePreset);
+    const aiRawText = input.guard?.signal
+        ? await callAIWithPreset_ACU(messages, effectivePreset, undefined, input.guard.signal)
+        : await callAIWithPreset_ACU(messages, effectivePreset);
     if (!aiRawText) {
         throw new Error('AI 未返回有效内容');
     }
@@ -1726,13 +1766,14 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
         throw new Error('请先选中一个表后再使用 AI 改表助手');
     }
 
-    const maxRounds = normalizePositiveInteger_ACU(input?.maxRounds, DEFAULT_TEMPLATE_ASSISTANT_MAX_ROUNDS_ACU);
+    const basePriorTurns = normalizePriorTurns_ACU(input?.priorTurns);
+    // 第一次对话（无 priorTurns）只跑 1 轮，不自动试验多轮；有历史时才按 maxRounds 允许续跑。
+    const maxRounds = basePriorTurns.length === 0 ? 1 : normalizePositiveInteger_ACU(input?.maxRounds, DEFAULT_TEMPLATE_ASSISTANT_MAX_ROUNDS_ACU);
     const maxRepairRetries = normalizeNonNegativeInteger_ACU(input?.maxRepairRetries, DEFAULT_TEMPLATE_ASSISTANT_MAX_REPAIR_RETRIES_ACU);
     const originalTempData = clone_ACU(tempData);
     const originalSheetOrder = Array.isArray(input?.sheetOrder) ? [...input.sheetOrder] : null;
     const originalBaseFingerprint = buildTemplateAssistantFingerprint_ACU(originalTempData);
     const rounds: TemplateAssistantSessionRound_ACU[] = [];
-    const basePriorTurns = normalizePriorTurns_ACU(input?.priorTurns);
     const onRoundComplete = input?.onRoundComplete;
 
     let workingTempData = clone_ACU(originalTempData);
@@ -1771,6 +1812,7 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
                     userRequest: roundUserRequest,
                     priorTurns: historyForRound,
                     tableApiPreset: input.tableApiPreset,
+                    guard: input.guard,
                 });
                 assertTemplateAssistantSessionActive_ACU(input.guard);
                 lastResult = result;

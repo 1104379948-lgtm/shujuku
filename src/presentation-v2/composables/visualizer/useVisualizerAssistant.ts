@@ -395,6 +395,7 @@ export function useVisualizerAssistant() {
         role: String(seg?.role || 'SYSTEM'),
         content: String(seg?.content ?? ''),
         deletable: seg?.deletable !== false,
+        pinned: seg?.pinned === true,
       }));
     } else {
       promptSegments.value = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
@@ -548,6 +549,8 @@ export function useVisualizerAssistant() {
     const createdAt = Date.now();
     const sessionBaselineFingerprint = buildTemplateAssistantFingerprint_ACU(visualizer.tempData || {});
     guardController = createTemplateAssistantSessionGuard_ACU();
+    // 初始化 AbortController，使本会话的 runGuard.signal 持有可中断的 signal
+    guardController.getSignal();
     visualizer.assistantIsRunning = true;
     visualizer.assistantErrorMessage = '';
     visualizer.assistantRounds = [];

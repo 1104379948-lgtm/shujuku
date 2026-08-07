@@ -321,33 +321,39 @@ describe('buildTemplateAssistantMessages_ACU 消息组装', () => {
       { role: 'SYSTEM', content: `需求：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`, deletable: false },
     ];
     const messages = buildTemplateAssistantMessages_ACU(buildInput_ACU() as any, 'acu-struct:fp');
-    // 单卡含 $1 → anchorIndex=0，resolved[0..-1] 为空，priorTurns 插到该卡之前
-    // messages = priorTurns(2) + [该卡] = 3 条
-    expect(messages).toHaveLength(3);
-    expect(messages[0]?.role).toBe('user');
-    expect(messages[0]?.content).toBe('帮我看看当前表');
-    expect(messages[2]?.role).toBe('SYSTEM');
-    // SYSTEM 卡无 referenceDocs 占位符 → T5 防呆在末尾追加引用文档
-    expect(messages[2]?.content).toContain('需求：新增一列 备注');
-  });
-
-  it('priorTurns 插在最后一张含 $1 的卡之前（构造两张含 $1 卡验证「最后」语义）', () => {
-    settings_ACU.templateAssistantPromptSegments = [
-      { role: 'SYSTEM', content: `说明：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`, deletable: true },
-      { role: 'USER', content: `现在执行：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`, deletable: true },
-    ];
-    const messages = buildTemplateAssistantMessages_ACU(buildInput_ACU() as any, 'acu-struct:fp');
-    // resolved = [卡0(已替换), 卡1(已替换)]，anchorIndex=1
-    // messages = [卡0] + priorTurns + [卡1]
+    // 单卡含 $1 → anchorIndex=0，多轮分支：提示词组整体放最顶 + priorTurns + 末尾 USER
+    // messages = [该卡(已替换$1)] + priorTurns(2) + USER(1) = 4 条
     expect(messages).toHaveLength(4);
     expect(messages[0]?.role).toBe('SYSTEM');
-    expect(messages[0]?.content).toContain('说明：新增一列 备注');
+    expect(messages[0]?.content).toContain('需求：新增一列 备注');
     expect(messages[1]?.role).toBe('user');
     expect(messages[1]?.content).toBe('帮我看看当前表');
     expect(messages[2]?.role).toBe('assistant');
     expect(messages[2]?.content).toBe('好的，当前表为 A表');
     expect(messages[3]?.role).toBe('USER');
-    expect(messages[3]?.content).toContain('现在执行：新增一列 备注');
+    expect(messages[3]?.content).toBe('新增一列 备注');
+    // SYSTEM 卡无 referenceDocs 占位符 → T5 防呆在末尾追加引用文档
+  });
+
+  it('多轮：含 $1 模板其提示词组整体放最顶，priorTurns 紧跟其后，本轮需求作为最后 USER（两张含 $1 卡）', () => {
+    settings_ACU.templateAssistantPromptSegments = [
+      { role: 'SYSTEM', content: `说明：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`, deletable: true },
+      { role: 'USER', content: `现在执行：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`, deletable: true },
+    ];
+    const messages = buildTemplateAssistantMessages_ACU(buildInput_ACU() as any, 'acu-struct:fp');
+    // resolved = [卡0(已替换), 卡1(已替换)]，anchorIndex=1（含 $1）
+    // messages = 提示词组整体(卡0+卡1) + priorTurns(2) + 末尾 USER(1) = 5
+    expect(messages).toHaveLength(5);
+    expect(messages[0]?.role).toBe('SYSTEM');
+    expect(messages[0]?.content).toContain('说明：新增一列 备注');
+    expect(messages[1]?.role).toBe('USER');
+    expect(messages[1]?.content).toContain('现在执行：新增一列 备注');
+    expect(messages[2]?.role).toBe('user');
+    expect(messages[2]?.content).toBe('帮我看看当前表');
+    expect(messages[3]?.role).toBe('assistant');
+    expect(messages[3]?.content).toBe('好的，当前表为 A表');
+    expect(messages[4]?.role).toBe('USER');
+    expect(messages[4]?.content).toBe('新增一列 备注');
   });
 
   it('无 $1 但有 $2 → priorTurns 追加在所有 segments 之后', () => {
@@ -365,15 +371,49 @@ describe('buildTemplateAssistantMessages_ACU 消息组装', () => {
     expect(messages[2]?.content).toBe('好的，当前表为 A表');
   });
 
-  it('伪 role 模板 + priorTurns → 预填充卡恒在末尾，role 为 assistant，内容为预填充文本', () => {
+  it('带 pinned 标记但无 $1 → 提示词组整体放最前，历史与本轮 USER 紧随其后', () => {
+    settings_ACU.templateAssistantPromptSegments = [
+      { role: 'SYSTEM', content: '固定规则卡', deletable: false, pinned: true },
+      { role: 'USER', content: '用户临时补充卡', deletable: true },
+    ];
+    const messages = buildTemplateAssistantMessages_ACU(buildInput_ACU() as any, 'acu-struct:fp');
+    // hasPinned → 提示词组整体(2) + 历史(2) + 本轮 USER(1) = 5
+    expect(messages).toHaveLength(5);
+    // 带 pinned 的卡放最前
+    expect(messages[0]?.role).toBe('SYSTEM');
+    expect(messages[0]?.content).toContain('固定规则卡');
+    expect(messages[1]?.role).toBe('USER');
+    expect(messages[1]?.content).toContain('用户临时补充卡');
+    // 历史紧随其后
+    expect(messages[2]?.role).toBe('user');
+    expect(messages[2]?.content).toBe('帮我看看当前表');
+    expect(messages[3]?.role).toBe('assistant');
+    expect(messages[3]?.content).toBe('好的，当前表为 A表');
+    // 本轮用户需求为最后一条
+    expect(messages[4]?.role).toBe('USER');
+    expect(messages[4]?.content).toBe('新增一列 备注');
+  });
+
+
+  it('伪 role 模板 + priorTurns → 提示词组整体放最前（预填充卡位于词组内），历史与本轮 USER 紧随其后', () => {
     settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
     const messages = buildTemplateAssistantMessages_ACU(buildInput_ACU() as any, 'acu-struct:fp');
-    const last = messages[messages.length - 1]!;
-    expect(last.role).toBe('assistant');
-    expect(last.content).toBe('收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：');
+    // 结构：提示词组整体(10) + 历史(2) + 本轮 USER(1) = 13
+    expect(messages).toHaveLength(13);
+    // 预填充卡位于提示词组内（下标 9），不再恒在末尾
+    const prefill = messages[9]!;
+    expect(prefill.role).toBe('assistant');
+    expect(prefill.content).toBe('收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：');
     // 预填充卡不含 draft 开标签
-    expect(last.content).not.toContain('<templateAssistantDraft>');
-    // 伪 role 模板含 $1 → 不追加 payload user 消息
+    expect(prefill.content).not.toContain('<templateAssistantDraft>');
+    // 真实历史跟随提示词组之后（下标 10、11），本轮 USER 为最后一条（下标 12）
+    expect(messages[10]?.role).toBe('user');
+    expect(messages[10]?.content).toBe('帮我看看当前表');
+    expect(messages[11]?.role).toBe('assistant');
+    expect(messages[11]?.content).toBe('好的，当前表为 A表');
+    expect(messages[12]?.role).toBe('USER');
+    expect(messages[12]?.content).toBe('新增一列 备注');
+    // 伪 role 模板含 $1 → 不追加完整 payload user 消息
     const userPayloadCount = messages.filter((m) => m.role === 'user' && m.content.includes('"userRequest"')).length;
     expect(userPayloadCount).toBe(0);
   });
@@ -401,7 +441,7 @@ describe('buildTemplateAssistantMessages_ACU 消息组装', () => {
     expect(last.content).toBe('收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：');
   });
 
-  it('多轮：不重复注入卡 9 包装语，真实历史按 user→assistant 顺序，本轮需求作为独立 USER 消息，末条仍为预填充', () => {
+  it('多轮：伪 role 提示词组整体放最顶（含卡 9 包装语与卡 10 预填充），真实历史按 user→assistant 顺序，本轮需求作为最后 USER 消息', () => {
     settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
     const messages = buildTemplateAssistantMessages_ACU(
       {
@@ -413,24 +453,25 @@ describe('buildTemplateAssistantMessages_ACU 消息组装', () => {
       } as any,
       'acu-struct:fp',
     );
-    // 结构：卡1-8(8) + 真实历史(2) + 本轮 USER(1) + 预填充(1) = 12
-    expect(messages).toHaveLength(12);
-    // 卡 9 包装语不再重复出现
+    // 结构：提示词组整体(10，含卡9包装语与卡10预填充) + 真实历史(2) + 本轮 USER(1) = 13
+    expect(messages).toHaveLength(13);
+    // 卡 9 包装语出现在最顶（提示词组内，$1 替换为第二轮需求）
     const wrapperCount = messages.filter((m) => m.content.includes('现在请按照我的需求立刻开始工作')).length;
-    expect(wrapperCount).toBe(0);
-    // 真实历史按 user→assistant 顺序出现在卡 1-8 之后（下标 8、9）
-    expect(messages[8]?.role).toBe('user');
-    expect(messages[8]?.content).toBe('第一轮需求');
+    expect(wrapperCount).toBe(1);
+    // 提示词组固定在最顶：末位卡 10 预填充位于下标 9
+    expect(messages[0]?.role).toBe('SYSTEM');
     expect(messages[9]?.role).toBe('assistant');
-    expect(messages[9]?.content).toBe('<templateAssistantDraft>{}</templateAssistantDraft>');
-    // 本轮需求作为独立 USER 消息（下标 10），且内容为替换后的 userRequest
-    expect(messages[10]?.role).toBe('USER');
-    expect(messages[10]?.content).toBe('第二轮需求');
-    // 末条仍为预填充卡
-    const last = messages[messages.length - 1]!;
-    expect(last.role).toBe('assistant');
-    expect(last.content).toBe('收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：');
+    expect(messages[9]?.content).toBe('收到，我不会输出解释文本，现在直接输出完整的 draft 标签与 JSON：');
+    // 真实历史按 user→assistant 顺序紧跟提示词组之后（下标 10、11）
+    expect(messages[10]?.role).toBe('user');
+    expect(messages[10]?.content).toBe('第一轮需求');
+    expect(messages[11]?.role).toBe('assistant');
+    expect(messages[11]?.content).toBe('<templateAssistantDraft>{}</templateAssistantDraft>');
+    // 本轮需求作为最后一条独立 USER 消息（下标 12）
+    expect(messages[12]?.role).toBe('USER');
+    expect(messages[12]?.content).toBe('第二轮需求');
   });
+
 
   it('多轮：不追加完整 payload（不存在含 userRequest 的 JSON 消息）', () => {
     settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();

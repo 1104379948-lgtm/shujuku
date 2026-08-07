@@ -430,8 +430,8 @@ describe('applyCombinedSettingsImport_ACU', () => {
     });
     expect(fields).toContain('templateAssistantPromptSegments');
     expect(mockSettings.templateAssistantPromptSegments).toEqual([
-      { role: 'SYSTEM', content: '规则一', deletable: false },
-      { role: 'assistant', content: '样例', deletable: true },
+      { role: 'SYSTEM', content: '规则一', deletable: false, pinned: false },
+      { role: 'assistant', content: '样例', deletable: true, pinned: false },
     ]);
   });
 
