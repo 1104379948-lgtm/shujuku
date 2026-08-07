@@ -89,6 +89,27 @@ const serviceMock = vi.hoisted(() => ({
   resolveActiveTemplatePresetName_ACU: vi.fn(() => '现有预设'),
   upsertTemplatePreset_ACU: vi.fn(() => true),
   getGlobalInjectionConfigFromData_ACU: vi.fn(() => ({})),
+  // 贴近真实的规范化实现：缺失字段补默认值。若用 vi.fn(x => x)，
+  // 「基线缺字段 + 草稿被补齐默认值」的伪变更哨兵测试将失去意义。
+  ensureGlobalInjectionConfigDefaults_ACU: vi.fn((rawConfig: any) => {
+    const base = {
+      readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+      wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+    };
+    const raw = (rawConfig && typeof rawConfig === 'object') ? rawConfig : {};
+    const normalize = (value: any, def: any) => {
+      const v = (value && typeof value === 'object') ? value : {};
+      return {
+        position: v.position || def.position,
+        depth: v.depth ?? def.depth,
+        order: v.order ?? def.order,
+      };
+    };
+    return {
+      readableEntryPlacement: normalize(raw.readableEntryPlacement, base.readableEntryPlacement),
+      wrapperPlacement: normalize(raw.wrapperPlacement, base.wrapperPlacement),
+    };
+  }),
   purgeSheetKeysFromChatHistoryHard_ACU: vi.fn(async () => ({ changed: true })),
   refreshMergedDataAndNotify_ACU: vi.fn(async () => undefined),
   updateReadableLorebookEntry_ACU: vi.fn(async () => undefined),
@@ -188,6 +209,7 @@ vi.mock('../../../src/service/template/template-preset-service', () => ({
 }));
 vi.mock('../../../src/service/worldbook/injection-engine', () => ({
   getGlobalInjectionConfigFromData_ACU: serviceMock.getGlobalInjectionConfigFromData_ACU,
+  ensureGlobalInjectionConfigDefaults_ACU: serviceMock.ensureGlobalInjectionConfigDefaults_ACU,
   purgeSheetKeysFromChatHistoryHard_ACU: serviceMock.purgeSheetKeysFromChatHistoryHard_ACU,
 }));
 vi.mock('../../../src/service/worldbook/pipeline', () => ({
@@ -1783,5 +1805,343 @@ it('成功保存后回填临时行 ID，refresh 失败时不提前回填', async
     expect(second).toBe(true);
     expect(store.currentSheet.content[2][0]).toBe('2');
     expect(store.pendingDataOps.committed).toBeUndefined();
+  });
+
+  it('仅修改全局注入配置时以 scope-only 提交，不调用结构提交（inherit 模式）', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      isolationKey: 'iso-test',
+      pristineOverride: false,
+      reason: 'visualizer_v2_template_mate_only',
+      templateSource: expect.objectContaining({
+        mate: expect.objectContaining({
+          globalInjectionConfig: expect.objectContaining({
+            readableEntryPlacement: expect.objectContaining({ depth: 7 }),
+          }),
+        }),
+      }),
+    }));
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(runtimeMock._set_currentJsonTableData_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      mate: expect.objectContaining({
+        globalInjectionConfig: expect.objectContaining({
+          readableEntryPlacement: expect.objectContaining({ depth: 7 }),
+        }),
+      }),
+    }));
+    expect(store.lastSavedTarget).toBe('template-chat');
+    expect(store.dirty).toBe(false);
+  });
+
+  it('仅修改全局注入配置时保存成功后推进基线，再次保存提示无变化', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+
+    const first = await useVisualizerSave().saveTemplateToCurrentChat();
+    expect(first).toBe(true);
+    expect(store.templateBaseData.mate.globalInjectionConfig.readableEntryPlacement.depth).toBe(7);
+
+    const second = await useVisualizerSave().saveTemplateToCurrentChat();
+    expect(second).toBe(false);
+    expect(toastMock.info).toHaveBeenCalledWith('模板结构没有变化。', { muteable: false });
+  });
+
+  it('全局注入配置 + 锁同时变更时一次提交并保存锁草稿', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+    store.toggleRowLock('sheet_test_vz2', 1);
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.saveTableLocksForSheet_ACU).toHaveBeenCalled();
+    expect(toastMock.success).toHaveBeenCalledWith('全局注入配置与表格锁定设置已保存到当前聊天。', { muteable: false });
+  });
+
+  it('pristine 会话下仅修改全局注入配置仍先执行降级预检（noReplayRoot 放行）', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReturnValueOnce({ mode: 'pristine' });
+    serviceMock.demoteTemplateOnlyRootToScopeOnly_ACU.mockResolvedValueOnce({
+      ok: false, demoted: false, noReplayRoot: true, reason: 'pristine，无回放根。',
+    });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.demoteTemplateOnlyRootToScopeOnly_ACU).toHaveBeenCalled();
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      // mate-only 不得绕过 Sheet 投影校验（计划 :77 / 风险 R2）。
+      pristineOverride: false,
+    }));
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
+
+  it('pristine 会话下降级预检失败时零提交并报错', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReturnValueOnce({ mode: 'pristine' });
+    serviceMock.demoteTemplateOnlyRootToScopeOnly_ACU.mockResolvedValueOnce({
+      ok: false, demoted: false, reason: '检测到含真实数据的 full checkpoint，拒绝降级，零写入。',
+    });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('模板保存被降级预检阻止'), expect.any(Object));
+  });
+
+  it('pristine 会话下仅修改全局注入配置但 Sheet 投影不一致时零落盘并给出先保存数据指引', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReturnValueOnce({ mode: 'pristine' });
+    serviceMock.demoteTemplateOnlyRootToScopeOnly_ACU.mockResolvedValueOnce({
+      ok: true, demoted: true,
+    });
+    serviceMock.commitCurrentFloorTemplateScopeOnly_ACU.mockResolvedValueOnce({
+      saved: false,
+      error: 'scope-only 模板提交要求 baseline 与 candidate 的持久化 Sheet 投影完全一致。',
+    });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      pristineOverride: false,
+    }));
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith(
+      expect.stringContaining('存在未提交的表内容差异，请先保存数据到当前消息，再保存全局配置。'),
+      { muteable: false },
+    );
+  });
+
+  it('blocked 会话下仅修改全局注入配置零提交并报错', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReturnValueOnce({ mode: 'blocked', reason: '状态损坏' });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('模板保存已阻止'), expect.any(Object));
+  });
+
+  it('基线缺失时拒绝保存全局配置且零提交', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+    }, []);
+    store.templateBaseData = null;
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('模板基线缺失'), expect.any(Object));
+  });
+
+  it('scope-only 投影不一致时如实报错并给出先保存数据的指引', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+    serviceMock.commitCurrentFloorTemplateScopeOnly_ACU.mockResolvedValueOnce({
+      saved: false,
+      error: 'scope-only 模板提交要求 baseline 与 candidate 的持久化 Sheet 投影完全一致。',
+    });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(toastMock.error).toHaveBeenCalledWith(
+      expect.stringContaining('存在未提交的表内容差异，请先保存数据到当前消息，再保存全局配置。'),
+      { muteable: false },
+    );
+  });
+
+  it('基线缺少 globalInjectionConfig 而草稿被补齐默认值时不视为变更（伪变更哨兵）', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    // 基线 mate 无 globalInjectionConfig 字段。
+    store.loadSnapshot({ mate: { type: 'chatSheets', version: 1 }, sheet_test_vz2: sheet() }, ['sheet_test_vz2']);
+    // 草稿被 ensureWriteBack 补齐了默认值，但内容与规范化后的基线一致。
+    store.tempData.mate.globalInjectionConfig = {
+      readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+      wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+    };
+    store.setDirty(true);
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(toastMock.info).toHaveBeenCalledWith('模板结构没有变化。', { muteable: false });
+  });
+
+  it('全局注入配置变更叠加表结构变更时仍走结构提交且不重复调用 scope-only', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.currentSheet.name = '新表名';
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      templateSource: expect.objectContaining({
+        mate: expect.objectContaining({
+          globalInjectionConfig: expect.objectContaining({
+            readableEntryPlacement: expect.objectContaining({ depth: 7 }),
+          }),
+        }),
+      }),
+    }));
+  });
+
+  it('数据路径：仅有全局注入配置变更时提示改用模板保存且零持久化', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const base = {
+      mate: { type: 'chatSheets', version: 1, globalInjectionConfig: {
+        readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+        wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+      } },
+      sheet_test_vz2: sheet(),
+    };
+    store.loadSnapshot(base, ['sheet_test_vz2']);
+    store.tempData.mate.globalInjectionConfig.readableEntryPlacement.depth = 7;
+    store.setDirty(true);
+
+    const saved = await useVisualizerSave().saveToChat();
+
+    expect(saved).toBe(false);
+    expect(toastMock.info).toHaveBeenCalledWith('全局注入配置属于模板层，请使用「保存模板到当前聊天」保存。', { muteable: false });
+    expect(serviceMock.persistTableMutationLogBatchV2_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.runTableWriteTransaction_ACU).not.toHaveBeenCalled();
   });
 });

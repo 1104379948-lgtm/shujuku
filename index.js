@@ -147124,6 +147124,22 @@ Expected function or array of functions, received type ${typeof value}.`
             metadata.exportConfig = cloneData$1(sheet.exportConfig);
         return metadata;
     }
+    /**
+     * mate 级持久化投影。
+     * 只纳入「用户可在编辑器中修改」的 mate 字段：
+     * - globalInjectionConfig：全局注入位置配置（唯一 UI 入口）
+     * 刻意排除：
+     * - type / version：结构常量，由 sanitize / ensure 链路补齐，纳入会产生伪变更
+     * - updateConfigUiSentinel：由持久层补齐（storage-frame-v2-persist.ts:3145），
+     *   UI 侧写的是 sheet.updateConfig.uiSentinel，与 mate 无关
+     * 两侧都必须过 ensureGlobalInjectionConfigDefaults_ACU 规范化，
+     * 否则「基线未含该字段 + 草稿已被 ensureWriteBack 写入默认值」会被误判为变更。
+     */
+    function projectTemplateMateProjection_ACU(data) {
+        return {
+            globalInjectionConfig: ensureGlobalInjectionConfigDefaults_ACU(cloneData$1(data?.mate?.globalInjectionConfig ?? null)),
+        };
+    }
     function classifyVisualizerTemplateChanges_ACU(baseData, nextData) {
         const baseKeys = Object.keys(baseData || {}).filter(key => key.startsWith('sheet_'));
         const nextKeys = Object.keys(nextData || {}).filter(key => key.startsWith('sheet_'));
@@ -147133,7 +147149,8 @@ Expected function or array of functions, received type ${typeof value}.`
             && !sameTemplateValue_ACU(projectSheetSchema_ACU(baseData[key]), projectSheetSchema_ACU(nextData[key])));
         const metadataChangedSheetKeys = nextKeys.filter(key => baseData?.[key]
             && !sameTemplateValue_ACU(projectSheetPersistentMetadata_ACU(baseData[key]), projectSheetPersistentMetadata_ACU(nextData[key])));
-        return { addedSheetKeys, schemaChangedSheetKeys, metadataChangedSheetKeys, deletedSheetKeys };
+        const mateChanged = !sameTemplateValue_ACU(projectTemplateMateProjection_ACU(baseData), projectTemplateMateProjection_ACU(nextData));
+        return { addedSheetKeys, schemaChangedSheetKeys, metadataChangedSheetKeys, deletedSheetKeys, mateChanged };
     }
     function prepareTemplateSheetsForCommit_ACU(data, sheetKeys) {
         const scopedData = Object.fromEntries(sheetKeys.map(sheetKey => [sheetKey, data[sheetKey]]));
@@ -147364,7 +147381,12 @@ Expected function or array of functions, received type ${typeof value}.`
                     return false;
                 }
                 if (!result.changed && deletedSheetKeys.length === 0 && !hasLockChanges) {
-                    toastStore.info('没有需要保存的数据、锁或删表增量。', { muteable: false });
+                    // 数据路径不负责模板层配置。若检测到仅存在 mate 级配置变更（如全局注入配置），
+                    // 给出可执行指引，而非误导性的「没有需要保存的」。
+                    const mateChanged = classifyVisualizerTemplateChanges_ACU(visualizer.templateBaseData, visualizer.tempData).mateChanged;
+                    toastStore.info(mateChanged
+                        ? '全局注入配置属于模板层，请使用「保存模板到当前聊天」保存。'
+                        : '没有需要保存的数据、锁或删表增量。', { muteable: false });
                     return false;
                 }
                 if (deletedSheetKeys.length > 0) {
@@ -147404,6 +147426,146 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         async function saveTemplateToCurrentChat() {
             return runSaving(async () => {
+                const commitMateOnlyTemplateChange = async (options) => {
+                    const guideIsolationKey = getCurrentIsolationKey_ACU();
+                    // 1. fail-closed 前置：模板基线必须存在且包含 sheet，否则无法证明 sheet 投影一致。
+                    const hasSheetBaseline = visualizer.templateBaseData
+                        && Object.keys(visualizer.templateBaseData).some(key => key.startsWith('sheet_'));
+                    if (!hasSheetBaseline) {
+                        toastStore.error('模板基线缺失，无法安全保存全局配置；请重新载入当前聊天后重试。', { muteable: false });
+                        return false;
+                    }
+                    // 2. 构建 guideData（复用现有写法，含 preserveSeedRowsFromGuideData 与 seedRowsFromTemplateObj）。
+                    //    跳过 prepareTemplateSheetsForCommit_ACU：mate-only 没有变更 sheet，无需 DDL strict 校验。
+                    const existingGuide = getChatSheetGuideDataForIsolationKey_ACU(guideIsolationKey);
+                    const guideData = buildChatSheetGuideDataFromData_ACU(orderedData, {
+                        preserveSeedRowsFromGuideData: existingGuide,
+                        seedRowsFromTemplateObj: parseTableTemplateJson_ACU({ stripSeedRows: false }),
+                        orderedKeys: [...visualizer.sheetOrder],
+                    });
+                    if (!guideData || !Object.keys(guideData).some(key => key.startsWith('sheet_'))) {
+                        throw new Error('无法为当前模板结构生成聊天指导表。');
+                    }
+                    // 3. switchMode 分流。
+                    const switchMode = resolveTemplateSwitchMode_ACU(getChatArray_ACU(), guideIsolationKey);
+                    logDebug_ACU(`[ACU-V2 Visualizer] saveTemplateToCurrentChat mate-only 分流: mode=${switchMode.mode}${switchMode.mode === 'blocked' ? `, reason=${switchMode.reason}` : ''}。`);
+                    if (switchMode.mode === 'blocked') {
+                        toastStore.error(`模板保存已阻止：${switchMode.reason}`, { muteable: false });
+                        return false;
+                    }
+                    let commitResult;
+                    if (switchMode.mode === 'pristine') {
+                        // pristine 会话：与既有 pristine 分支完全一致的三态判定，不得简化为按 reason 文案匹配。
+                        const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({
+                            isolationKey: guideIsolationKey,
+                            requestId: `visualizer_v2_save:${guideIsolationKey}`,
+                        });
+                        if (!demotion.ok && demotion.noReplayRoot === true) {
+                            logDebug_ACU(`[ACU-V2 Visualizer] 聊天无回放根，跳过降级直接 scope-only：${demotion.reason}`);
+                        }
+                        else if (!demotion.ok) {
+                            toastStore.error(`模板保存被降级预检阻止：${demotion.reason || 'template_only_root 降级失败。'}`, { muteable: false });
+                            return false;
+                        }
+                        // 注意：与既有非-mate pristine 分支不同，此处**不得**传 pristineOverride: true。
+                        // 既有 pristine 分支传 true 是因为其基线可能为空对象（无 sheet），投影校验必然失败；
+                        // 而 mate-only 的 fail-closed 前置已强制要求基线存在 sheet（hasSheetBaseline），
+                        // 因此投影校验可正常执行。传 pristineOverride: true 会掩盖 R2 场景
+                        // （摘要索引锁静默改写数据行导致的 sheet 投影漂移），把「无法证明仅 mate 变化」
+                        // 的状态伪装成保存成功。计划 :77 与风险 R2 明确禁止此行为。
+                        commitResult = await commitCurrentFloorTemplateScopeOnly_ACU({
+                            isolationKey: guideIsolationKey,
+                            baselineData: visualizer.templateBaseData,
+                            candidateData: orderedData,
+                            guideData,
+                            templateSource: cloneData$1(orderedData),
+                            presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
+                            source: 'visualizer_v2_save',
+                            reason: 'visualizer_v2_template_mate_only',
+                            pristineOverride: false,
+                        });
+                    }
+                    else {
+                        // inherit 模式：直接走 scope-only（不得改走结构提交，它会因空 sheetChanges 拒绝）。
+                        commitResult = await commitCurrentFloorTemplateScopeOnly_ACU({
+                            isolationKey: guideIsolationKey,
+                            baselineData: visualizer.templateBaseData,
+                            candidateData: orderedData,
+                            guideData,
+                            templateSource: cloneData$1(orderedData),
+                            presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
+                            source: 'visualizer_v2_save',
+                            reason: 'visualizer_v2_template_mate_only',
+                            pristineOverride: false,
+                        });
+                    }
+                    // 5. 失败处理：投影不一致时追加可执行指引。
+                    if (!commitResult.saved) {
+                        const errorText = commitResult.error || '全局配置保存失败。';
+                        const projectionMismatch = errorText.includes('scope-only 模板提交要求 baseline 与 candidate 的持久化 Sheet 投影完全一致');
+                        toastStore.error(projectionMismatch
+                            ? `${errorText}存在未提交的表内容差异，请先保存数据到当前消息，再保存全局配置。`
+                            : errorText, { muteable: false });
+                        return false;
+                    }
+                    // 6. 成功后置（顺序与既有成功路径一致）。
+                    try {
+                        applyTemplateScopeForCurrentChat_ACU();
+                    }
+                    catch (error) {
+                        logWarn_ACU('[ACU-V2 Visualizer] mate-only commit saved but applyTemplateScopeForCurrentChat failed:', error);
+                        toastStore.warning('模板已保存，但模板作用域运行时同步失败；请重新载入当前聊天后重试。', { muteable: false });
+                    }
+                    try {
+                        _set_currentJsonTableData_ACU(cloneData$1(orderedData));
+                    }
+                    catch (error) {
+                        logWarn_ACU('[ACU-V2 Visualizer] mate-only commit saved but runtime data synchronization failed:', error);
+                        toastStore.warning('全局配置已保存，但运行时数据同步失败；请重新载入当前聊天后重试。', { muteable: false });
+                    }
+                    let lockSaveFailed = false;
+                    if (options.hasPendingLocks) {
+                        try {
+                            saveLockDrafts(visualizer.tableLockDrafts);
+                        }
+                        catch (error) {
+                            lockSaveFailed = true;
+                            logWarn_ACU('[ACU-V2 Visualizer] mate-only commit saved but lock drafts failed:', error);
+                            toastStore.warning('全局配置已保存，但表格锁定设置未保存；请重试保存。', { muteable: false });
+                        }
+                    }
+                    if (isSqliteMode()) {
+                        try {
+                            await reloadStorageProvider();
+                        }
+                        catch (error) {
+                            logWarn_ACU('[ACU-V2 Visualizer] mate-only commit saved but reloadStorageProvider failed:', error);
+                            toastStore.warning('全局配置已保存，但 SQLite 运行时刷新失败；请重新载入当前聊天后重试。', { muteable: false });
+                        }
+                    }
+                    try {
+                        await refreshMergedDataAndNotify_ACU();
+                    }
+                    catch (error) {
+                        logWarn_ACU('[ACU-V2 Visualizer] mate-only commit saved but refreshMergedDataAndNotify failed:', error);
+                        toastStore.warning('全局配置已保存，但合并数据刷新失败；请重新载入当前聊天后重试。', { muteable: false });
+                    }
+                    try {
+                        topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
+                    }
+                    catch { }
+                    if (lockSaveFailed && (visualizer.lockDirty || visualizer.pendingLockChanges.length > 0)) {
+                        visualizer.markTemplateSavedWithPendingLocks();
+                    }
+                    else {
+                        visualizer.markSaved('template-chat');
+                    }
+                    notifyTemplateRuntimeCommitted_ACU();
+                    toastStore.success(options.hasPendingLocks
+                        ? '全局注入配置与表格锁定设置已保存到当前聊天。'
+                        : '全局注入配置已保存到当前聊天。', { muteable: false });
+                    return true;
+                };
                 if (hasVisualizerPendingDataOps_ACU(visualizer)) {
                     toastStore.error('存在未保存的数据增量；本次是模板保存，已阻止混合提交。', { muteable: false });
                     return false;
@@ -147426,14 +147588,21 @@ Expected function or array of functions, received type ${typeof value}.`
                 const hasRemainingSummarySheet = Object.keys(orderedData).some(sheetKey => sheetKey.startsWith('sheet_')
                     && !!orderedData[sheetKey]?.name && isSummaryOrOutlineTable_ACU(String(orderedData[sheetKey].name)));
                 if (changedSheetKeys.length === 0 && deletedSheetKeys.length === 0) {
-                    if (visualizer.pendingLockChanges.length > 0 || visualizer.lockDirty) {
-                        saveLockDrafts(visualizer.tableLockDrafts);
-                        visualizer.markSaved('template-chat');
-                        toastStore.success('表格锁定设置已保存。', { muteable: false });
-                        return true;
+                    if (!changes.mateChanged) {
+                        // 无 mate 变更时，保持原语义：锁优先，其余提示无变化
+                        if (visualizer.pendingLockChanges.length > 0 || visualizer.lockDirty) {
+                            saveLockDrafts(visualizer.tableLockDrafts);
+                            visualizer.markSaved('template-chat');
+                            toastStore.success('表格锁定设置已保存。', { muteable: false });
+                            return true;
+                        }
+                        toastStore.info('模板结构没有变化。', { muteable: false });
+                        return false;
                     }
-                    toastStore.info('模板结构没有变化。', { muteable: false });
-                    return false;
+                    // mate-only（可叠加锁变更）→ 走 scope-only 通道。
+                    return await commitMateOnlyTemplateChange({
+                        hasPendingLocks: visualizer.lockDirty || visualizer.pendingLockChanges.length > 0,
+                    });
                 }
                 const guideIsolationKey = getCurrentIsolationKey_ACU();
                 const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([...new Set([...changedSheetKeys, ...deletedSheetKeys])]
@@ -147816,7 +147985,6 @@ Expected function or array of functions, received type ${typeof value}.`
                     : deletedSheetKeys.length > 0
                         ? `模板/结构已保存到当前聊天${scopeOnlyMessage}，已删除 ${deletedSheetKeys.length} 张表。`
                         : `模板/结构已保存到当前聊天${scopeOnlyMessage}。`, { muteable: false });
-                return true;
                 return true;
             });
         }
