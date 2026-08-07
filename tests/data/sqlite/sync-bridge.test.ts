@@ -736,5 +736,38 @@ describe('SyncBridge', () => {
       const result = engine.query(`SELECT * FROM ${tableName};`);
       expect(result.values).toHaveLength(1);
     });
+
+    it('中文表名+中文表头端到端 hydrate：物理名为拼音 slug，列全 TEXT，数据可读回（T4.2）', () => {
+      const sheet = makeSheet({
+        uid: 'sheet_tianqi',
+        name: '天气表',
+        sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '' },
+        content: [
+          ['row_id', '天气状况', '温度'],
+          ['1', '晴', '28'],
+          ['2', '多云', '24'],
+        ],
+      });
+      const data = makeTableData({ sheet_tianqi: sheet });
+      bridge.loadFromTableData(data);
+
+      // 物理表名来自中文表名的拼音 slug（toAsciiSlug_ACU），且去除下划线
+      // （见 sheet-identity.ts:145 physicalTableNameBase_ACU 的 .replace(/_/g, '')）。
+      const tableNames = engine.getTableNames();
+      expect(tableNames).toContain('tianqibiao');
+      const ddl = engine.getTableDDL('tianqibiao');
+      expect(ddl).toContain('CREATE TABLE tianqibiao');
+      expect(ddl).toContain('row_id INTEGER PRIMARY KEY');
+      // 其余列全 TEXT，物理列名保留 slug 下划线（列名不经过表名的去下划线规则）
+      expect(ddl).toContain('tian_qi_zhuang_kuang TEXT');
+      expect(ddl).toContain('wen_du TEXT');
+
+      const result = engine.query('SELECT * FROM tianqibiao;');
+      expect(result.columns).toEqual(['row_id', 'tian_qi_zhuang_kuang', 'wen_du']);
+      expect(result.values).toEqual([
+        [1, '晴', '28'],
+        [2, '多云', '24'],
+      ]);
+    });
   });
 });

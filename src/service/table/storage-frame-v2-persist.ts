@@ -3187,6 +3187,10 @@ async function assertValidInitialTemplateSnapshot_ACU(
   }
   if (storageMode === 'sqlite') {
     try {
+      // 持久化契约校验路径：这里刻意保持严格（不传 allowRuntimeDdlFallback）。
+      // 若在此降级，非法显式 DDL 会以全 TEXT fallback schema 进入权威 V2 快照，
+      // 后续读取得到的是与用户编写 DDL 不符的结构，且损坏点离修改点很远。
+      // 运行时注入/协调路径（template-state-reset / chat-template-reconciler）才允许降级。
       await hydrateTableDataStrict_ACU(data);
     } catch (error: any) {
       throw new Error(`V2 首次模板提交的完整 templateSource 无法通过 SQLite strict hydrate：${error?.message || String(error)}`);

@@ -485,6 +485,8 @@ function buildSessionStopReasonLabel_ACU(result: TemplateAssistantSessionResult_
             return '空操作停止';
         case 'repair_retry_capped':
             return '修复重试已达上限';
+        case 'environment_failure':
+            return 'SQLite 引擎不可用';
         default:
             return '';
     }

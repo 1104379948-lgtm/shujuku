@@ -90,7 +90,12 @@ export async function resetCurrentChatTableStateFromTemplate_ACU(
     normalizationAudit = preparedResult.normalizationAudit;
     guideData = buildChatSheetGuideDataFromTemplateObj_ACU(prepared, { stripSeedRows: false });
     if (!guideData) throw new Error('无法从初始化模板生成聊天指导表。');
-    if (getCurrentStorageMode() === 'sqlite') await hydrateTableDataStrict_ACU(prepared);
+    if (getCurrentStorageMode() === 'sqlite') {
+      // 运行时模板注入路径（initGameSession/模板面板）与 table-import-service.ts:132 语义一致：
+      // 非法显式 DDL 允许降级为 fallback schema，避免「导入面板能过、API 注入被硬拦」的不一致。
+      // 持久化契约校验（storage-frame-v2-persist.ts:3190）保持严格，不在此处放宽。
+      await hydrateTableDataStrict_ACU(prepared, { allowRuntimeDdlFallback: true });
+    }
   } catch (error: any) {
     return { saved: false, error: error?.message || String(error) };
   }

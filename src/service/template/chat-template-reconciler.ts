@@ -265,7 +265,10 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
     }
 
     try {
-      await hydrateTableDataStrict_ACU(candidateData);
+      // 运行时协调路径：与 template-state-reset.ts（initGameSession）同为运行时注入/协调，
+      // 非法显式 DDL 允许降级为 fallback schema（:242 已存在 native 门禁，此处只作用于 sqlite）。
+      // 持久化契约校验（storage-frame-v2-persist.ts:3190）保持严格，不在此处放宽。
+      await hydrateTableDataStrict_ACU(candidateData, { allowRuntimeDdlFallback: true });
     } catch (error: any) {
       return emptyPlan_ACU(baselineData, audit, [
         `完整 replay candidate SQLite hydrate 失败: ${error?.message || String(error)}`,

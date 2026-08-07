@@ -8,7 +8,7 @@
  *
  * 日志只输出 origin + pathname，不打印 query，避免泄露参数。
  */
-import { logWarn_ACU } from '../../shared/utils';
+import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 /** 已知油猴/扩展产物名，用于托管形态定位当前脚本所在目录。 */
 const KNOWN_SCRIPT_NAMES_ACU = [
   'index.bundle.js',
@@ -158,7 +158,7 @@ export function resolveSqlWasmUrl_ACU(fileName: string): string {
   }
   try {
     const url = new URL(resolved);
-    logWarn_ACU('[SQLite] wasm 解析: ' + url.origin + url.pathname);
+    logDebug_ACU('[SQLite] wasm 解析: ' + url.origin + url.pathname);
   } catch {
     // 忽略日志失败
   }

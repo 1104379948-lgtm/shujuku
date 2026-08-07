@@ -48,6 +48,22 @@ export interface BatchResult<T = void> {
   finalizeResult?: T;
 }
 
+/**
+ * SQLite 运行时（sql.js/wasm）不可用。
+ * 语义边界：只表示「引擎起不来」，不表示 DDL/数据非法。
+ * 上层据此分类与降级（如 T5 preflight、T6 改表助手环境失败），
+ * 绝不能用文案匹配替代本类型判定。
+ * 范式参考 sheet-identity.ts:48 PhysicalTableNameCollisionError_ACU。
+ */
+export class SqliteRuntimeUnavailableError_ACU extends Error {
+  readonly cause?: unknown;
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = 'SqliteRuntimeUnavailableError_ACU';
+    this.cause = cause;
+  }
+}
+
 export class SqliteEngine {
   private db: SqlJsDatabase | null = null;
   private sqlJs: SqlJsStatic | null = null;
@@ -74,10 +90,10 @@ export class SqliteEngine {
 
     // [6.7.2] 检测 sql.js 是否可用（CDN @require 可能加载失败）
     if (typeof initSqlJs !== 'function') {
-      throw new Error(
+      throw new SqliteRuntimeUnavailableError_ACU(
         'sql.js 引擎未加载：initSqlJs 函数不存在。' +
         '请检查构建产物是否正确打包 sql-wasm.js 与 sql-wasm.wasm（URL/MIME/CSP/跨域），' +
-        '或 CDN 是否可达。将自动 fallback 到原生模式。'
+        '或 CDN 是否可达。'
       );
     }
 
@@ -90,8 +106,11 @@ export class SqliteEngine {
           return runtime;
         } catch (e: any) {
           logError_ACU('[SQLite引擎] sql.js 初始化失败:', e?.message || String(e));
-          throw new Error(
-            `sql.js 初始化失败: ${e?.message || String(e)}。将自动 fallback 到原生模式。`
+          // 仅「引擎起不来」抛结构化类型；SQL 语义错误（_ensureDb/query/run 抛出的）
+          // 不得改类，仍按普通 Error 传播（语义边界见 SqliteRuntimeUnavailableError_ACU）。
+          throw new SqliteRuntimeUnavailableError_ACU(
+            `sql.js 初始化失败: ${e?.message || String(e)}`,
+            e,
           );
         }
       })();

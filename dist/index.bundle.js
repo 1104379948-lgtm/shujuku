@@ -7898,7 +7898,7 @@ $CONTENT
         }
         try {
             const url = new URL(resolved);
-            logWarn_ACU('[SQLite] wasm 解析: ' + url.origin + url.pathname);
+            logDebug_ACU('[SQLite] wasm 解析: ' + url.origin + url.pathname);
         }
         catch {
             // 忽略日志失败
@@ -7919,6 +7919,20 @@ $CONTENT
     // 引擎选择由构建开关 ACU_SQLITE_ENGINE 决定（rollup 把占位符替换为具体模块）：
     //   wasm（默认）：sql.js/dist/sql-wasm.js + 构建期复制分发 sql-wasm.wasm；
     //   asm（回滚）：sql.js/dist/sql-asm-memory-growth.js（纯 JS，无 wasm）。
+    /**
+     * SQLite 运行时（sql.js/wasm）不可用。
+     * 语义边界：只表示「引擎起不来」，不表示 DDL/数据非法。
+     * 上层据此分类与降级（如 T5 preflight、T6 改表助手环境失败），
+     * 绝不能用文案匹配替代本类型判定。
+     * 范式参考 sheet-identity.ts:48 PhysicalTableNameCollisionError_ACU。
+     */
+    class SqliteRuntimeUnavailableError_ACU extends Error {
+        constructor(message, cause) {
+            super(message);
+            this.name = 'SqliteRuntimeUnavailableError_ACU';
+            this.cause = cause;
+        }
+    }
     class SqliteEngine {
         constructor() {
             this.db = null;
@@ -7944,9 +7958,9 @@ $CONTENT
                 return this.sqlJs;
             // [6.7.2] 检测 sql.js 是否可用（CDN @require 可能加载失败）
             if (typeof initSqlJs !== 'function') {
-                throw new Error('sql.js 引擎未加载：initSqlJs 函数不存在。' +
+                throw new SqliteRuntimeUnavailableError_ACU('sql.js 引擎未加载：initSqlJs 函数不存在。' +
                     '请检查构建产物是否正确打包 sql-wasm.js 与 sql-wasm.wasm（URL/MIME/CSP/跨域），' +
-                    '或 CDN 是否可达。将自动 fallback 到原生模式。');
+                    '或 CDN 是否可达。');
             }
             if (!this.sqlJsInitPromise) {
                 this.sqlJsInitPromise = (async () => {
@@ -7958,7 +7972,9 @@ $CONTENT
                     }
                     catch (e) {
                         logError_ACU('[SQLite引擎] sql.js 初始化失败:', e?.message || String(e));
-                        throw new Error(`sql.js 初始化失败: ${e?.message || String(e)}。将自动 fallback 到原生模式。`);
+                        // 仅「引擎起不来」抛结构化类型；SQL 语义错误（_ensureDb/query/run 抛出的）
+                        // 不得改类，仍按普通 Error 传播（语义边界见 SqliteRuntimeUnavailableError_ACU）。
+                        throw new SqliteRuntimeUnavailableError_ACU(`sql.js 初始化失败: ${e?.message || String(e)}`, e);
                     }
                 })();
             }
@@ -44518,6 +44534,10 @@ $CONTENT
         }
         if (storageMode === 'sqlite') {
             try {
+                // 持久化契约校验路径：这里刻意保持严格（不传 allowRuntimeDdlFallback）。
+                // 若在此降级，非法显式 DDL 会以全 TEXT fallback schema 进入权威 V2 快照，
+                // 后续读取得到的是与用户编写 DDL 不符的结构，且损坏点离修改点很远。
+                // 运行时注入/协调路径（template-state-reset / chat-template-reconciler）才允许降级。
                 await hydrateTableDataStrict_ACU(data);
             }
             catch (error) {
@@ -49037,7 +49057,10 @@ $CONTENT
                 }
             }
             try {
-                await hydrateTableDataStrict_ACU(candidateData);
+                // 运行时协调路径：与 template-state-reset.ts（initGameSession）同为运行时注入/协调，
+                // 非法显式 DDL 允许降级为 fallback schema（:242 已存在 native 门禁，此处只作用于 sqlite）。
+                // 持久化契约校验（storage-frame-v2-persist.ts:3190）保持严格，不在此处放宽。
+                await hydrateTableDataStrict_ACU(candidateData, { allowRuntimeDdlFallback: true });
             }
             catch (error) {
                 return emptyPlan_ACU(baselineData, audit, [
@@ -100438,8 +100461,12 @@ $CONTENT
             guideData = buildChatSheetGuideDataFromTemplateObj_ACU(prepared, { stripSeedRows: false });
             if (!guideData)
                 throw new Error('无法从初始化模板生成聊天指导表。');
-            if (getCurrentStorageMode() === 'sqlite')
-                await hydrateTableDataStrict_ACU(prepared);
+            if (getCurrentStorageMode() === 'sqlite') {
+                // 运行时模板注入路径（initGameSession/模板面板）与 table-import-service.ts:132 语义一致：
+                // 非法显式 DDL 允许降级为 fallback schema，避免「导入面板能过、API 注入被硬拦」的不一致。
+                // 持久化契约校验（storage-frame-v2-persist.ts:3190）保持严格，不在此处放宽。
+                await hydrateTableDataStrict_ACU(prepared, { allowRuntimeDdlFallback: true });
+            }
         }
         catch (error) {
             return { saved: false, error: error?.message || String(error) };
@@ -146926,6 +146953,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 continue;
             }
             catch (v1Error) {
+                // 运行时不可用不是 schema 语义问题：不得降级为 planner/rebase，
+                // 否则环境故障会伪装成「schema 不支持」并污染 applyMode 决策。
+                if (v1Error instanceof SqliteRuntimeUnavailableError_ACU)
+                    throw v1Error;
                 const explicitIntent = input.intents?.[sheetKey];
                 const planned = explicitIntent ? null : planSheetSchemaMigration_ACU(before, after);
                 const inferredIntent = planned?.status === 'auto_apply' ? planned.intent : undefined;
@@ -147009,6 +147040,9 @@ Expected function or array of functions, received type ${typeof value}.`
                     applyModes[sheetKey] = 'migration';
                 }
                 catch (v2Error) {
+                    // 同上：运行时不可用直接上抛，绝不降级为 V2_CONTRACT_INVALID 之类的语义判定。
+                    if (v2Error instanceof SqliteRuntimeUnavailableError_ACU)
+                        throw v2Error;
                     const issue = input.destructiveChangeConfirmed === true ? null : getDestructiveDropIssue_ACU(sheetKey, before, after);
                     if (issue) {
                         issues.push(issue);
@@ -147029,6 +147063,12 @@ Expected function or array of functions, received type ${typeof value}.`
             await hydrateTableDataStrict_ACU(input.candidateData);
         }
         catch (error) {
+            // 完整 candidate hydrate 失败需区分环境类与语义类：
+            // 环境类（引擎起不来）→ 独立 code，不得伪装成「candidate schema 不支持」；
+            // 语义类（DDL/数据非法）→ 既有 CANDIDATE_SQLITE_HYDRATE_FAILED。
+            if (error instanceof SqliteRuntimeUnavailableError_ACU) {
+                throw error;
+            }
             return { changedSheetKeys, operations: [], issues: [], blockers: [`完整 candidate SQLite hydrate 失败: ${error?.message || String(error)}`], decisions: decisions.map(decision => ({ ...decision, status: 'invalid', code: 'CANDIDATE_SQLITE_HYDRATE_FAILED', message: error?.message || String(error) })) };
         }
         try {
@@ -150269,13 +150309,26 @@ Expected function or array of functions, received type ${typeof value}.`
             catch (error) {
                 assertTemplateAssistantSessionActive_ACU(input.guard);
                 lastErrorMessage = error?.message || '未知错误';
+                // 环境失败（sql.js/wasm 引擎不可用，SqliteRuntimeUnavailableError_ACU）由
+                // preflight/hydrate 直接上抛（见 schema-migration-preflight.ts T5）。
+                // 它不是 AI 输出问题：重试不会改善、回喂 AI 无意义，必须单独分类并终止。
+                const isEnvironmentFailure = error instanceof SqliteRuntimeUnavailableError_ACU
+                    || error?.failureKind === 'environment';
                 const failureKind = error?.failureKind === 'parse'
                     || error?.failureKind === 'validate'
                     || error?.failureKind === 'fingerprint'
                     || error?.failureKind === 'preflight'
                     ? error.failureKind
-                    : 'unknown';
+                    : isEnvironmentFailure
+                        ? 'environment'
+                        : 'unknown';
                 lastFailure = { kind: failureKind, message: lastErrorMessage, rawText: error?.failureRawText };
+                if (isEnvironmentFailure) {
+                    // 环境失败：不可重试、不消耗 repairRetriesUsed、不把 sql.js 错误当修复上下文回喂 AI。
+                    stopReason = 'environment_failure';
+                    repairReason = '';
+                    break;
+                }
                 if (repairRetriesUsed >= maxRepairRetries) {
                     stopReason = 'repair_retry_capped';
                     break;
@@ -150837,7 +150890,8 @@ Expected function or array of functions, received type ${typeof value}.`
             && !isRunning.value
             && allHighRiskConfirmed.value
             && isLatestDraftForCurrentSheet.value
-            && latestResult.value?.session?.stopReason !== 'repair_retry_capped');
+            && latestResult.value?.session?.stopReason !== 'repair_retry_capped'
+            && latestResult.value?.session?.stopReason !== 'environment_failure');
         const sessionSummary = computed(() => {
             const session = latestResult.value?.session;
             if (!session)
@@ -150845,6 +150899,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const stopReasonLabel = {
                 empty_operations: '空操作停止',
                 repair_retry_capped: '修复重试已达上限',
+                environment_failure: 'SQLite 引擎不可用',
             };
             const repairPart = session.repairRetriesUsed > 0 ? ` · 修复 ${session.repairRetriesUsed} 次` : '';
             return `${stopReasonLabel[session.stopReason] || session.stopReason}${repairPart}`;
@@ -151237,6 +151292,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const stopReasonLabel = {
                 empty_operations: '空操作停止',
                 repair_retry_capped: '修复重试已达上限',
+                environment_failure: 'SQLite 引擎不可用',
             };
             const repairPart = session.repairRetriesUsed > 0 ? ` · 修复 ${session.repairRetriesUsed} 次` : '';
             return `${stopReasonLabel[session.stopReason] || session.stopReason}${repairPart}`;

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   saveStrict: vi.fn(),
   setGuide: vi.fn(),
   setRuntime: vi.fn(),
+  hydrateStrict: vi.fn(),
   aliasConflicts: new Set<string>(),
   swappedChat: null as any[] | null,
   canonicalRowErrors: [] as string[],
@@ -43,8 +44,8 @@ vi.mock('../../../src/shared/sql-read-resolver', () => ({ buildSheetTableAliasMa
 vi.mock('../../../src/service/table/canonical-checkpoint-builder', () => ({
   buildCanonicalFullCheckpoint_ACU: (value: any) => ({ checkpoint: { kind: 'full', ...value } }),
 }));
-vi.mock('../../../src/service/table/sqlite-template-validation', () => ({ hydrateTableDataStrict_ACU: vi.fn() }));
-vi.mock('../../../src/service/table/storage-mode', () => ({ getCurrentStorageMode: () => 'native' }));
+vi.mock('../../../src/service/table/sqlite-template-validation', () => ({ hydrateTableDataStrict_ACU: mocks.hydrateStrict }));
+vi.mock('../../../src/service/table/storage-mode', () => ({ getCurrentStorageMode: () => mocks.settings.storageMode }));
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: async (_options: any, task: any) => task({ runCommit: (commit: any) => commit() }),
 }));
@@ -241,3 +242,19 @@ describe('resetCurrentChatTableStateFromTemplate_ACU', () => {
     expect(mocks.saveStrict).not.toHaveBeenCalled();
   });
 });
+
+  it('sqlite 模式下注入无 DDL 模板时授权 runtime DDL fallback 并成功保存（T4.5）', async () => {
+    mocks.settings.storageMode = 'sqlite';
+    const result = await resetCurrentChatTableStateFromTemplate_ACU({
+      sheet_tianqi: { uid: 'sheet_tianqi', name: '天气表', content: [['row_id', '天气状况'], ['1', '晴']] },
+    });
+
+    expect(result).toMatchObject({ saved: true });
+    // 无 DDL 表在 sqlite 模式必须走 hydrate，且授权 runtime fallback（与 table-import-service 语义一致）。
+    expect(mocks.hydrateStrict).toHaveBeenCalledTimes(1);
+    expect(mocks.hydrateStrict).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ allowRuntimeDdlFallback: true }),
+    );
+    expect(mocks.saveStrict).toHaveBeenCalledOnce();
+  });

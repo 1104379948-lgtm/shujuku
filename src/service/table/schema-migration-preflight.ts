@@ -8,6 +8,7 @@ import {
 } from './table-schema-migration';
 import { planSheetSchemaMigration_ACU, type SchemaMigrationPlannerChoice_ACU } from './schema-migration-planner';
 import { hydrateTableDataStrict_ACU } from './sqlite-template-validation';
+import { SqliteRuntimeUnavailableError_ACU } from '../../data/sqlite/sqlite-engine';
 
 export type SchemaMigrationPreflightIntent_ACU = Omit<
   TableSheetSchemaMigrateOperationV2Contract_ACU,
@@ -48,6 +49,12 @@ export type SchemaMigrationApplyMode_ACU = 'migration' | 'rebase';
 export interface SchemaMigrationPreflightResult_ACU {
   changedSheetKeys: string[];
   blockers: string[];
+  /**
+   * 非阻断性诊断（可选，旧调用方可忽略）。
+   * 例如：hydrate 过程中记录到运行时 fallback 时用于说明降级原因。
+   * 兼容范式参考 useVisualizerSave.ts:823-827（旧返回值缺字段仍可工作）。
+   */
+  warnings?: string[];
   issues: SchemaMigrationPreflightIssue_ACU[];
   operations: TableSheetSchemaMigrateOperation_ACU[];
   decisions: SchemaMigrationPreflightDecision_ACU[];
@@ -140,6 +147,9 @@ export async function preflightSchemaMigrations_ACU(input: {
       applyModes[sheetKey] = 'migration';
       continue;
     } catch (v1Error: any) {
+      // 运行时不可用不是 schema 语义问题：不得降级为 planner/rebase，
+      // 否则环境故障会伪装成「schema 不支持」并污染 applyMode 决策。
+      if (v1Error instanceof SqliteRuntimeUnavailableError_ACU) throw v1Error;
       const explicitIntent = input.intents?.[sheetKey];
       const planned = explicitIntent ? null : planSheetSchemaMigration_ACU(before, after);
       const inferredIntent = planned?.status === 'auto_apply' ? planned.intent : undefined;
@@ -221,6 +231,8 @@ export async function preflightSchemaMigrations_ACU(input: {
         decisions.push({ sheetKey, status: 'auto_apply', code: explicitIntent ? 'EXPLICIT_V2_INTENT' : 'UNIQUE_V2_INTENT' });
         applyModes[sheetKey] = 'migration';
       } catch (v2Error: any) {
+        // 同上：运行时不可用直接上抛，绝不降级为 V2_CONTRACT_INVALID 之类的语义判定。
+        if (v2Error instanceof SqliteRuntimeUnavailableError_ACU) throw v2Error;
         const issue = input.destructiveChangeConfirmed === true ? null : getDestructiveDropIssue_ACU(sheetKey, before, after);
         if (issue) {
           issues.push(issue);
@@ -239,6 +251,12 @@ export async function preflightSchemaMigrations_ACU(input: {
   try {
     await hydrateTableDataStrict_ACU(input.candidateData);
   } catch (error: any) {
+    // 完整 candidate hydrate 失败需区分环境类与语义类：
+    // 环境类（引擎起不来）→ 独立 code，不得伪装成「candidate schema 不支持」；
+    // 语义类（DDL/数据非法）→ 既有 CANDIDATE_SQLITE_HYDRATE_FAILED。
+    if (error instanceof SqliteRuntimeUnavailableError_ACU) {
+      throw error;
+    }
     return { changedSheetKeys, operations: [], issues: [], blockers: [`完整 candidate SQLite hydrate 失败: ${error?.message || String(error)}`], decisions: decisions.map(decision => ({ ...decision, status: 'invalid', code: 'CANDIDATE_SQLITE_HYDRATE_FAILED', message: error?.message || String(error) })) };
   }
 

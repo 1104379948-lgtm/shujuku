@@ -429,6 +429,23 @@ describe('generateDDL', () => {
 });
 
 describe('resolveEffectiveDDL', () => {
+  it('无 DDL 时返回 fallback_missing 并生成 row_id INTEGER PRIMARY KEY + 全 TEXT（T4.1）', () => {
+    const sheet = makeSheet({
+      sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '' },
+      content: [['row_id', '姓名', '年龄'], ['1', '张三', '25']],
+    });
+
+    const resolved = resolveEffectiveDDL(sheet, 'sheet_people', 'ren_yuan_biao');
+
+    expect(resolved.source).toBe('fallback_missing');
+    expect(resolved.effectiveDDL).toContain('CREATE TABLE ren_yuan_biao');
+    expect(resolved.effectiveDDL).toContain('row_id INTEGER PRIMARY KEY');
+    expect(resolved.effectiveDDL).toContain('xing_ming TEXT');
+    expect(resolved.effectiveDDL).toContain('nian_ling TEXT');
+    // 物理表名走拼音：中文表名 → slug
+    expect(resolved.effectiveDDL).not.toContain('sheet_people');
+  });
+
   it('非法显式 DDL 仅生成 runtime fallback，不改写 sourceData.ddl', () => {
     const sheet = makeSheet({
       sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: 'CREATE TABLE broken ( INVALID SYNTAX;' },

@@ -14,11 +14,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   logWarn: vi.fn(),
+  logDebug: vi.fn(),
   originalOverride: undefined as unknown,
 }));
 
 vi.mock('../../../src/shared/utils', () => ({
-  logDebug_ACU: vi.fn(),
+  logDebug_ACU: (...args: any[]) => h.logDebug(...args),
   logWarn_ACU: (...args: any[]) => h.logWarn(...args),
   logError_ACU: vi.fn(),
 }));
@@ -66,14 +67,14 @@ describe('resolveSqlWasmUrl_ACU', () => {
     const url = resolveSqlWasmUrl_ACU('sql-wasm.wasm');
     // base 视为目录补斜杠 → 相对解析替换 pathname 末段并丢弃 query
     expect(url).toBe('https://cdn.example.com/sqljs/sql-wasm.wasm');
-    const logged = h.logWarn.mock.calls.map((call: any[]) => String(call[0] || '')).join('\n');
+    const logged = h.logDebug.mock.calls.map((call: any[]) => String(call[0] || '')).join('\n');
     expect(logged).not.toContain('token');
   });
 
   it('解析成功后日志只输出 origin + pathname，不打印 query', () => {
     (globalThis as any).ACU_SQL_WASM_URL_ACU = 'https://cdn.example.com/sqljs/';
     resolveSqlWasmUrl_ACU('sql-wasm.wasm');
-    const logged = h.logWarn.mock.calls.map((call: any[]) => String(call[0] || '')).join('\n');
+    const logged = h.logDebug.mock.calls.map((call: any[]) => String(call[0] || '')).join('\n');
     expect(logged).toContain('https://cdn.example.com/sqljs/sql-wasm.wasm');
   });
 });

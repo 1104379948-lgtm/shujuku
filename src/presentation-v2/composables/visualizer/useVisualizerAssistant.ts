@@ -358,7 +358,8 @@ export function useVisualizerAssistant() {
     && !isRunning.value
     && allHighRiskConfirmed.value
     && isLatestDraftForCurrentSheet.value
-    && latestResult.value?.session?.stopReason !== 'repair_retry_capped',
+    && latestResult.value?.session?.stopReason !== 'repair_retry_capped'
+    && latestResult.value?.session?.stopReason !== 'environment_failure',
   );
 
   const sessionSummary = computed(() => {
@@ -367,6 +368,7 @@ export function useVisualizerAssistant() {
     const stopReasonLabel: Record<string, string> = {
       empty_operations: '空操作停止',
       repair_retry_capped: '修复重试已达上限',
+      environment_failure: 'SQLite 引擎不可用',
     };
     const repairPart =
       session.repairRetriesUsed > 0 ? ` · 修复 ${session.repairRetriesUsed} 次` : '';
@@ -776,6 +778,7 @@ export function useVisualizerAssistant() {
     const stopReasonLabel: Record<string, string> = {
       empty_operations: '空操作停止',
       repair_retry_capped: '修复重试已达上限',
+      environment_failure: 'SQLite 引擎不可用',
     };
     const repairPart =
       session.repairRetriesUsed > 0 ? ` · 修复 ${session.repairRetriesUsed} 次` : '';

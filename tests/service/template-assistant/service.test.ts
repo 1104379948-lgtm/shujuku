@@ -62,6 +62,8 @@ vi.mock('../../../src/service/table/schema-migration-preflight', () => ({
   preflightSchemaMigrations_ACU: mockPreflightSchemaMigrations,
 }));
 
+import { SqliteRuntimeUnavailableError_ACU } from '../../../src/data/sqlite/sqlite-engine';
+
 import {
   buildTemplateAssistantFingerprint_ACU,
   createTemplateAssistantSessionGuard_ACU,
@@ -542,6 +544,35 @@ describe('template assistant service', () => {
     expect(result.session.stopReason).toBe('repair_retry_capped');
     expect(result.session.repairRetriesUsed).toBe(1);
     expect(result.session.lastErrorMessage).toContain('mock ai failure');
+    expect(result.rounds).toHaveLength(0);
+  });
+
+  it('环境失败（sql.js 引擎不可用）不重试、不消耗 repairRetries、不回喂 AI（T6）', async () => {
+    const tempData = buildTempData_ACU();
+    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+    // AI 先正常返回合法 draft，环境失败只来自 preflight（SqliteRuntimeUnavailableError_ACU）。
+    mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-env","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"环境失败","warnings":[],"operations":[]}</templateAssistantDraft>`);
+    // 仅第一次 preflight 调用（generate 内）reject 环境错误：
+    // environment 分支会 break，最终 preflight 不会被执行，无需 Once。
+    mockPreflightSchemaMigrations.mockRejectedValueOnce(
+      new SqliteRuntimeUnavailableError_ACU('sql.js 初始化失败: both async and sync fetching of the wasm failed'),
+    );
+
+    const result = await runTemplateAssistantSession_ACU({
+      tempData,
+      currentSheetKey: 'sheet_a',
+      sheetOrder: ['sheet_a'],
+      userRequest: '修改当前表',
+      maxRounds: 1,
+      maxRepairRetries: 3,
+    });
+
+    // 环境失败立即终止：不可重试、不消耗 repairRetriesUsed、stopReason 独立。
+    expect(result.session.stopReason).toBe('environment_failure');
+    expect(result.session.repairRetriesUsed).toBe(0);
+    expect(result.session.lastFailure?.kind).toBe('environment');
+    // 不把 sql.js 错误当修复上下文回喂 AI：repairReason 不进入下一轮（无下一轮，且未重试）。
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
     expect(result.rounds).toHaveLength(0);
   });
 

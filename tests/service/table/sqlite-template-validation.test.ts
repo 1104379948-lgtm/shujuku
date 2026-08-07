@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  hydrateTableDataStrict_ACU,
   validateSqliteTemplateDataStrict_ACU,
 } from '../../../src/service/table/sqlite-template-validation';
 
@@ -32,5 +33,38 @@ describe('validateSqliteTemplateDataStrict_ACU', () => {
       invalidRuntimeDdlSnapshot,
       { allowRuntimeDdlFallback: true },
     )).resolves.toEqual({ success: true });
+  });
+});
+
+describe('hydrateTableDataStrict_ACU 授权边界（T4.4）', () => {
+  it('未授权时非法显式 DDL fail-closed（抛异常，不放行）', async () => {
+    await expect(hydrateTableDataStrict_ACU(invalidRuntimeDdlSnapshot))
+      .rejects.toThrow(/fallback|DDL|broken_runtime/i);
+  });
+
+  it('授权时非法显式 DDL 降级为 fallback schema 完成 hydrate', async () => {
+    await expect(hydrateTableDataStrict_ACU(
+      invalidRuntimeDdlSnapshot,
+      { allowRuntimeDdlFallback: true },
+    )).resolves.toBeUndefined();
+  });
+
+  it('无 DDL 中文表端到端 hydrate 成功，物理名为拼音（T4.2 hydrate 层）', async () => {
+    const chineseSheet = {
+      mate: { type: 'acu_table_data', version: 3 },
+      sheet_tianqi: {
+        uid: 'sheet_tianqi',
+        name: '天气表',
+        sourceData: {},
+        content: [
+          ['row_id', '天气状况', '温度'],
+          ['1', '晴', '28'],
+        ],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    };
+    await expect(hydrateTableDataStrict_ACU(chineseSheet)).resolves.toBeUndefined();
   });
 });

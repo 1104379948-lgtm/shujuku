@@ -8,6 +8,7 @@ import { hashUserInput_ACU, logError_ACU } from '../../shared/utils';
 import { buildTemplateAssistantCumulativeCompileResult_ACU, compileTemplateAssistantDraft_ACU, type TemplateAssistantCompileResult_ACU } from './compiler';
 import { preflightSchemaMigrations_ACU, type SchemaMigrationPreflightIntent_ACU } from '../table/schema-migration-preflight';
 import { buildTemplateAssistantEmbeddedReferenceText_ACU } from './reference-docs';
+import { SqliteRuntimeUnavailableError_ACU } from '../../data/sqlite/sqlite-engine';
 
 type AnyRecord = Record<string, any>;
 
@@ -220,7 +221,8 @@ export interface TemplateAssistantGenerateResult_ACU {
 export type TemplateAssistantSessionStopReason_ACU =
     | 'success'
     | 'empty_operations'
-    | 'repair_retry_capped';
+    | 'repair_retry_capped'
+    | 'environment_failure';
 
 export type TemplateAssistantSessionAbortReason_ACU = 'cancelled' | 'stale';
 
@@ -317,7 +319,7 @@ export interface TemplateAssistantPromptSegment_ACU {
     pinned?: boolean;
 }
 
-export type TemplateAssistantFailureKind_ACU = 'parse' | 'validate' | 'fingerprint' | 'preflight' | 'unknown';
+export type TemplateAssistantFailureKind_ACU = 'parse' | 'validate' | 'fingerprint' | 'preflight' | 'environment' | 'unknown';
 
 export interface TemplateAssistantFailureInfo_ACU {
     kind: TemplateAssistantFailureKind_ACU;
@@ -1751,14 +1753,28 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
         } catch (error: any) {
             assertTemplateAssistantSessionActive_ACU(input.guard);
             lastErrorMessage = error?.message || '未知错误';
+            // 环境失败（sql.js/wasm 引擎不可用，SqliteRuntimeUnavailableError_ACU）由
+            // preflight/hydrate 直接上抛（见 schema-migration-preflight.ts T5）。
+            // 它不是 AI 输出问题：重试不会改善、回喂 AI 无意义，必须单独分类并终止。
+            const isEnvironmentFailure =
+                error instanceof SqliteRuntimeUnavailableError_ACU
+                || error?.failureKind === 'environment';
             const failureKind: TemplateAssistantFailureKind_ACU =
                 error?.failureKind === 'parse'
                 || error?.failureKind === 'validate'
                 || error?.failureKind === 'fingerprint'
                 || error?.failureKind === 'preflight'
                     ? error.failureKind
-                    : 'unknown';
+                    : isEnvironmentFailure
+                        ? 'environment'
+                        : 'unknown';
             lastFailure = { kind: failureKind, message: lastErrorMessage, rawText: error?.failureRawText };
+            if (isEnvironmentFailure) {
+                // 环境失败：不可重试、不消耗 repairRetriesUsed、不把 sql.js 错误当修复上下文回喂 AI。
+                stopReason = 'environment_failure';
+                repairReason = '';
+                break;
+            }
             if (repairRetriesUsed >= maxRepairRetries) {
                 stopReason = 'repair_retry_capped';
                 break;
