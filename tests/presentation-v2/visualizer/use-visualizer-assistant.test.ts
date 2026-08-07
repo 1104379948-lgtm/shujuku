@@ -28,9 +28,14 @@ const {
 
 vi.mock('../../../src/service/template-assistant/service', () => ({
   buildTemplateAssistantFingerprint_ACU: mockFingerprint,
+  buildDefaultTemplateAssistantPromptSegments_ACU: () => [{ role: 'SYSTEM', content: '默认提示词', deletable: false }],
   createTemplateAssistantSessionGuard_ACU: mockCreateGuard,
   getTemplateAssistantApplyBaselineFingerprint_ACU: mockGetBaselineFingerprint,
+  resolveAssistantSystemPrompt_ACU: (segments: any[]) => (Array.isArray(segments) && segments.length
+    ? segments.map((seg: any) => ({ role: seg.role, content: seg.content }))
+    : [{ role: 'SYSTEM', content: '默认提示词' }]),
   runTemplateAssistantSession_ACU: mockRunSession,
+  setTemplateAssistantPrompt_ACU: vi.fn((segments: any[]) => ({ ok: true })),
   TemplateAssistantSessionStoppedError_ACU: class TemplateAssistantSessionStoppedError_ACU extends Error {},
 }));
 
@@ -59,9 +64,11 @@ function buildResult(input: any, overrides: any = {}) {
       stopReason: 'empty_operations',
       roundsExecuted: 1,
       maxRounds: 3,
+      lastFailure: null,
       repairRetriesUsed: 0,
       maxRepairRetries: 1,
       lastErrorMessage: '',
+      ...overrides.session,
     },
     compileResult: {
       candidateData: input.tempData,
@@ -475,5 +482,95 @@ describe('useVisualizerAssistant', () => {
     expect(assistant.applyLatestDraft()).toBe(true);
     expect(visualizer.pendingLockChanges).toHaveLength(1);
     expect(visualizer.pendingLockChanges[0].sheetKey).toBe('sheet_a');
+  });
+
+  it('会话失败时透出 lastFailure（分类 + 原文）供失败横幅渲染', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      session: {
+        originalBaseFingerprint: 'fp:base',
+        finalWorkingFingerprint: 'next',
+        stopReason: 'repair_retry_capped',
+        roundsExecuted: 0,
+        maxRounds: 3,
+        repairRetriesUsed: 1,
+        maxRepairRetries: 1,
+        lastErrorMessage: 'AI 响应中未找到 <templateAssistantDraft> 标签',
+        lastFailure: {
+          kind: 'parse',
+          message: 'AI 响应中未找到 <templateAssistantDraft> 标签',
+          rawText: '这只是一段解释文字',
+        },
+      },
+    }));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '生成草稿';
+    await assistant.run();
+
+    expect(assistant.latestResult.value?.session.stopReason).toBe('repair_retry_capped');
+    expect(assistant.lastFailure.value?.kind).toBe('parse');
+    expect(assistant.lastFailure.value?.message).toContain('templateAssistantDraft');
+    expect(assistant.lastFailure.value?.rawText).toBe('这只是一段解释文字');
+    // 失败时无合法草稿 → 不可应用
+    expect(assistant.canApply.value).toBe(false);
+  });
+
+  it('runWithRepairFeedback 会把修改意见拼进 userRequest 重新发起会话', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '新增状态列';
+    const ok = await assistant.runWithRepairFeedback('不要输出解释文字，直接给 JSON');
+
+    expect(ok).toBe(true);
+    expect(mockRunSession).toHaveBeenCalledWith(expect.objectContaining({
+      userRequest: '新增状态列\n\n补充要求：不要输出解释文字，直接给 JSON',
+    }));
+  });
+
+  it('提示词抽屉子状态：默认 segments、编辑 dirty、保存/重置', async () => {
+    const { settings_ACU } = await import('../../../src/service/runtime/state-manager');
+    settings_ACU.templateAssistantPromptSegments = [];
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+
+    const assistant = useVisualizerAssistant();
+    expect(assistant.promptSegments.value).toEqual([{ role: 'SYSTEM', content: '默认提示词', deletable: false }]);
+    expect(assistant.promptDirty.value).toBe(false);
+
+    assistant.updatePromptSegment(0, { content: '修改后的规则' });
+    expect(assistant.promptDirty.value).toBe(true);
+
+    assistant.addPromptSegment('bottom');
+    expect(assistant.promptSegments.value).toHaveLength(2);
+    expect(assistant.promptDirty.value).toBe(true);
+
+    expect(assistant.savePrompt()).toBe(true);
+    expect(assistant.promptDirty.value).toBe(false);
+
+    assistant.resetPrompt();
+    expect(assistant.promptSegments.value).toEqual([{ role: 'SYSTEM', content: '默认提示词', deletable: false }]);
+    expect(assistant.promptDirty.value).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
 import { callAIWithPreset_ACU } from '../ai/api-call';
 import { settings_ACU } from '../runtime/state-manager';
+import { withSettingsWrite_ACU } from '../settings/settings-write-service';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { getGlobalInjectionConfigFromData_ACU } from '../worldbook/injection-engine';
 import { safeJsonStringify_ACU } from '../../shared/json-helpers';
@@ -237,6 +238,13 @@ export interface TemplateAssistantSessionMeta_ACU {
     originalBaseFingerprint: string;
     finalWorkingFingerprint: string;
     stopReason: TemplateAssistantSessionStopReason_ACU;
+    /**
+     * 会话的最终失败信息。
+     * - 会话最终成功（任一 round 产出可应用 draft）时为 null；
+     * - 仅当会话以失败告终（如 repair_retry_capped 或最终 preflight 失败）时携带失败详情。
+     * 面板据此决定是否展示失败横幅与「携带修改意见重试」入口。
+     */
+    lastFailure: TemplateAssistantFailureInfo_ACU | null;
     roundsExecuted: number;
     maxRounds: number;
     repairRetriesUsed: number;
@@ -288,8 +296,59 @@ export class TemplateAssistantSessionStoppedError_ACU extends Error {
 const DEFAULT_TEMPLATE_ASSISTANT_MAX_ROUNDS_ACU = 3;
 const DEFAULT_TEMPLATE_ASSISTANT_MAX_REPAIR_RETRIES_ACU = 1;
 
+/**
+ * 可编辑提示词卡片段（设置键 templateAssistantPromptSegments 的元素）。
+ * role 支持 SYSTEM / USER / assistant（复用 normalizeRole 规则）。
+ */
+export interface TemplateAssistantPromptSegment_ACU {
+    role: string;
+    content: string;
+    deletable?: boolean;
+}
+
+export type TemplateAssistantFailureKind_ACU = 'parse' | 'validate' | 'fingerprint' | 'preflight' | 'unknown';
+
+export interface TemplateAssistantFailureInfo_ACU {
+    kind: TemplateAssistantFailureKind_ACU;
+    message: string;
+    rawText?: string;
+}
+
+export const TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU = '{{assistant.referenceDocs}}';
+
 function clone_ACU<T>(value: T): T {
     return JSON.parse(JSON.stringify(value));
+}
+
+/**
+ * 归一 AI 改表助手提示词段的 role：
+ * - SYSTEM / USER 保持大写（与 AcuPromptSegments 的 roleOptions 及 FormFill 体系一致）；
+ * - assistant 返回小写（酒馆 API / Chat Completions 对 assistant role 的大小写约定不统一，
+ *   此处沿用 AcuPromptSegments DEFAULT_ROLE_OPTIONS 的 'assistant' 小写值）；
+ * - 其余非法值一律归一为 SYSTEM。
+ */
+function normalizeAssistantPromptRole_ACU(raw: unknown) {
+    const role = String(raw || 'SYSTEM').trim();
+    if (role === 'assistant') return 'assistant';
+    if (role.toUpperCase() === 'SYSTEM') return 'SYSTEM';
+    if (role.toUpperCase() === 'USER') return 'USER';
+    if (role.toUpperCase() === 'ASSISTANT') return 'assistant';
+    return 'SYSTEM';
+}
+
+function normalizeAssistantPromptSegments_ACU(input: unknown): TemplateAssistantPromptSegment_ACU[] {
+    if (!Array.isArray(input)) return [];
+    return input
+        .map((item: any) => ({
+            role: normalizeAssistantPromptRole_ACU(item?.role),
+            content: String(item?.content ?? ''),
+            deletable: item?.deletable !== false,
+        }))
+        .filter((seg) => !!seg.content.trim());
+}
+
+export function buildDefaultTemplateAssistantPromptSegments_ACU(): TemplateAssistantPromptSegment_ACU[] {
+    return [{ role: 'SYSTEM', content: buildDefaultSystemPrompt_ACU(), deletable: false }];
 }
 
 function normalizePositiveInteger_ACU(value: any, fallback: number) {
@@ -325,9 +384,8 @@ function normalizePriorTurns_ACU(priorTurns: TemplateAssistantPriorTurn_ACU[] | 
 }
 
 function buildTemplateAssistantMessages_ACU(input: TemplateAssistantGenerateInput_ACU, baseFingerprint: string) {
-    const messages: Array<{ role: string; content: string }> = [
-        { role: 'system', content: buildSystemPrompt_ACU() },
-    ];
+    const systemMessages = resolveAssistantSystemPrompt_ACU(settings_ACU.templateAssistantPromptSegments);
+    const messages: Array<{ role: string; content: string }> = [...systemMessages];
     normalizePriorTurns_ACU(input.priorTurns).forEach((turn) => {
         if (turn.user) {
             messages.push({ role: 'user', content: turn.user });
@@ -338,6 +396,19 @@ function buildTemplateAssistantMessages_ACU(input: TemplateAssistantGenerateInpu
     });
     messages.push({ role: 'user', content: buildUserPrompt_ACU(input, baseFingerprint) });
     return messages;
+}
+
+export function setTemplateAssistantPrompt_ACU(
+    segments: TemplateAssistantPromptSegment_ACU[],
+): { ok: boolean; message?: string } {
+    const normalized = normalizeAssistantPromptSegments_ACU(segments);
+    const result = withSettingsWrite_ACU(['templateAssistantPromptSegments'], () => {
+        settings_ACU.templateAssistantPromptSegments = normalized;
+    });
+    if (!result.ok) {
+        return { ok: false, message: result.message || '提示词保存失败。' };
+    }
+    return { ok: true };
 }
 
 function sanitizeSourceDataSnapshotForAssistant_ACU(value: any) {
@@ -428,6 +499,12 @@ export function buildTemplateAssistantFingerprint_ACU(tempData: AnyRecord) {
     return `acu-struct:${hashUserInput_ACU(safeJsonStringify_ACU(snapshot, '{}'))}`;
 }
 
+/**
+ * 取 AI 文本中最后一个 <templateAssistantDraft> 标签对内的内容。
+ * 注意：若最后一个标签对内的 JSON 本身损坏，不会向前回退到更早的标签对——
+ * 由调用方（parseTemplateAssistantDraft_ACU）走 stripCodeFences / 兜底大括号截取链处理。
+ * @throws 未找到任何标签对时抛出定位错误
+ */
 function getLastTaggedDraftText_ACU(aiText: string) {
     const tagPattern = /<templateAssistantDraft>([\s\S]*?)<\/templateAssistantDraft>/g;
     const matches = Array.from(String(aiText || '').matchAll(tagPattern));
@@ -437,15 +514,87 @@ function getLastTaggedDraftText_ACU(aiText: string) {
     return String(matches[matches.length - 1][1] || '').trim();
 }
 
+function stripCodeFences_ACU(aiText: string) {
+    // 剥离 ```json / ``` 围栏（含开头 ```json 行与结尾 ``` 行），仅用于标签与兜底 JSON 提取
+    return String(aiText || '')
+        .replace(/^[\s\S]*?```(?:json)?\s*/i, '')
+        .replace(/\s*```[\s\S]*$/i, '');
+}
+
+/**
+ * 容错兜底：从 AI 文本中截取"最后一个 { 到与之配对的最后一个 }"之间的子串尝试解析。
+ * 仅作 JSON.parse 的兜底输入；解析成功仍须通过 validateTemplateAssistantDraft_ACU 的完整协议校验，
+ * 不放宽任何协议闸门。为避免"最后一个 {" 落在字符串字面量内部导致误切，
+ * 从后往前枚举所有候选起始点，取第一个能配对闭合且 JSON.parse 成功的子串。
+ */
+function extractFallbackDraftJson_ACU(aiText: string) {
+    const text = String(aiText || '');
+    const candidates: number[] = [];
+    for (let i = 0; i < text.length; i += 1) {
+        if (text[i] === '{') candidates.push(i);
+    }
+    for (let k = candidates.length - 1; k >= 0; k -= 1) {
+        const start = candidates[k];
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+        for (let i = start; i < text.length; i += 1) {
+            const ch = text[i];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (ch === '\\') escaped = true;
+                else if (ch === '"') inString = false;
+                continue;
+            }
+            if (ch === '"') {
+                inString = true;
+            } else if (ch === '{') {
+                depth += 1;
+            } else if (ch === '}') {
+                depth -= 1;
+                if (depth === 0) {
+                    const candidate = text.slice(start, i + 1);
+                    try {
+                        JSON.parse(candidate);
+                        return candidate;
+                    } catch {
+                        break; // 该候选解析失败，尝试更早的 {
+                    }
+                }
+            }
+        }
+    }
+    throw new Error('AI 响应中的 JSON 对象未闭合（缺少匹配的 } ）');
+}
+
 export function parseTemplateAssistantDraft_ACU(aiText: string): TemplateAssistantDraft_ACU {
-    const jsonText = getLastTaggedDraftText_ACU(aiText);
+    let jsonText: string;
+    try {
+        jsonText = getLastTaggedDraftText_ACU(aiText);
+    } catch (tagError: any) {
+        // 容错链：先剥离 ```json 围栏再找标签；仍未找到则尝试截取首尾大括号 JSON。
+        // 无论哪条路径成功，后续仍走 validateTemplateAssistantDraft_ACU 完整协议校验。
+        try {
+            jsonText = getLastTaggedDraftText_ACU(stripCodeFences_ACU(aiText));
+        } catch (fenceError: any) {
+            jsonText = extractFallbackDraftJson_ACU(aiText);
+        }
+    }
     let parsed: any = null;
     try {
         parsed = JSON.parse(jsonText);
     } catch (error: any) {
-        throw new Error(`assistant draft JSON 解析失败: ${error?.message || '未知错误'}`);
+        const wrapped = new Error(`assistant draft JSON 解析失败: ${error?.message || '未知错误'}`);
+        (wrapped as any).failureKind = 'parse';
+        throw wrapped;
     }
-    return validateTemplateAssistantDraft_ACU(parsed);
+    try {
+        return validateTemplateAssistantDraft_ACU(parsed);
+    } catch (error: any) {
+        const wrapped = new Error(error?.message || 'assistant draft 校验失败');
+        (wrapped as any).failureKind = 'validate';
+        throw wrapped;
+    }
 }
 
 function validatePatchSheetBoundary_ACU(op: any, selectedSheetKey: string, currentSheetKey: string | null, protocolVersion: 1 | 2) {
@@ -878,7 +1027,7 @@ export function validateTemplateAssistantDraft_ACU(draft: any): TemplateAssistan
     };
 }
 
-function buildSystemPrompt_ACU() {
+function buildDefaultSystemPrompt_ACU() {
     const embeddedReferenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
     return [
         '你是 visualizer 内的模板改表助手。',
@@ -915,8 +1064,53 @@ function buildSystemPrompt_ACU() {
         '顶层 JSON 必须包含 protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、operations。',
         'warnings 必须是字符串数组；没有则输出空数组。',
         '如果无法生成合法操作，请保持 warnings 为字符串数组，并让 operations=[]，不要输出协议外字段。',
-        embeddedReferenceText,
+        TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
     ].join('\n');
+}
+
+/**
+ * 解析 assistant 系统提示词：
+ * - segments 为空（settings 无自定义或全空）→ 使用默认提示词（与旧硬编码一致，含占位符）。
+ * - 每个卡片按 {role, content} 生成消息；content 中的占位符在运行时替换为引用文档全文。
+ * - 若没有任何卡片包含占位符，则在最后一个 SYSTEM 卡末尾自动追加引用文档（防呆，避免用户删掉占位符后引用静默丢失）。
+ * - 默认回退路径的 role 输出小写 'system'，与旧版 buildTemplateAssistantMessages_ACU 的消息结构字节级一致，
+ *   保证存量用户（settings 无 templateAssistantPromptSegments）发送给 AI 的 messages 完全不变。
+ *   自定义 segments 路径保留用户选择的 role 大小写（SYSTEM/USER/assistant），
+ *   该路径仅被主动编辑过提示词的用户触发，不涉及存量兼容。
+ */
+export function resolveAssistantSystemPrompt_ACU(
+    segments?: TemplateAssistantPromptSegment_ACU[] | null,
+): Array<{ role: string; content: string }> {
+    const normalized = normalizeAssistantPromptSegments_ACU(segments);
+    if (normalized.length === 0) {
+        const referenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
+        const defaultContent = buildDefaultSystemPrompt_ACU().replace(
+            TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
+            referenceText,
+        );
+        return [{ role: 'system', content: defaultContent }];
+    }
+    const cards = normalized;
+    const referenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
+    const resolved = cards.map((seg) => ({
+        role: seg.role,
+        content: String(seg.content || '').replace(
+            TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
+            referenceText,
+        ),
+    }));
+    const hasPlaceholder = cards.some((seg) =>
+        String(seg.content || '').includes(TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU),
+    );
+    if (!hasPlaceholder && resolved.length > 0) {
+        const lastSystemIndex = resolved.map((item) => item.role).lastIndexOf('SYSTEM');
+        const targetIndex = lastSystemIndex >= 0 ? lastSystemIndex : resolved.length - 1;
+        resolved[targetIndex] = {
+            ...resolved[targetIndex],
+            content: `${resolved[targetIndex].content}\n\n${referenceText}`,
+        };
+    }
+    return resolved;
 }
 
 function buildUserPrompt_ACU(input: TemplateAssistantGenerateInput_ACU, baseFingerprint: string) {
@@ -1180,11 +1374,18 @@ export async function generateTemplateAssistantDraft_ACU(input: TemplateAssistan
             errorMessage: error?.message || '未知错误',
             aiRawText,
         });
-        throw error;
+        const wrapped = new Error(error?.message || 'assistant draft 解析失败');
+        // 转发内部已有的分类（validate 在 parseTemplateAssistantDraft_ACU 内部抛出），未标记则按 parse
+        (wrapped as any).failureKind = error?.failureKind === 'validate' ? 'validate' : 'parse';
+        (wrapped as any).failureRawText = aiRawText;
+        throw wrapped;
     }
 
     if (draft.baseFingerprint !== baseFingerprint) {
-        throw new Error('AI 返回的 baseFingerprint 与当前结构不一致');
+        const wrapped = new Error('AI 返回的 baseFingerprint 与当前结构不一致');
+        (wrapped as any).failureKind = 'fingerprint';
+        (wrapped as any).failureRawText = aiRawText;
+        throw wrapped;
     }
     draft.operations.forEach((op) => {
         if (String(op?.op || '').startsWith('patch_sheet_')) {
@@ -1203,7 +1404,12 @@ export async function generateTemplateAssistantDraft_ACU(input: TemplateAssistan
         candidateData: compileResult.candidateData as any,
         intents: compileResult.schemaMigrationIntents,
     });
-    if (preflight.blockers.length > 0) throw new Error(`schema migration preflight 失败：${preflight.blockers.join('；')}`);
+    if (preflight.blockers.length > 0) {
+        const wrapped = new Error(`schema migration preflight 失败：${preflight.blockers.join('；')}`);
+        (wrapped as any).failureKind = 'preflight';
+        (wrapped as any).failureRawText = aiRawText;
+        throw wrapped;
+    }
 
     return {
         draft,
@@ -1241,6 +1447,7 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
     let repairRetriesUsed = 0;
     let lastErrorMessage = '';
     let lastResult: TemplateAssistantGenerateResult_ACU | null = null;
+    let lastFailure: TemplateAssistantFailureInfo_ACU | null = null;
 
     outerLoop:
     for (let round = 1; round <= maxRounds; round += 1) {
@@ -1290,6 +1497,11 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
                 rounds.push(roundRecord);
                 emitTemplateAssistantRoundComplete_ACU(onRoundComplete, roundRecord, rounds, maxRounds);
 
+                // 该 round 成功产出可应用 draft：此前任何轮次的失败都不再是「最终失败」。
+                // 清空 lastFailure，避免面板在最终成功的会话上误显示失败横幅（残留风险）。
+                lastFailure = null;
+                lastErrorMessage = '';
+
                 if (!hasOperations) {
                     stopReason = 'empty_operations';
                     break outerLoop;
@@ -1314,6 +1526,14 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
             } catch (error: any) {
                 assertTemplateAssistantSessionActive_ACU(input.guard);
                 lastErrorMessage = error?.message || '未知错误';
+                const failureKind: TemplateAssistantFailureKind_ACU =
+                    error?.failureKind === 'parse'
+                    || error?.failureKind === 'validate'
+                    || error?.failureKind === 'fingerprint'
+                    || error?.failureKind === 'preflight'
+                        ? error.failureKind
+                        : 'unknown';
+                lastFailure = { kind: failureKind, message: lastErrorMessage, rawText: error?.failureRawText };
                 if (repairRetriesUsed >= maxRepairRetries) {
                     stopReason = 'repair_retry_capped';
                     break outerLoop;
@@ -1365,6 +1585,7 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
             repairRetriesUsed,
             maxRepairRetries,
             lastErrorMessage,
+            lastFailure,
         },
     };
 }

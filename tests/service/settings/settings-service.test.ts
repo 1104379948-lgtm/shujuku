@@ -420,6 +420,28 @@ describe('applyCombinedSettingsImport_ACU', () => {
     expect(mockSettings.mergeBatchSize).toBe(10);
   });
 
+  it('导入 AI 改表助手提示词段（归一化 role 与空内容过滤）', () => {
+    const fields = applyCombinedSettingsImport_ACU({
+      templateAssistantPromptSegments: [
+        { role: 'system', content: '规则一', deletable: false },
+        { role: 'weird', content: '   ' },
+        { role: 'assistant', content: '样例' },
+      ],
+    });
+    expect(fields).toContain('templateAssistantPromptSegments');
+    expect(mockSettings.templateAssistantPromptSegments).toEqual([
+      { role: 'SYSTEM', content: '规则一', deletable: false },
+      { role: 'assistant', content: '样例', deletable: true },
+    ]);
+  });
+
+  it('templateAssistantPromptSegments 非数组时不导入', () => {
+    mockSettings.templateAssistantPromptSegments = [{ role: 'SYSTEM', content: '原有' }];
+    const fields = applyCombinedSettingsImport_ACU({ templateAssistantPromptSegments: 'not-array' });
+    expect(fields).not.toContain('templateAssistantPromptSegments');
+    expect(mockSettings.templateAssistantPromptSegments).toEqual([{ role: 'SYSTEM', content: '原有' }]);
+  });
+
   it('空对象不修改任何字段', () => {
     const fields = applyCombinedSettingsImport_ACU({});
     // 不包含 charCardPrompt（因为 combinedData.prompt 不是数组）

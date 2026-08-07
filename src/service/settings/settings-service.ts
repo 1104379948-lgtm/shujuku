@@ -821,6 +821,8 @@ export   function buildDefaultSettings_ACU() {
           charCardPrompt: DEFAULT_CHAR_CARD_PROMPT_ACU,
           strictJsonCharCardPrompt: DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU,
           strictJsonSqlCharCardPrompt: DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU,
+          // [AI 改表助手] 可编辑提示词卡片段（空数组 = 使用默认硬编码提示词）
+          templateAssistantPromptSegments: [] as any[],
           autoUpdateThreshold: DEFAULT_AUTO_UPDATE_THRESHOLD_ACU,
           autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
           autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
@@ -1043,11 +1045,36 @@ export function setSummaryVectorIndexMode_ACU(modeEnabled: boolean) {
  * 
  * @returns 被修改的字段名列表（供 presentation 层更新对应的 UI 元素）
  */
+function normalizeAssistantPromptRoleForImport_ACU(raw: unknown): string {
+    const role = String(raw || 'SYSTEM').trim();
+    if (role === 'assistant') return 'assistant';
+    if (role.toUpperCase() === 'SYSTEM') return 'SYSTEM';
+    if (role.toUpperCase() === 'USER') return 'USER';
+    if (role.toUpperCase() === 'ASSISTANT') return 'assistant';
+    return 'SYSTEM';
+}
+
+/**
+ * 归一化 AI 改表助手提示词段（与 template-assistant service 的 normalize 语义保持一致）
+ * 避免导入的脏数据直接进 settings；空内容段会被过滤。
+ */
+function normalizeAssistantPromptSegmentsForImport_ACU(input: unknown): Array<{ role: string; content: string; deletable: boolean }> {
+    if (!Array.isArray(input)) return [];
+    return input
+        .map((item: any) => ({
+            role: normalizeAssistantPromptRoleForImport_ACU(item?.role),
+            content: String(item?.content ?? ''),
+            deletable: item?.deletable !== false,
+        }))
+        .filter((seg) => !!seg.content.trim());
+}
+
 export function applyCombinedSettingsImport_ACU(combinedData: any): string[] {
     const modifiedFields: string[] = [];
     const FIELDS = [
         'charCardPrompt',
         'mergeSummaryPrompt',
+        'templateAssistantPromptSegments',
         'mergeTargetCount',
         'mergeBatchSize',
         'mergeStartIndex',
@@ -1076,6 +1103,13 @@ export function applyCombinedSettingsImport_ACU(combinedData: any): string[] {
     if (combinedData.mergeSummaryPrompt) {
         settings_ACU.mergeSummaryPrompt = combinedData.mergeSummaryPrompt;
         modifiedFields.push('mergeSummaryPrompt');
+    }
+
+    // 导入 AI 改表助手提示词段（须归一化后再入库，避免脏数据进 settings）
+    if (Array.isArray(combinedData.templateAssistantPromptSegments)) {
+        settings_ACU.templateAssistantPromptSegments =
+            normalizeAssistantPromptSegmentsForImport_ACU(combinedData.templateAssistantPromptSegments);
+        modifiedFields.push('templateAssistantPromptSegments');
     }
 
     // 导入合并设置

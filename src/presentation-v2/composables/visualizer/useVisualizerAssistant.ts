@@ -1,12 +1,16 @@
-import { computed, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { applySheetOrderNumbers_ACU, logWarn_ACU } from '../../../shared/utils';
 import { settings_ACU } from '../../../service/runtime/state-manager';
 import {
   buildTemplateAssistantFingerprint_ACU,
+  buildDefaultTemplateAssistantPromptSegments_ACU,
   createTemplateAssistantSessionGuard_ACU,
   getTemplateAssistantApplyBaselineFingerprint_ACU,
   runTemplateAssistantSession_ACU,
+  setTemplateAssistantPrompt_ACU,
   TemplateAssistantSessionStoppedError_ACU,
+  type TemplateAssistantFailureInfo_ACU,
+  type TemplateAssistantPromptSegment_ACU,
   type TemplateAssistantSessionResult_ACU,
   type TemplateAssistantSessionRound_ACU,
 } from '../../../service/template-assistant/service';
@@ -272,7 +276,11 @@ export function useVisualizerAssistant() {
   });
 
   const canApply = computed(() =>
-    !!latestResult.value && !isRunning.value && allHighRiskConfirmed.value && isLatestDraftForCurrentSheet.value,
+    !!latestResult.value
+    && !isRunning.value
+    && allHighRiskConfirmed.value
+    && isLatestDraftForCurrentSheet.value
+    && latestResult.value?.session?.stopReason !== 'repair_retry_capped',
   );
 
   const sessionSummary = computed(() => {
@@ -284,11 +292,143 @@ export function useVisualizerAssistant() {
       repair_retry_capped: '修复重试已达上限',
       max_rounds: '达到轮次上限',
     };
-    return `会话${session.roundsExecuted}轮 · ${stopReasonLabel[session.stopReason] || session.stopReason}`;
+    const repairPart =
+      session.repairRetriesUsed > 0 ? ` · 修复 ${session.repairRetriesUsed} 次` : '';
+    return `会话${session.roundsExecuted}轮${repairPart} · ${stopReasonLabel[session.stopReason] || session.stopReason}`;
   });
+
+  const lastFailure = computed<TemplateAssistantFailureInfo_ACU | null>(() => {
+    const failure = latestResult.value?.session?.lastFailure;
+    if (!failure) return null;
+    return { kind: failure.kind, message: failure.message, rawText: failure.rawText };
+  });
+
+  const promptSegments = ref<TemplateAssistantPromptSegment_ACU[]>([]);
+  const promptDirty = ref(false);
+
+  function loadPromptSegments(): void {
+    const saved = settings_ACU.templateAssistantPromptSegments;
+    if (Array.isArray(saved) && saved.length > 0) {
+      promptSegments.value = saved.map((seg: any) => ({
+        role: String(seg?.role || 'SYSTEM'),
+        content: String(seg?.content ?? ''),
+        deletable: seg?.deletable !== false,
+      }));
+    } else {
+      promptSegments.value = buildDefaultTemplateAssistantPromptSegments_ACU();
+    }
+    promptDirty.value = false;
+  }
+
+  function savePrompt(): boolean {
+    const result = setTemplateAssistantPrompt_ACU(promptSegments.value);
+    if (!result.ok) {
+      toastStore.error(result.message || '提示词保存失败。', { muteable: false });
+      return false;
+    }
+    promptDirty.value = false;
+    toastStore.success('提示词已保存，下一次会话生效。', { muteable: false });
+    return true;
+  }
+
+  function resetPrompt(): void {
+    promptSegments.value = buildDefaultTemplateAssistantPromptSegments_ACU();
+    promptDirty.value = true;
+  }
+
+  function addPromptSegment(position: 'top' | 'bottom'): void {
+    const seg: TemplateAssistantPromptSegment_ACU = { role: 'SYSTEM', content: '', deletable: true };
+    const next = promptSegments.value.slice();
+    if (position === 'top') next.unshift(seg);
+    else next.push(seg);
+    promptSegments.value = next;
+    promptDirty.value = true;
+  }
+
+  function deletePromptSegment(index: number): void {
+    const target = promptSegments.value[index];
+    if (!target || target.deletable === false) return;
+    const next = promptSegments.value.slice();
+    next.splice(index, 1);
+    promptSegments.value = next;
+    promptDirty.value = true;
+  }
+
+  function updatePromptSegment(index: number, patch: Partial<TemplateAssistantPromptSegment_ACU>): void {
+    if (!promptSegments.value[index]) return;
+    const next = promptSegments.value.map((seg, i) => (i === index ? { ...seg, ...patch } : { ...seg }));
+    promptSegments.value = next;
+    promptDirty.value = true;
+  }
+
+  function importPromptFile(file: File): Promise<void> {
+    return file
+      .text()
+      .then((text) => JSON.parse(text))
+      .then((parsed) => {
+        if (!Array.isArray(parsed)) throw new Error('提示词 JSON 必须是数组。');
+        promptSegments.value = parsed.map((seg: any) => ({
+          role: String(seg?.role || 'SYSTEM'),
+          content: String(seg?.content ?? ''),
+          deletable: seg?.deletable !== false,
+        }));
+        promptDirty.value = true;
+        toastStore.success('提示词 JSON 已载入，保存后生效。', { muteable: false });
+      })
+      .catch((error: any) => {
+        toastStore.error(error?.message || '提示词 JSON 读取失败。', { muteable: false });
+      });
+  }
+
+  function exportPrompt(): void {
+    try {
+      const text = JSON.stringify(promptSegments.value, null, 2);
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'acu-visualizer-assistant-prompt.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error: any) {
+      toastStore.error(error?.message || '提示词导出失败。', { muteable: false });
+    }
+  }
+
+  loadPromptSegments();
 
   function resetRiskConfirmations(): void {
     visualizer.assistantRiskConfirmations = {};
+  }
+
+  function getTurnRawText(turn: VisualizerAssistantTurn): string {
+    if (turn.type === 'round') return String(turn.roundData.aiRawText || '');
+    if (turn.type === 'final') return String(turn.result.aiRawText || '');
+    return '';
+  }
+
+  function getTurnValidationError(turn: VisualizerAssistantTurn): string {
+    if (turn.type === 'round' || turn.type === 'final') {
+      const failure = turn.type === 'round'
+        ? (turn.roundData as any).lastFailure
+        : turn.result.session?.lastFailure;
+      if (failure?.message) return String(failure.message);
+    }
+    return '';
+  }
+
+  async function runWithRepairFeedback(feedbackText: string): Promise<boolean> {
+    const feedback = String(feedbackText || '').trim();
+    const baseRequest = String(userRequest.value || '').trim();
+    const combined = feedback ? [baseRequest, feedback].filter(Boolean).join('\n\n补充要求：') : baseRequest;
+    if (!combined.trim()) {
+      visualizer.assistantErrorMessage = '请输入改表需求。';
+      return false;
+    }
+    userRequest.value = combined.trim();
+    return run();
   }
 
   function appendTurn(turn: VisualizerAssistantTurnState): void {
@@ -509,11 +649,25 @@ export function useVisualizerAssistant() {
     allHighRiskConfirmed,
     canApply,
     sessionSummary,
+    lastFailure,
+    promptSegments,
+    promptDirty,
+    loadPromptSegments,
+    savePrompt,
+    resetPrompt,
+    addPromptSegment,
+    deletePromptSegment,
+    updatePromptSegment,
+    importPromptFile,
+    exportPrompt,
     run,
     cancel,
     setRiskConfirmation,
     applyLatestDraft,
     syncApiPresetFromCurrentSheet,
+    runWithRepairFeedback,
+    getTurnRawText,
+    getTurnValidationError,
     getTurnSummary,
     getTurnWarnings,
     getTurnDiffGroups,

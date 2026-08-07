@@ -224,6 +224,8 @@ export let settings_ACU: any = {
     charCardPrompt: DEFAULT_CHAR_CARD_PROMPT_ACU,
     strictJsonCharCardPrompt: DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU,
     strictJsonSqlCharCardPrompt: DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU,
+    // [AI 改表助手] 可编辑提示词卡片段（空数组 = 使用默认硬编码提示词）
+    templateAssistantPromptSegments: [] as any[],
     autoUpdateThreshold: DEFAULT_AUTO_UPDATE_THRESHOLD_ACU,
     autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
     autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,

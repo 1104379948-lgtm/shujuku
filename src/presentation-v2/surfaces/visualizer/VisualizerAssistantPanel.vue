@@ -19,6 +19,9 @@
             @update:model-value="value => assistant.tableApiPreset.value = value"
           />
         </AcuFormRow>
+        <AcuButton size="sm" variant="secondary" :disabled="assistant.isRunning.value" @click="promptDrawerOpen = true">
+          <i class="fa-solid fa-pen-to-square"></i> 编辑提示词
+        </AcuButton>
         <AcuFormRow label="最大轮次">
           <AcuInput
             type="number"
@@ -42,6 +45,40 @@
         />
       </AcuFormRow>
 
+      <AcuInfoBanner v-if="assistant.lastFailure.value" tone="warning">
+        <strong>{{ failureKindLabel(assistant.lastFailure.value.kind) }}</strong>
+        <p class="acu-viz-assistant__failure-msg">{{ assistant.lastFailure.value.message }}</p>
+      </AcuInfoBanner>
+
+      <AcuDisclosureGroup
+        v-if="assistant.lastFailure.value && assistant.lastFailure.value.rawText"
+        label="查看 AI 原始输出"
+        :expanded="rawOutputExpanded"
+        body-id="acu-viz-assistant-raw-failure"
+        body-mode="show"
+        root-class="acu-viz-assistant__raw-disclosure"
+        @toggle="rawOutputExpanded = !rawOutputExpanded"
+      >
+        <pre class="acu-viz-assistant__raw-text">{{ assistant.lastFailure.value.rawText }}</pre>
+      </AcuDisclosureGroup>
+
+      <div v-if="assistant.lastFailure.value" class="acu-viz-assistant__repair">
+        <AcuTextarea
+          v-model="repairFeedback"
+          :rows="2"
+          placeholder="说明你希望 AI 如何修正（可选），例如：不要输出解释文字，直接给改表 JSON。"
+          :disabled="assistant.isRunning.value"
+        />
+        <AcuButton
+          variant="primary"
+          size="sm"
+          :disabled="assistant.isRunning.value"
+          @click="submitRepair"
+        >
+          <i class="fa-solid fa-rotate"></i> 携带修改意见重试
+        </AcuButton>
+      </div>
+
       <div class="acu-viz-assistant__action-row">
         <AcuButton
           v-if="assistant.isRunning.value"
@@ -62,10 +99,14 @@
         </AcuButton>
         <AcuButton
           :disabled="!assistant.canApply.value"
+          :title="canApplyReason"
           @click="assistant.applyLatestDraft"
         >
           应用到编辑器草稿
         </AcuButton>
+        <span v-if="!assistant.canApply.value && canApplyReason" class="acu-viz-assistant__apply-reason">
+          {{ canApplyReason }}
+        </span>
       </div>
 
       <AcuInfoBanner v-if="assistant.errorMessage.value" tone="warning">
@@ -121,6 +162,24 @@
               <AcuBadge v-else variant="neutral">请求</AcuBadge>
             </header>
             <p>{{ assistant.getTurnSummary(turn) }}</p>
+
+            <AcuInfoBanner
+              v-if="assistant.getTurnValidationError(turn)"
+              tone="warning"
+            >
+              校验失败：{{ assistant.getTurnValidationError(turn) }}
+            </AcuInfoBanner>
+
+            <AcuDisclosureGroup
+              v-if="assistant.getTurnRawText(turn)"
+              label="查看 AI 原始输出"
+              :expanded="false"
+              body-id="acu-viz-assistant-raw-turn"
+              body-mode="show"
+              root-class="acu-viz-assistant__raw-disclosure"
+            >
+              <pre class="acu-viz-assistant__raw-text">{{ assistant.getTurnRawText(turn) }}</pre>
+            </AcuDisclosureGroup>
 
             <AcuInfoBanner
               v-if="assistant.getTurnWarnings(turn).length"
@@ -236,11 +295,27 @@
         </div>
       </AcuPanel>
     </AcuDisclosureGroup>
+
+    <AssistantPromptDrawer
+      :is-open="promptDrawerOpen"
+      :segments="assistant.promptSegments.value"
+      :dirty="assistant.promptDirty.value"
+      :message="null"
+      @close="promptDrawerOpen = false"
+      @save="assistant.savePrompt"
+      @reset="assistant.resetPrompt"
+      @import-file="assistant.importPromptFile($event)"
+      @export="assistant.exportPrompt"
+      @add="assistant.addPromptSegment($event)"
+      @delete="assistant.deletePromptSegment($event)"
+      @update="(index, patch) => assistant.updatePromptSegment(index, patch)"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
+import AssistantPromptDrawer from '../../components/AssistantPromptDrawer.vue';
 import AcuBadge from '../../components/_lib/AcuBadge.vue';
 import AcuButton from '../../components/_lib/AcuButton.vue';
 import AcuCheckbox from '../../components/_lib/AcuCheckbox.vue';
@@ -252,10 +327,39 @@ import AcuPanel from '../../components/_lib/AcuPanel.vue';
 import AcuSelect from '../../components/_lib/AcuSelect.vue';
 import AcuTextarea from '../../components/_lib/AcuTextarea.vue';
 import { useVisualizerAssistant } from '../../composables/visualizer/useVisualizerAssistant';
+import type { TemplateAssistantFailureKind_ACU } from '../../../service/template-assistant/service';
 
 const assistant = useVisualizerAssistant();
 const transcriptExpanded = ref(true);
 const draftExpanded = ref(true);
+const promptDrawerOpen = ref(false);
+const rawOutputExpanded = ref(false);
+const repairFeedback = ref('');
+
+const FAILURE_KIND_LABELS: Record<TemplateAssistantFailureKind_ACU, string> = {
+  parse: '解析失败',
+  validate: '校验失败',
+  fingerprint: '结构指纹不一致',
+  preflight: '迁移预检失败',
+  unknown: '执行失败',
+};
+
+function failureKindLabel(kind: TemplateAssistantFailureKind_ACU): string {
+  return FAILURE_KIND_LABELS[kind] || kind || '执行失败';
+}
+
+const canApplyReason = computed(() => {
+  if (assistant.isRunning.value) return '';
+  if (!assistant.latestResult.value) return '还没有可应用的草稿。';
+  if (!assistant.allHighRiskConfirmed.value) return '请先确认所有高风险项。';
+  if (!assistant.isLatestDraftForCurrentSheet.value) return '这份草稿属于其他锚点表，请切回原表或重新生成。';
+  return '';
+});
+
+function submitRepair(): void {
+  assistant.runWithRepairFeedback(repairFeedback.value);
+  repairFeedback.value = '';
+}
 
 function updateMaxRounds(value: string | number): void {
   const next = Math.max(1, Math.min(6, Math.floor(Number(value) || 1)));
@@ -312,9 +416,50 @@ watch(() => assistant.latestResult.value, value => {
   gap: 8px;
 }
 
+.acu-viz-assistant__repair {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.acu-viz-assistant__apply-reason {
+  color: var(--acu-text-3);
+  font-size: var(--acu-font-size-caption, 11px);
+  line-height: 1.4;
+}
+
 .acu-viz-assistant__action-row,
 .acu-viz-assistant__summary {
   flex-wrap: wrap;
+}
+
+.acu-viz-assistant__failure-msg {
+  margin: 4px 0 0;
+  font-size: var(--acu-font-size-body, 12px);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.acu-viz-assistant__raw-disclosure {
+  min-width: 0;
+  border: 1px solid var(--acu-border);
+  border-radius: var(--acu-radius-sm);
+  background: var(--acu-bg-0);
+}
+
+.acu-viz-assistant__raw-text {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--acu-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--acu-text-2);
+  background: var(--acu-bg-1);
+  border-radius: var(--acu-radius-sm);
 }
 
 .acu-viz-assistant__running {

@@ -31,7 +31,7 @@ vi.mock('../../../src/service/ai/api-call', () => ({
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
-  settings_ACU: { tableApiPreset: 'preset-1', apiPresets: [], tableApiPresetOverridesByName: {} },
+  settings_ACU: { tableApiPreset: 'preset-1', apiPresets: [], tableApiPresetOverridesByName: {}, templateAssistantPromptSegments: [] },
 }));
 
 vi.mock('../../../src/shared/utils', async () => {
@@ -667,6 +667,7 @@ describe('template assistant service', () => {
         stopReason: 'empty_operations',
         roundsExecuted: 0,
         maxRounds: 3,
+        lastFailure: null,
         repairRetriesUsed: 0,
         maxRepairRetries: 1,
         lastErrorMessage: '',
@@ -685,10 +686,103 @@ describe('template assistant service', () => {
         stopReason: 'empty_operations',
         roundsExecuted: 0,
         maxRounds: 3,
+        lastFailure: null,
         repairRetriesUsed: 0,
         maxRepairRetries: 1,
         lastErrorMessage: '',
       },
     })).toBe('');
+  });
+
+  it('repair 重试耗尽时透出结构化 lastFailure（含失败分类与 AI 原文）', async () => {
+    const tempData = buildTempData_ACU();
+    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+    const aiRawText = `<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-bad-op","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[{"op":"create_sheet","sheetName":"战利品表"}]}</templateAssistantDraft>`;
+    mockCallAIWithPreset.mockResolvedValue(aiRawText);
+
+    const result = await runTemplateAssistantSession_ACU({
+      tempData,
+      currentSheetKey: 'sheet_a',
+      sheetOrder: ['sheet_a'],
+      userRequest: '请生成草稿',
+      maxRounds: 2,
+      maxRepairRetries: 1,
+    });
+
+    expect(result.session.stopReason).toBe('repair_retry_capped');
+    expect(result.session.repairRetriesUsed).toBe(1);
+    expect(result.session.lastFailure).toEqual({
+      kind: 'validate',
+      message: expect.stringMatching(/包含当前协议不支持的操作/),
+      rawText: aiRawText,
+    });
+    expect(result.rounds).toHaveLength(0);
+    expect(result.draft.operations).toEqual([]);
+  });
+
+  it('无标签垃圾文本失败时 lastFailure.kind 为 parse 且携带原文', async () => {
+    const tempData = buildTempData_ACU();
+    mockCallAIWithPreset.mockResolvedValue('这只是一句解释，没有任何 JSON');
+
+    const result = await runTemplateAssistantSession_ACU({
+      tempData,
+      currentSheetKey: 'sheet_a',
+      sheetOrder: ['sheet_a'],
+      userRequest: '请生成草稿',
+      maxRounds: 2,
+      maxRepairRetries: 0,
+    });
+
+    expect(result.session.stopReason).toBe('repair_retry_capped');
+    expect(result.session.lastFailure?.kind).toBe('parse');
+    expect(result.session.lastFailure?.rawText).toBe('这只是一句解释，没有任何 JSON');
+    expect(result.session.lastFailure?.message).toContain('JSON');
+  });
+
+  it('preflight 失败时 lastFailure.kind 为 preflight', async () => {
+    const tempData = buildTempData_ACU();
+    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+    mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-preflight","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`);
+    mockPreflightSchemaMigrations.mockResolvedValueOnce({ changedSheetKeys: [], blockers: ['迁移不可逆'], operations: [] });
+
+    const result = await runTemplateAssistantSession_ACU({
+      tempData,
+      currentSheetKey: 'sheet_a',
+      sheetOrder: ['sheet_a'],
+      userRequest: '请生成草稿',
+      maxRounds: 1,
+      maxRepairRetries: 0,
+    });
+
+    expect(result.session.stopReason).toBe('repair_retry_capped');
+    expect(result.session.lastFailure?.kind).toBe('preflight');
+    expect(result.session.lastFailure?.message).toContain('迁移不可逆');
+  });
+
+  it('先失败后成功时 lastFailure 被清空（成功会话不误报失败）', async () => {
+    const tempData = buildTempData_ACU();
+    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+    const okDraft = `<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-ok","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"ok","warnings":[],"operations":[]}</templateAssistantDraft>`;
+    // 第 1 轮：解析失败；第 2 轮（修复重试）：成功产出空操作 draft
+    mockCallAIWithPreset
+      .mockResolvedValueOnce('不是 JSON 的解释文本')
+      .mockResolvedValueOnce(okDraft);
+
+    const result = await runTemplateAssistantSession_ACU({
+      tempData,
+      currentSheetKey: 'sheet_a',
+      sheetOrder: ['sheet_a'],
+      userRequest: '请生成草稿',
+      maxRounds: 3,
+      maxRepairRetries: 1,
+    });
+
+    expect(result.session.stopReason).toBe('empty_operations');
+    expect(result.session.repairRetriesUsed).toBe(1);
+    // 成功路径清空 lastFailure，避免面板误显示失败横幅
+    expect(result.session.lastFailure).toBeNull();
+    expect(result.session.lastErrorMessage).toBe('');
+    expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0]?.aiRawText).toBe(okDraft);
   });
 });
