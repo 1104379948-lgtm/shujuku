@@ -920,6 +920,11 @@ export class SqlTableService implements ITableStorageProvider {
    * 从调用方刚刚恢复的当前聊天 JSON 快照初始化 SQLite runtime。
    * 调用方必须保证 data 与当前聊天/isolationKey 属于同一次回放；本方法绝不自行回放聊天，
    * 从而避免 legacy→V2 迁移与 SQLite 初始化重复产生副作用。
+   *
+   * 返回契约：`loaded` 表示数据存在性而非 readiness——
+   * `loaded: false, source: 'empty', error: undefined` 是正常空 schema
+   * （引擎已初始化、empty-schema mapper 已发布、`isReady() === true`）；
+   * 仅当 `error` 存在时才表示加载失败，此时 runtime 被重置为 not-ready。
    */
   async loadFromData(data: TableDataObject_ACU | null): Promise<{
     loaded: boolean;
@@ -983,6 +988,7 @@ export class SqlTableService implements ITableStorageProvider {
           return { loaded: hasSeedRows, source: hasSeedRows ? 'initialized' : 'empty' };
         }
 
+        // 正常空状态：无 error，loaded=false/source=empty，但 Provider 已 ready。
         logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
         // runtime 没有任何表可映射。显式标记空 schema，避免同步读门禁把它
         // 误判成「mapper 意外丢失」并按异常反复告警。

@@ -38,6 +38,8 @@ vi.mock('../../../src/service/table/table-service', () => ({
 // ═══════════════════════════════════════════════════════════════
 let sqliteLoadResult: { loaded: boolean; source: 'merged' | 'initialized' | 'empty'; error?: string } = { loaded: true, source: 'merged' };
 let sqliteLoadShouldThrow: Error | null = null;
+let sqliteProviderReady: boolean = true;
+let sqliteHydrateGate: Promise<{ loaded: boolean; source: 'merged' | 'initialized' | 'empty'; error?: string }> | null = null;
 let nativeReloadGate: Promise<void> | null = null;
 let nativeReloadStarted: (() => void) | null = null;
 
@@ -67,12 +69,15 @@ function createMockProvider(mode: 'native' | 'sqlite') {
       }
       currentData = data || null;
       if (mode === 'sqlite') {
+        if (sqliteHydrateGate) {
+          await sqliteHydrateGate;
+        }
         return { ...sqliteLoadResult };
       }
       return { loaded: true, source: 'merged' as const };
     }),
     saveToChat: vi.fn().mockResolvedValue({ saved: true }),
-    isReady: vi.fn().mockReturnValue(true),
+    isReady: vi.fn(() => (mode === 'sqlite' ? sqliteProviderReady : true)),
     getCurrentData: vi.fn(() => currentData),
     applyEdits: vi.fn().mockReturnValue({ success: true, modifiedKeys: [], appliedEdits: 1 }),
     executeQuery: vi.fn(),
@@ -125,6 +130,8 @@ describe('table-storage-strategy', () => {
     mockStorageMode = 'native';
     sqliteLoadResult = { loaded: true, source: 'merged' };
     sqliteLoadShouldThrow = null;
+    sqliteProviderReady = true;
+    sqliteHydrateGate = null;
     nativeReloadGate = null;
     nativeReloadStarted = null;
     allCreatedProviders = [];
@@ -295,6 +302,34 @@ describe('table-storage-strategy', () => {
       // 旧 provider 应该被 dispose
       expect(oldProvider.dispose).toHaveBeenCalled();
     });
+
+    it('空状态冷初始化保持 SQLite ready（loaded=false/source=empty 不是失败）', async () => {
+      mockStorageMode = 'sqlite';
+      sqliteLoadResult = { loaded: false, source: 'empty' };
+
+      const result = await initStorageProvider();
+
+      expect(result).toMatchObject({ ok: true, degraded: false, source: 'empty' });
+      expect(getCurrentProviderMode()).toBe('sqlite');
+      expect(getActiveStorageProvider()!.isReady()).toBe(true);
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({
+        status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', source: 'empty',
+      });
+    });
+
+    it('空状态但候选 not-ready 时冷初始化 fail-loud 回退 native（错误不为 unknown）', async () => {
+      mockStorageMode = 'sqlite';
+      sqliteLoadResult = { loaded: false, source: 'empty' };
+      sqliteProviderReady = false;
+
+      const result = await initStorageProvider();
+
+      expect(result).toMatchObject({
+        ok: false, degraded: true, failureCode: 'provider_fallback', error: 'provider_not_ready_after_init',
+      });
+      expect(getCurrentProviderMode()).toBe('native');
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({ status: 'degraded', activeMode: 'native' });
+    });
   });
 
   describe('ensureStorageProviderReady_ACU', () => {
@@ -386,6 +421,28 @@ describe('table-storage-strategy', () => {
       // 应该有可用的 provider
       expect(getCurrentProviderMode()).not.toBeNull();
     });
+
+    it('空状态模式切换保持 SQLite ready（与冷初始化、hydrate 同矩阵）', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty' };
+
+      await expect(switchStorageMode('sqlite')).resolves.toBeUndefined();
+
+      expect(getCurrentProviderMode()).toBe('sqlite');
+      expect(getActiveStorageProvider()!.isReady()).toBe(true);
+    });
+
+    it('空状态但候选 not-ready 时模式切换 fail-loud 回退 native 并抛出明确错误', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty' };
+      sqliteProviderReady = false;
+
+      await expect(switchStorageMode('sqlite')).rejects.toThrow('provider_not_ready_after_switch');
+      expect(getCurrentProviderMode()).toBe('native');
+    });
+
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -836,6 +893,88 @@ describe('table-storage-strategy', () => {
 
       expect(result).toMatchObject({ ok: false, degraded: true, failureCode: 'provider_fallback' });
       expect(getCurrentProviderMode()).toBe('native');
+    });
+
+    it('空 canonical snapshot hydrate 成功：发布 ready SQLite，不降级不产生 ERROR', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      const activeBefore = getActiveStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty' };
+      // canonical 不允许 null data；空 schema 用仅含 metadata 的空壳表示。
+      const envelope = buildEnvelope({ data: { mate: { type: 'acu', version: 1 } } });
+
+      const result = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+
+      expect(result).toMatchObject({ ok: true, degraded: false, source: 'empty' });
+      // 新 SQLite 候选已发布，旧 provider 被正确 dispose（不得复活）。
+      expect(getActiveStorageProvider()).not.toBe(activeBefore);
+      expect(getActiveStorageProvider()!.mode).toBe('sqlite');
+      expect(activeBefore!.dispose).toHaveBeenCalled();
+      const health = getStorageRuntimeHealth_ACU();
+      expect(health).toMatchObject({
+        status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', source: 'empty',
+      });
+      expect(health.failureCode).toBeUndefined();
+      expect(health.error).toBeUndefined();
+      // 空快照是正常状态：不得出现失败/unknown/fallback ERROR。
+      expect((await import('../../../src/shared/utils')).logError_ACU).not.toHaveBeenCalled();
+    });
+
+    it('真实 hydrate 失败保持 fallback，并保留原始 error', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty', error: 'hydrate 失败' };
+      const envelope = buildEnvelope();
+
+      const result = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+
+      expect(result).toMatchObject({ ok: false, degraded: true, failureCode: 'provider_fallback', error: 'hydrate 失败' });
+      expect(getCurrentProviderMode()).toBe('native');
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({
+        status: 'degraded', expectedMode: 'sqlite', activeMode: 'native',
+        failureCode: 'provider_fallback', error: 'hydrate 失败',
+      });
+    });
+
+    it('无 error 但候选 not-ready 时不得发布 SQLite，错误不为 unknown', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty' };
+      sqliteProviderReady = false;
+      const envelope = buildEnvelope();
+
+      const result = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+
+      expect(result).toMatchObject({
+        ok: false, degraded: true, failureCode: 'provider_fallback', error: 'provider_not_ready_after_hydrate',
+      });
+      // 绝不发布裸/半初始化 SQLite。
+      expect(getCurrentProviderMode()).toBe('native');
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({ status: 'degraded', activeMode: 'native' });
+    });
+
+    it('空 hydrate 期间 lifecycle 漂移仍返回 stale_load_discarded，候选被销毁', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      const activeBefore = getActiveStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty' };
+      const envelope = buildEnvelope({ data: { mate: { type: 'acu', version: 1 } } });
+
+      let releaseHydrate!: (value: any) => void;
+      sqliteHydrateGate = new Promise(resolve => { releaseHydrate = resolve; });
+      const pending = hydrateStorageProviderFromSnapshot_ACU(envelope);
+      // hydrate 挂起期间 lifecycle 漂移（dispose 推进 epoch 并清空当前 provider）。
+      disposeStorageProvider();
+      releaseHydrate({ loaded: false, source: 'empty' });
+
+      const result = await pending;
+
+      expect(result).toMatchObject({ ok: false, degraded: false, failureCode: 'stale_load_discarded' });
+      // 候选必须销毁，不能覆盖 dispose 后的空运行时。
+      const sqliteCandidates = allCreatedProviders.filter(p => p.mode === 'sqlite');
+      expect(sqliteCandidates[sqliteCandidates.length - 1].dispose).toHaveBeenCalled();
+      expect(getActiveStorageProvider()).not.toBe(activeBefore);
+      expect(getActiveStorageProvider()?.mode).not.toBe('sqlite');
     });
   });
 

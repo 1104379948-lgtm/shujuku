@@ -77,6 +77,13 @@ export interface ITableStorageProvider {
    * 从聊天消息加载表格数据到运行时
    * - native：调用 loadOrCreateJsonTableFromChatHistory_ACU
    * - sqlite：mergeAll → loadFromTableData → 建表灌数据
+   *
+   * 返回契约（loaded 表示数据存在性，不等价于 Provider readiness）：
+   * - `loaded: true`：已载入真实数据或 seed rows；
+   * - `loaded: false, source: 'empty', error: undefined`：正常空状态，
+   *   Provider 仍可通过 `isReady()` 正常 ready；
+   * - `error` 存在：加载失败；不得仅凭 `source` 或 `loaded` 猜测成功，
+   *   是否可发布还必须通过 `isReady()` 后置条件确认。
    */
   loadFromChat(): Promise<{
     loaded: boolean;
@@ -89,6 +96,10 @@ export interface ITableStorageProvider {
    *
    * SQLite 实现用它避免重复回放/迁移同一聊天；native 无需实现，
    * 因为它直接使用全局 JSON 运行时视图。
+   *
+   * 返回契约与 loadFromChat 一致：`loaded: false, source: 'empty'` 且无
+   * `error` 是正常空 schema（empty-schema mapper 已发布、引擎已就绪），
+   * 不是失败；只有 `error` 存在才表示加载失败。
    */
   loadFromData?(data: TableDataObject_ACU | null): Promise<{
     loaded: boolean;
@@ -96,7 +107,7 @@ export interface ITableStorageProvider {
     error?: string;
   }>;
 
-  /** 当前运行时是否已经可用。native 恒为 true；sqlite 需引擎已初始化。 */
+  /** 当前运行时是否已经可用（Provider readiness 契约）。native 恒为 true；sqlite 需引擎已初始化且映射已发布。 */
   isReady(): boolean;
 
   /**

@@ -217,10 +217,11 @@ async function initializeStorageProvider_ACU(mode: StorageMode, epoch: number): 
   setRuntimeHealth_ACU({ status: 'loading', expectedMode: mode, activeMode: currentProvider?.mode ?? null });
   logDebug_ACU(`[StorageStrategy] 初始化 Provider: ${mode}`);
 
+  let result: { loaded: boolean; source: 'merged' | 'initialized' | 'empty'; error?: string };
   let nextProvider: ITableStorageProvider | null = null;
   try {
     nextProvider = createProvider(mode);
-    const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
+    result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
     logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
 
     if (epoch !== initializationEpoch_ACU) {
@@ -238,15 +239,18 @@ async function initializeStorageProvider_ACU(mode: StorageMode, epoch: number): 
       return { ok: false, degraded: false, source: result.source, failureCode: 'stale_load_discarded' };
     }
 
-    if (mode === 'sqlite' && !result.loaded && result.error) {
-      logError_ACU(`[StorageStrategy] SQLite 加载失败，自动 fallback 到原生模式: ${result.error}`);
-      nextProvider.dispose();
-      replaceActiveProvider_ACU(createProvider('native'));
-      setRuntimeHealth_ACU({
-        status: 'degraded', expectedMode: mode, activeMode: 'native', source: result.source,
-        failureCode: 'provider_fallback', error: result.error,
-      });
-      return { ok: false, degraded: true, source: result.source, failureCode: 'provider_fallback', error: result.error };
+    if (mode === 'sqlite') {
+      const failure = evaluateProviderPublishFailure_ACU(result, nextProvider, 'provider_not_ready_after_init');
+      if (failure) {
+        logError_ACU(`[StorageStrategy] SQLite 加载失败，自动 fallback 到原生模式: ${failure}`);
+        nextProvider.dispose();
+        replaceActiveProvider_ACU(createProvider('native'));
+        setRuntimeHealth_ACU({
+          status: 'degraded', expectedMode: mode, activeMode: 'native', source: result.source,
+          failureCode: 'provider_fallback', error: failure,
+        });
+        return { ok: false, degraded: true, source: result.source, failureCode: 'provider_fallback', error: failure };
+      }
     }
     replaceActiveProvider_ACU(nextProvider);
     setRuntimeHealth_ACU({ status: 'ready', expectedMode: mode, activeMode: mode, source: result.source });
@@ -294,11 +298,14 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
     const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
     logDebug_ACU(`[StorageStrategy] 切换完成: loaded=${result.loaded}, source=${result.source}`);
 
-    if (mode === 'sqlite' && !result.loaded && result.error) {
-      logError_ACU(`[StorageStrategy] SQLite 切换失败，fallback 到原生模式: ${result.error}`);
-      nextProvider.dispose();
-      replaceActiveProvider_ACU(createProvider('native'));
-      throw new Error(`SQLite 模式切换失败: ${result.error}。已自动回退到原生模式。`);
+    if (mode === 'sqlite') {
+      const failure = evaluateProviderPublishFailure_ACU(result, nextProvider, 'provider_not_ready_after_switch');
+      if (failure) {
+        logError_ACU(`[StorageStrategy] SQLite 切换失败，fallback 到原生模式: ${failure}`);
+        nextProvider.dispose();
+        replaceActiveProvider_ACU(createProvider('native'));
+        throw new Error(`SQLite 模式切换失败: ${failure}。已自动回退到原生模式。`);
+      }
     }
     replaceActiveProvider_ACU(nextProvider);
   } catch (e: any) {
@@ -441,16 +448,17 @@ export async function hydrateStorageProviderFromSnapshot_ACU(
   const nextProvider = createProvider('sqlite');
   try {
     const result = await nextProvider.loadFromData(envelope.data);
-    if (!result.loaded) {
+    const failure = evaluateProviderPublishFailure_ACU(result, nextProvider, 'provider_not_ready_after_hydrate');
+    if (failure) {
       nextProvider.dispose();
-      logError_ACU(`[StorageStrategy] snapshot hydrate 失败: ${result.error || 'unknown'}`);
+      logError_ACU(`[StorageStrategy] snapshot hydrate 失败: ${failure}`);
       // 沿用现有 fallback 语义：SQLite hydrate 失败回退 native。
       replaceActiveProvider_ACU(createProvider('native'));
       setRuntimeHealth_ACU({
         status: 'degraded', expectedMode: 'sqlite', activeMode: 'native', source: result.source,
-        failureCode: 'provider_fallback', error: result.error,
+        failureCode: 'provider_fallback', error: failure,
       });
-      return { ok: false, degraded: true, source: result.source, failureCode: 'provider_fallback', error: result.error };
+      return { ok: false, degraded: true, source: result.source, failureCode: 'provider_fallback', error: failure };
     }
 
     // 身份复检：hydrate 期间 chat/isolation/mode/lifecycle 变化则丢弃候选。
@@ -465,6 +473,10 @@ export async function hydrateStorageProviderFromSnapshot_ACU(
 
     replaceActiveProvider_ACU(nextProvider);
     setRuntimeHealth_ACU({ status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', source: result.source });
+    if (result.source === 'empty') {
+      // 空 schema 是正常状态，只允许 debug 级记录，不输出“失败”或 fallback ERROR。
+      logDebug_ACU('[StorageStrategy] SQLite 空 schema 已就绪（normal empty snapshot），无降级。');
+    }
     return { ok: true, degraded: false, source: result.source };
   } catch (error: any) {
     const message = error?.message || String(error);
@@ -525,6 +537,27 @@ async function loadProviderForCurrentChat_ACU(
     throw new Error('[StorageStrategy] SQLite provider 未实现 canonical snapshot hydrate。');
   }
   return provider.loadFromData(replay.data || null);
+}
+
+/**
+ * 阶段 A：统一加载结果发布判定（冷初始化、模式切换、snapshot hydrate 共用）。
+ *
+ * 失败 = `result.error` 存在（优先保留 Provider 原始错误），或 Provider 未通过
+ * `isReady()` 后置条件（生成稳定错误码，禁止发布裸/半初始化 SQLite，杜绝 `unknown`）。
+ * 空状态（`loaded=false/source=empty` 且无 error）不是失败：只要 Provider ready，
+ * 无论 `loaded` 为 true/false 都可以发布。
+ *
+ * @param notReadyCode 无 error 但 Provider not-ready 时使用的稳定错误码（区分调用路径）。
+ * @returns 失败信息（非空则不得发布候选）；可发布时返回 null。
+ */
+function evaluateProviderPublishFailure_ACU(
+  result: { loaded: boolean; source: 'merged' | 'initialized' | 'empty'; error?: string },
+  provider: ITableStorageProvider,
+  notReadyCode: string,
+): string | null {
+  if (result.error) return result.error;
+  if (!provider.isReady()) return notReadyCode;
+  return null;
 }
 
 function replaceActiveProvider_ACU(nextProvider: ITableStorageProvider): void {

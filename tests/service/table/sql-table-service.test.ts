@@ -997,6 +997,17 @@ describe('SqlTableService', () => {
       expect(mockPublishGlobalNameMapper).not.toHaveBeenCalled();
     });
 
+    it('loadFromData(null) 空 schema 契约：loaded=false/source=empty/error 未定义/isReady=true，empty-schema mapper 已发布', async () => {
+      const result = await service.loadFromData(null);
+
+      expect(result).toEqual({ loaded: false, source: 'empty' });
+      expect(result.error).toBeUndefined();
+      expect(service.isReady()).toBe(true);
+      expect(mockPublishGlobalNameMapperEmptySchema).toHaveBeenCalledTimes(1);
+      expect(mockPublishGlobalNameMapper).not.toHaveBeenCalled();
+    });
+
+
 
     it('首个用户消息后、首个真实 AI 回复前将模板 seedRows 写入运行时 SQLite，支持首次 SQL 读取', async () => {
       mockShouldUseInitialSeedRows.mockReturnValue(true);
