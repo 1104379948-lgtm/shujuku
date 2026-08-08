@@ -17,6 +17,9 @@
       <AcuBadge :variant="templates.isChatOverridden.value ? 'accent' : 'neutral'">
         {{ templates.isChatOverridden.value ? '已覆盖' : '跟随全局' }}
       </AcuBadge>
+      <AcuBadge v-if="templates.runtimeDiffersFromLibrary.value" variant="warning">
+        当前生效模板与预设库内容不同
+      </AcuBadge>
     </AcuText>
 
     <div class="acu-table-template-panel__preset-row">
@@ -38,6 +41,12 @@
       >
         <i class="fa-solid fa-download"></i>
       </AcuFileButton>
+      <AcuIconButton
+        icon="fa-solid fa-upload"
+        title="导出当前生效模板"
+        :disabled="templates.busy.value || management.busy.value || !templates.runtimeTemplateAvailable.value"
+        @click="templates.exportTemplate('runtime')"
+      />
       <AcuIconButton
         icon="fa-solid fa-clock-rotate-left"
         title="恢复历史模板归档"
@@ -122,7 +131,7 @@ watch(useTemplateRuntimeChangeTick(), refreshAll);
 
 .acu-table-template-panel__preset-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);
+  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);
   gap: 6px;
   align-items: stretch;
   min-width: 0;

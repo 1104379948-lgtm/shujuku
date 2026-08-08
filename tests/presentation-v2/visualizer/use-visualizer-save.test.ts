@@ -88,6 +88,7 @@ const serviceMock = vi.hoisted(() => ({
   applyTemplatePresetToCurrent_ACU: vi.fn(async () => true),
   resolveActiveTemplatePresetName_ACU: vi.fn(() => '现有预设'),
   upsertTemplatePreset_ACU: vi.fn(() => true),
+  getTemplatePreset_ACU: vi.fn(() => ({ templateStr: '{"mate":{"type":"chatSheets","version":1}}', templateObj: { mate: { type: 'chatSheets', version: 1 } } })),
   getGlobalInjectionConfigFromData_ACU: vi.fn(() => ({})),
   // 贴近真实的规范化实现：缺失字段补默认值。若用 vi.fn(x => x)，
   // 「基线缺字段 + 草稿被补齐默认值」的伪变更哨兵测试将失去意义。
@@ -206,6 +207,7 @@ vi.mock('../../../src/service/template/template-preset-service', () => ({
   applyTemplatePresetToCurrent_ACU: serviceMock.applyTemplatePresetToCurrent_ACU,
   resolveActiveTemplatePresetName_ACU: serviceMock.resolveActiveTemplatePresetName_ACU,
   upsertTemplatePreset_ACU: serviceMock.upsertTemplatePreset_ACU,
+  getTemplatePreset_ACU: serviceMock.getTemplatePreset_ACU,
 }));
 vi.mock('../../../src/service/worldbook/injection-engine', () => ({
   getGlobalInjectionConfigFromData_ACU: serviceMock.getGlobalInjectionConfigFromData_ACU,
@@ -376,6 +378,93 @@ describe('useVisualizerSave', () => {
     }));
     expect(serviceMock.runTableUpdateCommit_ACU).not.toHaveBeenCalled();
     expect(store.dirty).toBe(true);
+    expect(store.lastSavedTarget).toBe('template-global');
+  });
+
+  it('保存到全局：目标预设不存在时视为有变化，必须落库', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet('新建预设测试表'),
+    }, ['sheet_test_vz2']);
+    store.setDirty(true);
+    serviceMock.getTemplatePreset_ACU.mockReturnValueOnce(undefined);
+    // 默认 sanitize mock 固定返回 {"mate":...}，会丢失表内容；
+    // 真实化后才可断言落库内容 = 当前草稿（对比现有用例 L351 的做法）。
+    serviceMock.sanitizeTemplateSnapshotForChat_ACU.mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value),
+      templateObj: value,
+    }));
+
+    const saved = await useVisualizerSave({
+      confirmOverwriteGlobalPreset: vi.fn(async () => true),
+    }).saveToGlobal();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.upsertTemplatePreset_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.upsertTemplatePreset_ACU).toHaveBeenCalledWith('现有预设', expect.any(String));
+    const savedTemplate = JSON.parse(serviceMock.upsertTemplatePreset_ACU.mock.calls[0][1]);
+    expect(savedTemplate.sheet_test_vz2.name).toBe('新建预设测试表');
+    expect(store.lastSavedTarget).toBe('template-global');
+  });
+
+  it('保存到全局：与目标预设内容一致时标记 unchanged，不落库', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet('一致测试表'),
+    }, ['sheet_test_vz2']);
+    store.setDirty(true);
+    // 闭包：源码 L314 先 sanitize 得到 preparedSnapshot，L317 才调 getTemplatePreset_ACU。
+    // 让目标预设串 = 当前草稿的真实化串，二者必然相等 → unchanged。
+    let presetStr = '';
+    serviceMock.sanitizeTemplateSnapshotForChat_ACU.mockImplementationOnce((value: any) => {
+      presetStr = JSON.stringify(value);
+      return { templateStr: presetStr, templateObj: value };
+    });
+    serviceMock.getTemplatePreset_ACU.mockImplementationOnce(() => ({ templateStr: presetStr }));
+
+    const saved = await useVisualizerSave({
+      confirmOverwriteGlobalPreset: vi.fn(async () => true),
+    }).saveToGlobal();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.upsertTemplatePreset_ACU).not.toHaveBeenCalled();
+    expect(store.lastSavedTarget).toBe('template-global');
+  });
+
+  it('保存到全局：内容等于全局 profile 串但不同于目标预设时，仍必须落库', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet('差异测试表'),
+    }, ['sheet_test_vz2']);
+    store.setDirty(true);
+    serviceMock.getTemplatePreset_ACU.mockReturnValueOnce({
+      templateStr: '{"mate":{"type":"chatSheets","version":1},"sheet_test_vz2":{"name":"旧目标预设表","content":[["row_id","姓名","状态"]]}}',
+      templateObj: { mate: { type: 'chatSheets', version: 1 }, sheet_test_vz2: { name: '旧目标预设表', content: [['row_id', '姓名', '状态']] } },
+    });
+    serviceMock.sanitizeTemplateSnapshotForChat_ACU.mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value),
+      templateObj: value,
+    }));
+    serviceMock.getGlobalTemplateSnapshotForCurrentProfile_ACU.mockReturnValueOnce({
+      templateStr: JSON.stringify({ mate: { type: 'chatSheets', version: 1 }, sheet_test_vz2: { name: '差异测试表', content: [['row_id', '姓名', '状态']] } }),
+      templateObj: { mate: { type: 'chatSheets', version: 1 }, sheet_test_vz2: { name: '差异测试表', content: [['row_id', '姓名', '状态']] } },
+    });
+
+    const saved = await useVisualizerSave({
+      confirmOverwriteGlobalPreset: vi.fn(async () => true),
+    }).saveToGlobal();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.upsertTemplatePreset_ACU).toHaveBeenCalledTimes(1);
     expect(store.lastSavedTarget).toBe('template-global');
   });
 

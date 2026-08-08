@@ -45,13 +45,13 @@ import { applyTemplateScopeForCurrentChat_ACU } from '../../../service/settings/
 import {
   buildChatSheetGuideDataFromData_ACU,
   getChatSheetGuideDataForIsolationKey_ACU,
-  getGlobalTemplateSnapshotForCurrentProfile_ACU,
   getSortedSheetKeys_ACU,
   sanitizeTemplateSnapshotForChat_ACU,
 } from '../../../service/template/chat-scope';
 import { generateDDL, validateDDLTextAgainstHeaders_ACU } from '../../../data/sqlite/schema-mapper';
 import {
   applyTemplatePresetToCurrent_ACU,
+  getTemplatePreset_ACU,
   resolveActiveTemplatePresetName_ACU,
   upsertTemplatePreset_ACU,
 } from '../../../service/template/template-preset-service';
@@ -292,9 +292,6 @@ async function saveGlobalTemplateSnapshot(
     forceRebuild: false,
   });
 
-  const currentGlobalSnapshot = getGlobalTemplateSnapshotForCurrentProfile_ACU();
-  const currentGlobalStr = currentGlobalSnapshot?.templateStr || '';
-
   const isolationKey = getCurrentIsolationKey_ACU();
   const activePresetName = normalizeTemplatePresetSelectionValue_ACU(
     resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey }),
@@ -315,10 +312,13 @@ async function saveGlobalTemplateSnapshot(
   if (!finalGlobalPresetName) return { status: 'cancelled' };
 
   const preparedSnapshot = sanitizeTemplateSnapshotForChat_ACU(templateObj);
+  // 比较对象是「目标预设自身」的 templateStr，而不是全局 profile 串：
+  // 目标预设不存在（新建场景）视为有变化，必须落库。
+  const targetPresetStr = getTemplatePreset_ACU(finalGlobalPresetName)?.templateStr || '';
   if (!preparedSnapshot?.templateStr) {
     throw new Error('无法生成模板快照。');
   }
-  if (currentGlobalStr && preparedSnapshot.templateStr === currentGlobalStr) return { status: 'unchanged' };
+  if (targetPresetStr && preparedSnapshot.templateStr === targetPresetStr) return { status: 'unchanged' };
   const presetSaved = upsertTemplatePreset_ACU(finalGlobalPresetName, preparedSnapshot.templateStr);
   if (!presetSaved) throw new Error('无法写入全局预设库。');
 

@@ -189,6 +189,25 @@ export function getDefaultTemplateSnapshot_ACU() {
     return snapshot || sanitizeTemplateSnapshotForChat_ACU(previousTemplate);
 }
 
+/**
+ * 解析当前内存运行时模板（TABLE_TEMPLATE_ACU）为可导出的快照。
+ *
+ * 与「保存」路径 normalizeTemplateForPresetSave_ACU 对齐：parse → 补顺序号 → sanitize。
+ * 解析失败返回 null，绝不静默回落到默认模板——否则会把「运行时损坏」伪装成「运行时正常」。
+ * 纯函数：不写任何存储，不触发 notifyTemplateRuntimeCommitted_ACU。
+ */
+export function getRuntimeTemplateSnapshot_ACU() {
+    const obj = parseTableTemplateJson_ACU({ stripSeedRows: false });
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+    try {
+        const sheetKeys = Object.keys(obj).filter(k => k.startsWith('sheet_'));
+        ensureSheetOrderNumbers_ACU(obj, { baseOrderKeys: sheetKeys, forceRebuild: false });
+    } catch (e) { logWarn_ACU('[模板预设] getRuntimeTemplateSnapshot: 排序号处理失败:', e); }
+    const sanitized = sanitizeTemplateSnapshotForChat_ACU(obj);
+    if (!sanitized?.templateStr || !sanitized?.templateObj) return null;
+    return sanitized;
+}
+
 export function parseImportedTemplateData_ACU(templateData: any) {
     let jsonData;
 
@@ -819,17 +838,29 @@ export async function applyTemplatePresetToCurrent_ACU(presetName: string, { sou
  * 
  * @param scope - 'global' | 'chat'
  * @param selectedPresetName - 当前选中的预设名（由 UI 层传入）
+ * @param options.allowRuntimeFallback - 仅影响 global 分支：传了名字但解析失败时，
+ *   是否允许继续回落全局快照。默认 false，保持既有 4 个调用方行为完全不变。
  * @returns { jsonData, fromPresetName } 或 null（解析失败）
  */
 export function resolveTemplateForExport_ACU(
     scope: string,
-    selectedPresetName?: string
+    selectedPresetName?: string,
+    options?: { allowRuntimeFallback?: boolean }
 ): { jsonData: Record<string, any>; fromPresetName: string } | null {
-    const normalizedScope = normalizeTemplateOperationScope_ACU(scope);
+    const allowRuntimeFallback = !!options?.allowRuntimeFallback;
     let fromPresetName = '';
     let jsonData: Record<string, any> | null = null;
 
-    if (normalizedScope === 'global') {
+    // runtime scope 必须在 normalizeTemplateOperationScope_ACU 之前分流：
+    // 该函数把一切非 'chat' 折叠成 'global'，直接给它加 runtime 会改变所有调用方语义。
+    if (scope === 'runtime') {
+        const runtimeSnapshot = getRuntimeTemplateSnapshot_ACU();
+        if (!runtimeSnapshot?.templateObj || typeof runtimeSnapshot.templateObj !== 'object') return null;
+        jsonData = JSON.parse(JSON.stringify(runtimeSnapshot.templateObj));
+        fromPresetName = normalizeTemplatePresetSelectionValue_ACU(
+            resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true }),
+        );
+    } else if (normalizeTemplateOperationScope_ACU(scope) === 'global') {
         // 优先从选中的预设加载
         if (selectedPresetName) {
             try {
@@ -846,7 +877,7 @@ export function resolveTemplateForExport_ACU(
         }
 
         if (!jsonData || typeof jsonData !== 'object') {
-            if (selectedPresetName) return null;
+            if (selectedPresetName && !allowRuntimeFallback) return null;
             const globalSnapshot = getGlobalTemplateSnapshotForCurrentProfile_ACU();
             if (globalSnapshot?.templateObj && typeof globalSnapshot.templateObj === 'object') {
                 jsonData = JSON.parse(JSON.stringify(globalSnapshot.templateObj));

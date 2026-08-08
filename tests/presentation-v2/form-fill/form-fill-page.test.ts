@@ -158,11 +158,15 @@ async function mountFormFillPage(
         { value: 'global:global-A', label: 'global-A（全局预设）', meta: '2 张表' },
       ]),
       chatArchiveItems: ref([]),
+      runtimeTemplateItem: ref(null),
+      runtimeDiffersFromLibrary: ref(false),
+      runtimeTemplateAvailable: ref(false),
       refresh: vi.fn(),
       selectGlobalPreset: vi.fn(async () => {}),
       selectChatPreset: vi.fn(async () => {}),
       importPresetForCurrentChat: vi.fn(async () => {}),
       restoreArchivedChatTemplate: vi.fn(async () => {}),
+      exportTemplate: vi.fn(),
     }),
   }));
   vi.doMock('../../../src/presentation-v2/composables/useTablePresetManagement', () => ({

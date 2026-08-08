@@ -12,6 +12,7 @@ async function importComposable() {
   let activeScope: 'global' | 'chat' = 'global';
   let activeMode = 'inherit_global';
   let archiveEntries: any[] = [];
+  let runtimeSnapshot: any = { templateStr: '{"sheet_1":{"name":"运行时"}}', templateObj: { sheet_1: { name: '运行时' } } };
   const applyTemplateSnapshotToScope_ACU = vi.fn(async () => ({ saved: true, presetName: selectedChat }));
   const applyTemplatePresetToCurrent_ACU = vi.fn(async () => ({ saved: true, presetName: selectedChat }));
   const resolveTemplateForExport_ACU = vi.fn(() => ({ jsonData: { sheet_1: {} }, fromPresetName: selectedChat || '默认预设' }));
@@ -50,6 +51,7 @@ async function importComposable() {
     getActiveTemplatePresetMeta_ACU: () => ({ presetName: selectedChat, scope: activeScope, mode: activeMode }),
     ensureUniqueTemplatePresetName_ACU: (name: string) => name,
     getDefaultTemplateSnapshot_ACU: () => ({ templateObj: { sheet_1: {} }, templateStr: '{"sheet_1":{}}' }),
+    getRuntimeTemplateSnapshot_ACU: () => runtimeSnapshot,
     getTemplatePreset_ACU: () => ({ templateStr: '{"sheet_1":{}}' }),
     listTemplatePresetNames_ACU: () => ['global-A', 'chat-A'],
     normalizeTemplateForPresetSave_ACU: () => ({ templateStr: '{"sheet_1":{}}' }),
@@ -79,12 +81,18 @@ async function importComposable() {
     setActiveScope: (value: 'global' | 'chat') => { activeScope = value; activeMode = value === 'chat' ? 'chat_override' : 'inherit_global'; },
     setActiveMode: (value: string) => { activeMode = value; activeScope = value === 'inherit_global' ? 'global' : 'chat'; },
     setChatEntries: (value: any[]) => { archiveEntries = value; },
+    setRuntimeSnapshot: (value: any) => { runtimeSnapshot = value; },
+    setRuntimeAvailable: (available: boolean) => { runtimeSnapshot = available ? { templateStr: '{"sheet_1":{"name":"运行时"}}', templateObj: { sheet_1: { name: '运行时' } } } : null; },
   };
 }
 
 beforeEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.stubGlobal('URL', {
+    createObjectURL: vi.fn(() => 'blob:test'),
+    revokeObjectURL: vi.fn(),
+  });
 });
 
 describe('useTableTemplatePresets', () => {
@@ -343,5 +351,64 @@ describe('useTableTemplatePresets', () => {
       kind: 'error',
       text: '无法解析当前模板。',
     });
+  });
+});
+
+describe('useTableTemplatePresets · runtime 视图', () => {
+  it('runtime 项出现在主下拉且不覆盖既有 global:/snapshot: 项，顺序稳定', async () => {
+    const { useTableTemplatePresets, setActiveMode, setSelectedChat } = await importComposable();
+    setSelectedChat('global-A');
+    setActiveMode('chat_override');
+    const presets = useTableTemplatePresets();
+
+    const labels = presets.chatPresetItems.value.map(item => item.label);
+    expect(labels).toContain('当前生效模板（内存）');
+    expect(labels).toContain('global-A（全局预设）');
+    expect(labels).toContain('global-A（当前聊天快照）');
+    // 默认项 → runtime → 全局预设 → 聊天快照，顺序稳定
+    expect(labels.indexOf('默认预设（全局）')).toBeLessThan(labels.indexOf('当前生效模板（内存）'));
+    expect(labels.indexOf('当前生效模板（内存）')).toBeLessThan(labels.indexOf('global-A（全局预设）'));
+    expect(labels.indexOf('global-A（全局预设）')).toBeLessThan(labels.indexOf('global-A（当前聊天快照）'));
+  });
+
+  it('运行时内容与库内容一致时 runtimeDiffersFromLibrary 为 false', async () => {
+    const { useTableTemplatePresets, setRuntimeSnapshot } = await importComposable();
+    setRuntimeSnapshot({ templateStr: '{"sheet_1":{}}', templateObj: { sheet_1: {} } });
+    const presets = useTableTemplatePresets();
+    expect(presets.runtimeDiffersFromLibrary.value).toBe(false);
+  });
+
+  it('运行时内容与库内容不同时 runtimeDiffersFromLibrary 为 true', async () => {
+    const { useTableTemplatePresets, setRuntimeSnapshot } = await importComposable();
+    setRuntimeSnapshot({ templateStr: '{"sheet_1":{"name":"新内容"}}', templateObj: { sheet_1: { name: '新内容' } } });
+    const presets = useTableTemplatePresets();
+    expect(presets.runtimeDiffersFromLibrary.value).toBe(true);
+  });
+
+  it('运行时解析失败时 runtimeTemplateAvailable=false、runtimeTemplateItem=null 且不抛异常', async () => {
+    const { useTableTemplatePresets, setRuntimeAvailable } = await importComposable();
+    setRuntimeAvailable(false);
+    const presets = useTableTemplatePresets();
+    expect(presets.runtimeTemplateAvailable.value).toBe(false);
+    expect(presets.runtimeTemplateItem.value).toBeNull();
+    expect(presets.chatPresetItems.value.some(item => item.label === '当前生效模板（内存）')).toBe(false);
+    expect(() => presets.refresh()).not.toThrow();
+  });
+
+  it('exportTemplate(runtime) 以 runtime scope 调用 resolveTemplateForExport_ACU', async () => {
+    const { useTableTemplatePresets, resolveTemplateForExport_ACU } = await importComposable();
+    const presets = useTableTemplatePresets();
+    presets.exportTemplate('runtime');
+    expect(resolveTemplateForExport_ACU).toHaveBeenCalledWith('runtime', '');
+  });
+
+  it('选中 runtime 项时零切换调用（不触发模板切换事务）', async () => {
+    const { useTableTemplatePresets, applyTemplatePresetToCurrent_ACU, applyTemplateSnapshotToScope_ACU } = await importComposable();
+    const presets = useTableTemplatePresets();
+    const runtimeItem = presets.chatPresetItems.value.find(item => item.label === '当前生效模板（内存）');
+    expect(runtimeItem).toBeDefined();
+    await presets.selectChatPreset(runtimeItem!.value);
+    expect(applyTemplatePresetToCurrent_ACU).not.toHaveBeenCalled();
+    expect(applyTemplateSnapshotToScope_ACU).not.toHaveBeenCalled();
   });
 });

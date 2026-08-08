@@ -16,24 +16,31 @@
     <ul v-if="presetMeta.length" class="acu-v2-manage-list">
       <li v-for="meta in presetMeta" :key="meta.name" class="acu-v2-manage-item">
         <div class="acu-v2-manage-item__info">
-          <AcuText as="span" variant="list-title" class="acu-v2-manage-item__name">{{ meta.name }}</AcuText>
+          <AcuText as="span" variant="list-title" class="acu-v2-manage-item__name">{{ meta.label ?? meta.name }}</AcuText>
           <AcuText as="span" variant="caption" class="acu-v2-manage-item__meta">
-            <template v-if="meta.name === defaultPresetName">全局默认</template>
+            <template v-if="meta.kind === 'runtime'">{{ meta.meta ?? '当前生效（内存）' }}</template>
+            <template v-else-if="meta.name === defaultPresetName">全局默认</template>
             <template v-else>全局预设</template>
           </AcuText>
         </div>
         <div class="acu-v2-manage-item__actions">
-          <AcuIconButton
-            :icon="meta.name === defaultPresetName ? 'fa-solid fa-star' : 'fa-regular fa-star'"
-            title="设为全局默认"
-            :variant="meta.name === defaultPresetName ? 'accent' : 'default'"
-            :disabled="busy"
-            @click="$emit('set-default', meta.name)"
-          />
-          <AcuIconButton icon="fa-solid fa-upload" title="导出 JSON" :disabled="busy" @click="$emit('export', meta.name)" />
-          <AcuIconButton icon="fa-solid fa-i-cursor" title="重命名" :disabled="busy" @click="$emit('rename', meta.name)" />
-          <AcuIconButton icon="fa-solid fa-pen" title="编辑（打开可视化表格编辑器）" :disabled="busy" @click="$emit('edit', meta.name)" />
-          <AcuIconButton icon="fa-solid fa-trash-can" variant="danger" title="删除" :disabled="busy" @click="$emit('delete', meta.name)" />
+          <template v-if="meta.kind === 'runtime'">
+            <!-- 只读 runtime 项：仅导出，不渲染 star/rename/edit/delete -->
+            <AcuIconButton icon="fa-solid fa-upload" title="导出当前生效模板" :disabled="busy" @click="$emit('export', meta.name)" />
+          </template>
+          <template v-else>
+            <AcuIconButton
+              :icon="meta.name === defaultPresetName ? 'fa-solid fa-star' : 'fa-regular fa-star'"
+              title="设为全局默认"
+              :variant="meta.name === defaultPresetName ? 'accent' : 'default'"
+              :disabled="busy"
+              @click="$emit('set-default', meta.name)"
+            />
+            <AcuIconButton icon="fa-solid fa-upload" title="导出 JSON" :disabled="busy" @click="$emit('export', meta.name)" />
+            <AcuIconButton icon="fa-solid fa-i-cursor" title="重命名" :disabled="busy" @click="$emit('rename', meta.name)" />
+            <AcuIconButton icon="fa-solid fa-pen" title="编辑（打开可视化表格编辑器）" :disabled="busy" @click="$emit('edit', meta.name)" />
+            <AcuIconButton icon="fa-solid fa-trash-can" variant="danger" title="删除" :disabled="busy" @click="$emit('delete', meta.name)" />
+          </template>
         </div>
       </li>
     </ul>
@@ -57,7 +64,7 @@ defineProps<{
   title: string;
   busy: boolean;
   message: { kind: 'success' | 'error' | 'info' | 'warning'; text: string } | null;
-  presetMeta: Array<{ name: string }>;
+  presetMeta: Array<{ name: string; kind?: 'preset' | 'runtime'; label?: string; meta?: string; readOnly?: boolean }>;
   defaultPresetName: string;
 }>();
 

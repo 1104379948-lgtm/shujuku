@@ -9,6 +9,7 @@ import {
   getTemplatePreset_ACU,
   listTemplatePresetNames_ACU,
   normalizeTemplateForPresetSave_ACU,
+  getRuntimeTemplateSnapshot_ACU,
   parseImportedTemplateData_ACU,
   resolveActiveTemplatePresetName_ACU,
   resolveTemplateForExport_ACU,
@@ -29,15 +30,18 @@ import { useDialogStore } from '../stores/dialog-store';
 import { useToastStore } from '../stores/toast-store';
 import { ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU } from './useTemplateRecoveryGuard';
 
-export type TemplateScope = 'global' | 'chat';
+export type TemplateScope = 'global' | 'chat' | 'runtime';
 
 type MessageKind = 'success' | 'error' | 'info' | 'warning';
-type ChatPresetSelectionKind = 'global' | 'snapshot';
+type ChatPresetSelectionKind = 'global' | 'snapshot' | 'runtime';
 type TemplateArchiveEntry = Record<string, any>;
 type PresetItem = { value: string; label: string; meta?: string };
 
 const CHAT_GLOBAL_PRESET_VALUE_PREFIX = 'global:';
 const CHAT_SNAPSHOT_PRESET_VALUE_PREFIX = 'snapshot:';
+const RUNTIME_PRESET_VALUE = 'runtime:current';
+
+const RUNTIME_SENTINEL_NAME = '__runtime__';
 
 function encodeChatPresetValue(kind: ChatPresetSelectionKind, name: string): string {
   return `${kind === 'snapshot' ? CHAT_SNAPSHOT_PRESET_VALUE_PREFIX : CHAT_GLOBAL_PRESET_VALUE_PREFIX}${encodeURIComponent(name || '')}`;
@@ -45,6 +49,9 @@ function encodeChatPresetValue(kind: ChatPresetSelectionKind, name: string): str
 
 function decodeChatPresetValue(value: string): { kind: ChatPresetSelectionKind; name: string } {
   const raw = String(value || '');
+  if (raw === RUNTIME_PRESET_VALUE) {
+    return { kind: 'runtime', name: '' };
+  }
   if (raw.startsWith(CHAT_SNAPSHOT_PRESET_VALUE_PREFIX)) {
     return { kind: 'snapshot', name: normalizeTemplatePresetSelectionValue_ACU(decodeURIComponent(raw.slice(CHAT_SNAPSHOT_PRESET_VALUE_PREFIX.length))) };
   }
@@ -55,9 +62,23 @@ function decodeChatPresetValue(value: string): { kind: ChatPresetSelectionKind; 
   return { kind: 'global', name: normalized };
 }
 
-function defaultPresetItem(label: string, meta?: string, value = '') {
+function isRuntimePresetValue(value: string): boolean {
+  return String(value || '') === RUNTIME_PRESET_VALUE;
+}
+
+function isRuntimeSentinelName(name: string): boolean {
+  return String(name || '') === RUNTIME_SENTINEL_NAME;
+}
+
+function buildRuntimePresetItem(meta?: string): PresetItem {
+  return { value: RUNTIME_PRESET_VALUE, label: '当前生效模板（内存）', meta };
+}
+
+function defaultPresetItem(label: string, meta?: string, value = ''): PresetItem {
   return { value, label, meta };
 }
+
+const RUNTIME_TEMPLATE_LABEL = '当前生效模板（内存）';
 
 function countTemplateSheets(templateSource: unknown): number | null {
   const templateObj = typeof templateSource === 'string'
@@ -152,6 +173,9 @@ export function useTableTemplatePresets() {
   const chatPresetItems = ref<PresetItem[]>([]);
   const chatArchiveItems = ref<PresetItem[]>([]);
   const activeTemplateScope = ref<'global' | 'chat'>('global');
+  const runtimeTemplateItem = ref<PresetItem | null>(null);
+  const runtimeDiffersFromLibrary = ref(false);
+  const runtimeTemplateAvailable = ref(false);
 
   const isChatOverridden = computed(() => activeTemplateScope.value === 'chat');
 
@@ -159,11 +183,16 @@ export function useTableTemplatePresets() {
     globalNames: string[],
     _currentGlobalPreset: string,
     activeMeta: ReturnType<typeof getActiveTemplatePresetMeta_ACU>,
+    runtimeItem: PresetItem | null,
   ): PresetItem[] {
     const seen = new Set<string>();
     const defaultSnapshot = getDefaultTemplateSnapshot_ACU();
     const items = [defaultPresetItem('默认预设（全局）', formatSheetCountMeta(defaultSnapshot?.templateObj || defaultSnapshot?.templateStr), encodeChatPresetValue('global', ''))];
     seen.add(encodeChatPresetValue('global', ''));
+    if (runtimeItem) {
+      items.push(runtimeItem);
+      seen.add(RUNTIME_PRESET_VALUE);
+    }
     for (const name of globalNames) {
       const normalized = normalizeTemplatePresetSelectionValue_ACU(name);
       if (!normalized) continue;
@@ -201,6 +230,28 @@ export function useTableTemplatePresets() {
     return encodeChatPresetValue('global', currentGlobalPreset || '');
   }
 
+  function computeRuntimeViews(): { item: PresetItem | null; available: boolean; differsFromLibrary: boolean } {
+    const runtimeSnapshot = getRuntimeTemplateSnapshot_ACU();
+    if (!runtimeSnapshot?.templateStr || !runtimeSnapshot?.templateObj) {
+      return { item: null, available: false, differsFromLibrary: false };
+    }
+    const item: PresetItem = {
+      value: RUNTIME_PRESET_VALUE,
+      label: RUNTIME_TEMPLATE_LABEL,
+      meta: formatSheetCountMeta(runtimeSnapshot.templateObj),
+    };
+
+    const activeName = normalizeTemplatePresetSelectionValue_ACU(resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true }));
+    let libraryStr: string | null = null;
+    if (activeName) {
+      libraryStr = getTemplatePreset_ACU(activeName)?.templateStr || null;
+    } else {
+      libraryStr = getDefaultTemplateSnapshot_ACU()?.templateStr || null;
+    }
+    const differsFromLibrary = libraryStr != null && runtimeSnapshot.templateStr !== libraryStr;
+    return { item, available: true, differsFromLibrary };
+  }
+
   function refresh(): void {
     const nextGlobalNames = listTemplatePresetNames_ACU();
     const nextChatArchives = listChatTemplateArchiveEntries_ACU();
@@ -208,10 +259,15 @@ export function useTableTemplatePresets() {
       getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: false }),
     );
     const activeMeta = getActiveTemplatePresetMeta_ACU();
+    const runtimeViews = computeRuntimeViews();
+    runtimeTemplateItem.value = runtimeViews.item;
+    runtimeTemplateAvailable.value = runtimeViews.available;
+    runtimeDiffersFromLibrary.value = runtimeViews.differsFromLibrary;
     const nextItems = buildChatPresetItems(
       nextGlobalNames,
       nextSelectedGlobal,
       activeMeta,
+      runtimeViews.item,
     );
     const nextSelectedChat = resolveSelectedChatPresetValue(activeMeta, nextSelectedGlobal);
 
@@ -306,6 +362,7 @@ export function useTableTemplatePresets() {
   async function selectChatPreset(name: string): Promise<void> {
     const selection = decodeChatPresetValue(name);
     const normalized = normalizeTemplatePresetSelectionValue_ACU(selection.name);
+    if (selection.kind === 'runtime') return;
     await run(async () => {
       const guideData = resolveGuideDataForPresetSelection(selection);
       const canProceed = await ensureTemplateSwitchCanProceed(guideData);
@@ -315,7 +372,7 @@ export function useTableTemplatePresets() {
         updateGlobal: false,
         save: true,
         persistChatScope: true,
-        chatSelectionSource: selection.kind,
+        chatSelectionSource: selection.kind === 'snapshot' ? 'snapshot' : 'global',
         destructiveChangeConfirmed,
         signal: templateOperationController.signal,
       }));
@@ -507,9 +564,11 @@ export function useTableTemplatePresets() {
   }
 
   function exportTemplate(scope: TemplateScope): void {
-    const selectedPresetName = scope === 'global'
-      ? selectedGlobalPreset.value
-      : decodeChatPresetValue(selectedChatPreset.value).name;
+    const selectedPresetName = scope === 'runtime'
+      ? ''
+      : (scope === 'global'
+        ? selectedGlobalPreset.value
+        : decodeChatPresetValue(selectedChatPreset.value).name);
     const resolved = resolveTemplateForExport_ACU(scope, selectedPresetName);
     if (!resolved) {
       const text = '无法解析当前模板。';
@@ -521,10 +580,12 @@ export function useTableTemplatePresets() {
     const safeName = sanitizeFilenameComponent_ACU(resolved.fromPresetName) || 'template';
     const filename = scope === 'global'
       ? `TavernDB_template_${safeName}.json`
-      : `TavernDB_template_chat_${safeName}.json`;
+      : (scope === 'chat'
+        ? `TavernDB_template_chat_${safeName}.json`
+        : `TavernDB_template_runtime_${safeName}.json`);
     downloadJson(sanitized, filename);
     message.value = null;
-    toast.success(scope === 'global' ? '全局模板已导出。' : '当前聊天模板已导出。');
+    toast.success(scope === 'global' ? '全局模板已导出。' : (scope === 'chat' ? '当前聊天模板已导出。' : '当前生效模板已导出。'));
   }
 
   refresh();
@@ -539,6 +600,9 @@ export function useTableTemplatePresets() {
     isChatOverridden,
     chatPresetItems,
     chatArchiveItems,
+    runtimeTemplateItem,
+    runtimeDiffersFromLibrary,
+    runtimeTemplateAvailable,
     refresh,
     selectGlobalPreset,
     selectChatPreset,

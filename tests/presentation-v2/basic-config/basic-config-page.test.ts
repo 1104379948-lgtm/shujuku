@@ -110,11 +110,15 @@ async function mountBasicConfigPage(settings = createSettings()) {
       isChatOverridden: ref(false),
       chatPresetItems: ref([{ value: '', label: '默认预设', meta: '内置' }]),
       chatArchiveItems: ref([]),
+      runtimeTemplateItem: ref(null),
+      runtimeDiffersFromLibrary: ref(false),
+      runtimeTemplateAvailable: ref(false),
       refresh: vi.fn(),
       selectGlobalPreset: vi.fn(),
       selectChatPreset: vi.fn(),
       importPresetForCurrentChat: vi.fn(),
       restoreArchivedChatTemplate: vi.fn(),
+      exportTemplate: vi.fn(),
     }),
   }));
   const openVisualizer = vi.fn();

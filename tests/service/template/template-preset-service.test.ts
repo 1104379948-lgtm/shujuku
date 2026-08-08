@@ -163,13 +163,14 @@ import {
   applyTemplateSnapshotToScope_ACU,
   applyTemplatePresetToCurrent_ACU,
   applyChatTemplateSnapshotWithReconciliation_ACU,
+  getRuntimeTemplateSnapshot_ACU,
   resolveTemplateForExport_ACU,
 } from '../../../src/service/template/template-preset-service';
 
 import { saveSettings_ACU } from '../../../src/service/settings/settings-service';
 import { getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, activateChatTemplatePresetSelection_ACU, normalizeTemplateScopeMode_ACU } from '../../../src/service/template/chat-scope';
 import { getCurrentTemplatePresetName_ACU } from '../../../src/shared/template-preset-utils';
-import { logWarn_ACU, parseTableTemplateJson_ACU } from '../../../src/shared/utils';
+import { ensureSheetOrderNumbers_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../../src/shared/utils';
 import { detectDisplayNameTranslationHazards_ACU, TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from '../../../src/service/template/template-import-validator';
 import { buildDefaultTableTemplateObject_ACU } from '../../../src/shared/table-defaults/index.js';
 import { reconcileChatTemplate_ACU } from '../../../src/service/template/chat-template-reconciler';
@@ -1245,3 +1246,112 @@ describe('resolveTemplateForExport_ACU', () => {
     expect(result).toBeNull();
   });
 });
+
+// ═══ getRuntimeTemplateSnapshot_ACU ═══
+describe('getRuntimeTemplateSnapshot_ACU', () => {
+  beforeEach(() => {
+    // 既有用例（"所有来源都无数据时返回 null"）曾用 mockReturnValueOnce 留下未消费
+    // 的 once 队列；vi.clearAllMocks 不清 once 队列，会污染后续用例。这里显式 reset
+    // 并恢复默认实现，保证本块用例隔离。
+    vi.mocked(parseTableTemplateJson_ACU).mockReset().mockReturnValue({ sheet_0: { name: '测试表' } });
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReset().mockImplementation((obj: any) => obj
+      ? { templateStr: JSON.stringify(obj), templateObj: obj }
+      : null);
+    // 恢复 ensure 的真实行为（写 orderNo），供 orderNo 断言使用
+    vi.mocked(ensureSheetOrderNumbers_ACU).mockReset().mockImplementation((obj: any, opts: any) => {
+      const keys = (opts?.baseOrderKeys || Object.keys(obj).filter((k: string) => k.startsWith('sheet_'))).sort();
+      keys.forEach((key: string, index: number) => { if (obj[key] && typeof obj[key] === 'object') obj[key].orderNo = index + 1; });
+      return obj;
+    });
+  });
+  it('运行时模板可解析时返回 sanitized 快照', () => {
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValueOnce({ sheet_0: { name: '运行时表' } } as any);
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValueOnce({
+      templateStr: '{"sheet_0":{"name":"运行时表"}}',
+      templateObj: { sheet_0: { name: '运行时表' } },
+    } as any);
+    const result = getRuntimeTemplateSnapshot_ACU();
+    expect(result).not.toBeNull();
+    expect(result!.templateStr).toBe('{"sheet_0":{"name":"运行时表"}}');
+    expect(sanitizeTemplateSnapshotForChat_ACU).toHaveBeenCalled();
+  });
+
+  it('解析失败返回 null，不回落默认模板', () => {
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValueOnce(null as any);
+    expect(getRuntimeTemplateSnapshot_ACU()).toBeNull();
+  });
+
+  it('sanitize 失败返回 null，不回落默认模板', () => {
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValueOnce({ sheet_0: { name: '运行时表' } } as any);
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValueOnce(null as any);
+    expect(getRuntimeTemplateSnapshot_ACU()).toBeNull();
+  });
+});
+
+// ═══ resolveTemplateForExport_ACU runtime scope ═══
+describe('resolveTemplateForExport_ACU · runtime scope', () => {
+  beforeEach(() => {
+    vi.mocked(parseTableTemplateJson_ACU).mockReset().mockReturnValue({ sheet_0: { name: '测试表' } });
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReset().mockImplementation((obj: any) => obj
+      ? { templateStr: JSON.stringify(obj), templateObj: obj }
+      : null);
+    vi.mocked(ensureSheetOrderNumbers_ACU).mockReset().mockImplementation((obj: any, opts: any) => {
+      const keys = (opts?.baseOrderKeys || Object.keys(obj).filter((k: string) => k.startsWith('sheet_'))).sort();
+      keys.forEach((key: string, index: number) => { if (obj[key] && typeof obj[key] === 'object') obj[key].orderNo = index + 1; });
+      return obj;
+    });
+    vi.mocked(getGlobalTemplateSnapshotForCurrentProfile_ACU).mockReset().mockReturnValue(null);
+  });
+  it('runtime scope 返回运行时内容，且 sheet 有 orderNo 与 exportConfig', () => {
+    const runtimeObj = {
+      sheet_0: { name: '运行时表', exportConfig: { enabled: true } },
+    };
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValueOnce(runtimeObj as any);
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValueOnce({
+      templateStr: JSON.stringify(runtimeObj),
+      templateObj: runtimeObj,
+    } as any);
+    const result = resolveTemplateForExport_ACU('runtime');
+    expect(result).not.toBeNull();
+    expect(result!.jsonData.sheet_0).toBeDefined();
+    expect(result!.jsonData.sheet_0).toHaveProperty('orderNo');
+    expect(result!.jsonData.sheet_0).toHaveProperty('exportConfig');
+  });
+
+  it('运行时模板 ≠ 预设库同名预设时，runtime 返回运行时内容、global 返回库内容，二者不相等', () => {
+    // 预设库同名预设（旧内容）
+    upsertTemplatePreset_ACU('同名预设', '{"sheet_0":{"name":"库内容"}}');
+    // 运行时内容（新内容）
+    const runtimeObj = { sheet_0: { name: '运行时新内容' } };
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValueOnce(runtimeObj as any);
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value),
+      templateObj: value,
+    } as any));
+    const runtimeResult = resolveTemplateForExport_ACU('runtime');
+    const globalResult = resolveTemplateForExport_ACU('global', '同名预设');
+    expect(runtimeResult).not.toBeNull();
+    expect(globalResult).not.toBeNull();
+    expect(JSON.stringify(runtimeResult!.jsonData)).not.toBe(JSON.stringify(globalResult!.jsonData));
+  });
+
+  it('运行时解析失败返回 null', () => {
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValueOnce(null as any);
+    expect(resolveTemplateForExport_ACU('runtime')).toBeNull();
+  });
+
+  it('global 传不存在的预设名且不传 options 时仍返回 null（回归断言）', () => {
+    expect(resolveTemplateForExport_ACU('global', '不存在的预设')).toBeNull();
+  });
+
+  it('global 传不存在的预设名但 allowRuntimeFallback=true 时回落到全局快照', () => {
+    vi.mocked(getGlobalTemplateSnapshotForCurrentProfile_ACU).mockReturnValueOnce({
+      templateObj: { sheet_0: { name: '全局快照' } },
+      templateStr: '{}',
+    } as any);
+    const result = resolveTemplateForExport_ACU('global', '不存在的预设', { allowRuntimeFallback: true });
+    expect(result).not.toBeNull();
+    expect(result!.jsonData.sheet_0.name).toBe('全局快照');
+  });
+});
+
