@@ -27,7 +27,7 @@ import { executeContentOptimization_ACU } from '../../components/optimization-ui
 import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/helpers-remaining';
 import { purgeOldLayerData_ACU } from './settings-ui-config';
 import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU, handleFloorIncreaseDelay_ACU } from '../../../service/table/update-scheduler';
-import { processGroupedRuntimeChunk_ACU, type CardUpdateProgressEvent } from '../../../service/table/update-orchestrator';
+import { executeAutoFillStagingGroups_ACU, processGroupedRuntimeChunk_ACU, type CardUpdateProgressEvent } from '../../../service/table/update-orchestrator';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-performance';
 import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
@@ -233,6 +233,23 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
                             const upstreamProgress = options?.onProgress;
                             return processGroupedRuntimeChunk_ACU(groups, mode, {
                                 ...options,
+                                abortController: autoGroupedAbortController,
+                                onProgress: event => {
+                                    upstreamProgress?.(event);
+                                    handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
+                                },
+                            });
+                        },
+                        processStagingGroupedUpdates: (groups, mode, options) => {
+                            // 跨 full checkpoint 边界组：共享 staging runner（pre 段 stage_only、
+                            // 边界原子汇合、post 段普通持久化）。boundary 元数据来自计划构建层。
+                            const upstreamProgress = options?.onProgress;
+                            return executeAutoFillStagingGroups_ACU(groups, mode, {
+                                ...options,
+                                boundary: {
+                                    fullCheckpointIndices: plan.boundary?.fullCheckpointIndices || [],
+                                    requiresBoundaryStaging: plan.boundary?.requiresBoundaryStaging || false,
+                                },
                                 abortController: autoGroupedAbortController,
                                 onProgress: event => {
                                     upstreamProgress?.(event);

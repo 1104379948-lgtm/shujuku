@@ -71,7 +71,21 @@ export interface RunTableUpdateCommitOptions_ACU {
   manualCatchUpRunId?: string;
   performanceRunId?: string;
   performanceParentSpanId?: string;
+  /** 旧契约：跳过聊天 V2 frame 写入（sql-api/table-crud-api 的 skipChatSave）。仍走 bridge gate 与 legacy 迁移。 */
   skipChatSave?: boolean;
+  /**
+   * 提交语义判别联合（计划 5.3）。
+   *
+   * - 缺省或 'persist_v2'：普通持久化提交，写聊天 V2 frame 并推进 tracking/checkpoint。
+   * - 'stage_only'：隔离 stage-only 提交。复用现有 apply（AI 响应收集、表白名单、SQL 重绑定、
+   *   row_id 分配、编辑解析、表级校验），但最终只更新 run-scoped 的隔离 working snapshot：
+   *   - 不调用 persistTablesToChatMessage_ACU；
+   *   - 不推进 tracking / manualRefillProgress / summary vector flush；
+   *   - 跳过 bridge gate 与 ensureLegacyStorageMigratedBeforeWrite_ACU（后者可能写聊天迁移帧）；
+   *   - 成功只更新 runtime 快照（_set_currentJsonTableData_ACU）。
+   * 允许恢复 bucket 前 runtime snapshot（快照保存在调用方 staging runner）。
+   */
+  commitMode?: 'persist_v2' | 'stage_only';
 }
 
 export interface RunTableUpdateCommitResult_ACU<T> {
@@ -159,6 +173,40 @@ export async function runTableUpdateCommit_ACU<T>(
   let requiresRuntimeReload = false;
   try {
     assertExpectedCommitScope_ACU(options, '提交前');
+    const commitMode = options.commitMode ?? 'persist_v2';
+    if (commitMode === 'stage_only') {
+      // stage-only：不进入聊天写入路径。跳过 bridge gate 与 legacy 迁移——迁移可能写聊天帧，
+      // 且 staging 运行期间不应推进持久化拓扑。scope 复检已在函数入口执行。
+      return await runTableWriteTransaction_ACU({
+        source: options.source,
+        reason: options.reason,
+        chatKey: options.chatKey,
+        isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(),
+        writeSet: options.writeSet,
+        baseRevision: options.baseRevision,
+        workingDataMode: options.workingDataMode,
+        initialData: options.initialData !== undefined ? options.initialData : currentJsonTableData_ACU,
+      }, async (transactionContext, workingData) => {
+        let commitRevisionWriteSet = options.revisionWriteSet;
+        return transactionContext.runCommit(async () => {
+          assertExpectedCommitScope_ACU(options, 'stage 应用前');
+          const applied = await apply({ transactionContext, workingData });
+          if (!applied.success || !applied.tableData) {
+            throw new TableUpdateCommitError_ACU(applied.error || `${options.reason}: stage apply failed`, applied.errorCategory || 'infrastructure');
+          }
+          commitRevisionWriteSet = applied.persist?.revisionWriteSet ?? options.revisionWriteSet;
+          _set_currentJsonTableData_ACU(cloneTableData_ACU(applied.tableData));
+          return {
+            success: true,
+            value: applied.value,
+            tableData: applied.tableData,
+            mutationResult: applied.mutationResult,
+            saved: false,
+            messageIndex: undefined as number | undefined,
+          };
+        }, () => commitRevisionWriteSet);
+      });
+    }
     // 普通表写入前统一恢复门：残留 provisional bridge 先自动 finalize/rollback。
     // catch-up 自身携带 runId 时跳过——该 bridge 正是本次 run 建立的，不能提前汇合。
     if (!options.manualCatchUpRunId) {

@@ -20,3 +20,8 @@ SillyTavern-1.13.1/
 
 # macOS
 .DS_Store
+
+# 本地诊断/测试日志与临时备份
+*.log
+.acu-*.txt
+tsc.log

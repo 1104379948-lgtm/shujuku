@@ -115,9 +115,7 @@ import {
   ensureV2BoundaryCheckpointForRetainedBuffer_ACU,
   shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU,
   replaceManualRefillSheetBaselineInRangeAtomic_ACU,
-  captureManualRefillSessionSnapshot_ACU,
   commitManualRefillSheetSnapshotInRangeAtomic_ACU,
-  restoreManualRefillSessionSnapshotAtomic_ACU,
   clearManualRefillIncrementalDataInRange_ACU,
   clearTableDataAtFloors_ACU,
   deleteLocalDataInChatCore_ACU,
@@ -4122,25 +4120,4 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
     expect(JSON.parse(JSON.stringify(chat))).toEqual(before);
   });
 
-  it('会话快照深拷贝消息字段，并在回滚时严格保存恢复结果', async () => {
-    const chat = [
-      makeFrameMessage({
-        version: 2,
-        checkpoint: { kind: 'full', reason: 'compaction', createdAt: 20, data: { sheet_0: { name: '纪要表', content: [['row_id'], ['20']] } } },
-        logEntries: [],
-      }),
-      { is_user: true },
-    ];
-    mockGetChatArray.mockReturnValue(chat);
-    const before = JSON.parse(JSON.stringify(chat));
-
-    const snapshot = captureManualRefillSessionSnapshot_ACU([0, 1]);
-    chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_0.content.push(['30']);
-    chat[0].TavernDB_ACU_Identity = { mutated: true };
-
-    await restoreManualRefillSessionSnapshotAtomic_ACU(snapshot, '', ['sheet_0']);
-
-    expect(JSON.parse(JSON.stringify(chat))).toEqual(before);
-    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
-  });
 });

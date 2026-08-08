@@ -8,12 +8,16 @@
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
-import { resolveTableHistoryStatesFromChat_ACU } from './table-history';
+import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStatesFromChat_ACU } from './table-history';
 
 export interface TableUpdateItem {
     sheetKey: string;
     sheetName: string;
     indices: number[];
+    /** 完整历史待填缺口（未与 contextDepth 裁剪求交），跨根判定与全量追补使用。 */
+    allIndices: number[];
+    /** 该表的待填范围是否跨当前唯一 full checkpoint（需要走 run 级隔离 staging）。 */
+    requiresBoundaryStaging: boolean;
     groupId: number;
     batchSize: number;
     scheduleSignature: string;
@@ -26,11 +30,18 @@ export interface UpdateGroup {
     scheduleSignature: string;
     sheetKeys: string[];
     sheetNames: string[];
+    /** 该组是否跨当前唯一 full checkpoint（需要走 run 级隔离 staging，与普通组分离执行）。 */
+    requiresBoundaryStaging: boolean;
 }
 
 export interface AutoUpdatePlan {
     tablesToUpdate: TableUpdateItem[];
     updateGroups: Record<string, UpdateGroup>;
+    /** 跨 full checkpoint 边界元数据（调度层预计算，执行层据此走 staging 流程）。 */
+    boundary: {
+        fullCheckpointIndices: number[];
+        requiresBoundaryStaging: boolean;
+    };
 }
 
 /**
@@ -78,6 +89,9 @@ export function buildAutoUpdatePlan_ACU(
     const globalFrequency = settings.autoUpdateFrequency || 1;
     const globalSkip = settings.skipUpdateFloors || 0;
 
+    // 当前唯一 full checkpoint（replay 正式根）：为 -1 时表示尚无 full，不触发跨根 staging。
+    const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, isolationKey);
+
     for (const sheetKey of sheetKeys) {
         const table = tableData[sheetKey];
         if (!table) continue;
@@ -117,17 +131,24 @@ export function buildAutoUpdatePlan_ACU(
             if (startIndexInAiArray < effectiveAiIndices.length) {
                 const unupdatedAiIndices = effectiveAiIndices.slice(startIndexInAiArray);
                 const contextScopeIndices = effectiveAiIndices.slice(-threshold);
-                const contextScopeSet = new Set(contextScopeIndices);
 
                 logDebug_ACU(`[Trigger Check] Unupdated: ${unupdatedAiIndices.length}, ContextScope: ${contextScopeIndices.length}`);
 
-                const indicesToUpdate = unupdatedAiIndices.filter((idx: number) => contextScopeSet.has(idx));
+                // 历史补填范围 = 完整待更新缺口（不再与 contextDepth 求交）。
+                // 计划 §5.6：新增表历史前沿为 0 时必须能从第 1 楼补到当前楼，
+                // 不能把 contextDepth（AI prompt 上下文窗口）当作历史补填范围。
+                const indicesToUpdate = unupdatedAiIndices;
+                const requiresBoundaryStaging = originalFullIndex >= 0
+                    && indicesToUpdate.length > 0
+                    && indicesToUpdate[0] < originalFullIndex;
 
                 if (indicesToUpdate.length > 0) {
                     tablesToUpdate.push({
                         sheetKey,
                         sheetName: table.name,
                         indices: indicesToUpdate,
+                        allIndices: indicesToUpdate,
+                        requiresBoundaryStaging,
                         groupId,
                         batchSize: (rawBatch === -1) ? (settings.updateBatchSize || 3) : ((rawBatch > 0) ? rawBatch : (settings.updateBatchSize || 3)),
                         scheduleSignature: [groupId, threshold, frequency, skipFloors, rawBatch].join('|'),
@@ -137,17 +158,20 @@ export function buildAutoUpdatePlan_ACU(
         }
     }
 
-    // 分组：将待更新的表按 (groupId + indices + batchSize) 进行分组
+    // 分组：将待更新的表按 (groupId + indices + batchSize + staging 归属) 进行分组。
+    // 同组混合正常表与跨根表必须拆开（计划 §5.6）：staging 表走隔离提交，
+    // 普通表走常规提交，两者不能混在一次统一提交中。
     const updateGroups: Record<string, UpdateGroup> = {};
 
     tablesToUpdate.forEach(item => {
-        const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize;
+        const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize + '|' + (item.requiresBoundaryStaging ? 'staging' : 'normal');
         if (!updateGroups[key]) {
             updateGroups[key] = {
                 indices: item.indices,
                 batchSize: item.batchSize,
                 groupId: item.groupId,
                 scheduleSignature: item.scheduleSignature,
+                requiresBoundaryStaging: item.requiresBoundaryStaging,
                 sheetKeys: [],
                 sheetNames: []
             };
@@ -160,7 +184,14 @@ export function buildAutoUpdatePlan_ACU(
         groupCount: Object.keys(updateGroups).length,
         changedSheetCount: tablesToUpdate.length,
     });
-    return { tablesToUpdate, updateGroups };
+    return {
+        tablesToUpdate,
+        updateGroups,
+        boundary: {
+            fullCheckpointIndices: originalFullIndex >= 0 ? [originalFullIndex] : [],
+            requiresBoundaryStaging: tablesToUpdate.some(item => item.requiresBoundaryStaging),
+        },
+    };
 }
 
 // ============================================================
@@ -238,6 +269,12 @@ export interface AutoUpdateResult {
 export interface AutoUpdateOperations {
     processUpdates: (indices: number[], mode: string, options: any) => Promise<any>;
     processGroupedUpdates?: (groups: Array<{ key: string; groupId: number; indices: number[]; batchSize: number; sheetKeys: string[]; requestOptions: Record<string, any> | null }>, mode: string, options: any) => Promise<{ success: boolean; failedGroups: string[]; error?: string }>;
+    /**
+     * 跨 full checkpoint 边界分组的执行委托（由 orchestrator 提供共享 staging runner）。
+     * 传入的是 requiresBoundaryStaging=true 的组；执行器负责 pre 段 stage_only、
+     * 边界原子汇合与 post 段普通持久化。缺省时降级为 processGroupedUpdates。
+     */
+    processStagingGroupedUpdates?: (groups: Array<{ key: string; groupId: number; indices: number[]; batchSize: number; sheetKeys: string[]; requestOptions: Record<string, any> | null }>, mode: string, options: any) => Promise<{ success: boolean; failedGroups: string[]; error?: string }>;
     refreshData: () => Promise<any>;
     loadAllChatMessages: () => Promise<void>;
     purgeOldLayerData: () => Promise<void>;
@@ -267,10 +304,6 @@ export async function executeAutoUpdatePlan_ACU(
 
     const totalGroups = groupKeys.length;
     const maxConcurrentGroups = Math.max(1, settings.maxConcurrentGroups || 1);
-
-    try {
-      setAutoUpdating(true);
-
     const failedGroupKeys: string[] = [];
     const failedGroupErrors: string[] = [];
     const pushGroupError_ACU = (groupKey: string, error: unknown): void => {
@@ -278,33 +311,49 @@ export async function executeAutoUpdatePlan_ACU(
         if (!message) return;
         failedGroupErrors.push(`group ${groupKey}: ${message}`);
     };
-    for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
-        const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
-        if (ops.processGroupedUpdates) {
-            const groupedChunk = chunkKeys.map(key => {
-                const group = updateGroups[key];
-                logDebug_ACU(`[Parallel] Processing grouped update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
-                return {
-                    key,
-                    groupId: group.groupId,
-                    indices: group.indices,
-                    batchSize: group.batchSize,
-                    sheetKeys: group.sheetKeys,
-                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
-                };
-            });
-            const groupedOptions = performanceContext?.runId || performanceContext?.parentSpanId
-                ? {
-                    ...(performanceContext.runId ? { performanceRunId: performanceContext.runId } : {}),
-                    performanceParentSpanId: performanceSpan.id,
-                }
-                : {};
-            const groupedResult = await ops.processGroupedUpdates(groupedChunk, 'auto_independent', groupedOptions);
-            if (!groupedResult.success) {
-                failedGroupKeys.push(...groupedResult.failedGroups);
-                const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
-                groupedResult.failedGroups.forEach(groupKey => pushGroupError_ACU(groupKey, groupedError));
+    // 跨 full checkpoint 边界组分离：staging 组必须与普通组分开调度，
+    // 由共享 staging runner（processStagingGroupedUpdates）处理边界分段与原子汇合。
+    const stagingGroupKeys = groupKeys.filter(key => updateGroups[key].requiresBoundaryStaging === true);
+    const normalGroupKeys = groupKeys.filter(key => updateGroups[key].requiresBoundaryStaging !== true);
+    const executeGroupChunk = async (
+        chunkKeys: string[],
+        runner: ((groups: Array<{ key: string; groupId: number; indices: number[]; batchSize: number; sheetKeys: string[]; requestOptions: Record<string, any> | null }>, mode: string, options: any) => Promise<{ success: boolean; failedGroups: string[]; error?: string }>),
+    ): Promise<void> => {
+        const groupedChunk = chunkKeys.map(key => {
+            const group = updateGroups[key];
+            logDebug_ACU(`[Parallel] Processing ${group.requiresBoundaryStaging ? 'staging' : 'grouped'} update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
+            return {
+                key,
+                groupId: group.groupId,
+                indices: group.indices,
+                batchSize: group.batchSize,
+                sheetKeys: group.sheetKeys,
+                requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
+            };
+        });
+        const groupedOptions = performanceContext?.runId || performanceContext?.parentSpanId
+            ? {
+                ...(performanceContext.runId ? { performanceRunId: performanceContext.runId } : {}),
+                performanceParentSpanId: performanceSpan.id,
             }
+            : {};
+        const groupedResult = await runner(groupedChunk, 'auto_independent', groupedOptions);
+        if (!groupedResult.success) {
+            failedGroupKeys.push(...groupedResult.failedGroups);
+            const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
+            groupedResult.failedGroups.forEach(groupKey => pushGroupError_ACU(groupKey, groupedError));
+        }
+    };
+
+    try {
+      setAutoUpdating(true);
+
+    // 调度顺序：先普通组（现有并发语义），再 staging 组（边界分段 + 原子汇合）。
+    // staging 组不与普通组并发：边界汇合需要独占 run 级写集，混跑会破坏原子性。
+    for (let start = 0; start < normalGroupKeys.length; start += maxConcurrentGroups) {
+        const chunkKeys = normalGroupKeys.slice(start, start + maxConcurrentGroups);
+        if (ops.processGroupedUpdates) {
+            await executeGroupChunk(chunkKeys, ops.processGroupedUpdates);
         } else {
             const groupPromises = chunkKeys.map(key => (async () => {
                 const group = updateGroups[key];
@@ -319,6 +368,46 @@ export async function executeAutoUpdatePlan_ACU(
                 return { key, success, sheetNames: group.sheetNames };
             })());
 
+            const results = await Promise.allSettled(groupPromises);
+            results.forEach((result, idx) =>{
+                if (result.status === 'rejected') {
+                    failedGroupKeys.push(chunkKeys[idx]);
+                    pushGroupError_ACU(chunkKeys[idx], result.reason || '分组更新异常退出。');
+                    return;
+                }
+                const rawResult = result.value?.success;
+                const groupSucceeded = typeof rawResult === 'object' && rawResult !== null && 'success' in rawResult
+                    ? (rawResult as { success?: boolean }).success !== false
+                    : !!rawResult;
+                if (!groupSucceeded) {
+                    failedGroupKeys.push(chunkKeys[idx]);
+                    const error = rawResult && typeof rawResult === 'object' && 'error' in rawResult
+                        ? (rawResult as { error?: unknown }).error
+                        : '分组更新失败，未返回具体错误。';
+                    pushGroupError_ACU(chunkKeys[idx], error);
+                }
+            });
+        }
+    }
+
+    // staging 组：使用共享 staging runner（orchestrator 提供），降级为普通分组。
+    for (let start = 0; start < stagingGroupKeys.length; start += maxConcurrentGroups) {
+        const chunkKeys = stagingGroupKeys.slice(start, start + maxConcurrentGroups);
+        const stagingRunner = ops.processStagingGroupedUpdates || ops.processGroupedUpdates;
+        if (stagingRunner) {
+            await executeGroupChunk(chunkKeys, stagingRunner);
+        } else {
+            // 无 staging runner（旧调用方未接线）：跨根组退回普通执行，
+            // 由 persist 层 root-before-target 闸门阻止写目标早于 full 的 bucket。
+            const groupPromises = chunkKeys.map(key => (async () => {
+                const group = updateGroups[key];
+                const success = await ops.processUpdates(group.indices, 'auto_independent', {
+                    targetSheetKeys: group.sheetKeys,
+                    batchSize: group.batchSize,
+                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
+                });
+                return { key, success, sheetNames: group.sheetNames };
+            })());
             const results = await Promise.allSettled(groupPromises);
             results.forEach((result, idx) =>{
                 if (result.status === 'rejected') {

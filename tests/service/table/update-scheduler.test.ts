@@ -24,6 +24,19 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
   getSortedSheetKeys_ACU: vi.fn((data: any) => data ? Object.keys(data).filter((k: string) => k.startsWith('sheet_')) : []),
 }));
 
+// 部分 mock table-history：保留 resolveTableHistoryStatesFromChat_ACU 真实实现
+// （buildAutoUpdatePlan_ACU 依赖它从聊天算出 lastTrackedUpdateAiFloor），
+// 仅覆盖 full checkpoint 检测为可配置，供跨根 staging 场景使用。
+vi.mock('../../../src/service/table/table-history', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/service/table/table-history')>();
+  return {
+    ...actual,
+    getLatestV2FullCheckpointMessageIndex_ACU: vi.fn(() => -1),
+  };
+});
+
+import { getLatestV2FullCheckpointMessageIndex_ACU } from '../../../src/service/table/table-history';
+
 import {
   clearRuntimePerformanceSpans_ACU,
   getRecentRuntimePerformanceSpans_ACU,
@@ -190,6 +203,11 @@ describe('buildAutoUpdatePlan_ACU', () => {
     dataIsolationEnabled: false,
     dataIsolationCode: '',
   };
+
+  beforeEach(() => {
+    vi.mocked(getLatestV2FullCheckpointMessageIndex_ACU).mockReset();
+    vi.mocked(getLatestV2FullCheckpointMessageIndex_ACU).mockReturnValue(-1);
+  });
 
   it('无 AI 消息时返回空计划', () => {
     const liveChat = [{ is_user: true }];
@@ -419,7 +437,7 @@ describe('buildAutoUpdatePlan_ACU', () => {
     expect(plan.tablesToUpdate).toHaveLength(0);
   });
 
-  it('contextDepth 限制上下文范围', () => {
+  it('contextDepth 不再裁剪历史补填范围（完整缺口优先，计划 §5.6）', () => {
     const liveChat = [
       { is_user: true },
       { is_user: false }, // AI 1
@@ -432,10 +450,88 @@ describe('buildAutoUpdatePlan_ACU', () => {
       sheet_0: { name: '测试表', updateConfig: { contextDepth: 1 } },
     };
     const plan = buildAutoUpdatePlan_ACU(liveChat, tableData, baseSettings, '');
-    if (plan.tablesToUpdate.length > 0) {
-      // contextDepth=1 只看最近1条 AI 消息
-      expect(plan.tablesToUpdate[0].indices.length).toBeLessThanOrEqual(1);
-    }
+    expect(plan.tablesToUpdate).toHaveLength(1);
+    // contextDepth 是 AI prompt 上下文窗口，不是历史补填范围：
+    // 完整待填缺口应为全部未更新 AI 楼层，即使 contextDepth=1 也不裁剪。
+    expect(plan.tablesToUpdate[0].indices).toEqual([1, 3, 5]);
+    expect(plan.tablesToUpdate[0].allIndices).toEqual([1, 3, 5]);
+    expect(plan.tablesToUpdate[0].requiresBoundaryStaging).toBe(false);
+    expect(plan.boundary).toEqual({ fullCheckpointIndices: [], requiresBoundaryStaging: false });
+  });
+
+  it('跨 full checkpoint：待填范围早于原 full 的表标记 requiresBoundaryStaging=true', () => {
+    const liveChat = [
+      { is_user: true },
+      { is_user: false }, // AI 1
+      { is_user: true },
+      { is_user: false }, // AI 2
+      { is_user: true },
+      { is_user: false }, // AI 3
+    ];
+    const tableData = {
+      sheet_0: { name: '测试表', updateConfig: {} },
+    };
+    // 原 full 在 AI 2（消息索引 3）：待填 [1,3,5] 中 1 < 3，跨根成立。
+    vi.mocked(getLatestV2FullCheckpointMessageIndex_ACU).mockReturnValue(3);
+    const plan = buildAutoUpdatePlan_ACU(liveChat, tableData, baseSettings, '');
+    expect(plan.tablesToUpdate).toHaveLength(1);
+    expect(plan.tablesToUpdate[0].requiresBoundaryStaging).toBe(true);
+    expect(plan.boundary).toEqual({ fullCheckpointIndices: [3], requiresBoundaryStaging: true });
+  });
+
+  it('跨 full checkpoint：待填范围全在边界后不标记 staging', () => {
+    const liveChat = [
+      { is_user: true },
+      { is_user: false }, // AI 1
+      { is_user: true },
+      { is_user: false }, // AI 2
+      { is_user: true },
+      { is_user: false }, // AI 3
+    ];
+    const tableData = {
+      sheet_0: { name: '测试表', updateConfig: {} },
+    };
+    // 原 full 在 AI 1（消息索引 1）：待填 [1,3,5] 中 1 >= 1，不跨根。
+    vi.mocked(getLatestV2FullCheckpointMessageIndex_ACU).mockReturnValue(1);
+    const plan = buildAutoUpdatePlan_ACU(liveChat, tableData, baseSettings, '');
+    expect(plan.tablesToUpdate).toHaveLength(1);
+    expect(plan.tablesToUpdate[0].requiresBoundaryStaging).toBe(false);
+    expect(plan.boundary).toEqual({ fullCheckpointIndices: [1], requiresBoundaryStaging: false });
+  });
+
+  it('同组混合正常表与跨根表时按 staging 归属拆成两个组', () => {
+    const liveChat = [
+      { is_user: true },
+      {
+        is_user: false,
+        // AI 1：sheet_a 在该楼已 tracking（updateGroupKeys），lastTrackedUpdateAiFloor=1
+        TavernDB_ACU_IsolatedData: { 'test-iso': { updateGroupKeys: ['sheet_a'] } },
+      },
+      { is_user: true },
+      { is_user: false }, // AI 2
+      { is_user: true },
+      { is_user: false }, // AI 3
+    ];
+    const tableData = {
+      sheet_a: { name: '正常表', updateConfig: { groupId: 1 } },
+      sheet_b: { name: '跨根表', updateConfig: { groupId: 1 } },
+    };
+    vi.mocked(getLatestV2FullCheckpointMessageIndex_ACU).mockReturnValue(3);
+    const plan = buildAutoUpdatePlan_ACU(liveChat, tableData, {
+      ...baseSettings,
+      dataIsolationEnabled: true,
+      dataIsolationCode: 'test-iso',
+    }, 'test-iso');
+    expect(plan.tablesToUpdate).toHaveLength(2);
+    const groupKeys = Object.keys(plan.updateGroups);
+    // 同 groupId 但 staging 归属不同 → 拆成两个组，防止提交语义混在一次统一提交。
+    expect(groupKeys.length).toBe(2);
+    const stagingGroup = groupKeys.find(key => plan.updateGroups[key].requiresBoundaryStaging === true);
+    const normalGroup = groupKeys.find(key => plan.updateGroups[key].requiresBoundaryStaging !== true);
+    expect(stagingGroup).toBeDefined();
+    expect(normalGroup).toBeDefined();
+    expect(plan.updateGroups[stagingGroup!].sheetKeys).toContain('sheet_b');
+    expect(plan.updateGroups[normalGroup!].sheetKeys).toContain('sheet_a');
   });
 
   it.each([

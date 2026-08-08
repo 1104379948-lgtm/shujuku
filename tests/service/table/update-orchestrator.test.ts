@@ -102,18 +102,16 @@ vi.mock('../../../src/service/ai/prompt-builder', () => ({
   },
 }));
 
-const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_ACU, mockCaptureManualRefillSessionSnapshot, mockClearManualRefillIncrementalDataInRange, mockClearManualRefillSheetDataInRange, mockCommitManualRefillSheetSnapshot, mockRestoreManualRefillSessionSnapshot, mockEnsureManualCatchUpAnchor, mockEnsureBoundaryCheckpoint, mockShouldRotateBoundaryCheckpoint, mockPurgeSheetKeysFromChatHistoryHard } = vi.hoisted(() => {
+const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_ACU, mockClearManualRefillIncrementalDataInRange, mockClearManualRefillSheetDataInRange, mockCommitManualRefillSheetSnapshot, mockEnsureManualCatchUpAnchor, mockEnsureBoundaryCheckpoint, mockShouldRotateBoundaryCheckpoint, mockPurgeSheetKeysFromChatHistoryHard } = vi.hoisted(() => {
   const chatArray: any[] = [];
   const independentTableStates: Record<string, any> = {};
   return {
     mockChatArrayForSeedStage: chatArray,
     mockIndependentTableStates: independentTableStates,
     mockGetChatArray_ACU: vi.fn(() => chatArray),
-    mockCaptureManualRefillSessionSnapshot: vi.fn(() => ({ targetMessageIndices: [], messageFields: [] })),
     mockClearManualRefillIncrementalDataInRange: vi.fn().mockResolvedValue(0),
     mockClearManualRefillSheetDataInRange: vi.fn().mockResolvedValue(0),
     mockCommitManualRefillSheetSnapshot: vi.fn().mockResolvedValue({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 0 }),
-    mockRestoreManualRefillSessionSnapshot: vi.fn().mockResolvedValue(undefined),
     mockEnsureManualCatchUpAnchor: vi.fn().mockResolvedValue({ status: 'ready', checkpointMessageIndex: 0 }),
     mockEnsureBoundaryCheckpoint: vi.fn().mockResolvedValue({ success: true, changed: false, skipped: true }),
     mockShouldRotateBoundaryCheckpoint: vi.fn(() => false),
@@ -122,12 +120,10 @@ const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_
 });
 vi.mock('../../../src/service/chat/chat-service', () => ({
   getChatArray_ACU: mockGetChatArray_ACU,
-  captureManualRefillSessionSnapshot_ACU: mockCaptureManualRefillSessionSnapshot,
   clearTableDataAtFloors_ACU: vi.fn().mockResolvedValue(0),
   clearManualRefillIncrementalDataInRange_ACU: mockClearManualRefillIncrementalDataInRange,
   clearManualRefillSheetDataInRange_ACU: mockClearManualRefillSheetDataInRange,
   commitManualRefillSheetSnapshotInRangeAtomic_ACU: mockCommitManualRefillSheetSnapshot,
-  restoreManualRefillSessionSnapshotAtomic_ACU: mockRestoreManualRefillSessionSnapshot,
   ensureManualCatchUpAnchorBeforeTarget_ACU: mockEnsureManualCatchUpAnchor,
   ensureV2BoundaryCheckpointForRetainedBuffer_ACU: mockEnsureBoundaryCheckpoint,
   shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU: mockShouldRotateBoundaryCheckpoint,
@@ -300,6 +296,19 @@ vi.mock('../../../src/service/table/manual-catch-up-provisional-bridge', () => (
   getOriginalFullFrameFingerprint_ACU: vi.fn(() => 'test-fingerprint'),
 }));
 
+// table-fill-boundary-staging 模块 mock：planTableFillBoundaryStaging_ACU（冻结 scope）与
+// splitMessageIndicesAtBoundary_ACU（拆段）是纯函数，保留真实实现；只有
+// commitStagedSheetsAtFullBoundaryAtomic_ACU（原子汇合）依赖 saveChatToHostStrict_ACU 等
+// 未 mock 的重依赖，必须替换。
+const mockCommitStagedSheetsAtFullBoundaryAtomic = vi.fn();
+vi.mock('../../../src/service/table/table-fill-boundary-staging', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/service/table/table-fill-boundary-staging')>();
+  return {
+    ...actual,
+    commitStagedSheetsAtFullBoundaryAtomic_ACU: (...args: any[]) => mockCommitStagedSheetsAtFullBoundaryAtomic(...args),
+  };
+});
+
 vi.mock('../../../src/service/settings/settings-readers', () => ({
   getCurrentWorldbookConfig_ACU: vi.fn(() => ({ summaryVectorIndexModeEnabled: true })),
 }));
@@ -345,6 +354,13 @@ beforeEach(() => {
     return provider;
   });
   mockEnsureLegacyStorageMigratedBeforeWrite.mockReset().mockResolvedValue({ success: true, migrated: false });
+});
+
+// staging boundary commit 默认 mock：默认成功。跨边界用例在各自 it 内覆写返回值，
+// 覆盖 zero-staging 丢弃（不调用 commit）与汇合失败（{ ok: false }）。
+mockCommitStagedSheetsAtFullBoundaryAtomic.mockReset().mockResolvedValue({
+  ok: true,
+  boundaryCommitSummary: { selectedSheetKeys: ['sheet_a', 'sheet_b'], originalFullCheckpointIndex: 2 },
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -1628,12 +1644,8 @@ describe('orchestrateManualUpdate_ACU', () => {
       skipUpdateFloors: 0,
     };
     mockWasStopped = false;
-    mockCaptureManualRefillSessionSnapshot.mockReset();
-    mockCaptureManualRefillSessionSnapshot.mockReturnValue({ targetMessageIndices: [], messageFields: [] });
     mockClearManualRefillSheetDataInRange.mockReset();
     mockClearManualRefillSheetDataInRange.mockResolvedValue(0);
-    mockRestoreManualRefillSessionSnapshot.mockReset();
-    mockRestoreManualRefillSessionSnapshot.mockResolvedValue(undefined);
     mockCommitManualRefillSheetSnapshot.mockReset();
     mockCommitManualRefillSheetSnapshot.mockResolvedValue({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 0 });
     mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
@@ -1847,9 +1859,6 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('表格运行时在确认期间发生变化');
     expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
-    // 首检已提升到 manualRefillEnabled 分支之外（refreshData 之后），阻断早于
-    // captureManualRefillSessionSnapshot；重填会话快照不应被捕获。
-    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(mockReloadStorageProvider).not.toHaveBeenCalled();
     expect(processBatch).not.toHaveBeenCalled();
   });
@@ -1968,11 +1977,10 @@ describe('orchestrateManualUpdate_ACU', () => {
     await expect(orchestrateManualUpdate_ACU(['sheet_0'], processBatch, mockRefreshData, { onProgress }))
       .rejects.toThrow('ordinary progress observer failed');
 
-    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(processBatch).not.toHaveBeenCalled();
   });
 
-  it('范围内清理直接 reject 时统一回滚且返回硬失败', async () => {
+  it('范围内清理直接 reject 时返回硬失败且不回滚', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复1' }]);
     mockCurrentJsonTableData = { sheet_0: { name: 'chronicle', updateConfig: {}, content: [['row_id', 'code_index']] } };
@@ -1982,12 +1990,12 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('purge transaction rejected');
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
     expect(mockReloadStorageProvider).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalled();
   });
 
-  it('范围内清理完成后 preparing 进度回调抛错时统一回滚', async () => {
+  it('范围内清理完成后 preparing 进度回调抛错时失败且不回滚', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       { is_user: true },
@@ -2010,13 +2018,13 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('progress observer failed');
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
     expect(mockReloadStorageProvider).toHaveBeenCalled();
     expect(processBatch).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalled();
   });
 
-  it('重填清理并 reload 后 runtime 变化：最终复检失败必须回滚会话快照，不得裸返回', async () => {
+  it('重填清理并 reload 后 runtime 变化：最终复检失败时失败返回并刷新对齐，不回滚', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     vi.mocked(getChatArray_ACU).mockReturnValue([
@@ -2030,7 +2038,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A']] },
       sheet_1: { name: '测试表B', updateConfig: {}, content: [['row_id', '值B']] },
     };
-    mockCaptureManualRefillSessionSnapshot.mockReturnValue({ targetMessageIndices: [1, 3], messageFields: [{ index: 1, field: 'data' }] });
     mockClearManualRefillSheetDataInRange.mockResolvedValue(0);
     // reload 是清理后、最终复检前的异步窗口：在此期间 runtime 表集合被收紧（删除 sheet_1）
     mockReloadStorageProvider.mockImplementationOnce(async () => {
@@ -2048,13 +2055,13 @@ describe('orchestrateManualUpdate_ACU', () => {
       { clearBeforeUpdate: true, executionSnapshot: { sheetKeys: ['sheet_0', 'sheet_1'] } },
     );
 
-    // 清理已发生且 reload 期间 runtime 变化：必须走 failManualRefillSession 恢复已捕获的会话快照，
-    // 不能直接 return 造成“旧数据已清、新数据未写”的净损失。
+    // 清理已发生且 reload 期间 runtime 变化：必须走 failManualRefillSession，
+    // 不回滚、保留删除，按已提交事实刷新对齐（不能裸返回造成净损失假象）。
     expect(result.success).toBe(false);
     expect(result.error).toContain('表格运行时在确认期间发生变化');
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
     expect(processBatch).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalled();
   });
 
   it('重填每个 chunk 的 loadAllChatMessages 窗口 runtime 变化：首 chunk 零提交时回滚快照', async () => {
@@ -2072,7 +2079,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A']] },
       sheet_1: { name: '测试表B', updateConfig: {}, content: [['row_id', '值B']] },
     };
-    mockCaptureManualRefillSessionSnapshot.mockReturnValue({ targetMessageIndices: [1, 3], messageFields: [{ index: 1, field: 'data' }] });
     mockClearManualRefillSheetDataInRange.mockResolvedValue(0);
     // 入口 load（第 1 次）正常；循环内 chunk 前的 load（第 2 次）期间 runtime 被收紧：删除 sheet_1
     let loadCallCount = 0;
@@ -2093,13 +2099,13 @@ describe('orchestrateManualUpdate_ACU', () => {
       { clearBeforeUpdate: true, executionSnapshot: { sheetKeys: ['sheet_0', 'sheet_1'] } },
     );
 
-    // 破坏性清理已发生、chunk 前复检发现 runtime 变化：零提交必须恢复已捕获的会话快照，
-    // 不得把 stale target 带入 AI 调用。
+    // 破坏性清理已发生、chunk 前复检发现 runtime 变化：失败返回且不回滚
+    // （清理不可逆、保留删除），按已提交事实刷新对齐，不得把 stale target 带入 AI 调用。
     expect(result.success).toBe(false);
     expect(result.error).toContain('表格运行时在确认期间发生变化');
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
     expect(processBatch).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalled();
   });
 
   it('重填后续 chunk 前 runtime 变化：循环内复检阻断后续 chunk，不把 stale target 带入 AI', async () => {
@@ -2117,7 +2123,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A']] },
       sheet_1: { name: '测试表B', updateConfig: {}, content: [['row_id', '值B']] },
     };
-    mockCaptureManualRefillSessionSnapshot.mockReturnValue({ targetMessageIndices: [1, 3], messageFields: [{ index: 1, field: 'data' }] });
     mockClearManualRefillSheetDataInRange.mockResolvedValue(0);
     // 入口 load（1）+ chunk1 前 load（2）+ chunk1 后 load（3）均正常；
     // 第二个 chunk 前的 load（4）期间 runtime 被收紧：删除 sheet_1
@@ -2146,11 +2151,10 @@ describe('orchestrateManualUpdate_ACU', () => {
     );
 
     // 首 chunk 已提交 bucket，第二个 chunk 前的 load 期间 runtime 变化：
-    // 循环内复检必须阻断后续 chunk；已提交 bucket 保留（不得回滚丢弃用户成果），
+    // 循环内复检必须阻断后续 chunk；已提交 bucket 保留（不回滚丢弃用户成果），
     // 也不得把确认前的 stale target 带入第二个 chunk 的 AI 调用。
     expect(result.success).toBe(false);
     expect(result.error).toContain('表格运行时在确认期间发生变化');
-    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     // 首 chunk 已提交（持久化发生过）
     expect(mockPersistTablesToChatMessage).toHaveBeenCalled();
     // 补强：stale target（sheet_1）绝不能进入 AI。首 chunk 已执行（至少一次 AI 调用，
@@ -2197,7 +2201,6 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(result.error).toContain('表格运行时在确认期间发生变化');
     expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
-    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
   });
 
   it('手动重填只清理范围内选中表，不触碰范围外历史基底', async () => {
@@ -2326,13 +2329,12 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledTimes(1);
     expect(mockClearManualRefillSheetDataInRange).toHaveBeenCalledWith([0, 2], ['sheet_0']);
     expect(mockReloadStorageProvider).toHaveBeenCalled();
-    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     // 清理后必须补写完整单表 checkpoint，否则新增量将没有回放锚点。
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).toHaveBeenCalledTimes(1);
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
   });
 
-  it('无可回放 full checkpoint 时预清理范围内数据，并在成功后提交完整快照', async () => {
+  it('范围末端存在 full checkpoint 时预清理并跨根 staging：pre 段不写聊天帧，边界汇合后 post 段 persist', async () => {
     const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
@@ -2408,8 +2410,54 @@ describe('orchestrateManualUpdate_ACU', () => {
     }));
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
     expect(mockReloadStorageProvider).toHaveBeenCalledTimes(1);
-    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(3);
+    // 跨根 staging：pre 段（[0,2]）stage_only 不写聊天帧，仅 post 段（[4]）普通 persist。
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
   });
+  it('跨根 staging 的 pre 段失败时不继续 post 段写入，不回滚保留已清理状态', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+    });
+    // 跨边界布局：full checkpoint 位于 index 4，contextScopeIndices=[0,2,4]，0<4 → 跨根 staging。
+    // pre 段（[0,2]）stage_only，post 段（[4]）普通 persist。
+    const chat: any[] = [
+      { is_user: false, mes: 'AI回复1' },
+      { is_user: true, mes: '用户2' },
+      { is_user: false, mes: 'AI回复3' },
+      { is_user: true, mes: '用户4' },
+      {
+        is_user: false,
+        mes: 'AI回复5',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', reason: 'init', createdAt: 2, data: { mate: { type: 'acu' }, sheet_0: { name: '测试表A', content: [['row_id', '值A'], ['later', '目标层基底']] } } } },
+          },
+        },
+      },
+    ];
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    mockSettings.maxConcurrentGroups = 1;
+    mockSettings.autoUpdateThreshold = 0;
+    mockSettings.updateBatchSize = 1;
+    mockCurrentJsonTableData = { sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值A'], ['1', '旧A']] } };
+    // pre 段（index 0）AI 调用直接失败：stage_only 提交失败 → 该组整体失败。
+    mockCallCustomOpenAI.mockRejectedValue(new Error('AI 调用失败'));
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('AI 调用失败');
+    // pre 段失败：post 段（[4]）不得写入聊天帧；清理已发生且不可逆，不回滚。
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalled();
+    expect(mockCommitManualRefillSheetSnapshot).not.toHaveBeenCalled();
+  });
+
+
 
 
   it('boundary checkpoint 后写目标陈旧时，在 AI 调用前结构化阻断（零 token、零清理、零写 frame）', async () => {
@@ -2503,7 +2551,7 @@ describe('orchestrateManualUpdate_ACU', () => {
 
 
   it('跨 checkpoint 重填的最终快照提交失败时保留已提交 bucket，不回滚会话快照', async () => {
-    const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
+    const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       {
         is_user: false,
@@ -2520,8 +2568,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: true },
       { is_user: false },
     ]);
-    const sessionSnapshot = { targetMessageIndices: [0, 2], messageFields: [{ index: 0 }, { index: 2 }] } as any;
-    vi.mocked(captureManualRefillSessionSnapshot_ACU).mockReturnValue(sessionSnapshot);
     vi.mocked(commitManualRefillSheetSnapshotInRangeAtomic_ACU).mockResolvedValue({ success: false, changed: false, clearedCount: 0, checkpointCount: 0, error: 'strict save failed' });
     mockSettings.autoUpdateThreshold = 0;
     mockSettings.updateBatchSize = 1;
@@ -2536,15 +2582,13 @@ describe('orchestrateManualUpdate_ACU', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
 
     expect(result).toEqual(expect.objectContaining({ success: false, error: expect.stringContaining('strict save failed') }));
-    expect(captureManualRefillSessionSnapshot_ACU).toHaveBeenCalledWith([0, 2]);
-    // 已有 bucket 成功提交，回滚会连带丢掉用户已填好的楼层，因此必须保留。
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU).not.toHaveBeenCalled();
+    // 清理不可逆、失败不回滚：已提交 bucket 保留，仅按聊天记录重新同步运行时。
     expect(mockRefreshData).toHaveBeenCalled();
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
   });
 
   it('跨 checkpoint 重填在用户停止后保留已提交 bucket，不回滚会话快照', async () => {
-    const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
+    const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       {
         is_user: false,
@@ -2561,8 +2605,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: true },
       { is_user: false },
     ]);
-    const sessionSnapshot = { targetMessageIndices: [0, 2], messageFields: [{ index: 0 }, { index: 2 }] } as any;
-    vi.mocked(captureManualRefillSessionSnapshot_ACU).mockReturnValue(sessionSnapshot);
     mockSettings.autoUpdateThreshold = 0;
     mockSettings.updateBatchSize = 1;
     mockPersistTablesToChatMessage.mockImplementationOnce(async () => {
@@ -2575,14 +2617,14 @@ describe('orchestrateManualUpdate_ACU', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
 
     expect(result.success).toBe(false);
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU).not.toHaveBeenCalled();
+    // 清理不可逆、失败不回滚：已提交 bucket 保留，仅按聊天记录重新同步运行时。
     expect(mockRefreshData).toHaveBeenCalled();
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).not.toHaveBeenCalled();
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
   });
 
   it('跨 checkpoint 重填在分组后同步聊天失败时保留已提交 bucket，不回滚会话快照', async () => {
-    const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
+    const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     const { loadAllChatMessages_ACU } = await import('../../../src/service/worldbook/pipeline');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       {
@@ -2600,8 +2642,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: true },
       { is_user: false },
     ]);
-    const sessionSnapshot = { targetMessageIndices: [0, 2], messageFields: [{ index: 0 }, { index: 2 }] } as any;
-    vi.mocked(captureManualRefillSessionSnapshot_ACU).mockReturnValue(sessionSnapshot);
     mockSettings.autoUpdateThreshold = 0;
     mockSettings.updateBatchSize = 1;
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
@@ -2621,7 +2661,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(loadAllChatMessages_ACU).toHaveBeenCalledTimes(4);
     expect(loadCallCount).toBe(4);
     // 同步失败发生在已有 bucket 提交之后，保留已填数据并按聊天记录重新同步。
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU).not.toHaveBeenCalled();
+    // 清理不可逆、失败不回滚：已提交 bucket 保留，仅按聊天记录重新同步运行时。
     expect(mockRefreshData).toHaveBeenCalled();
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).not.toHaveBeenCalled();
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
@@ -2760,13 +2800,11 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('终止');
-    // 已有成功提交的 bucket，绝不能把数据回滚到填表前。
-    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
-    // 但必须按聊天记录重新同步运行时数据。
+    // 清理不可逆、失败不回滚：已提交 bucket 保留，仅按聊天记录重新同步运行时。
     expect(mockRefreshData).toHaveBeenCalled();
   });
 
-  it('手动重填一个 bucket 都未成功就失败时回滚，避免旧数据净损失', async () => {
+  it('手动重填一个 bucket 都未成功就失败时不回滚，保留清理结果', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       { is_user: true },
@@ -2781,7 +2819,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
 
     expect(result.success).toBe(false);
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockRefreshData).toHaveBeenCalled();
   });
 
 
@@ -5916,6 +5954,18 @@ describe('orchestrateManualCatchUp_ACU', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    // staging boundary commit 默认成功；跨边界用例在各自 it 内用 mockResolvedValueOnce 覆写。
+    // 必须显式 reset（clearAllMocks 不清 implementation），防止前序用例的常驻失败实现污染本用例。
+    mockCommitStagedSheetsAtFullBoundaryAtomic.mockReset().mockResolvedValue({
+      ok: true,
+      boundaryCommitSummary: { selectedSheetKeys: ['sheet_a', 'sheet_b'], originalFullCheckpointIndex: 2 },
+    });
+    // anchor 预检 mock 默认 ready；跨边界用例在各自 it 内用 mockResolvedValueOnce 覆写。
+    // 必须 mockReset（clearAllMocks 不清 Once 队列），防止前序用例未消费完的 Once 残留
+    // 到本用例（残留的 checkpointMessageIndex 会污染 staging originalFullIndex）。
+    mockEnsureManualCatchUpAnchor.mockReset().mockResolvedValue({ status: 'ready', checkpointMessageIndex: 0 });
+    // 旧 bridge 残留检测默认 false（无 active bridge），跨边界用例按需覆写。
+    mockHasActiveProvisionalBridgeAnywhere.mockReset().mockReturnValue(false);
     mockWasStopped = false;
     mockIsAutoUpdating = false;
     mockSettings = {
@@ -5935,7 +5985,8 @@ describe('orchestrateManualCatchUp_ACU', () => {
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(JSON.parse(JSON.stringify(mockCurrentJsonTableData)));
     mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
-    mockCallCustomOpenAI
+    // 必须先 mockReset：前序用例若消费/残留了 Once 队列或常驻实现，不清掉会污染本用例。
+    mockCallCustomOpenAI.mockReset()
       .mockResolvedValueOnce('<tableEdit>sheet_a</tableEdit>')
       .mockResolvedValue('<tableEdit>sheet_a sheet_b</tableEdit>');
     mockParseAndApplyTableEditsToData.mockImplementation((response: string, data: any) => {
@@ -5948,7 +5999,7 @@ describe('orchestrateManualCatchUp_ACU', () => {
         appliedEdits: modifiedKeys.length,
       };
     });
-    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 5 });
+    mockPersistTablesToChatMessage.mockReset().mockResolvedValue({ saved: true, messageIndex: 5 });
   });
 
   it('模板存在但 runtime 缺失时，prepareManualCatchUpPlan_ACU 拒绝（模板不作资格兜底）', async () => {
@@ -6021,19 +6072,20 @@ describe('orchestrateManualCatchUp_ACU', () => {
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
-  it('provisional bridge 建立期间 runtime 变化：二检阻断并回滚已建立的 bridge', async () => {
+  it('staging scope 冻结期间 runtime 变化：二检阻断并丢弃 run 级 staging（零持久化改写）', async () => {
     mockGetChatArray_ACU.mockReturnValue(createCatchUpChat(1, 2) as any);
     mockEnsureManualCatchUpAnchor.mockResolvedValueOnce({ status: 'provisional_bridge_required', checkpointMessageIndex: 2 });
     mockHasActiveProvisionalBridgeAnywhere.mockReturnValue(false);
-    // bridge 建立成功，但建立过程中（异步窗口）runtime 表集合被收紧：删除 sheet_b
-    mockEstablishProvisionalBridge.mockImplementationOnce(async () => {
+    // staging scope 冻结是无异步窗口的同步内存操作；真正的异步窗口是预检 await。
+    // 用 loadAllChatMessages_ACU（wave 循环首部）收紧 runtime：删除 sheet_b，
+    // 模拟 scope 冻结后、AI 调用前 runtime 表集合变化。
+    const { loadAllChatMessages_ACU } = await import('../../../src/service/worldbook/pipeline');
+    vi.mocked(loadAllChatMessages_ACU).mockImplementationOnce(async () => {
       mockCurrentJsonTableData = {
         mate: { type: 'acu' },
         sheet_a: { name: '表A', updateConfig: { groupId: 0 }, content: [['row_id', '值']] },
       };
-      return { ok: true, provisionalRootIndex: 0 };
     });
-    mockRollbackProvisionalBridge.mockResolvedValueOnce({ ok: true });
 
     const refreshData = vi.fn().mockResolvedValue({ degraded: false });
     const result = await orchestrateManualCatchUp_ACU(
@@ -6045,24 +6097,53 @@ describe('orchestrateManualCatchUp_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.outcome).toBe('blocked');
     expect(result.diagnosticCode).toBe('catch_up_runtime_changed_after_confirmation');
-    // 已建立的 bridge 必须零提交 rollback，不得残留 active bridge
-    expect(mockRollbackProvisionalBridge).toHaveBeenCalledTimes(1);
+    // staging 只是内存状态：二检阻断直接丢弃，不触发 boundary commit、不写任何聊天帧。
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).not.toHaveBeenCalled();
     expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
-  it('provisional bridge建立期间 runtime 变化且 rollback 失败：返回 integrity_failed 诊断', async () => {
-    mockGetChatArray_ACU.mockReturnValue(createCatchUpChat(1, 2) as any);
-    mockEnsureManualCatchUpAnchor.mockResolvedValueOnce({ status: 'provisional_bridge_required', checkpointMessageIndex: 2 });
+  it('跨根 staging 汇合失败时返回 integrity_failed 诊断（不写误导性 failed 终态）', async () => {
+    // 跨边界布局：AI 楼层 index=2/4/6，原 full checkpoint 位于 index=4（含真实数据，不可前移）。
+    // sheet_a.lastFilledAiFloor=1 → 计划从 floor 2 开始：wave0 messageIndices=[2,4]，
+    // pre 段（index 2 < 4）走 stage_only，post 段（index 4）前 settle 汇合。
+    const chat: any[] = [
+      { is_user: true, mes: '用户0' },
+      { is_user: true, mes: '用户1' },
+      { is_user: false, mes: 'AI 2', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } } } },
+      { is_user: true, mes: '用户3' },
+      {
+        is_user: false,
+        mes: 'AI 4',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full', reason: 'init', createdAt: 1,
+                data: { mate: { type: 'acu' }, sheet_a: { name: '表A', content: [['row_id', '值'], ['1', '真实']] } },
+                event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+              },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: true, mes: '用户5' },
+      { is_user: false, mes: 'AI 6' },
+    ];
+    mockGetChatArray_ACU.mockReturnValue(chat);
+    mockEnsureManualCatchUpAnchor.mockResolvedValueOnce({ status: 'provisional_bridge_required', checkpointMessageIndex: 4 });
     mockHasActiveProvisionalBridgeAnywhere.mockReturnValue(false);
-    mockEstablishProvisionalBridge.mockImplementationOnce(async () => {
-      mockCurrentJsonTableData = {
-        mate: { type: 'acu' },
-        sheet_a: { name: '表A', updateConfig: { groupId: 0 }, content: [['row_id', '值']] },
-      };
-      return { ok: true, provisionalRootIndex: 0 };
+    // 边界前段（index 2）走 stage_only：AI 结果只进 run 级 staging。
+    // 边界汇合（commitStagedSheetsAtFullBoundaryAtomic_ACU）返回失败 → integrity_failed。
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 0 });
+    mockCommitStagedSheetsAtFullBoundaryAtomic.mockResolvedValueOnce({
+      ok: false,
+      error: 'boundary commit 事务冲突',
+      diagnosticCode: 'boundary_commit_failed',
     });
-    mockRollbackProvisionalBridge.mockResolvedValueOnce({ ok: false, error: 'bridge 回滚事务冲突' });
 
     const refreshData = vi.fn().mockResolvedValue({ degraded: false });
     const result = await orchestrateManualCatchUp_ACU(
@@ -6071,64 +6152,20 @@ describe('orchestrateManualCatchUp_ACU', () => {
       { executionSnapshot: { sheetKeys: ['sheet_a', 'sheet_b'] } },
     );
 
-    // rollback 失败意味着可能残留 active bridge，必须暴露为完整性/恢复类诊断，而非普通 blocked
     expect(result.success).toBe(false);
-    // 与 reject 测试复用同一套完整结构化返回契约，防止失败分支悄悄丢失字段
     expect(result).toEqual(expect.objectContaining({
       success: false,
       outcome: 'integrity_failed',
-      diagnosticCode: 'bridge_finalize_failed',
-      // 完整性失败结果必须携带本次执行对应的追平计划供 UI/恢复诊断使用
+      diagnosticCode: 'boundary_commit_failed',
       catchUpPlan: expect.objectContaining({ waves: expect.any(Array) }),
-      committedBucketCount: 0,
-      dataCommitted: false,
+      committedBucketCount: 1,
+      dataCommitted: true,
       replayVerified: false,
-      terminalProgressSaved: false,
+      // settle 失败后仍写 failed 终态（记录失败事实），所以 terminal progress 已保存。
+      terminalProgressSaved: true,
     }));
-    expect(result.error).toContain('provisional bridge 回滚失败');
-    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
-    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
-  });
-
-  it('provisional bridge建立期间 runtime 变化且 rollback 抛异常：reject 统一映射 integrity_failed 诊断', async () => {
-    mockGetChatArray_ACU.mockReturnValue(createCatchUpChat(1, 2) as any);
-    mockEnsureManualCatchUpAnchor.mockResolvedValueOnce({ status: 'provisional_bridge_required', checkpointMessageIndex: 2 });
-    mockHasActiveProvisionalBridgeAnywhere.mockReturnValue(false);
-    mockEstablishProvisionalBridge.mockImplementationOnce(async () => {
-      // bridge 建立过程中 runtime 表集合被收紧：删除 sheet_b
-      mockCurrentJsonTableData = {
-        mate: { type: 'acu' },
-        sheet_a: { name: '表A', updateConfig: { groupId: 0 }, content: [['row_id', '值']] },
-      };
-      return { ok: true, provisionalRootIndex: 0 };
-    });
-    // rollback 依赖 runTableWriteTransaction_ACU，事务层异常可能让 Promise reject，而非 resolve 为 { ok: false }
-    mockRollbackProvisionalBridge.mockRejectedValueOnce(new Error('rollback 事务调度崩溃'));
-
-    const refreshData = vi.fn().mockResolvedValue({ degraded: false });
-    const result = await orchestrateManualCatchUp_ACU(
-      ['sheet_a', 'sheet_b'],
-      refreshData,
-      { executionSnapshot: { sheetKeys: ['sheet_a', 'sheet_b'] } },
-    );
-
-    // reject 必须与 { ok: false } 一样收敛为结构化完整性失败，不能逃逸成调用方异常
-    expect(result.success).toBe(false);
-    // 锁定完整结构化返回契约，防止后续维护中完整性失败分支悄悄丢失字段
-    expect(result).toEqual(expect.objectContaining({
-      success: false,
-      outcome: 'integrity_failed',
-      diagnosticCode: 'bridge_finalize_failed',
-      // 与 {ok:false} 测试复用同一契约：完整性失败必须携带本次执行对应的追平计划
-      catchUpPlan: expect.objectContaining({ waves: expect.any(Array) }),
-      committedBucketCount: 0,
-      dataCommitted: false,
-      replayVerified: false,
-      terminalProgressSaved: false,
-    }));
-    expect(result.error).toContain('provisional bridge 回滚失败');
-    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
-    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(result.error).toContain('跨根 staging 汇合失败');
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
   });
 
   it('显式传空 executionSnapshot 时追平 fail-closed 阻断（不静默降级）', async () => {
@@ -6466,6 +6503,119 @@ describe('orchestrateManualCatchUp_ACU', () => {
     expect(refreshData).toHaveBeenCalledTimes(1);
   });
 
+// ═══════════════════════════════════════════════════════════════
+// executeAutoFillStagingGroups_ACU（提交 5：自动填表跨 full checkpoint staging 编排）
+// ═══════════════════════════════════════════════════════════════
+describe('executeAutoFillStagingGroups_ACU', () => {
+  beforeEach(async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { disposeStorageProvider } = await import('../../../src/service/table/table-storage-strategy');
+    disposeStorageProvider();
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+    vi.clearAllMocks();
+    mockCallCustomOpenAI.mockReset();
+    mockPersistTablesToChatMessage.mockReset();
+    mockParseAndApplyTableEditsToData.mockReset();
+    mockWasStopped = false;
+    mockSettings = {
+      ...mockSettings,
+      autoUpdateTokenThreshold: 0,
+      updateBatchSize: 2,
+      tableMaxRetries: 1,
+      tableApiPresetOverridesByName: {},
+    };
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    };
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockUpdateReadableLorebookEntry.mockResolvedValue(undefined);
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 5 });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    } as any);
+    mockParseAndApplyTableEditsToData.mockImplementation((aiResponse: string, tableData: any) => {
+      if (aiResponse.includes('sheet_0')) {
+        tableData.sheet_0.content.push([String(tableData.sheet_0.content.length), '来自A']);
+        return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 };
+      }
+      return { success: false, modifiedKeys: [], appliedEdits: 0 };
+    });
+    mockCommitStagedSheetsAtFullBoundaryAtomic.mockReset();
+    mockCommitStagedSheetsAtFullBoundaryAtomic.mockResolvedValue({ ok: true, boundaryCommitSummary: { selectedSheetKeys: ['sheet_0'], originalFullCheckpointIndex: 3 } });
+  });
+
+  const stagingGroup = (indices: number[]) => ({
+    key: 'staging-group',
+    groupId: 1,
+    indices,
+    batchSize: 2,
+    sheetKeys: ['sheet_0'],
+    requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
+  });
+
+  it('无 full checkpoint 时退化为普通分组执行，不冻结 scope 也不汇合', async () => {
+    const { executeAutoFillStagingGroups_ACU } = await import('../../../src/service/table/update-orchestrator');
+    const result = await executeAutoFillStagingGroups_ACU([stagingGroup([1])], 'auto_independent', {
+      boundary: { fullCheckpointIndices: [], requiresBoundaryStaging: true },
+    });
+    expect(result.success).toBe(true);
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).not.toHaveBeenCalled();
+    // 普通持久化路径：persist 被调用
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalled();
+  });
+
+  it('纯 pre-boundary 组：stage_only 提交不写聊天帧，收尾原子汇合回原根', async () => {
+    const { executeAutoFillStagingGroups_ACU } = await import('../../../src/service/table/update-orchestrator');
+    const result = await executeAutoFillStagingGroups_ACU([stagingGroup([1])], 'auto_independent', {
+      boundary: { fullCheckpointIndices: [3], requiresBoundaryStaging: true },
+    });
+    expect(result.success).toBe(true);
+    // stage_only 不调用 persist（不写聊天 V2 frame）
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    // 收尾汇合：staging 累计快照折叠回原根
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).toHaveBeenCalledTimes(1);
+    const commitCall = mockCommitStagedSheetsAtFullBoundaryAtomic.mock.calls[0];
+    expect(commitCall[1]).toEqual(expect.objectContaining({
+      originalFullIndex: 3,
+      targetSheetKeys: ['sheet_0'],
+    }));
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+  });
+
+  it('pre + post 跨边界组：pre 段 stage_only、首个 post 段前汇合、post 段普通持久化', async () => {
+    const { executeAutoFillStagingGroups_ACU } = await import('../../../src/service/table/update-orchestrator');
+    const result = await executeAutoFillStagingGroups_ACU([stagingGroup([1, 5])], 'auto_independent', {
+      boundary: { fullCheckpointIndices: [3], requiresBoundaryStaging: true },
+    });
+    expect(result.success).toBe(true);
+    // pre 段 stage_only 不写聊天帧；post 段普通持久化
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    // 边界汇合恰在 post 段前执行一次
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).toHaveBeenCalledTimes(1);
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+  });
+
+  it('边界汇合失败时返回失败并保留 staging 组为失败组', async () => {
+    const { executeAutoFillStagingGroups_ACU } = await import('../../../src/service/table/update-orchestrator');
+    mockCommitStagedSheetsAtFullBoundaryAtomic.mockResolvedValue({
+      ok: false,
+      error: 'boundary commit 拒绝执行：full checkpoint 不唯一',
+      diagnosticCode: 'multiple_full_checkpoints',
+    });
+    const result = await executeAutoFillStagingGroups_ACU([stagingGroup([1, 5])], 'auto_independent', {
+      boundary: { fullCheckpointIndices: [3], requiresBoundaryStaging: true },
+    });
+    expect(result.success).toBe(false);
+    expect(result.failedGroups).toContain('staging-group');
+    expect(result.error).toContain('full checkpoint 不唯一');
+  });
+});
+
+
   it('主执行失败且终态严格保存也失败时返回组合错误并释放运行锁', async () => {
     mockGetChatArray_ACU.mockReturnValue(createCatchUpChat(1, 2) as any);
     mockPersistTablesToChatMessage
@@ -6492,7 +6642,7 @@ describe('orchestrateManualCatchUp_ACU', () => {
     expect(mockIsAutoUpdating).toBe(false);
   });
 
-  it('跨原 full 边界的 wave：边界前 bucket 携带 runId 提交，边界后 bucket 前 finalize，且 merge base 重建', async () => {
+  it('跨原 full 边界的 wave：边界前段走 stage_only 不写聊天帧，边界后段前原子汇合，边界后段普通 persist', async () => {
     // AI 楼层：0/2/4。原 full checkpoint 位于 messageIndex=2（含真实行数据，不可前移）。
     // 追平目标楼层 4 > 原 full 边界 2：wave 同时覆盖边界前（0）与边界后（2,4）。
     const chat: any[] = [
@@ -6522,45 +6672,39 @@ describe('orchestrateManualCatchUp_ACU', () => {
     mockGetChatArray_ACU.mockReturnValue(chat);
     mockEnsureManualCatchUpAnchor.mockResolvedValueOnce({ status: 'provisional_bridge_required', checkpointMessageIndex: 2 });
     mockHasActiveProvisionalBridgeAnywhere.mockReturnValue(false);
-    mockEstablishProvisionalBridge.mockResolvedValueOnce({ ok: true, provisionalRootIndex: 0 });
-    mockFinalizeProvisionalBridge.mockResolvedValueOnce({ ok: true, finalizeSummary: { selectedSheetKeys: ['sheet_a'], originalFullCheckpointIndex: 2 } });
-    // 边界前 bucket（target=0）与边界后 bucket（target=2,4）都成功提交。
+    // 边界后 bucket（target=2,4）走普通 persist；边界前 bucket（target=0）走 stage_only，
+    // 不触发 persistTablesToChatMessage_ACU。
     mockPersistTablesToChatMessage
-      .mockResolvedValueOnce({ saved: true, messageIndex: 0 })
       .mockResolvedValueOnce({ saved: true, messageIndex: 2 })
       .mockResolvedValueOnce({ saved: true, messageIndex: 4 })
       .mockResolvedValue({ saved: true, messageIndex: 4 });
+    // boundary commit 默认成功（beforeEach 已设）。断言其调用参数。
+    mockCommitStagedSheetsAtFullBoundaryAtomic.mockClear();
     const refreshData = vi.fn().mockResolvedValue({ degraded: false });
 
     const result = await orchestrateManualCatchUp_ACU(['sheet_a'], refreshData);
 
     expect(result).toEqual(expect.objectContaining({ success: true, outcome: 'complete', committedBucketCount: 3 }));
-    // establish 在 preflight 后调用，携带原 full 边界。
-    expect(mockEstablishProvisionalBridge).toHaveBeenCalledTimes(1);
-    const establishArgs = mockEstablishProvisionalBridge.mock.calls[0];
-    expect(establishArgs[3]).toBe(2); // originalFullCheckpointIndex
-    expect(establishArgs[0]).toEqual(expect.any(String)); // runId
-    // 边界前 bucket：target=0，必须携带匹配 runId，且被 persist 准入（含 bridge 授权）。
+    // 边界前段（target=0）走 stage_only：不调用 persistTablesToChatMessage_ACU。
     const preBoundaryCall = mockPersistTablesToChatMessage.mock.calls.find(call => call[0]?.targetMessageIndex === 0);
-    expect(preBoundaryCall?.[0]).toEqual(expect.objectContaining({
-      targetMessageIndex: 0,
-      manualCatchUpRunId: establishArgs[0],
-      manualRefillProgress: expect.objectContaining({ status: 'committed' }),
+    expect(preBoundaryCall).toBeUndefined();
+    // 边界后首个 bucket（target=2）提交前必须触发 boundary commit：staging 原子汇合到原根。
+    const commitCall = mockCommitStagedSheetsAtFullBoundaryAtomic.mock.calls[0];
+    expect(commitCall).toBeDefined();
+    expect(commitCall[1]).toEqual(expect.objectContaining({
+      originalFullIndex: 2,
+      targetSheetKeys: ['sheet_a'],
     }));
-    // 边界后首个 bucket（target=2）提交前必须 finalize，nextSaveTargetIndex 精确为 2。
-    const finalizeCall = mockFinalizeProvisionalBridge.mock.calls[0];
-    expect(finalizeCall).toBeDefined();
-    expect(finalizeCall[1]).toEqual(expect.objectContaining({ nextSaveTargetIndex: 2 }));
-    // finalize 后边界后 bucket 仍在同一 run 内提交（bridge 已关闭，普通 persist 放行）。
+    expect(commitCall[0]).toEqual(expect.any(String)); // runId
+    // boundary commit 后边界后 bucket 走普通 persist（无 manualCatchUpRunId / 无 stage_only）。
     const postBoundaryCall = mockPersistTablesToChatMessage.mock.calls.find(call => call[0]?.targetMessageIndex === 2);
     expect(postBoundaryCall?.[0]).toEqual(expect.objectContaining({ targetMessageIndex: 2 }));
-    // 收尾：bridge 已在循环内 finalize，不应再重复 finalize/rollback。
-    expect(mockRollbackProvisionalBridge).not.toHaveBeenCalled();
-    expect(mockFinalizeProvisionalBridge).toHaveBeenCalledTimes(1);
+    // 收尾：boundary commit 只触发一次，不重复。
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).toHaveBeenCalledTimes(1);
     expect(mockIsAutoUpdating).toBe(false);
   });
 
-  it('跨边界 wave 边界前 bucket 提交失败时零提交回滚 bridge，而不是空快照 rebase', async () => {
+  it('跨边界 wave 边界前段零提交时丢弃 staging，而不是空快照 rebase', async () => {
     const chat: any[] = [
       { is_user: false, mes: 'AI 0', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } } } },
       { is_user: true, mes: '用户1' },
@@ -6588,19 +6732,18 @@ describe('orchestrateManualCatchUp_ACU', () => {
     mockGetChatArray_ACU.mockReturnValue(chat);
     mockEnsureManualCatchUpAnchor.mockResolvedValueOnce({ status: 'provisional_bridge_required', checkpointMessageIndex: 2 });
     mockHasActiveProvisionalBridgeAnywhere.mockReturnValue(false);
-    mockEstablishProvisionalBridge.mockResolvedValueOnce({ ok: true, provisionalRootIndex: 0 });
-    mockRollbackProvisionalBridge.mockResolvedValue({ ok: true });
-    // 边界前 bucket（target=0）提交失败 → 零提交；随后 chunk 失败分支收敛 → rollback。
-    mockPersistTablesToChatMessage.mockResolvedValue({ saved: false, error: '边界前 bucket 保存失败' });
+    // AI 调用失败 → 边界前段（target=0）零 staging 提交。
+    // 必须 mockReset 清掉 beforeEach 的 mockResolvedValueOnce 队列，否则首个 bucket 仍会消费成功响应。
+    mockCallCustomOpenAI.mockReset().mockRejectedValue(new Error('边界前 AI 调用失败'));
     const refreshData = vi.fn().mockResolvedValue({ degraded: false });
 
     const result = await orchestrateManualCatchUp_ACU(['sheet_a'], refreshData);
 
-    // 边界前提交失败：chunk 失败分支先收敛 bridge（零提交 → rollback），再写 failed 终态。
     expect(result).toEqual(expect.objectContaining({ success: false }));
-    expect(mockRollbackProvisionalBridge).toHaveBeenCalledTimes(1);
-    expect(mockFinalizeProvisionalBridge).not.toHaveBeenCalled();
-    // 收敛后仍写 failed 终态（bridge 已关闭，普通 persist 放行）。
+    expect(result.committedBucketCount).toBe(0);
+    // 零 staging：丢弃而非 rebase，boundary commit 不得被调用。
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).not.toHaveBeenCalled();
+    // 丢弃 staging 后仍写 failed 终态（普通 persist 放行）。
     const failedCall = mockPersistTablesToChatMessage.mock.calls.find(call => (
       call[0]?.manualRefillProgress?.status === 'failed'
     ));

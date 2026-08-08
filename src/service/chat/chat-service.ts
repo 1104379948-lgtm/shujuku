@@ -106,19 +106,6 @@ export interface ManualRefillSheetSnapshotCommitOptions_ACU {
     templateData?: Record<string, any>;
 }
 
-export interface ManualRefillSessionSnapshot_ACU {
-    targetMessageIndices: number[];
-    messageFields: Array<{
-        index: number;
-        hadIsolatedData: boolean;
-        originalIsolatedData: any;
-        isolatedData: any;
-        hadIdentity: boolean;
-        originalIdentity: any;
-        identity: any;
-        originals: WeakMap<object, any>;
-    }>;
-}
 
 export interface ManualRefillSheetBaselineReplaceResult_ACU {
     success: boolean;
@@ -2645,39 +2632,6 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
     });
 }
 
-export function captureManualRefillSessionSnapshot_ACU(targetMessageIndices: number[]): ManualRefillSessionSnapshot_ACU {
-    const chat = getChatArray_ACU();
-    const normalizedIndices = [...new Set(targetMessageIndices.filter((idx): idx is number => Number.isInteger(idx) && idx >= 0 && idx < chat.length))].sort((a, b) => a - b);
-    return {
-        targetMessageIndices: normalizedIndices,
-        messageFields: normalizedIndices.map(index => ({ index, ...messageFieldSnapshot_ACU(chat[index]) })),
-    };
-}
-
-export async function restoreManualRefillSessionSnapshotAtomic_ACU(
-    snapshot: ManualRefillSessionSnapshot_ACU,
-    isolationKey: string,
-    targetSheetKeys: string[],
-): Promise<void> {
-    const writeSet = targetSheetKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
-    await runTableWriteTransaction_ACU({
-        source: 'system_cleanup',
-        reason: 'restoreManualRefillSessionSnapshot',
-        isolationKey,
-        writeSet,
-        maintenanceMode: 'exclusive',
-    }, async () => {
-        const chat = getChatArray_ACU();
-        for (const messageField of snapshot.messageFields) {
-            if (!chat[messageField.index]) {
-                throw new Error(`手动重填回滚失败：消息索引 ${messageField.index} 已不存在。`);
-            }
-            restoreMessageFieldSnapshot_ACU(chat[messageField.index], messageField);
-        }
-        await saveChatToHostStrict_ACU();
-    });
-}
-
 export async function replaceManualRefillSheetBaselineInRangeAtomic_ACU(
     options: ManualRefillSheetBaselineReplaceOptions_ACU,
 ): Promise<ManualRefillSheetBaselineReplaceResult_ACU> {
@@ -2691,6 +2645,8 @@ export async function replaceManualRefillSheetBaselineInRangeAtomic_ACU(
     if (missingBaselineSheet) {
         return { success: false, changed: false, clearedCount: 0, checkpointCount: 0, error: `手动重填基底替换失败：缺少目标表 ${missingBaselineSheet} 的重建基底。` };
     }
+
+
 
     const writeSet = options.targetSheetKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
     return runTableWriteTransaction_ACU({
@@ -2787,33 +2743,53 @@ async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: n
     const clearsSummaryOrOutline = tableListContainsSummaryOrOutline_ACU(targetSheetKeys);
     let clearedCount = 0;
 
-    for (const idx of targetMessageIndices) {
-        if (idx < 0 || idx >= chat.length) continue;
-        const msg = chat[idx];
-        if (!msg || msg.is_user) continue;
+    const normalizedIndices = targetMessageIndices.filter((idx): idx is number => Number.isInteger(idx) && idx >= 0 && idx < chat.length);
+    const snapshots = new Map<number, ReturnType<typeof messageFieldSnapshot_ACU>>();
+    normalizedIndices.forEach(idx => snapshots.set(idx, messageFieldSnapshot_ACU(chat[idx])));
+    // 候选克隆上执行清理：strict save 失败时 live chat 保持原位，不产生半写清理。
+    // 计划 §5.5：清理自身失败不半写；只有 strict save 成功才把候选改动 apply 到 live。
+    const vectorManifestsToDeleteAfterCommit: any[] = [];
 
-        const changed = purgeSheetKeysFromMessageForIsolation_ACU(msg, isolationKey, targetSheetKeys);
-        if (clearsSummaryOrOutline) {
-            const isolatedData = msg?.TavernDB_ACU_IsolatedData;
-            const tagData = isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData)
-                ? isolatedData[isolationKey]
-                : null;
-            if (await deleteVectorIndexManifestFromTagData_ACU(tagData)) {
-                logDebug_ACU(`[手动重填预清理] 已删除消息索引 ${idx} 上的交火向量索引外置文件引用。`);
+    try {
+        const candidateChat = cloneCandidateChat_ACU(chat);
+        for (const idx of normalizedIndices) {
+            const msg = candidateChat[idx];
+            if (!msg || msg.is_user) continue;
+
+            const changed = purgeSheetKeysFromMessageForIsolation_ACU(msg, isolationKey, targetSheetKeys);
+            if (clearsSummaryOrOutline) {
+                const isolatedData = msg?.TavernDB_ACU_IsolatedData;
+                const tagData = isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData)
+                    ? isolatedData[isolationKey]
+                    : null;
+                // 只剥离 tagData 上的引用并收集 manifest，strict save 成功后才删除外置文件。
+                if (tagData && await deleteVectorIndexManifestFromTagData_ACU(tagData, { deleteExternal: false, onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest) })) {
+                    logDebug_ACU(`[手动重填预清理] 已标记消息索引 ${idx} 上的交火向量索引外置文件引用待删除。`);
+                }
+            }
+            if (changed) {
+                clearedCount++;
+                logDebug_ACU(`[手动重填预清理] 已清理消息索引 ${idx} 上选中表的范围内旧数据 (标签: ${isolationKey || '无'})`);
             }
         }
-        if (changed) {
-            clearedCount++;
-            logDebug_ACU(`[手动重填预清理] 已清理消息索引 ${idx} 上选中表的范围内旧数据 (标签: ${isolationKey || '无'})`);
+
+        if (clearedCount > 0) {
+            // candidate 改动 apply 到 live 后 strict save；失败时原位回滚并抛错，
+            // 由调用方（orchestrator）把清理视为失败处理（保留删除语义，不恢复已删数据）。
+            normalizedIndices.forEach(idx => applyCandidateMessageFields_ACU(chat[idx], candidateChat[idx]));
+            await saveChatToHostStrict_ACU();
+            // strict save 成功后才删除外置向量文件；清理失败仅记录警告，不影响已提交清理。
+            await cleanupVectorIndexManifestsAfterCommit_ACU(vectorManifestsToDeleteAfterCommit);
+            logDebug_ACU(`[手动重填预清理] 共清理 ${clearedCount} 条消息的选中表范围内旧数据，聊天已严格保存。`);
         }
+        return clearedCount;
+    } catch (error: any) {
+        // strict save 失败：live chat 原位恢复（候选未 apply 或已 apply 均恢复），
+        // 外置向量文件保持未删除。清理失败由调用方按失败语义处理（不恢复已删业务数据）。
+        snapshots.forEach((snapshot, idx) => restoreMessageFieldSnapshot_ACU(chat[idx], snapshot));
+        logError_ACU('[手动重填预清理] 清理 strict save 失败，已原位恢复聊天内存状态:', error);
+        throw error;
     }
-
-    if (clearedCount > 0) {
-        await saveChatToHost_ACU();
-        logDebug_ACU(`[手动重填预清理] 共清理 ${clearedCount} 条消息的选中表范围内旧数据，聊天已保存。`);
-    }
-
-    return clearedCount;
 }
 
 export async function clearManualRefillSheetDataInRange_ACU(targetMessageIndices: number[], targetSheetKeys: string[] | null = null): Promise<number> {

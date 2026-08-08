@@ -6,7 +6,7 @@
 
 import { currentChatFileIdentifier_ACU, isAutoUpdatingCard_ACU, pendingFinalGenerationGreenlights_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
 import { callCustomOpenAI_ACU, RetryableAiResponseError_ACU } from '../ai/prompt-builder';
-import { captureManualRefillSessionSnapshot_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
+import { clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
@@ -14,13 +14,21 @@ import type { TemplateScope_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import { enqueueSummaryVectorIndexFlush_ACU } from '../vector/summary-vector-index-flush-queue';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
-import { resolveTableHistoryStateFromChat_ACU } from './table-history';
+import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
 import { rebindSheetKeysThroughTableAliases_ACU, resolveHistoricalSheetKeyMigrations_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
-import { establishProvisionalBridge_ACU, finalizeProvisionalBridge_ACU, rollbackProvisionalBridge_ACU, recoverProvisionalBridgeSession_ACU, hasActiveProvisionalBridgeAnywhere_ACU } from './manual-catch-up-provisional-bridge';
-import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { recoverProvisionalBridgeSession_ACU, hasActiveProvisionalBridgeAnywhere_ACU } from './manual-catch-up-provisional-bridge';
+import {
+  commitStagedSheetsAtFullBoundaryAtomic_ACU,
+  planTableFillBoundaryStaging_ACU,
+  splitMessageIndicesAtBoundary_ACU,
+  type BoundarySegment_ACU,
+  type TableFillBoundaryStagingPlan_ACU,
+  type TableFillStagingRunContext_ACU,
+} from './table-fill-boundary-staging';
+import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
@@ -131,7 +139,7 @@ export interface ManualUpdateResult {
     /** terminal manualRefillProgress 是否已严格保存。 */
     terminalProgressSaved?: boolean;
     /** 面向 UI/恢复诊断的稳定失败分类；不得依赖错误文案解析。 */
-    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'catch_up_runtime_changed_after_confirmation' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required' | 'stale_bucket_after_boundary_checkpoint';
+    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'catch_up_runtime_changed_after_confirmation' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required' | 'stale_bucket_after_boundary_checkpoint' | 'staging_plan_failed' | 'boundary_commit_failed';
     catchUpPlan?: ManualCatchUpPlan_ACU;
 }
 
@@ -715,21 +723,6 @@ async function loadV2ReplayMergeBase_ACU(
     }
 }
 
-function collectManualRefillRollbackMessageIndices_ACU(
-    chat: any[],
-    currentIsolationKey: string,
-    contextScopeIndices: number[],
-): number[] {
-    const indices = new Set(contextScopeIndices);
-    for (let i = 0; i < chat.length; i += 1) {
-        const message = chat[i];
-        if (!message || message.is_user) continue;
-        const tagData = readIsolatedTagData_ACU(message, currentIsolationKey);
-        if (!isV2TagData_ACU(tagData)) continue;
-        if (tagData.storageFrame.checkpoint?.kind === 'full') indices.add(i);
-    }
-    return [...indices].sort((a, b) => a - b);
-}
 
 function buildGuideOrTemplateMergeBase_ACU(batchNumber: number): { data: Record<string, any> | null; error: string | null } {
     const batchIsoKey = getCurrentIsolationKey_ACU();
@@ -1177,6 +1170,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         syncAfterCommit?: boolean;
         baseRevision?: string | null;
         manualCatchUpRunId?: string;
+        commitMode?: 'persist_v2' | 'stage_only';
         performanceRunId?: string;
         performanceParentSpanId?: string;
     }
@@ -1348,6 +1342,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             replaceExistingIncremental: options.replaceExistingIncremental,
             manualRefillProgress: options.manualRefillProgress,
             manualCatchUpRunId: options.manualCatchUpRunId,
+            commitMode: options.commitMode,
             skipChatSave: options.isImportMode,
         }, async () => {
             const provider = await ensureStorageProviderReady_ACU();
@@ -1612,6 +1607,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             replaceExistingIncremental: options.replaceExistingIncremental,
             manualRefillProgress: options.manualRefillProgress,
             manualCatchUpRunId: options.manualCatchUpRunId,
+            commitMode: options.commitMode,
         }, () => ({
             success: true,
             value: { modifiedKeys },
@@ -1720,6 +1716,8 @@ async function processGroupedRuntimeChunkCore_ACU(
          *  清理前保留的旧 full checkpoint 是预期行为（commitManualRefillSheetSnapshotInRangeAtomic_ACU
          *  在全部 bucket 提交后才原子写新 checkpoint）。豁免仅限重填路径。 */
         skipWriteTargetAdmission?: boolean;
+        /** 提交模式：stage_only 只更新 run 级 staging workingData，不写聊天 V2 frame。 */
+        commitMode?: 'persist_v2' | 'stage_only';
         performanceRunId?: string;
         performanceParentSpanId?: string;
     } = {}
@@ -1975,7 +1973,9 @@ async function processGroupedRuntimeChunkCore_ACU(
             // 手动重填（clearBeforeUpdate）也跳过此处：重填先清旧增量，中间 bucket 目标
             // 早于清理后保留的旧 full checkpoint 是预期（末尾 commitManualRefillSheetSnapshotInRangeAtomic_ACU
             // 才原子写新 checkpoint）；清理前 refillAdmission 已对范围末尾做准入。
-            if (!options.manualCatchUpRunId && !options.skipWriteTargetAdmission) {
+            // stage_only 边界前段同样跳过：staging 不写聊天 V2 frame，不参与 replay 根准入，
+            // 准入检查只针对真正持久化到聊天的目标。
+            if (!options.manualCatchUpRunId && !options.skipWriteTargetAdmission && options.commitMode !== 'stage_only') {
                 for (const job of jobs) {
                     const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
                         chat: getChatArray_ACU() || [],
@@ -2107,6 +2107,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                 templateScope: executionScope.templateScope,
                 sqlApplyScope: executionScope.sqlApplyScope,
                 manualCatchUpRunId: options.manualCatchUpRunId,
+                commitMode: options.commitMode,
                 performanceRunId: options.performanceRunId,
                 performanceParentSpanId: options.performanceParentSpanId,
             });
@@ -2188,6 +2189,223 @@ export function processGroupedRuntimeChunk_ACU(
         throw error;
     });
 }
+/**
+ * 自动填表跨 full checkpoint staging 编排器（计划 5.6 执行层）。
+ *
+ * 由 presentation 层绑定为 AutoUpdateOperations.processStagingGroupedUpdates：
+ *  - 无 full checkpoint 或组内无 pre-boundary 索引 → 直接普通分组执行（退化安全）；
+ *  - 有 pre-boundary 段 → 先以 commitMode='stage_only' 执行 pre 段（run 级隔离 staging，
+ *    不写聊天 V2 frame），到达原 full 边界时用 commitStagedSheetsAtFullBoundaryAtomic_ACU
+ *    把累计目标表快照原子折叠为原根的 sheet_rebase，边界后段恢复普通持久化；
+ *  - 失败/停止时只丢弃内存 staging（零持久化改写），符合自动填表失败语义矩阵。
+ */
+export async function executeAutoFillStagingGroups_ACU(
+    groups: GroupedRuntimeUpdateGroup_ACU[],
+    mode: string,
+    options: {
+        abortController?: AbortController;
+        onProgress?: (event: CardUpdateProgressEvent) => void;
+        respectGlobalStop?: boolean;
+        performanceRunId?: string;
+        performanceParentSpanId?: string;
+        /** 调度层预计算的边界元数据（AutoUpdatePlan.boundary 透传）。 */
+        boundary?: {
+            fullCheckpointIndices: number[];
+            requiresBoundaryStaging: boolean;
+        };
+    } = {},
+): Promise<{ success: boolean; failedGroups: string[]; error?: string; aborted?: boolean; committedBucketCount: number }> {
+    const boundary = options.boundary;
+    const originalFullIndex = boundary?.fullCheckpointIndices?.length === 1 ? boundary.fullCheckpointIndices[0] : null;
+    const normalizedGroups = Array.isArray(groups) ? groups : [];
+
+    // 无 full 根或未标记 staging：直接普通执行，不引入任何 staging 语义。
+    if (originalFullIndex === null || normalizedGroups.length === 0) {
+        return processGroupedRuntimeChunk_ACU(normalizedGroups, mode, {
+            abortController: options.abortController,
+            onProgress: options.onProgress,
+            respectGlobalStop: options.respectGlobalStop,
+            performanceRunId: options.performanceRunId,
+            performanceParentSpanId: options.performanceParentSpanId,
+        });
+    }
+
+    const failedGroups = new Set<string>();
+    let firstError: string | undefined;
+    let committedBucketCount = 0;
+    let boundaryCommitted = false;
+    let stagingRun: TableFillStagingRunContext_ACU | null = null;
+    let boundaryPlan: TableFillBoundaryStagingPlan_ACU | null = null;
+
+    // 冻结 run 级 staging scope（与手动追平同款：单 full 根复检、范围、目标表、模板指纹）。
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const chatKey = currentChatFileIdentifier_ACU;
+    const allPendingIndices = [...new Set(normalizedGroups.flatMap(group => group.indices || []))].sort((a, b) => a - b);
+    const targetSheetKeys = [...new Set(normalizedGroups.flatMap(group => group.sheetKeys || []))].sort();
+    const templateFingerprint = getTableDataFingerprint_ACU(parseTableTemplateJson_ACU({ stripSeedRows: true }) || {});
+    try {
+        boundaryPlan = planTableFillBoundaryStaging_ACU({
+            runKind: 'auto_fill',
+            runId: options.performanceRunId || `auto-fill-${Date.now()}`,  // 仅作作用域身份，不写任何持久化
+            chatKey,
+            isolationKey,
+            targetSheetKeys,
+            templateFingerprint,
+            messageIndices: allPendingIndices,
+            fullCheckpointIndices: boundary?.fullCheckpointIndices || [],
+        });
+    } catch (error: any) {
+        return {
+            success: false,
+            failedGroups: normalizedGroups.map(group => group.key),
+            error: `跨 full checkpoint 自动填表规划失败：${error?.message || String(error)}`,
+            committedBucketCount: 0,
+        };
+    }
+    if (!boundaryPlan.requiresStaging) {
+        // 规划后发现实际无需 staging（如 full 索引被过滤）：普通执行。
+        return processGroupedRuntimeChunk_ACU(normalizedGroups, mode, {
+            abortController: options.abortController,
+            onProgress: options.onProgress,
+            respectGlobalStop: options.respectGlobalStop,
+            performanceRunId: options.performanceRunId,
+            performanceParentSpanId: options.performanceParentSpanId,
+        });
+    }
+    stagingRun = {
+        runId: boundaryPlan.scope.runId,
+        chatKey: boundaryPlan.scope.chatKey,
+        isolationKey: boundaryPlan.scope.isolationKey,
+        targetSheetKeys: [...boundaryPlan.scope.targetSheetKeys],
+        stagedWorkingData: null,
+        lastStagedSnapshot: null,
+        lastStagedTargetMessageIndex: null,
+        stagedBucketCount: 0,
+    };
+
+    const settleStagingBoundary = async (): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: string }> => {
+        if (!boundaryPlan || boundaryCommitted) return { ok: true };
+        if (!stagingRun || stagingRun.stagedBucketCount === 0) {
+            boundaryCommitted = true;
+            return { ok: true };
+        }
+        const fullIndex = boundaryPlan.scope.originalFullIndex;
+        if (fullIndex === null) {
+            boundaryCommitted = true;
+            return { ok: true };
+        }
+        const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
+            chatKey: stagingRun.chatKey,
+            isolationKey: stagingRun.isolationKey,
+            originalFullIndex: fullIndex,
+            stagedSnapshot: stagingRun.lastStagedSnapshot ?? {},
+            targetSheetKeys: stagingRun.targetSheetKeys,
+        });
+        if (!commitResult.ok) {
+            return { ok: false, error: (commitResult as { ok: false; error: string }).error, diagnosticCode: (commitResult as { ok: false; diagnosticCode?: string }).diagnosticCode ?? 'boundary_commit_failed' };
+        }
+        boundaryCommitted = true;
+        return { ok: true };
+    };
+
+    for (const group of normalizedGroups) {
+        if (options.abortController?.signal.aborted) {
+            return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
+        }
+        const groupIndices = [...(group.indices || [])].sort((a, b) => a - b);
+        const segments = splitMessageIndicesAtBoundary_ACU(groupIndices, originalFullIndex);
+        const preSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] < originalFullIndex);
+        const postSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] >= originalFullIndex);
+
+        for (const preSegment of preSegments) {
+            if (options.abortController?.signal.aborted) {
+                return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
+            }
+            const preGroups: GroupedRuntimeUpdateGroup_ACU[] = [{
+                ...group,
+                indices: [...preSegment.indices],
+                mergeBaseMaxMessageIndex: preSegment.mergeBaseMaxMessageIndex,
+            }];
+            const preResult = await processGroupedRuntimeChunk_ACU(preGroups, mode, {
+                abortController: options.abortController,
+                respectGlobalStop: options.respectGlobalStop,
+                commitMode: 'stage_only',
+                replaceExistingIncremental: true,
+                syncAfterCommit: false,
+                onProgress: options.onProgress,
+                performanceRunId: options.performanceRunId,
+                performanceParentSpanId: options.performanceParentSpanId,
+            });
+            committedBucketCount += preResult.committedBucketCount;
+            if (!preResult.success) {
+                failedGroups.add(group.key);
+                firstError = firstError || preResult.error || '边界前 staging 提交失败。';
+                break;
+            }
+            // 累积 staging 快照：bucket 提交后 runtime 已更新为目标表最新 AI 结果。
+            if (stagingRun) {
+                const stagedData = (currentJsonTableData_ACU as Record<string, any> | null) || {};
+                stagingRun.lastStagedSnapshot = JSON.parse(JSON.stringify(stagedData));
+                stagingRun.lastStagedTargetMessageIndex = preSegment.saveTargetIndex;
+                stagingRun.stagedBucketCount += 1;
+                stagingRun.stagedWorkingData = stagingRun.lastStagedSnapshot;
+            }
+        }
+
+        // 首个 post 段提交前收敛 staging：边界前累计快照原子折叠回原根；零 staging 则丢弃。
+        if (postSegments.length > 0) {
+            if (options.abortController?.signal.aborted) {
+                return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
+            }
+            const settleResult = await settleStagingBoundary();
+            if (!settleResult.ok) {
+                failedGroups.add(group.key);
+                firstError = firstError || `跨根 staging 汇合失败：${(settleResult as { ok: false; error: string }).error}`;
+                break;
+            }
+        }
+
+        for (const postSegment of postSegments) {
+            if (options.abortController?.signal.aborted) {
+                return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
+            }
+            const postGroups: GroupedRuntimeUpdateGroup_ACU[] = [{
+                ...group,
+                indices: [...postSegment.indices],
+                mergeBaseMaxMessageIndex: postSegment.mergeBaseMaxMessageIndex,
+            }];
+            const postResult = await processGroupedRuntimeChunk_ACU(postGroups, mode, {
+                abortController: options.abortController,
+                respectGlobalStop: options.respectGlobalStop,
+                replaceExistingIncremental: true,
+                syncAfterCommit: false,
+                onProgress: options.onProgress,
+                performanceRunId: options.performanceRunId,
+                performanceParentSpanId: options.performanceParentSpanId,
+            });
+            committedBucketCount += postResult.committedBucketCount;
+            if (!postResult.success) {
+                failedGroups.add(group.key);
+                firstError = firstError || postResult.error || '边界后持久化提交失败。';
+                break;
+            }
+        }
+    }
+
+    // 所有组都只有 pre-boundary 段（未触发循环内汇合）：正常收尾时仍须把 staging 汇合回原根。
+    if (!boundaryCommitted && stagingRun && stagingRun.stagedBucketCount > 0) {
+        const settleResult = await settleStagingBoundary();
+        if (!settleResult.ok) {
+            normalizedGroups.forEach(g => failedGroups.add(g.key));
+            firstError = firstError || `跨根 staging 收尾汇合失败：${(settleResult as { ok: false; error: string }).error}`;
+        }
+    }
+
+    return failedGroups.size > 0
+        ? { success: false, failedGroups: [...failedGroups], error: firstError || '跨根 staging 执行失败。', committedBucketCount }
+        : { success: true, failedGroups: [], committedBucketCount };
+}
+
 
 /**
  * 执行单次卡片更新的核心逻辑（AI调用 + 重试 + 解析 + 保存）
@@ -2991,13 +3209,14 @@ export async function orchestrateManualCatchUp_ACU(
         };
     }
 
-    // runId 必须在 preflight 之前创建：provisional bridge 建立与 bucket 提交共用同一个
-    // runId，保证写入准入（t5）的 run-scoped 隔离。
+    // runId 必须在 preflight 之前创建：staging run 与 bucket 提交共用同一个 runId，
+    // 保证 run-scoped 隔离（staging 只认本 run 授权的目标表）。
     const runId = createManualCatchUpRunId_ACU();
-    // provisional bridge run 状态：建立后在 bucket 循环内驱动 finalize。
-    // 不能依赖全局状态——必须在 run 内显式跟踪，避免跨 run 串扰。
-    let provisionalBridgeOriginalFullIndex: number | null = null;
-    let provisionalBridgeFinalized = false;
+    // 跨 full checkpoint staging run 状态：冻结 scope 后在 bucket 循环内累积 staging
+    // 快照，到达原 full 边界原子汇合。不能依赖全局状态——必须在 run 内显式跟踪。
+    let boundaryPlan: TableFillBoundaryStagingPlan_ACU | null = null;
+    let stagingRun: TableFillStagingRunContext_ACU | null = null;
+    let boundaryCommitted = false;
 
     // 旧版“删除全部数据”会将 header-only reset checkpoint 留在原先较晚楼层。
     // 在任何 AI 调用之前修复可证明安全的布局；无法证明安全则阻断，而不是让 bucket
@@ -3017,11 +3236,13 @@ export async function orchestrateManualCatchUp_ACU(
             };
         }
         if (anchorPreflight.status === 'provisional_bridge_required') {
-            // 追平目标早于含真实数据的正式 full checkpoint：不能移动原根，必须建立
-            // run-scoped provisional full checkpoint，追平至原 full 边界后原子汇合回原根。
-            // 若已有 active bridge（崩溃残留或并发 run），先尝试自动恢复，恢复失败则阻断。
+            // 追平目标早于含真实数据的正式 full checkpoint：不能移动原根，也不建立临时根。
+            // 改为冻结跨根 staging scope：边界前 bucket 只进 run 级隔离 staging（不写聊天
+            // V2 frame），到达原 full 边界原子汇合（sheet_rebase），边界后恢复普通持久化。
             const isolationKey = getCurrentIsolationKey_ACU();
             const liveChat = getChatArray_ACU();
+            // 旧版本遗留的 active provisional bridge 仍需恢复（兼容窗口未结束）；
+            // 新运行不再建立 bridge，因此这里只处理历史残留。
             if (hasActiveProvisionalBridgeAnywhere_ACU(liveChat)) {
                 const recovery = await recoverProvisionalBridgeSession_ACU({ isolationKey });
                 if (!recovery.ok) {
@@ -3036,73 +3257,56 @@ export async function orchestrateManualCatchUp_ACU(
                     };
                 }
             }
-            const rangeStartMessageIndex = plan.waves[0]?.messageIndices[0] ?? preflightTargetIndex;
-            const selectedSheetKeysForBridge = [...new Set(plan.waves.flatMap(wave => wave.sheetKeys))].sort();
-            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: false }) || {};
-            const establishResult = await establishProvisionalBridge_ACU(runId, selectedSheetKeysForBridge, rangeStartMessageIndex, anchorPreflight.checkpointMessageIndex, {
-                templateData,
-                chatKey: currentChatFileIdentifier_ACU,
-                isolationKey,
-            });
-            if (!establishResult.ok) {
+            // 冻结跨根 staging scope。checkpointMessageIndex 是唯一 full（多根已在
+            // ensureManualCatchUpAnchorBeforeTarget_ACU 内 blocked），作为 originalFullIndex。
+            const allPendingIndices = [...new Set(plan.waves.flatMap(wave => wave.messageIndices))].sort((left, right) => left - right);
+            const templateFingerprint = getTableDataFingerprint_ACU(parseTableTemplateJson_ACU({ stripSeedRows: true }) || {});
+            try {
+                boundaryPlan = planTableFillBoundaryStaging_ACU({
+                    runKind: 'manual_catch_up',
+                    runId,
+                    chatKey: currentChatFileIdentifier_ACU,
+                    isolationKey,
+                    targetSheetKeys: selectedSheetKeys,
+                    templateFingerprint,
+                    messageIndices: allPendingIndices,
+                    fullCheckpointIndices: [anchorPreflight.checkpointMessageIndex],
+                });
+            } catch (error: any) {
                 return {
                     success: false,
                     outcome: 'blocked',
-                    error: `provisional bridge 建立失败：${(establishResult as { ok: false; error: string }).error}`,
+                    error: `跨 full checkpoint 追平规划失败：${error?.message || String(error)}`,
                     catchUpPlan: plan,
                     committedBucketCount: 0,
                     dataCommitted: false,
-                    diagnosticCode: (establishResult as { ok: false; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }).diagnosticCode ?? 'provisional_bridge_conflict',
+                    diagnosticCode: 'staging_plan_failed',
                 };
             }
-            logDebug_ACU(`[手动追平] 已建立 provisional bridge：runId=${runId}, root=${establishResult.provisionalRootIndex}, originalFull=${anchorPreflight.checkpointMessageIndex}。`);
-            provisionalBridgeOriginalFullIndex = anchorPreflight.checkpointMessageIndex;
+            stagingRun = {
+                runId,
+                chatKey: boundaryPlan.scope.chatKey,
+                isolationKey: boundaryPlan.scope.isolationKey,
+                targetSheetKeys: [...boundaryPlan.scope.targetSheetKeys],
+                stagedWorkingData: null,
+                lastStagedSnapshot: null,
+                lastStagedTargetMessageIndex: null,
+                stagedBucketCount: 0,
+            };
+            logDebug_ACU(`[手动追平] 已冻结跨根 staging scope：runId=${runId}, originalFull=${anchorPreflight.checkpointMessageIndex}, preBoundary=${boundaryPlan.preBoundaryIndices.length}。`);
         }
     }
 
-    // 最终准入（第二次复检）：锚点预检/establishProvisionalBridge_ACU 都是异步边界，
-    // 等待期间 runtime 可能被 purge 或表集合变化。紧邻 AI 调用与 bucket 写入再次核对，
-    // 覆盖“第一次复检通过 → 锚点/bridge 建立 → AI 调用”之间的窗口。
+    // 最终准入（第二次复检）：锚点预检/staging scope 冻结都是异步边界，
+    // 等待期间 runtime 可能被 purge 或表集合变化。紧邻 AI 调用与 bucket 写入再次核对。
+    // staging 只是 run 级内存状态（未写任何聊天帧），二检阻断直接丢弃 staging 返回，
+    // 不遗留任何持久化拓扑改写，无需 rollback。
     if (options.executionSnapshot !== undefined) {
         if (!runtimeSheetKeysMatchSnapshot_ACU(executionSnapshot)) {
             logWarn_ACU('[手动追平] runtime 在 AI 调用前一刻变化，已阻止执行（快照未匹配）。');
-            // 若本 run 已建立 provisional bridge，二检阻断不能直接返回：bridge 已持久化
-            // 拓扑改写（临时 full + 原 full 备份移除），必须零提交 rollback，否则残留
-            // active bridge 会让下次追平依赖 recovery，属于半事务式退出。
-            if (provisionalBridgeOriginalFullIndex !== null) {
-                // rollbackProvisionalBridge_ACU 内部经 runTableWriteTransaction_ACU 执行，
-                // 事务获取/调度/回调中的非预期异常可能让 Promise reject，而不是 resolve 为
-                // { ok: false }。reject 与 { ok: false } 必须统一收敛为结构化完整性失败，
-                // 否则已持久化的 active bridge 会在无诊断的情况下残留。
-                let rollbackError: string | undefined;
-                try {
-                    const rollbackResult = await rollbackProvisionalBridge_ACU(runId, {
-                        chatKey: currentChatFileIdentifier_ACU,
-                        isolationKey: getCurrentIsolationKey_ACU(),
-                    });
-                    if (!rollbackResult.ok) {
-                        rollbackError = (rollbackResult as { ok: false; error: string }).error;
-                    }
-                } catch (rollbackThrown: any) {
-                    rollbackError = rollbackThrown?.message || String(rollbackThrown || 'rollback 抛异常');
-                }
-                if (rollbackError !== undefined) {
-                    logError_ACU('[手动追平] runtime 变化阻断后 provisional bridge 回滚失败：', rollbackError);
-                    return {
-                        success: false,
-                        outcome: 'integrity_failed',
-                        error: `表格运行时在确认期间发生变化；provisional bridge 回滚失败：${rollbackError}。请先执行恢复收敛再重试。`,
-                        catchUpPlan: plan,
-                        committedBucketCount: 0,
-                        dataCommitted: false,
-                        replayVerified: false,
-                        terminalProgressSaved: false,
-                        diagnosticCode: 'bridge_finalize_failed',
-                    };
-                }
-                provisionalBridgeFinalized = true;
-                logWarn_ACU('[手动追平] runtime 变化阻断：已回滚本次 provisional bridge，未遗留 active bridge。');
-            }
+            stagingRun = null;
+            boundaryPlan = null;
+            logWarn_ACU('[手动追平] runtime 变化阻断：已丢弃 run 级 staging，未遗留任何持久化改写。');
             return {
                 success: false,
                 outcome: 'blocked',
@@ -3266,37 +3470,32 @@ export async function orchestrateManualCatchUp_ACU(
             return error?.message || String(error || `手动追平终态 ${status} 保存异常。`);
         }
     };
-    // provisional bridge 收敛：有已提交 bucket 则 finalize，零提交则 rollback。
+    // 跨根 staging 收敛：有 staging 快照且有已提交 bucket 则 boundary commit 原子汇合
+    // （sheet_rebase 到原 full 根）；零 staging 或零提交则丢弃 staging（不写任何聊天帧）。
     // 只用于正常收尾与 stopped/failed 路径（计划阶段 7：终态必须在收敛后写入）。
-    const settleProvisionalBridge = async (nextSaveTargetIndex?: number): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }> => {
-        if (provisionalBridgeOriginalFullIndex === null || provisionalBridgeFinalized) return { ok: true };
-        if (committedBucketCount > 0) {
-            // nextSaveTargetIndex 缺省时用计划终点；跨边界段传入边界后首个 bucket 的
-            // saveTargetIndex（>= originalFull），保证 finalize 语义精确落在即将写入的楼层。
-            const effectiveNextSaveTargetIndex = nextSaveTargetIndex !== undefined && nextSaveTargetIndex >= provisionalBridgeOriginalFullIndex
-                ? nextSaveTargetIndex
-                : (terminalTargetMessageIndex >= provisionalBridgeOriginalFullIndex
-                    ? terminalTargetMessageIndex
-                    : provisionalBridgeOriginalFullIndex);
-            const finalizeResult = await finalizeProvisionalBridge_ACU(runId, {
-                chatKey: currentChatFileIdentifier_ACU,
-                isolationKey: getCurrentIsolationKey_ACU(),
-                nextSaveTargetIndex: effectiveNextSaveTargetIndex,
-            });
-            if (!finalizeResult.ok) {
-                return { ok: false, error: (finalizeResult as { ok: false; error: string }).error, diagnosticCode: (finalizeResult as { ok: false; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }).diagnosticCode ?? 'bridge_finalize_failed' };
-            }
-            provisionalBridgeFinalized = true;
+    const settleStagingBoundary = async (): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }> => {
+        if (!boundaryPlan || boundaryCommitted) return { ok: true };
+        if (!stagingRun || stagingRun.stagedBucketCount === 0) {
+            // 零提交：staging 只是内存状态，直接丢弃，不产生任何持久化改写。
+            boundaryCommitted = true;
             return { ok: true };
         }
-        const rollbackResult = await rollbackProvisionalBridge_ACU(runId, {
-            chatKey: currentChatFileIdentifier_ACU,
-            isolationKey: getCurrentIsolationKey_ACU(),
-        });
-        if (!rollbackResult.ok) {
-            return { ok: false, error: (rollbackResult as { ok: false; error: string }).error, diagnosticCode: 'bridge_finalize_failed' };
+        const originalFullIndex = boundaryPlan.scope.originalFullIndex;
+        if (originalFullIndex === null) {
+            boundaryCommitted = true;
+            return { ok: true };
         }
-        provisionalBridgeFinalized = true;
+        const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(runId, {
+            chatKey: stagingRun.chatKey,
+            isolationKey: stagingRun.isolationKey,
+            originalFullIndex,
+            stagedSnapshot: stagingRun.lastStagedSnapshot ?? {},
+            targetSheetKeys: stagingRun.targetSheetKeys,
+        });
+        if (!commitResult.ok) {
+            return { ok: false, error: (commitResult as { ok: false; error: string }).error, diagnosticCode: (commitResult as { ok: false; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }).diagnosticCode ?? 'boundary_commit_failed' };
+        }
+        boundaryCommitted = true;
         return { ok: true };
     };
     const refreshCommittedDataBeforeExit = async (): Promise<void> => {
@@ -3313,20 +3512,20 @@ export async function orchestrateManualCatchUp_ACU(
         for (let waveIndex = 0; waveIndex < plan.waves.length; waveIndex += 1) {
             activeWaveIndex = waveIndex;
             if (options.abortController?.signal.aborted) {
-                // 终态不变量：stopped 只能在 provisional 会话已 finalize/rollback 后写入。
-                // abort 时若已有已提交 bucket，先收敛 bridge（有提交 finalize、零提交 rollback），
+                // 终态不变量：stopped 只能在 staging 已汇合或丢弃后写入。
+                // abort 时先收敛 staging（有 staging 则汇合、零 staging 则丢弃），
                 // 收敛失败则不写终态，直接返回 integrity_failed。
-                const settleResult = await settleProvisionalBridge();
+                const settleResult = await settleStagingBoundary();
                 if (!settleResult.ok) {
                     const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
                     return {
                         success: false, outcome: 'integrity_failed',
-                        error: `provisional bridge 收敛失败：${settleError.error}`,
+                        error: `跨根 staging 收敛失败：${settleError.error}`,
                         committedBucketCount, catchUpPlan: plan,
                         dataCommitted: committedBucketCount > 0,
                         replayVerified: false,
                         terminalProgressSaved: false,
-                        diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                        diagnosticCode: settleError.diagnosticCode ?? 'boundary_commit_failed',
                     };
                 }
                 const terminalError = await persistCatchUpTerminalProgress('stopped', '手动追平已终止。');
@@ -3341,41 +3540,34 @@ export async function orchestrateManualCatchUp_ACU(
                 };
             }
             const wave = plan.waves[waveIndex];
-            // provisional bridge 边界汇合：wave 的 messageIndices 是连续 AI 楼层切片，
-            // 可能同时跨越原 full 边界两侧。若整段一起提交，跨边界 bucket 会先被 persist
-            // 准入拒绝（target >= originalFull 必须先 finalize），且过早 finalize 会让
-            // 边界前 bucket 失去 bridge 授权。因此把 wave 拆成边界前/后两段分别提交：
-            // 边界前段走 provisional（携带 runId），在首个跨边界 bucket 前 finalize，
-            // 边界后段回到原正式根（bridge 已关闭，普通 persist 放行）。
-            const bridgeBoundary = provisionalBridgeOriginalFullIndex;
-            const isBridgeActive = bridgeBoundary !== null && !provisionalBridgeFinalized;
-            const waveSegments: Array<{ indices: number[]; mergeBaseMaxMessageIndex: number }> = [];
-            if (isBridgeActive) {
-                const preBoundaryIndices = wave.messageIndices.filter(index => index < bridgeBoundary!);
-                const postBoundaryIndices = wave.messageIndices.filter(index => index >= bridgeBoundary!);
-                if (preBoundaryIndices.length > 0) {
-                    waveSegments.push({ indices: preBoundaryIndices, mergeBaseMaxMessageIndex: preBoundaryIndices[0] - 1 });
-                }
-                if (postBoundaryIndices.length > 0) {
-                    waveSegments.push({ indices: postBoundaryIndices, mergeBaseMaxMessageIndex: Math.max(postBoundaryIndices[0] - 1, bridgeBoundary!) });
-                }
-            } else {
-                waveSegments.push({ indices: [...wave.messageIndices], mergeBaseMaxMessageIndex: wave.messageIndices[0] - 1 });
-            }
+            // 跨 full checkpoint 边界汇合：wave 的 messageIndices 是连续 AI 楼层切片，
+            // 可能同时跨越原 full 边界两侧。用共享分段器拆成边界前/后两段：
+            // 边界前段走 stage_only（run 级隔离 staging，不写聊天 V2 frame），
+            // 在首个边界后段前 boundary commit 原子汇合（sheet_rebase 到原根），
+            // 边界后段恢复普通 persist（target >= originalFull 放行）。
+            const originalFullIndex = boundaryPlan?.scope.originalFullIndex ?? null;
+            const isBoundaryActive = originalFullIndex !== null && !boundaryCommitted;
+            const fullMessageIndexSet = new Set<number>(isBoundaryActive ? [originalFullIndex as number] : []);
+            const waveSegments: BoundarySegment_ACU[] = splitMessageIndicesAtBoundary_ACU(
+                wave.messageIndices,
+                originalFullIndex,
+                fullMessageIndexSet,
+            );
             for (const segment of waveSegments) {
                 if (options.abortController?.signal.aborted) {
-                    // 终态不变量：stopped 只能在 provisional 会话已 finalize/rollback 后写入。
-                    const settleResult = await settleProvisionalBridge();
+                    // 终态不变量：stopped 只能在 staging 已汇合或丢弃后写入。
+                    // pre-boundary 只丢 staging；post-boundary 保留已提交结果。
+                    const settleResult = await settleStagingBoundary();
                     if (!settleResult.ok) {
                         const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
                         return {
                             success: false, outcome: 'integrity_failed',
-                            error: `provisional bridge 收敛失败：${settleError.error}`,
+                            error: `跨根 staging 收敛失败：${settleError.error}`,
                             committedBucketCount, catchUpPlan: plan,
                             dataCommitted: committedBucketCount > 0,
                             replayVerified: false,
                             terminalProgressSaved: false,
-                            diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                            diagnosticCode: settleError.diagnosticCode ?? 'boundary_commit_failed',
                         };
                     }
                     const terminalError = await persistCatchUpTerminalProgress('stopped', '手动追平已终止。');
@@ -3399,36 +3591,37 @@ export async function orchestrateManualCatchUp_ACU(
                     requestOptions: group.requestOptions,
                     mergeBaseMaxMessageIndex: segment.mergeBaseMaxMessageIndex,
                 }));
-                // 首个跨边界段提交前收敛 bridge：边界前段已完成（或本 wave 直接起于边界后，
-                // 前序 wave 已完成），有提交则把 provisional 累计结果原子折叠回原根
-                // （sheet_rebase），零提交则回滚。随后边界后段在正式根上普通写入。
-                // 不能内联假设 committedBucketCount > 0：边界前段可能被模板过滤导致零提交，
-                // 直接把空快照 rebase 进原根是数据丢失。
-                if (isBridgeActive && segment.indices[0] >= bridgeBoundary!) {
-                    const settleResult = await settleProvisionalBridge(segment.indices[0]);
+                // 首个边界后段提交前收敛 staging：边界前段已完成（或本 wave 直接起于边界后，
+                // 前序 wave 已完成），有 staging 快照则把累计结果原子折叠回原根
+                // （sheet_rebase），零 staging 则丢弃（不写任何聊天帧）。随后边界后段在
+                // 正式根上普通写入。不能内联假设 staging 非空：边界前段可能被模板过滤
+                // 导致零提交，直接把空快照 rebase 进原根是数据丢失。
+                if (isBoundaryActive && segment.indices[0] >= originalFullIndex!) {
+                    const settleResult = await settleStagingBoundary();
                     if (!settleResult.ok) {
                         const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
-                        const terminalError = await persistCatchUpTerminalProgress('failed', `provisional bridge 汇合失败：${settleError.error}`);
+                        const terminalError = await persistCatchUpTerminalProgress('failed', `跨根 staging 汇合失败：${settleError.error}`);
                         await refreshCommittedDataBeforeExit();
                         return {
                             success: false,
                             outcome: 'integrity_failed',
-                            error: terminalError ? `provisional bridge 汇合失败：${settleError.error}；终态进度保存失败：${terminalError}` : `provisional bridge 汇合失败：${settleError.error}`,
+                            error: terminalError ? `跨根 staging 汇合失败：${settleError.error}；终态进度保存失败：${terminalError}` : `跨根 staging 汇合失败：${settleError.error}`,
                             committedBucketCount,
                             catchUpPlan: plan,
                             dataCommitted: committedBucketCount > 0,
                             replayVerified: false,
                             terminalProgressSaved: !terminalError,
-                            diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                            diagnosticCode: settleError.diagnosticCode ?? 'boundary_commit_failed',
                         };
                     }
-                    logDebug_ACU(`[手动追平] provisional bridge 已${provisionalBridgeFinalized ? '汇合回原根' : '回滚'}：originalFull=${provisionalBridgeOriginalFullIndex}。`);
+                    logDebug_ACU(`[手动追平] 跨根 staging 已${boundaryCommitted ? '汇合回原根' : '丢弃'}：originalFull=${originalFullIndex}。`);
                 }
+                const isPreBoundarySegment = isBoundaryActive && segment.indices[0] < originalFullIndex!;
                 const result = await processGroupedRuntimeChunk_ACU(groups, 'manual_independent', {
                     abortController: options.abortController,
                     respectGlobalStop: false,
                     manualCatchUpRun: true,
-                    manualCatchUpRunId: runId,
+                    ...(isPreBoundarySegment ? { commitMode: 'stage_only' as const } : {}),
                     replaceExistingIncremental: true,
                     syncAfterCommit: false,
                     onProgress: event => options.onProgress?.({
@@ -3468,27 +3661,36 @@ export async function orchestrateManualCatchUp_ACU(
                             completedSheetMessageIndexByKey[sheetKey] = bucket.saveTargetIndex;
                         });
                         lastCommittedBucketTargetIndex = bucket.saveTargetIndex;
+                        if (isPreBoundarySegment && stagingRun) {
+                            // 边界前 bucket：把 AI 结果累积进 run 级 staging 快照。
+                            // lastStagedSnapshot 只保存本 run 授权的目标表，供边界汇合取数。
+                            const stagedData = (currentJsonTableData_ACU as Record<string, any> | null) || {};
+                            stagingRun.lastStagedSnapshot = JSON.parse(JSON.stringify(stagedData));
+                            stagingRun.lastStagedTargetMessageIndex = bucket.saveTargetIndex;
+                            stagingRun.stagedBucketCount += 1;
+                            stagingRun.stagedWorkingData = stagingRun.lastStagedSnapshot;
+                        }
                     },
                 });
                 committedBucketCount += result.committedBucketCount;
                 if (!result.success) {
                     const outcome = result.aborted ? 'stopped' : undefined;
                     const primaryError = result.error || (result.aborted ? '手动追平已终止。' : '手动追平失败。');
-                    // 终态不变量：stopped/failed 只能在 provisional 会话已 finalize/rollback 后写入。
-                    // 已有已提交 bucket 时先收敛 bridge；收敛失败则返回 integrity_failed，不写误导性终态。
-                    const settleResult = await settleProvisionalBridge();
+                    // 终态不变量：stopped/failed 只能在 staging 已汇合或丢弃后写入。
+                    // 已有已提交 bucket 时先收敛 staging；收敛失败则返回 integrity_failed，不写误导性终态。
+                    const settleResult = await settleStagingBoundary();
                     if (!settleResult.ok) {
                         const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
                         return {
                             success: false,
                             outcome: 'integrity_failed',
-                            error: `${primaryError}；provisional bridge 收敛失败：${settleError.error}`,
+                            error: `${primaryError}；跨根 staging 收敛失败：${settleError.error}`,
                             committedBucketCount,
                             catchUpPlan: plan,
                             dataCommitted: committedBucketCount > 0,
                             replayVerified: false,
                             terminalProgressSaved: false,
-                            diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                            diagnosticCode: settleError.diagnosticCode ?? 'boundary_commit_failed',
                         };
                     }
                     const terminalError = await persistCatchUpTerminalProgress(result.aborted ? 'stopped' : 'failed', primaryError);
@@ -3508,26 +3710,26 @@ export async function orchestrateManualCatchUp_ACU(
             await loadAllChatMessages_ACU();
         }
 
-        // provisional bridge 收尾：wave 循环结束后 bridge 仍活跃（所有目标都早于原 full
-        // 边界，未触发循环内 finalize）时，必须把已提交成果汇合回原根；零提交则回滚。
-        // 这是 run 的正常终态，不能留下 active bridge 残留等下次启动才恢复。
-        if (provisionalBridgeOriginalFullIndex !== null && !provisionalBridgeFinalized) {
-            const settleResult = await settleProvisionalBridge();
+        // 跨根 staging 收尾：wave 循环结束后 staging 仍活跃（所有目标都早于原 full
+        // 边界，未触发循环内汇合）时，必须把已提交成果原子汇合回原根；零 staging 则
+        // 丢弃。这是 run 的正常终态，staging 只是内存状态，不会遗留持久化改写。
+        if (boundaryPlan && !boundaryCommitted) {
+            const settleResult = await settleStagingBoundary();
             if (!settleResult.ok) {
                 const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
                 return {
                     success: false,
                     outcome: 'integrity_failed',
-                    error: `provisional bridge 收敛失败：${settleError.error}`,
+                    error: `跨根 staging 收敛失败：${settleError.error}`,
                     committedBucketCount,
                     catchUpPlan: plan,
                     dataCommitted: committedBucketCount > 0,
                     replayVerified: false,
                     terminalProgressSaved: false,
-                    diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                    diagnosticCode: settleError.diagnosticCode ?? 'boundary_commit_failed',
                 };
             }
-            logDebug_ACU(`[手动追平] provisional bridge 收尾${provisionalBridgeFinalized ? '汇合' : '回滚'}完成：originalFull=${provisionalBridgeOriginalFullIndex}。`);
+            logDebug_ACU(`[手动追平] 跨根 staging 收尾${boundaryCommitted ? '汇合' : '丢弃'}完成：originalFull=${boundaryPlan.scope.originalFullIndex}。`);
         }
 
         const replayVerification = await verifyCommittedCatchUpReplay();
@@ -3601,20 +3803,20 @@ export async function orchestrateManualCatchUp_ACU(
         return { success: true, outcome: 'complete', committedBucketCount, dataCommitted: committedBucketCount > 0, replayVerified: true, terminalProgressSaved: true, catchUpPlan: plan };
     } catch (error: any) {
         const primaryError = error?.message || String(error || '手动追平执行异常。');
-        // 终态不变量：failed 只能在 provisional 会话已 finalize/rollback 后写入。
-        // 异常路径同样先收敛 bridge；收敛失败则返回 integrity_failed，不写误导性 failed 终态。
-        const settleResult = await settleProvisionalBridge();
+        // 终态不变量：failed 只能在 staging 已汇合或丢弃后写入。
+        // 异常路径同样先收敛 staging；收敛失败则返回 integrity_failed，不写误导性 failed 终态。
+        const settleResult = await settleStagingBoundary();
         if (!settleResult.ok) {
             const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
             return {
                 success: false,
-                error: `${primaryError}；provisional bridge 收敛失败：${settleError.error}`,
+                error: `${primaryError}；跨根 staging 收敛失败：${settleError.error}`,
                 committedBucketCount,
                 catchUpPlan: plan,
                 dataCommitted: committedBucketCount > 0,
                 replayVerified: false,
                 terminalProgressSaved: false,
-                diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                diagnosticCode: settleError.diagnosticCode ?? 'boundary_commit_failed',
             };
         }
         const terminalError = await persistCatchUpTerminalProgress('failed', primaryError);
@@ -3660,51 +3862,63 @@ export async function orchestrateManualUpdate_ACU(
         executionSnapshot?: { sheetKeys: string[] };
     } = {},
 ): Promise<ManualUpdateResult> {
-    let manualRefillSessionSnapshot: ReturnType<typeof captureManualRefillSessionSnapshot_ACU> | null = null;
-    let manualRefillRollbackAttempted = false;
     let committedBucketCount = 0;
-    // 回滚只用于“清理已发生但一个 bucket 都没成功”的窗口：此时旧数据已被删、
-    // 新数据尚未写入，必须还原以免净损失。
-    //
-    // 一旦有 bucket 成功提交（用户中途终止、网络中断、后续批次失败），就绝不回滚：
-    // 已填好的楼层是用户的真实成果，回滚会把它们连同旧数据一起丢掉。首个成功 bucket
-    // 在锚点缺失时已由 persist 层写成 init full checkpoint，因此保留下来的增量可以回放。
-    const rollbackManualRefillSession = async (): Promise<string | undefined> => {
-        if (committedBucketCount > 0) return undefined;
-        if (!manualRefillSessionSnapshot || manualRefillRollbackAttempted) return undefined;
-        manualRefillRollbackAttempted = true;
+    // 跨根 staging 作用域（仅 manualRefillEnabled 且跨根时启用；提升到函数级以便
+    // chunk 循环内 settle 与收尾共用）。non-null 断言仅在 requiresBoundaryStaging
+    // 分支内使用，普通路径保持 null。
+    let boundaryPlan: TableFillBoundaryStagingPlan_ACU | null = null;
+    let stagingRun: TableFillStagingRunContext_ACU | null = null;
+    let boundaryCommitted = false;
+    // 破坏性清理是否已开始：清理一旦开始即不可逆（失败不回滚、不恢复已删数据），
+    // 后续任何失败都必须走 failManualRefillSession 对齐运行时，而不是裸抛。
+    let refillCleanupStarted = false;
+    // 手动重填失败语义（计划 §5.5 / §5.6，已删除旧 snapshot/rollback 机制）：
+    // 破坏性清理不可逆，失败绝不回滚、绝不恢复已删数据；已提交的 bucket 成果保留，
+    // 仅按聊天记录里的已提交事实重新对齐运行时快照，避免界面显示与持久化不一致。
+    // 手动追平/自动填表路径的 staging 汇合失败会自行返回 integrity_failed，不在此回滚。
+    const failManualRefillSession = async (failureError: string): Promise<ManualUpdateResult> => {
+        // 清理失败或 bucket 失败后：运行时快照可能停在中间态，必须按聊天记录里的
+        // 已提交事实重新同步，否则界面会显示与持久化结果不一致的数据。
+        // 不回滚、不恢复已删数据；已提交成果保留。
         try {
-            await restoreManualRefillSessionSnapshotAtomic_ACU(
-                manualRefillSessionSnapshot,
-                getCurrentIsolationKey_ACU(),
-                targetKeys,
-            );
             await loadAllChatMessages_ACU();
             await refreshData();
-            return undefined;
-        } catch (error: any) {
-            const rollbackError = error?.message || String(error || '未知回滚错误');
-            logError_ACU('[Manual Refill] 手动重填会话回滚失败:', error);
-            return rollbackError;
-        }
-    };
-    const failManualRefillSession = async (failureError: string): Promise<ManualUpdateResult> => {
-        const rollbackError = await rollbackManualRefillSession();
-        if (!rollbackError && committedBucketCount > 0) {
-            // 未回滚时运行时快照可能停在中间态，需要按聊天记录里的已提交事实重新同步，
-            // 否则界面会显示与持久化结果不一致的数据。
-            try {
-                await loadAllChatMessages_ACU();
-                await refreshData();
-            } catch (refreshError) {
-                logWarn_ACU('[Manual Refill] 已提交 bucket 后刷新运行时数据失败:', refreshError);
-            }
+        } catch (refreshError) {
+            logWarn_ACU('[Manual Refill] 失败后刷新运行时数据失败:', refreshError);
         }
         return {
             success: false,
-            error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError,
+            error: failureError,
         };
     };
+    // 跨根 staging 汇合：边界前 bucket 只进入 run 级 staging（不写聊天 V2 frame），
+    // 到达原 full 边界时把累计目标表快照原子折叠为原根的 sheet_rebase（正式根），
+    // 边界后段恢复普通逐 bucket 持久化。零 staging 则直接丢弃（不写任何聊天帧）。
+    const settleStagingBoundary = async (): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: string }> => {
+        if (!boundaryPlan || boundaryCommitted) return { ok: true };
+        if (!stagingRun || stagingRun.stagedBucketCount === 0) {
+            boundaryCommitted = true;
+            return { ok: true };
+        }
+        const fullIndex = boundaryPlan.scope.originalFullIndex;
+        if (fullIndex === null) {
+            boundaryCommitted = true;
+            return { ok: true };
+        }
+        const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
+            chatKey: stagingRun.chatKey,
+            isolationKey: stagingRun.isolationKey,
+            originalFullIndex: fullIndex,
+            stagedSnapshot: stagingRun.lastStagedSnapshot ?? {},
+            targetSheetKeys: stagingRun.targetSheetKeys,
+        });
+        if (!commitResult.ok) {
+            return { ok: false, error: (commitResult as { ok: false; error: string }).error, diagnosticCode: (commitResult as { ok: false; diagnosticCode?: string }).diagnosticCode ?? 'boundary_commit_failed' };
+        }
+        boundaryCommitted = true;
+        return { ok: true };
+    };
+
     try {
         if (isAutoUpdatingCard_ACU) {
             return { success: false, error: '数据库更新正在进行中，请稍候...' };
@@ -3823,12 +4037,10 @@ export async function orchestrateManualUpdate_ACU(
         if (manualRefillEnabled) {
 
             const currentIsolationKey = getCurrentIsolationKey_ACU();
-            const rollbackMessageIndices = collectManualRefillRollbackMessageIndices_ACU(liveChat, currentIsolationKey, contextScopeIndices);
-
+            const refillTargetIndex = contextScopeIndices[contextScopeIndices.length - 1];
             // Task 4 破坏性清理前准入：重填会先清空范围内旧数据，若最新 full checkpoint
             // 晚于重填范围末尾，清理后写入目标早于回放根，必然撞 persist 层 fail-fast。
             // 必须在删除任何数据前阻止，避免用户数据先被清空才报错。
-            const refillTargetIndex = contextScopeIndices[contextScopeIndices.length - 1];
             const refillAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
                 chat: liveChat,
                 isolationKey: currentIsolationKey,
@@ -3839,7 +4051,35 @@ export async function orchestrateManualUpdate_ACU(
                 return { success: false, error: `手动重填被回放根准入阻断${refillAdmission.reason}` };
             }
 
-            manualRefillSessionSnapshot = captureManualRefillSessionSnapshot_ACU(rollbackMessageIndices);
+            // 跨根 staging 判定：重填范围首个目标早于原 full checkpoint 时，
+            // 中间 bucket 若按普通 persist 写入会撞 persist 层 fail-fast（写目标早于回放根）。
+            // 必须改为边界前 stage_only（不写聊天帧）、边界处原子汇合、边界后普通 persist。
+            const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, currentIsolationKey);
+            const requiresBoundaryStaging = originalFullIndex >= 0 && contextScopeIndices.length > 0 && contextScopeIndices[0] < originalFullIndex;
+            if (requiresBoundaryStaging) {
+                const templateFingerprint = getTableDataFingerprint_ACU(parseTableTemplateJson_ACU({ stripSeedRows: true }) || {});
+                boundaryPlan = planTableFillBoundaryStaging_ACU({
+                    runKind: 'manual_refill',
+                    runId: `manual-refill-${Date.now()}`,
+                    chatKey: currentChatFileIdentifier_ACU,
+                    isolationKey: currentIsolationKey,
+                    targetSheetKeys: targetKeys,
+                    templateFingerprint,
+                    messageIndices: contextScopeIndices,
+                    fullCheckpointIndices: [originalFullIndex],
+                });
+                stagingRun = {
+                    runId: boundaryPlan.scope.runId,
+                    chatKey: boundaryPlan.scope.chatKey,
+                    isolationKey: boundaryPlan.scope.isolationKey,
+                    targetSheetKeys: [...boundaryPlan.scope.targetSheetKeys],
+                    stagedWorkingData: null,
+                    lastStagedSnapshot: null,
+                    lastStagedTargetMessageIndex: null,
+                    stagedBucketCount: 0,
+                };
+                logDebug_ACU(`[Manual Refill] 跨根 staging 已启用：originalFull=${originalFullIndex}, 范围 [${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}]，边界前 bucket 仅写入 staging。`);
+            }
 
             // 重填会先删除持久化增量，不能在 SQLite runtime 尚未 ready 时进入破坏性阶段。
             // native 路径没有 SQLite 后置条件，保持既有行为。
@@ -3862,12 +4102,14 @@ export async function orchestrateManualUpdate_ACU(
             }
 
             try {
+                // 破坏性清理不可逆：一旦开始，后续任何失败都不回滚、不恢复已删数据。
+                refillCleanupStarted = true;
                 await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 清理本次范围内选中表旧数据失败:', error);
-                const rollbackError = await rollbackManualRefillSession();
                 const failureError = error?.message || '手动重填清理本次范围内选中表旧数据失败。';
-                return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
+                // 清理已部分发生且不可逆：不回滚、不恢复已删数据，直接失败返回。
+                return { success: false, error: failureError };
             }
             logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${contextScopeIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
 
@@ -3878,9 +4120,8 @@ export async function orchestrateManualUpdate_ACU(
                 }
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
-                const rollbackError = await rollbackManualRefillSession();
                 const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
-                return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
+                return { success: false, error: failureError };
             }
 
         }
@@ -3891,12 +4132,12 @@ export async function orchestrateManualUpdate_ACU(
         // 无论是否重填路径，都必须在调用 AI 前 fail-closed。
         // 注意：重填路径执行到这里时，破坏性清理与 reload 已经发生。若 runtime 在此间变化，
         // 直接 return 会绕过 failManualRefillSession，导致“旧数据已清、新数据未写”的净损失。
-        // 因此重填路径必须走 failManualRefillSession（零提交时恢复 manualRefillSessionSnapshot）。
+        // 因此重填路径必须走 failManualRefillSession（不回滚、保留删除，按已提交事实对齐运行时）。
         if (options.executionSnapshot !== undefined) {
             if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
                 logWarn_ACU('[Manual Update] runtime 在 AI 调用前一刻变化，已阻止手动更新（快照未匹配）。');
                 if (manualRefillEnabled) {
-                    return await failManualRefillSession('表格运行时在确认期间发生变化，已取消本次手动填表并回滚已清理的数据，请确认后重试。');
+                    return await failManualRefillSession('表格运行时在确认期间发生变化，已取消本次手动填表；已清理的数据不可恢复，请确认后重试。');
                 }
                 return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
             }
@@ -3997,27 +4238,98 @@ export async function orchestrateManualUpdate_ACU(
                 if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
                     logWarn_ACU(`[Manual Update] runtime 在第 ${chunkIndex} 批 AI 调用前一刻变化，已阻止该批执行（快照未匹配）。`);
                     if (manualRefillEnabled) {
-                        return await failManualRefillSession('表格运行时在确认期间发生变化，已取消本次手动填表并回滚已清理的数据，请确认后重试。');
+                        return await failManualRefillSession('表格运行时在确认期间发生变化，已取消本次手动填表；已清理的数据不可恢复，请确认后重试。');
                     }
                     return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
                 }
             }
             try {
-                const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
-                    onProgress: options.onProgress,
-                    // 重填路径：中间 bucket 目标早于清理后保留的旧 full checkpoint 是预期，
-                    // 由清理前 refillAdmission 与末尾原子完整 checkpoint 契约保证安全。
-                    skipWriteTargetAdmission: manualRefillEnabled,
-                    // 范围内旧增量已在预清理中删除，提交时无需再做增量替换。
-                    replaceExistingIncremental: false,
-                });
-                committedBucketCount += chunkResult.committedBucketCount;
-                if (!chunkResult.success) {
-                    chunkResult.failedGroups.forEach(key => {
-                        failedGroups.push({ key, error: chunkResult.error || '手动更新失败或被终止。' });
+                // 非跨根或未启用 staging：普通逐组执行（与旧路径完全一致）。
+                if (!manualRefillEnabled || !boundaryPlan || !stagingRun) {
+                    const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
+                        onProgress: options.onProgress,
+                        // 重填路径：中间 bucket 目标早于清理后保留的旧 full checkpoint 是预期，
+                        // 由清理前 refillAdmission 与末尾原子完整 checkpoint 契约保证安全。
+                        skipWriteTargetAdmission: manualRefillEnabled,
+                        // 范围内旧增量已在预清理中删除，提交时无需再做增量替换。
+                        replaceExistingIncremental: false,
                     });
-                    if (chunkResult.failedGroups.length === 0) {
-                        failedGroups.push({ key: chunkKeys[0] || 'manual_refill', error: chunkResult.error || '手动更新已终止。' });
+                    committedBucketCount += chunkResult.committedBucketCount;
+                    if (!chunkResult.success) {
+                        chunkResult.failedGroups.forEach(key => {
+                            failedGroups.push({ key, error: chunkResult.error || '手动更新失败或被终止。' });
+                        });
+                        if (chunkResult.failedGroups.length === 0) {
+                            failedGroups.push({ key: chunkKeys[0] || 'manual_refill', error: chunkResult.error || '手动更新已终止。' });
+                        }
+                    }
+                } else {
+                    // 跨根 staging：组内索引按原 full 边界拆段，pre 段 stage_only、边界汇合、post 段 persist。
+                    for (const group of groupedChunk) {
+                        let groupFailed = false;
+                        const groupIndices = [...(group.indices || [])].sort((a, b) => a - b);
+                        const segments = splitMessageIndicesAtBoundary_ACU(groupIndices, boundaryPlan.scope.originalFullIndex);
+                        const preSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] < boundaryPlan!.scope.originalFullIndex!);
+                        const postSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] >= boundaryPlan!.scope.originalFullIndex!);
+
+                        for (const preSegment of preSegments) {
+                            const preGroups: GroupedRuntimeUpdateGroup_ACU[] = [{
+                                ...group,
+                                indices: [...preSegment.indices],
+                                mergeBaseMaxMessageIndex: preSegment.mergeBaseMaxMessageIndex,
+                            }];
+                            const preResult = await processGroupedRuntimeChunk_ACU(preGroups, 'manual_independent', {
+                                onProgress: options.onProgress,
+                                skipWriteTargetAdmission: true,
+                                replaceExistingIncremental: false,
+                                commitMode: 'stage_only',
+                                syncAfterCommit: false,
+                            });
+                            committedBucketCount += preResult.committedBucketCount;
+                            if (!preResult.success) {
+                                failedGroups.push({ key: group.key, error: preResult.error || '边界前 staging 提交失败。' });
+                                groupFailed = true;
+                                break;
+                            }
+                            // 累积 staging 快照：bucket 提交后 runtime 已更新为目标表最新 AI 结果。
+                            if (stagingRun) {
+                                const stagedData = (currentJsonTableData_ACU as Record<string, any> | null) || {};
+                                stagingRun.lastStagedSnapshot = JSON.parse(JSON.stringify(stagedData));
+                                stagingRun.lastStagedTargetMessageIndex = preSegment.saveTargetIndex;
+                                stagingRun.stagedBucketCount += 1;
+                                stagingRun.stagedWorkingData = stagingRun.lastStagedSnapshot;
+                            }
+                        }
+
+                        // 首个 post 段提交前收敛 staging：边界前累计快照原子折叠回原根。
+                        // pre 段已失败时不得继续 settle 或写入 post 段（该组整体失败）。
+                        if (!groupFailed && postSegments.length > 0) {
+                            const settleResult = await settleStagingBoundary();
+                            if (!settleResult.ok) {
+                                failedGroups.push({ key: group.key, error: `跨根 staging 汇合失败：${(settleResult as { ok: false; error: string }).error}` });
+                                groupFailed = true;
+                                break;
+                            }
+                        }
+
+                        for (const postSegment of groupFailed ? [] : postSegments) {
+                            const postGroups: GroupedRuntimeUpdateGroup_ACU[] = [{
+                                ...group,
+                                indices: [...postSegment.indices],
+                                mergeBaseMaxMessageIndex: postSegment.mergeBaseMaxMessageIndex,
+                            }];
+                            const postResult = await processGroupedRuntimeChunk_ACU(postGroups, 'manual_independent', {
+                                onProgress: options.onProgress,
+                                skipWriteTargetAdmission: true,
+                                replaceExistingIncremental: false,
+                            });
+                            committedBucketCount += postResult.committedBucketCount;
+                            if (!postResult.success) {
+                                failedGroups.push({ key: group.key, error: postResult.error || '边界后提交失败。' });
+                                break;
+                            }
+                        }
+                        if (failedGroups.length > 0) break;
                     }
                 }
 
@@ -4032,6 +4344,19 @@ export async function orchestrateManualUpdate_ACU(
 
             if (failedGroups.length > 0) {
                 break;
+            }
+        }
+
+        // 跨根 staging 收尾：若所有目标都早于原 full 边界（未触发循环内汇合），
+        // 正常完成时仍须把已提交 staging 成果原子汇合回原根；零 staging 则丢弃。
+        // 这是 run 的正常终态，staging 只是内存状态，不会遗留持久化改写。
+        if (manualRefillEnabled && boundaryPlan && stagingRun && !boundaryCommitted) {
+            const settleResult = await settleStagingBoundary();
+            if (!settleResult.ok) {
+                logError_ACU(`[Manual Refill] 跨根 staging 收尾汇合失败: ${(settleResult as { ok: false; error: string }).error}`);
+                failedGroups.push({ key: 'manual_refill_staging_settle', error: `跨根 staging 汇合失败：${(settleResult as { ok: false; error: string }).error}` });
+            } else {
+                logDebug_ACU(`[Manual Refill] 跨根 staging 收尾${boundaryCommitted ? '汇合' : '丢弃'}完成：originalFull=${boundaryPlan.scope.originalFullIndex}。`);
             }
         }
 
@@ -4111,11 +4436,14 @@ export async function orchestrateManualUpdate_ACU(
 
         return { success: true, autoMergeTriggered, autoMergeSuccess, checkpointWarning };
     } catch (error: any) {
-        if (!manualRefillSessionSnapshot) {
+        // 破坏性清理尚未开始：异常原样抛出（可能是普通路径的配置/准入错误，或
+        // 发生在清理之前的规划错误），不吞掉，由上层按既有方式处理。
+        if (!refillCleanupStarted) {
             throw error;
         }
         const failureError = error?.message || String(error || '手动更新执行异常。');
         logError_ACU('[Manual Update] 执行过程中发生未处理异常:', error);
+        // 清理已开始：不可逆，不回滚、不恢复已删数据；失败按已提交事实对齐运行时。
         return await failManualRefillSession(failureError);
     } finally {
         _set_manualExtraHint_ACU('');

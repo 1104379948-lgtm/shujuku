@@ -323,3 +323,64 @@ describe('runTableUpdateCommit_ACU migration gate', () => {
     expect(mocks.persist).not.toHaveBeenCalled();
   });
 });
+
+
+describe('runTableUpdateCommit_ACU stage_only 判别联合（计划 5.3）', () => {
+  beforeEach(() => {
+    mocks.currentChatKey = 'chat-a';
+    mocks.currentIsolationKey = 'scope-a';
+    mocks.migration.mockReset().mockResolvedValue({ success: true, migrated: false });
+    mocks.reload.mockReset();
+    mocks.transaction.mockReset();
+    mocks.persist.mockReset();
+    mocks.ensureProvider.mockReset();
+    mocks.setCurrentData.mockReset();
+  });
+
+  it('stage_only 不调用 migration、bridge gate、persist，只更新运行时快照', async () => {
+    const stagedData: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_target: { uid: 'sheet_target', name: '目标表', content: [['row_id'], ['r1']] },
+    };
+    mocks.transaction.mockImplementation(async (transactionOptions: any, task: any) => {
+      expect(transactionOptions.workingDataMode).toBe('none');
+      return task({ runCommit: async (commitTask: any) => commitTask() }, null);
+    });
+
+    const result = await runTableUpdateCommit_ACU({
+      ...options('test_stage_only_commit'),
+      commitMode: 'stage_only',
+      workingDataMode: 'none',
+      targetSheetKeys: ['sheet_target'],
+    }, async () => ({ success: true, tableData: stagedData, value: 'staged' }));
+
+    expect(result).toMatchObject({ success: true, value: 'staged', saved: false });
+    expect(mocks.migration).not.toHaveBeenCalled();
+    expect(mocks.persist).not.toHaveBeenCalled();
+    expect(mocks.reload).not.toHaveBeenCalled();
+    expect(mocks.setCurrentData).toHaveBeenCalledTimes(1);
+  });
+
+  it('stage_only 在应用阶段检测到聊天切换时 fail-closed', async () => {
+    mocks.transaction.mockImplementation(async (_options: any, task: any) => {
+      mocks.currentChatKey = 'chat-b';
+      mocks.currentIsolationKey = 'scope-b';
+      return task({ runCommit: async (commitTask: any) => commitTask() }, null);
+    });
+
+    const result = await runTableUpdateCommit_ACU({
+      ...options('test_stage_only_scope_guard'),
+      commitMode: 'stage_only',
+      chatKey: 'chat-a',
+      isolationKey: 'scope-a',
+    }, async () => ({ success: true, tableData: { mate: { type: 'acu', version: 1 } } }));
+
+    expect(result).toMatchObject({
+      success: false,
+      errorCategory: 'precondition',
+      error: expect.stringContaining('聊天或隔离标识已切换'),
+    });
+    expect(mocks.persist).not.toHaveBeenCalled();
+    expect(mocks.setCurrentData).not.toHaveBeenCalled();
+  });
+});
