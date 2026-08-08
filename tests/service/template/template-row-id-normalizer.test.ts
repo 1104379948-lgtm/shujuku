@@ -158,7 +158,93 @@ describe('normalizeTemplateRowIds_ACU', () => {
     const result = normalizeTemplateRowIds_ACU(input);
     expect(result.blockers.map(b => b.code)).toEqual(['misplaced_row_id', 'duplicate_row_id_header']);
   });
+
+  it('首列 null 占位原地规范化为 row_id，不插列、不右移', () => {
+    const input = state({ sheet_a: sheet('A', [null as any, '名称'], [['', '铁剑'], ['7', '盾牌']]) });
+    const result = normalizeTemplateRowIds_ACU(input);
+    expect(result.blockers).toEqual([]);
+    expect(result.changed).toBe(true);
+    expect(result.templateData.sheet_a.content).toEqual([
+      ['row_id', '名称'], ['8', '铁剑'], ['7', '盾牌'],
+    ]);
+    expect(result.audits[0].headerAction).toBe('renamed');
+    expect(result.templateData.sheet_a.content[0]).toHaveLength(2);
+  });
+
+  it('首列 undefined 占位（对象入口经 JSON 深拷贝后为 null）同样规范化为 row_id', () => {
+    const input = state({ sheet_a: sheet('A', [undefined as any, '名称'], [['1', '铁剑']]) });
+    const result = normalizeTemplateRowIds_ACU(input);
+    expect(result.blockers).toEqual([]);
+    expect(result.changed).toBe(true);
+    expect(result.templateData.sheet_a.content).toEqual([['row_id', '名称'], ['1', '铁剑']]);
+    expect(result.audits[0].headerAction).toBe('renamed');
+  });
+
+  it('多张首列为 null 的表均独立规范化，业务列顺序保持不变', () => {
+    const input = state({
+      sheet_worldview: sheet('世界观', [null as any, '主要世界观', '力量体系'], [['', '高魔', '强者']]),
+      sheet_system: sheet('系统', [null as any, '系统名', '版本'], [['', '斗气', '1.0']]),
+    });
+    const result = normalizeTemplateRowIds_ACU(input);
+    expect(result.blockers).toEqual([]);
+    expect(result.templateData.sheet_worldview.content).toEqual([
+      ['row_id', '主要世界观', '力量体系'], ['1', '高魔', '强者'],
+    ]);
+    expect(result.templateData.sheet_system.content).toEqual([
+      ['row_id', '系统名', '版本'], ['1', '斗气', '1.0'],
+    ]);
+    expect(result.audits).toHaveLength(2);
+    expect(result.audits.every(audit => audit.headerAction === 'renamed')).toBe(true);
+  });
+
+  it('首列 null 占位 + content 数据行与 seedRows：行宽不变、身份分配正确、不重复插列', () => {
+    const input = state({ sheet_a: sheet('A', [null as any, '名称'], [['', '铁剑']], { seedRows: [['', '盾牌']] }) });
+    const result = normalizeTemplateRowIds_ACU(input);
+    expect(result.blockers).toEqual([]);
+    expect(result.templateData.sheet_a.content).toEqual([['row_id', '名称'], ['1', '铁剑']]);
+    expect(result.templateData.sheet_a.seedRows).toEqual([['2', '盾牌']]);
+    expect(result.templateData.sheet_a.content[1]).toHaveLength(2);
+    expect(result.templateData.sheet_a.seedRows[0]).toHaveLength(2);
+    expect(result.audits[0].generatedRowIdCount).toBe(2);
+  });
+
 });
+
+
+  it('首列 null 占位 + 合法 SQLite DDL：规范化成功且不重复注入 row_id', () => {
+    const input = state({ sheet_a: sheet('A', [null as any, '时间', '摘要'], [['', 'T1', 'A']], {
+      sourceData: { ddl: 'CREATE TABLE a (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  time TEXT, -- 时间\n  summary TEXT -- 摘要\n);' },
+    }) });
+    const result = normalizeTemplateRowIds_ACU(input, { syncDdl: true });
+    expect(result.blockers).toEqual([]);
+    expect(result.templateData.sheet_a.content).toEqual([['row_id', '时间', '摘要'], ['1', 'T1', 'A']]);
+    expect(result.templateData.sheet_a.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+    expect(result.audits[0].ddlUpdated).toBe(false);
+    expect(result.audits[0].headerAction).toBe('renamed');
+  });
+
+  it('首列 null 占位 + 非法 DDL：仍返回 invalid_ddl，不被本修复放行', () => {
+    const input = state({ sheet_a: sheet('A', [null as any, '时间', '摘要'], [['', 'T1', 'A']], {
+      sourceData: { ddl: 'CREATE TABLE a (\n  time TEXT -- 时间\n, summary TEXT -- 摘要\n, row_id TEXT\n);' },
+    }) });
+    const result = normalizeTemplateRowIds_ACU(input, { syncDdl: true });
+    expect(result.blockers[0].code).toBe('invalid_ddl');
+    expect(result.changed).toBe(false);
+  });
+
+  it('[名称, row_id] 错位 row_id 仍阻断', () => {
+    const input = state({ sheet_a: sheet('A', ['名称', 'row_id'], [['T1', '1']]) });
+    const result = normalizeTemplateRowIds_ACU(input);
+    expect(result.blockers[0].code).toBe('misplaced_row_id');
+  });
+
+  it('[row_id, null] 非首列空表头在规范化层不吞掉、不修改（拒绝交由导入 validator）', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', null as any], [['1', 'A']]) });
+    const result = normalizeTemplateRowIds_ACU(input);
+    expect(result.blockers).toEqual([]);
+    expect(result.templateData.sheet_a.content[0]).toEqual(['row_id', null]);
+    expect(result.audits[0].headerAction).toBe('unchanged');
+  });
 
 describe('normalizeTemplateRowIds_ACU 跨来源完全重复去重', () => {
   it('content 与 seedRows 相同 row_id 且完整行相同：去重成功，seedRows 删除副本，无 blocker', () => {

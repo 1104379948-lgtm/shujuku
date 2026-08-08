@@ -555,6 +555,42 @@ describe('parseImportedTemplateData_ACU', () => {
     expect(() => parseImportedTemplateData_ACU(template)).toThrow(TemplateImportValidationError_ACU);
     expect(sanitizeTemplateSnapshotForChat_ACU).not.toHaveBeenCalled();
   });
+
+  it('多张首列为 null 占位的表经真实导入入口规范化，不再报第 2 列列名不能为空', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_worldview: {
+        uid: 'sheet_worldview', name: '世界观',
+        content: [[null, '主要世界观', '力量体系'], ['', '高魔', '强者']],
+        sourceData: { ddl: 'CREATE TABLE worldview (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  worldview TEXT, -- 主要世界观\n  power_system TEXT -- 力量体系\n);' },
+      },
+      sheet_system: {
+        uid: 'sheet_system', name: '系统',
+        content: [[null, '系统名', '版本'], ['', '斗气', '1.0']],
+        sourceData: { ddl: 'CREATE TABLE system (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  name TEXT, -- 系统名\n  version TEXT -- 版本\n);' },
+      },
+    };
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value), templateObj: value,
+    }));
+
+    const result = parseImportedTemplateData_ACU(template);
+
+    expect(result).toHaveProperty('snapshot');
+    expect(result).toHaveProperty('templateObj');
+    expect(result.templateObj.sheet_worldview.content).toEqual([
+      ['row_id', '主要世界观', '力量体系'], ['1', '高魔', '强者'],
+    ]);
+    expect(result.templateObj.sheet_system.content).toEqual([
+      ['row_id', '系统名', '版本'], ['1', '斗气', '1.0'],
+    ]);
+    expect(result.templateObj.sheet_worldview.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+    expect(result.templateObj.sheet_system.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+    // 输入对象不被修改
+    expect(template.sheet_worldview.content[0]).toEqual([null, '主要世界观', '力量体系']);
+    expect(template.sheet_system.content[0]).toEqual([null, '系统名', '版本']);
+  });
+
 });
 
 describe('validateImportedTemplateObject_ACU', () => {

@@ -310,11 +310,15 @@ function normalizeSheetRowId_ACU(
     return;
   }
 
+  // 可视化编辑器使用 content[0][0] === null/undefined 表示不可编辑的 row_id 占位，
+  // 与 sql-identifier-mapper.ts 的首列 null/undefined row_id 身份契约一致（仅限首列）。
+  const firstIsRowIdPlaceholder = header[0] === null || header[0] === undefined;
+  // 占位本身就是身份列，不能进入“缺失身份列”的扫描/插入语义。
   const firstIsRowId = isRowIdHeader_ACU(header[0]);
-  const firstIsAlias = !firstIsRowId && isRowIdAliasHeader_ACU(header[0]);
+  const firstIsAlias = !firstIsRowId && !firstIsRowIdPlaceholder && isRowIdAliasHeader_ACU(header[0]);
   let misplacedIndex = -1;
   let duplicateHeaderIndex = -1;
-  if (!firstIsRowId && !firstIsAlias) {
+  if (!firstIsRowId && !firstIsAlias && !firstIsRowIdPlaceholder) {
     for (let index = 1; index < header.length; index += 1) {
       if (isRowIdHeader_ACU(header[index])) {
         misplacedIndex = index;
@@ -360,7 +364,12 @@ function normalizeSheetRowId_ACU(
   }
 
   let changed = false;
-  if (firstIsAlias) {
+  if (firstIsRowIdPlaceholder) {
+    // 占位规范化：原地替换为文本 row_id，不增加列、不移动业务列、不改数据行。
+    header[0] = 'row_id';
+    audit.headerAction = 'renamed';
+    changed = true;
+  } else if (firstIsAlias) {
     header[0] = 'row_id';
     audit.headerAction = 'renamed';
     changed = true;
