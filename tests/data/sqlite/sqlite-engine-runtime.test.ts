@@ -2,9 +2,11 @@
 /**
  * tests/data/sqlite/sqlite-engine-runtime.test.ts
  * 验证 T5 运行时初始化收敛：单一初始化 Promise、并发去重、失败可重试、
- * loadFromBinary 不再旁路独立 initSqlJs。
+ * loadFromBinary 不再旁路独立 initSqlJs；T6 验证 base64 内联 wasmBinary。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 const h = vi.hoisted(() => ({
   initSqlJs: vi.fn(),
@@ -41,9 +43,16 @@ beforeEach(() => {
   vi.clearAllMocks();
   runtime = fakeRuntime();
   h.initSqlJs.mockResolvedValue(runtime);
+  // 注入构建期常量：真实读取 node_modules wasm 编码为 base64，
+  // 使 buildInitConfig_ACU 走内联 wasmBinary 路径（而非测试环境空兜底）。
+  const wasm = readFileSync(join(process.cwd(), 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm'));
+  (globalThis as any).__ACU_SQLITE_WASM_BASE64__ = wasm.toString('base64');
+  (globalThis as any).__ACU_SQLITE_ENGINE__ = 'wasm';
 });
 
 afterEach(() => {
+  delete (globalThis as any).__ACU_SQLITE_WASM_BASE64__;
+  delete (globalThis as any).__ACU_SQLITE_ENGINE__;
   vi.restoreAllMocks();
 });
 
@@ -78,23 +87,23 @@ describe('SqliteEngine T5 运行时初始化收敛', () => {
     engine.dispose();
   });
 
-  it('T6：initSqlJs 收到 locateFile 配置（wasm 定位）', async () => {
+  it('T6：initSqlJs 收到 wasmBinary 配置（base64 内联 wasm）', async () => {
     const engine = new SqliteEngine();
     await engine.init();
     expect(h.initSqlJs).toHaveBeenCalledWith(
-      expect.objectContaining({ locateFile: expect.any(Function) })
+      expect.objectContaining({ wasmBinary: expect.any(Uint8Array) })
     );
     engine.dispose();
   });
 
-  it('T6：locateFile 返回可解析的 wasm URL', async () => {
+  it('T6：wasmBinary 是合法 base64 解码出的 wasm 二进制', async () => {
     const engine = new SqliteEngine();
     await engine.init();
-    const config = h.initSqlJs.mock.calls[0][0] as { locateFile?: (file: string) => string };
-    expect(typeof config?.locateFile).toBe('function');
-    const url = config!.locateFile!('sql-wasm.wasm');
-    // node 环境回落 import.meta.url 目录（file://）
-    expect(url).toMatch(/sql-wasm\.wasm$/);
+    const config = h.initSqlJs.mock.calls[0][0] as { wasmBinary?: Uint8Array };
+    expect(config?.wasmBinary).toBeInstanceOf(Uint8Array);
+    // 内联 wasm 以 magic \0asm 开头，且字节数非空
+    expect(config!.wasmBinary!.byteLength).toBeGreaterThan(0);
+    expect(Array.from(config!.wasmBinary!.slice(0, 4))).toEqual([0, 97, 115, 109]);
     engine.dispose();
   });
 

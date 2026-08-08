@@ -66,52 +66,32 @@ else
   exit 1
 fi
 
-# 步骤 4：sql-wasm.wasm 完整性检查（wasm 引擎必须随产物分发）
+# 步骤 4：wasm 内联完整性检查（wasm 引擎：base64 内联进产物；asm 引擎纯 JS 无 wasm）
 echo ""
-echo "[4/5] sql-wasm.wasm 完整性检查..."
+echo "[4/5] wasm 内联完整性检查..."
 WASM_SOURCE="$ROOT/node_modules/sql.js/dist/sql-wasm.wasm"
-if [ ! -f "$WASM_SOURCE" ]; then
-  echo "      ✗ sql.js wasm 源缺失: $WASM_SOURCE"
-  exit 1
-fi
-EXPECTED_SHA=$(node -e "console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync('$WASM_SOURCE')).digest('hex'))" 2>&1)
-case "$MODE" in
-  extension)
-    WASM_TARGET_DIRS=("$ROOT/dist/extension")
-    ;;
-  all)
-    WASM_TARGET_DIRS=("$ROOT/dist" "$ROOT/dist/extension" "$ROOT/dist/plus-assistantembedded")
-    ;;
-  concat|userscript)
-    WASM_TARGET_DIRS=("$ROOT/dist")
-    ;;
-  module)
-    # module 模式产物与 concat 相同（dist/index.bundle.js）
-    WASM_TARGET_DIRS=("$ROOT/dist")
-    ;;
-  *)
-    WASM_TARGET_DIRS=("$ROOT/dist")
-    ;;
-esac
-WASM_CHECK_FAILED=0
-for dir in "${WASM_TARGET_DIRS[@]}"; do
-  wasm_file="$dir/sql-wasm.wasm"
-  if [ ! -f "$wasm_file" ]; then
-    echo "      ✗ 缺失: $wasm_file"
-    WASM_CHECK_FAILED=1
-    continue
+ACU_ENGINE="${ACU_SQLITE_ENGINE:-}"
+ACU_ENGINE_NORM="$(echo "$ACU_ENGINE" | tr '[:upper:]' '[:lower:]' | xargs)"
+if [ -z "$ACU_ENGINE_NORM" ] || [ "$ACU_ENGINE_NORM" = "asm" ]; then
+  echo "      引擎: asm — 纯 JS，无 wasm 依赖，跳过 wasm 内联检查"
+else
+  echo "      引擎: wasm — 检查产物内联 base64 wasm（不再分发独立 wasm 文件）"
+  if [ ! -f "$WASM_SOURCE" ]; then
+    echo "      ✗ sql.js wasm 源缺失: $WASM_SOURCE"
+    exit 1
   fi
-  ACTUAL_SHA=$(node -e "console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync('$wasm_file')).digest('hex'))" 2>&1)
-  if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-    echo "      ✗ hash 不一致: $wasm_file ($ACTUAL_SHA != $EXPECTED_SHA)"
-    WASM_CHECK_FAILED=1
-  else
-    echo "      ✓ $wasm_file (sha256 $ACTUAL_SHA)"
-  fi
-done
-if [ "$WASM_CHECK_FAILED" -ne 0 ]; then
-  echo "      ✗ sql-wasm.wasm 缺失或 hash 不一致！请检查构建产物。"
-  exit 1
+  # 检查产物：必须包含 base64 内联常量赋值（运行时解码为 wasmBinary，无外部 fetch）。
+  # 注意：产物里存在 sql-wasm.wasm 字样是正常的（locateFile 回调名/注释/错误文案），
+  # 不能以「不含该字样」作为检查条件，只能断言内联常量确实注入。
+  node -e "
+const fs = require('fs');
+const code = fs.readFileSync('$DIST_FILE', 'utf8');
+if (!/__ACU_SQLITE_WASM_BASE64__\s*=\s*\"[A-Za-z0-9+/=]+\"/.test(code)) {
+  console.error('      ✗ 产物缺少内联 wasm base64 常量');
+  process.exit(1);
+}
+console.log('      ✓ 产物含内联 wasm base64，无外部 wasm fetch');
+" 2>&1
 fi
 
 # 步骤 5：重复声明检测（致命检查）

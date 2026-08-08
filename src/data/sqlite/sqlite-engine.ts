@@ -10,7 +10,8 @@
  */
 
 // 引擎选择由构建开关 ACU_SQLITE_ENGINE 决定（rollup 把占位符替换为具体模块）：
-//   wasm（默认）：sql.js/dist/sql-wasm.js + 构建期复制分发 sql-wasm.wasm；
+//   wasm（默认）：sql.js/dist/sql-wasm.js + sql-wasm.wasm 以 base64 内联进单文件产物，
+//                运行时解码为 wasmBinary 交给 emscripten（无外部 wasm fetch）；
 //   asm（回滚）：sql.js/dist/sql-asm-memory-growth.js（纯 JS，无 wasm）。
 import initSqlJs from '__ACU_SQLITE_ENGINE_IMPORT__';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
@@ -78,6 +79,47 @@ export class SqliteEngine {
     return this.db !== null;
   }
 
+  /**
+   * 构造 initSqlJs 配置。
+   * - wasm 引擎：构建期把 sql-wasm.wasm 编码为 base64 内联进单文件产物
+   *   （globalThis.__ACU_SQLITE_WASM_BASE64__，由 rollup replace 注入），
+   *   此处解码为 wasmBinary 交给 emscripten——emscripten 优先使用 wasmBinary，
+   *   不再发起外部 locateFile fetch，避免单文件 CDN 下 sql-wasm.wasm 404
+   *   （test28 事故根因：both async and sync fetching of the wasm failed）。
+   * - wasm 引擎但常量缺失/解码失败：抛 SqliteRuntimeUnavailableError_ACU（fail loud）。
+   *   单文件 CDN 下内联 wasm 是唯一正确来源，缺失=构建配置错误，静默退回 locateFile
+   *   会复现 test28 的 404 事故路径，绝不能静默。
+   * - asm 引擎：纯 JS 无 wasm，不要求内联常量，走 locateFile 兜底（不会命中 fetch）。
+   */
+  private buildInitConfig_ACU(): Parameters<typeof initSqlJs>[0] {
+    const config: Parameters<typeof initSqlJs>[0] = {
+      locateFile: (file: string) => resolveSqlWasmUrl_ACU(file),
+    };
+    // 注意：此处必须是字面量成员访问，rollup replace 才能精确替换并注入 base64。
+    const inlineBase64 = (globalThis as any).__ACU_SQLITE_WASM_BASE64__;
+    if (typeof inlineBase64 === 'string' && inlineBase64.length > 0) {
+      try {
+        config.wasmBinary = decodeInlineWasmBase64_ACU(inlineBase64);
+        logDebug_ACU(`[SQLite引擎] 使用内联 wasmBinary (${config.wasmBinary.byteLength} bytes)`);
+      } catch (e: any) {
+        throw new SqliteRuntimeUnavailableError_ACU(
+          `内联 wasm base64 解码失败: ${e?.message || String(e)}`,
+          e,
+        );
+      }
+      return config;
+    }
+    // 无内联常量：只有 asm 引擎（纯 JS）允许走 locateFile；wasm 引擎必须内联。
+    const engineName = String((globalThis as any).__ACU_SQLITE_ENGINE__ ?? '').toLowerCase();
+    if (engineName === 'wasm') {
+      throw new SqliteRuntimeUnavailableError_ACU(
+        'wasm 引擎缺少内联 wasm（globalThis.__ACU_SQLITE_WASM_BASE64__ 未注入）。' +
+        '单文件产物必须由构建期注入 base64 wasm；请检查 rollup replace 配置。',
+      );
+    }
+    return config;
+  }
+
 
   /**
    * 初始化 sql.js 运行时（单一入口，init/loadFromBinary 共用）。
@@ -92,7 +134,7 @@ export class SqliteEngine {
     if (typeof initSqlJs !== 'function') {
       throw new SqliteRuntimeUnavailableError_ACU(
         'sql.js 引擎未加载：initSqlJs 函数不存在。' +
-        '请检查构建产物是否正确打包 sql-wasm.js 与 sql-wasm.wasm（URL/MIME/CSP/跨域），' +
+        '请检查构建产物是否正确打包 sql-wasm.js 与内联 wasm（base64），' +
         '或 CDN 是否可达。'
       );
     }
@@ -101,7 +143,7 @@ export class SqliteEngine {
       this.sqlJsInitPromise = (async () => {
         try {
           logDebug_ACU('[SQLite引擎] 正在初始化 sql.js...');
-          const runtime = await initSqlJs({ locateFile: (file: string) => resolveSqlWasmUrl_ACU(file) });
+          const runtime = await initSqlJs(this.buildInitConfig_ACU());
           logDebug_ACU('[SQLite引擎] sql.js 初始化成功');
           return runtime;
         } catch (e: any) {
@@ -402,3 +444,38 @@ export class SqliteEngine {
     }
   }
 }
+
+/**
+ * 将 base64 字符串解码为 Uint8Array。
+ * 优先使用全局 atob（浏览器/现代 Node）；缺失时用纯 JS 手动解码
+ * （不依赖 Buffer，避免 tsconfig 未配 node 类型导致 tsc 报错）。
+ * 一次性初始化调用，659KB 二进制解码为毫秒级，可接受。
+ */
+function decodeInlineWasmBase64_ACU(base64: string): Uint8Array {
+  const globalAtob = (globalThis as any).atob as ((input: string) => string) | undefined;
+  if (typeof globalAtob === 'function') {
+    const binary = globalAtob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+  // 纯 JS 手动解码（atob 缺失时）
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const lookup = new Map<string, number>();
+  for (let i = 0; i < chars.length; i++) lookup.set(chars[i], i);
+  const clean = base64.replace(/=+$/, '');
+  const bytes: number[] = [];
+  for (let i = 0; i < clean.length; i += 4) {
+    const a = lookup.get(clean[i]) ?? 0;
+    const b = lookup.get(clean[i + 1]) ?? 0;
+    const c = lookup.get(clean[i + 2]) ?? 0;
+    const d = lookup.get(clean[i + 3]) ?? 0;
+    bytes.push((a << 2) | (b >> 4));
+    if (i + 2 < clean.length) bytes.push(((b & 15) << 4) | (c >> 2));
+    if (i + 3 < clean.length) bytes.push(((c & 3) << 6) | d);
+  }
+  return new Uint8Array(bytes);
+}
+

@@ -8,6 +8,8 @@
 interface SqlJsInitConfig {
   /** 自定义 wasm/asm 文件定位函数（asm 版本不需要） */
   locateFile?: (filename: string) => string;
+  /** 内联 wasm 二进制（base64 解码后传入；emscripten 优先使用，避免外部 fetch） */
+  wasmBinary?: Uint8Array;
 }
 
 /** sql.js 静态工厂对象 */
