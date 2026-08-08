@@ -4903,5 +4903,153 @@ describe('demoteTemplateOnlyRootToScopeOnly_ACU 契约（四行真值表）', ()
     // 降级后无 full checkpoint。
     expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([]);
   });
+
+  it('P0 仅 updateConfig.updateFrequency 不同：降级成功且零 full checkpoint', async () => {
+    // checkpoint 携带旧模板配置（updateFrequency 5），当前模板基线携带新配置
+    // （updateFrequency 60）。旧实现在降级路径用「全量字段指纹」比较，配置差异
+    // 会被误报为结构不一致；修复后只比较结构投影，应降级成功、零写入。
+    const headerOnlyData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_a: { ...sheetA, content: [['row_id', 'value']], updateConfig: { updateFrequency: 5 } },
+      sheet_b: { ...sheetB, content: [['row_id', 'value']], updateConfig: { updateFrequency: 5 } },
+    };
+    const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+      createdAt: Date.now(),
+      reason: 'init',
+      data: headerOnlyData,
+      event: { filledSheetKeys: [], changedSheetKeys: ['sheet_a'], groupKeys: [] },
+      context: { messageIndex: 0, aiFloor: 0, isolationKey: '' },
+    });
+    if (!checkpointResult.checkpoint) throw new Error('构造 header-only init checkpoint 失败');
+    mocks.chat.splice(0, mocks.chat.length, {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: checkpointResult.checkpoint,
+            perSheetCheckpoints: {},
+            logEntries: [],
+            headRevision: '3:header-only-root',
+          },
+        },
+      },
+    });
+    // 模板基线：与 checkpoint 结构一致，仅 updateConfig 不同。
+    const replayData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_a: { ...sheetA, content: [['row_id', 'value']], updateConfig: { updateFrequency: 60 } },
+      sheet_b: { ...sheetB, content: [['row_id', 'value']], updateConfig: { updateFrequency: 60 } },
+    };
+    mocks.loadReplayDetailed.mockResolvedValueOnce({
+      data: replayData,
+      baseKind: 'temporary_template_baseline',
+    });
+
+    const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({ isolationKey: '' });
+
+    expect(demotion).toMatchObject({ ok: true, demoted: true });
+    expect(mocks.saveChatStrict).toHaveBeenCalled();
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([]);
+  });
+
+  it('P0 仅 mate.updateConfigUiSentinel / sourceData.note 不同：降级成功', async () => {
+    const headerOnlyData = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 1, globalInjectionConfig: {} },
+      sheet_a: { ...sheetA, content: [['row_id', 'value']], sourceData: { note: '旧注记' } },
+      sheet_b: { ...sheetB, content: [['row_id', 'value']], sourceData: { note: '旧注记' } },
+    };
+    const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+      createdAt: Date.now(),
+      reason: 'init',
+      data: headerOnlyData,
+      event: { filledSheetKeys: [], changedSheetKeys: ['sheet_a'], groupKeys: [] },
+      context: { messageIndex: 0, aiFloor: 0, isolationKey: '' },
+    });
+    if (!checkpointResult.checkpoint) throw new Error('构造 header-only init checkpoint 失败');
+    mocks.chat.splice(0, mocks.chat.length, {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: checkpointResult.checkpoint,
+            perSheetCheckpoints: {},
+            logEntries: [],
+            headRevision: '3:header-only-root',
+          },
+        },
+      },
+    });
+    const replayData = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 2, globalInjectionConfig: {} },
+      sheet_a: { ...sheetA, content: [['row_id', 'value']], sourceData: { note: '新注记' } },
+      sheet_b: { ...sheetB, content: [['row_id', 'value']], sourceData: { note: '新注记' } },
+    };
+    mocks.loadReplayDetailed.mockResolvedValueOnce({
+      data: replayData,
+      baseKind: 'temporary_template_baseline',
+    });
+
+    const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({ isolationKey: '' });
+
+    expect(demotion).toMatchObject({ ok: true, demoted: true });
+    expect(mocks.saveChatStrict).toHaveBeenCalled();
+  });
+
+  it('P0 表头内容不同（列改名）仍拒绝降级：fail-closed 且带诊断', async () => {
+    const headerOnlyData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_a: { ...sheetA, content: [['row_id', 'value']] },
+      sheet_b: { ...sheetB, content: [['row_id', 'value']] },
+    };
+    const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+      createdAt: Date.now(),
+      reason: 'init',
+      data: headerOnlyData,
+      event: { filledSheetKeys: [], changedSheetKeys: ['sheet_a'], groupKeys: [] },
+      context: { messageIndex: 0, aiFloor: 0, isolationKey: '' },
+    });
+    if (!checkpointResult.checkpoint) throw new Error('构造 header-only init checkpoint 失败');
+    mocks.chat.splice(0, mocks.chat.length, {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: checkpointResult.checkpoint,
+            perSheetCheckpoints: {},
+            logEntries: [],
+            headRevision: '3:header-only-root',
+          },
+        },
+      },
+    });
+    // 模板基线：表头列名从 value 改为 display_name → 真实结构差异，必须拒绝。
+    const replayData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_a: { ...sheetA, content: [['row_id', 'display_name']] },
+      sheet_b: { ...sheetB, content: [['row_id', 'value']] },
+    };
+    mocks.loadReplayDetailed.mockResolvedValueOnce({
+      data: replayData,
+      baseKind: 'temporary_template_baseline',
+    });
+
+    const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({ isolationKey: '' });
+
+    // 结构不一致分支只返回 ok/demoted/reason，不带 noReplayRoot；调用方
+    // 「!ok && noReplayRoot !== true → fail-closed」即阻止保存（useVisualizerSave.ts）。
+    expect(demotion).toMatchObject({ ok: false, demoted: false });
+    expect(demotion.noReplayRoot).toBeUndefined();
+    expect(demotion.reason).toContain('表结构不一致');
+    expect(demotion.reason).toContain('sheet_a.headerChanged');
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    // 残留根仍在，full checkpoint 数保持 1。
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([0]);
+  });
 });
 

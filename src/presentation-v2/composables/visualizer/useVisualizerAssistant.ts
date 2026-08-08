@@ -366,7 +366,7 @@ export function useVisualizerAssistant() {
     const session = latestResult.value?.session;
     if (!session) return '';
     const stopReasonLabel: Record<string, string> = {
-      empty_operations: '空操作停止',
+      empty_operations: 'AI 未生成任何修改（可继续重试）',
       repair_retry_capped: '修复重试已达上限',
       environment_failure: 'SQLite 引擎不可用',
     };
@@ -776,7 +776,7 @@ export function useVisualizerAssistant() {
     const session = turn.result.session;
     if (!session) return '';
     const stopReasonLabel: Record<string, string> = {
-      empty_operations: '空操作停止',
+      empty_operations: 'AI 未生成任何修改（可继续重试）',
       repair_retry_capped: '修复重试已达上限',
       environment_failure: 'SQLite 引擎不可用',
     };

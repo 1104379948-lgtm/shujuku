@@ -18,6 +18,7 @@ import { createSheetInsertPlan, generateDDL, validateDDLTextAgainstHeaders_ACU }
 import { hydrateTableDataStrict_ACU } from './sqlite-template-validation';
 import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from './canonical-checkpoint-builder';
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
+import { parseDDLColumnInfos_ACU } from '../../shared/ddl-utils';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
 import { findLatestSpv79TransitionCheckpoint_ACU } from './spv79-transition-checkpoint';
 
@@ -442,6 +443,115 @@ function projectReplayComparableData_ACU(data: TableDataObject_ACU): TableDataOb
     delete (value as Record<string, any>).seedRows;
   }
   return projected;
+}
+
+/**
+ * 取 Sheet 表头行（content[0]）并做最小归一：null 统一为空串。
+ * 不做别名改写或 trim——任何未归一化的真实差异都应 fail-closed 拒绝降级。
+ */
+function projectSheetHeaderCells_ACU(sheet: Sheet_ACU): string[] {
+  const content = sheet.content;
+  if (!Array.isArray(content) || !Array.isArray(content[0])) return [];
+  return content[0].map(cell => (cell === null ? '' : String(cell)));
+}
+
+/**
+ * 提取 DDL 的物理列身份，排除显示层注释与 DDL 原文。
+ * 只比较 sqlName/类型/主键/NOT NULL/默认值——「只改显示表头同步 DDL 注释」
+ * 不构成结构差异，不得触发降级阻断。
+ * DDL 缺失或空时返回空数组；两侧 DDL 存在性不同即视为结构差异。
+ */
+function projectSheetDDLIdentity_ACU(ddl: unknown): Array<{
+  sqlName: string;
+  declaredType: string | null;
+  isPrimaryKey: boolean;
+  isNotNull: boolean;
+  hasDefault: boolean;
+  defaultExpression: string | null;
+}> {
+  const text = typeof ddl === 'string' ? ddl : '';
+  if (!text.trim()) return [];
+  return parseDDLColumnInfos_ACU(text).map(column => ({
+    sqlName: column.sqlName,
+    declaredType: column.declaredType,
+    isPrimaryKey: column.isPrimaryKey,
+    isNotNull: column.isNotNull,
+    hasDefault: column.hasDefault,
+    defaultExpression: column.defaultExpression,
+  }));
+}
+
+/**
+ * Header-only 回放比较专用结构投影（P0 修复核心）。
+ *
+ * template_only_root 降级前，候选回放（模板临时基线）与原 checkpoint 比较的是
+ * 「表结构」而非「全部持久化字段」：checkpoint 携带旧模板的 updateConfig、
+ * exportConfig、sourceData.note 等非结构配置，模板基线携带当前配置，全量指纹
+ * 比较必然把「仅改配置」误报为结构不一致。
+ *
+ * 本投影只保留影响表集合与作用域的结构字段：
+ * - mate 仅保留 type/version（格式标识，排除注入配置与 UI sentinel）
+ * - 每张表保留 uid/name/orderNo（身份、显示名、顺序）
+ * - content[0] 完整表头行（row_id 位置与列顺序）
+ * - DDL 物理列身份（见 projectSheetDDLIdentity_ACU）
+ *
+ * 任何真实结构变化（表增删、表头改名、列增删/位移、row_id 变化、DDL 物理列
+ * 变化）都会改变指纹，维持 fail-closed。
+ */
+function projectHeaderOnlyReplayComparableData_ACU(data: TableDataObject_ACU): TableDataObject_ACU {
+  const projected: Record<string, unknown> = {};
+  const mate = (data as Record<string, any>).mate;
+  if (isObjectRecord_ACU(mate)) {
+    projected.mate = { type: mate.type, version: mate.version };
+  }
+  for (const [key, value] of Object.entries(data)) {
+    if (!key.startsWith('sheet_') || !isObjectRecord_ACU(value)) continue;
+    const sheet = value as Sheet_ACU;
+    projected[key] = {
+      uid: sheet.uid,
+      name: sheet.name,
+      orderNo: sheet.orderNo,
+      header: projectSheetHeaderCells_ACU(sheet),
+      ddlColumns: projectSheetDDLIdentity_ACU(sheet.sourceData ? sheet.sourceData.ddl : ''),
+    };
+  }
+  return projected as TableDataObject_ACU;
+}
+
+/**
+ * 结构差异诊断：与 projectHeaderOnlyReplayComparableData_ACU 的投影字段一一对应，
+ * 保证「指纹不等 ⇒ 本函数至少返回一条差异」。
+ */
+function diffHeaderOnlyReplayStructures_ACU(
+  checkpointData: TableDataObject_ACU,
+  replayData: TableDataObject_ACU,
+): string[] {
+  const details: string[] = [];
+  const checkpointKeys = Object.keys(checkpointData).filter(key => key.startsWith('sheet_'));
+  const replayKeys = Object.keys(replayData).filter(key => key.startsWith('sheet_'));
+  const addedSheets = replayKeys.filter(key => !checkpointKeys.includes(key));
+  const removedSheets = checkpointKeys.filter(key => !replayKeys.includes(key));
+  if (addedSheets.length > 0) details.push(`addedSheets=[${addedSheets.join(',')}]`);
+  if (removedSheets.length > 0) details.push(`removedSheets=[${removedSheets.join(',')}]`);
+  const mateA = (checkpointData as Record<string, any>).mate;
+  const mateB = (replayData as Record<string, any>).mate;
+  if (mateA?.type !== mateB?.type) details.push('mate.typeChanged');
+  if (mateA?.version !== mateB?.version) details.push('mate.versionChanged');
+  for (const key of checkpointKeys) {
+    if (!replayKeys.includes(key)) continue;
+    const checkpointSheet = checkpointData[key] as Sheet_ACU;
+    const replaySheet = replayData[key] as Sheet_ACU;
+    if (checkpointSheet.uid !== replaySheet.uid) details.push(`${key}.uidChanged`);
+    if (checkpointSheet.name !== replaySheet.name) details.push(`${key}.nameChanged`);
+    if (checkpointSheet.orderNo !== replaySheet.orderNo) details.push(`${key}.orderChanged`);
+    const checkpointHeader = projectSheetHeaderCells_ACU(checkpointSheet);
+    const replayHeader = projectSheetHeaderCells_ACU(replaySheet);
+    if (JSON.stringify(checkpointHeader) !== JSON.stringify(replayHeader)) details.push(`${key}.headerChanged`);
+    const checkpointDdl = projectSheetDDLIdentity_ACU(checkpointSheet.sourceData ? checkpointSheet.sourceData.ddl : '');
+    const replayDdl = projectSheetDDLIdentity_ACU(replaySheet.sourceData ? replaySheet.sourceData.ddl : '');
+    if (JSON.stringify(checkpointDdl) !== JSON.stringify(replayDdl)) details.push(`${key}.ddlChanged`);
+  }
+  return details;
 }
 
 async function verifyTemporaryBaselineUpgrade_ACU(
@@ -1292,17 +1402,16 @@ export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
       // header-only content 等价。降级后无 full checkpoint，回放退化为模板临时基线
       // （resolveHeaderOnlyTemplateSnapshot_ACU 由 guide 派生），因此不能拿“降级前
       // replay vs 降级后 replay”直接比（两者来源不同）；正确口径是候选回放的 content
-      // 逐表与原 checkpoint 的 header-only content 等价。
-      const afterFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(replayAfter.data));
-      const headerOnlyProjection = deepClone_ACU(rootCheckpoint.data);
-      for (const sheetKey of Object.keys(headerOnlyProjection)) {
-        if (!sheetKey.startsWith('sheet_')) continue;
-        const sheet = headerOnlyProjection[sheetKey] as Sheet_ACU;
-        sheet.content = [deepClone_ACU(sheet.content?.[0])];
-      }
-      const expectedFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(headerOnlyProjection as TableDataObject_ACU));
+      // 逐表与原 checkpoint 的 header-only 结构投影等价。投影只保留表集合与作用域
+      // 结构字段（uid/name/orderNo/表头行/DDL 物理列），排除 updateConfig、
+      // exportConfig、sourceData.note 等非结构配置——仅改配置不再被误报为结构
+      // 不一致（P0 缺陷修复）。
+      const afterFingerprint = getTableDataFingerprint_ACU(projectHeaderOnlyReplayComparableData_ACU(replayAfter.data));
+      const expectedFingerprint = getTableDataFingerprint_ACU(projectHeaderOnlyReplayComparableData_ACU(rootCheckpoint.data as TableDataObject_ACU));
       if (afterFingerprint !== expectedFingerprint) {
-        return { ok: false, demoted: false, reason: 'template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。' };
+        const diffDetails = diffHeaderOnlyReplayStructures_ACU(rootCheckpoint.data as TableDataObject_ACU, replayAfter.data);
+        const detailText = diffDetails.length > 0 ? `（${diffDetails.join('; ')}）` : '';
+        return { ok: false, demoted: false, reason: `template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。${detailText}` };
       }
 
       // 真实写回：直接应用候选的最终容器形态，避免在真实对象上重复判空造成双写不一致。

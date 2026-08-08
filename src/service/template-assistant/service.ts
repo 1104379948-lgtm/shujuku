@@ -1341,6 +1341,41 @@ function buildDefaultSystemPrompt_ACU() {
 }
 
 /**
+ * AI 改表助手「核心协议卡」：短路由表 + 防误操作边界。
+ *
+ * 与 buildDefaultSystemPrompt_ACU 的区别：默认提示词面向「无自定义 segments」
+ * 的存量路径（字节级兼容），核心协议卡面向「已保存自定义提示词」的兼容注入——
+ * 旧自定义提示词缺新协议规则时，由 resolveAssistantSystemPrompt_ACU 自动追加，
+ * 不覆盖用户内容、不改变 pinned 消息顺序。
+ *
+ * 能力标记：以固定文本指纹 `[ACU 改表助手核心协议]` 判定是否已注入，
+ * 已注入则跳过追加（幂等）。该标记不进入 AI 上下文（追加时保留在内容中，
+ * 作为可读锚点，模型可据此理解协议边界）。
+ */
+export const TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU = '[ACU 改表助手核心协议]';
+
+export function buildCoreProtocolCard_ACU(): string {
+    return [
+        TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU,
+        '【操作路由】按用户意图选择唯一操作，不要跨层混写：',
+        '- 只改更新频率/上下文深度/批处理/分组/跳层 → patch_sheet_update_config（只填变更字段，不生成 content/schema/sourceData）',
+        '- 改 Note/Init/Insert/Update/Delete 说明 → patch_sheet_source_data（只允许 note/initNode/insertNode/updateNode/deleteNode 五字段，禁止 ddl/sql/schema/createTable）',
+        '- 改单元格/行数据 → patch_sheet_content（updateCells/addRows/deleteRows，rowNumber 1-based，列用 columnName）',
+        '- 改显示表头/列结构 → patch_sheet_schema（renameColumns/addColumns/deleteColumns；只改中文显示表头用 renameColumns，不输出 headers 字段）',
+        '- DDL → 仅在用户明确要求字段类型/约束/SQLite 建表语句时用 patch_sheet_schema.patch.ddl；中文表头必须英文/ASCII 物理列名 + `-- 中文表头` 注释一一对应，第一列 row_id INTEGER PRIMARY KEY',
+        '- 锁/全局注入 → patch_sheet_locks / patch_global_injection_config',
+        '',
+        '【防误操作边界】',
+        '- 只改更新频率时，禁止顺带输出 updateNode、headers、DDL 或 content patch（示例：仅 {"op":"patch_sheet_update_config","sheetKey":"<目标表 sheetKey>","patch":{"updateFrequency":60}}）',
+        '- 只改显示表头时，用 renameColumns，禁止输出 headers 字段；本地会自动同步既有 DDL 注释',
+        '- 同时改表头与 Note 时，输出两个独立 operation（一个 patch_sheet_schema.renameColumns + 一个 patch_sheet_source_data.note）',
+        '- 物理列名迁移与显示名改名是两件事：只有明确要求物理迁移才输出 migrationIntent，且必须完整提供 physicalColumnMappings/fills/conversions/migrationPolicy',
+        '- 涉及未知表/未知列/删除/类型转换/物理迁移/row_id/DDL 不一致时，不猜测；返回 warnings 说明 + operations=[]',
+        '- 需求信息不足时仍必须返回合法 draft：summary 简述、warnings 写明、operations=[]，禁止输出追问文本',
+    ].join('\n');
+}
+
+/**
  * 解析 assistant 系统提示词：
  * - segments 为空（settings 无自定义或全空）→ 使用默认提示词（与旧硬编码一致，含占位符）。
  * - 每个卡片按 {role, content} 生成消息；content 中的占位符在运行时替换为签名映射的值。
@@ -1386,6 +1421,23 @@ export function resolveAssistantSystemPrompt_ACU(
             ...resolved[targetIndex],
             content: `${resolved[targetIndex].content}\n\n${referenceText}`,
         };
+    }
+    // 核心协议卡自动追加（兼容旧自定义提示词）：任何自定义 segments 若未包含
+    // 核心协议标记，则把路由表追加到最后一个 SYSTEM 卡末尾。不改变用户消息顺序
+    // （仅追加到 SYSTEM 卡内容），不覆盖用户编辑内容，幂等（已含标记则跳过）。
+    if (resolved.length > 0) {
+        const hasCoreProtocol = cards.some((seg) =>
+            String(seg.content || '').includes(TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU),
+        );
+        if (!hasCoreProtocol) {
+            const lastSystemIndex = resolved.map((item) => item.role).lastIndexOf('SYSTEM');
+            const targetIndex = lastSystemIndex >= 0 ? lastSystemIndex : resolved.length - 1;
+            const coreCard = buildCoreProtocolCard_ACU();
+            resolved[targetIndex] = {
+                ...resolved[targetIndex],
+                content: `${resolved[targetIndex].content}\n\n${coreCard}`,
+            };
+        }
     }
     return resolved;
 }
@@ -1481,7 +1533,15 @@ function buildSessionRoundUserRequest_ACU(options: {
 }) {
     const chunks = [String(options.userRequest || '').trim()];
     if (options.repairReason) {
-        chunks.push(`修复要求：上一轮 assistant 草稿未通过本地校验，原因是：${options.repairReason}。请修复草稿并继续完成需求，仍然只能输出合法 draft JSON。`);
+        chunks.push(
+            '修复要求：上一轮 assistant 草稿未通过本地校验，原因是：'
+            + `${options.repairReason}。`
+            + '请只修复校验失败的那个 operation，不要重新生成整份复杂草稿；'
+            + '不得改变需求中未提及的表与字段。'
+            + '只改更新频率时输出 patch_sheet_update_config；'
+            + '只改显示表头时输出 patch_sheet_schema.renameColumns，不输出 headers 字段。'
+            + '仍然只能输出合法 draft JSON（protocolVersion=2、atomic=true、含 requestId/baseFingerprint/selectedSheetKey）。',
+        );
     }
     return chunks.filter(Boolean).join('\n\n');
 }

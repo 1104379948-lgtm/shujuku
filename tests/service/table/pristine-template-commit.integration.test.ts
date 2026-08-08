@@ -33,6 +33,8 @@ const mocks = vi.hoisted(() => ({
   guideContainer: null as any,
   setGuideResult: true,
   currentJsonTableData: null as any,
+  templateObj: null as any,
+  defaultTemplateObj: null as any,
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -105,30 +107,15 @@ vi.mock('../../../src/service/template/chat-scope', async importOriginal => {
 // 结构」而正确拒绝降级，测试将无法验证「降级成功」路径。
 vi.mock('../../../src/data/repositories/profile-repo', async importOriginal => {
   const actual = await importOriginal<typeof import('../../../src/data/repositories/profile-repo')>();
-  const templateObj = {
-    sheet_a: {
-      uid: 'sheet_a',
-      name: '表A',
-      content: [['row_id', '值']],
-      updateConfig: {},
-      exportConfig: {},
-      sourceData: {},
-      orderNo: 0,
-    },
-    sheet_b: {
-      uid: 'sheet_b',
-      name: '表B',
-      content: [['row_id', '值']],
-      updateConfig: {},
-      exportConfig: {},
-      sourceData: {},
-      orderNo: 1,
-    },
+  mocks.defaultTemplateObj = {
+    sheet_a: { uid: 'sheet_a', name: '表A', content: [['row_id', '值']], updateConfig: {}, exportConfig: {}, sourceData: {}, orderNo: 0 },
+    sheet_b: { uid: 'sheet_b', name: '表B', content: [['row_id', '值']], updateConfig: {}, exportConfig: {}, sourceData: {}, orderNo: 1 },
     mate: { type: 'database', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: {} },
   };
+  mocks.templateObj = mocks.defaultTemplateObj;
   return {
     ...actual,
-    readProfileTemplateFromStorage_ACU: vi.fn(() => JSON.stringify(templateObj)),
+    readProfileTemplateFromStorage_ACU: vi.fn(() => JSON.stringify(mocks.templateObj)),
   };
 });
 
@@ -224,6 +211,7 @@ describe('pristine 模板提交复现路径（复查点 1）', () => {
     mocks.scopeContainer = null;
     mocks.guideContainer = null;
     mocks.setGuideResult = true;
+    mocks.templateObj = mocks.defaultTemplateObj;
   });
 
   it('A：空数据聊天 + scope-only 保存模板 → 聊天零 full checkpoint', async () => {
@@ -350,6 +338,72 @@ describe('pristine 模板提交复现路径（复查点 1）', () => {
     expect(demotion.ok).toBe(false);
     expect(demotion.demoted).toBe(false);
     expect(demotion.noReplayRoot).toBe(false);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, isolationKey).length).toBe(1);
+  });
+
+  it('P0 集成：checkpoint 与当前模板仅 updateConfig.updateFrequency 不同 → 降级成功、零 full checkpoint', async () => {
+    // 旧 root 由旧模板生成（updateFrequency: 5），当前全局模板已把 updateFrequency
+    // 改为 60。降级只应比较结构投影，配置差异不得触发「表结构不一致」误报。
+    const templateWithOldConfig = {
+      sheet_a: {
+        uid: 'sheet_a', name: '表A', content: [['row_id', '值']],
+        updateConfig: { updateFrequency: 5 }, exportConfig: {}, sourceData: {}, orderNo: 0,
+      },
+      sheet_b: {
+        uid: 'sheet_b', name: '表B', content: [['row_id', '值']],
+        updateConfig: { updateFrequency: 5 }, exportConfig: {}, sourceData: {}, orderNo: 1,
+      },
+      mate: { type: 'database', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: {} },
+    };
+    mocks.templateObj = templateWithOldConfig;
+    mocks.chat.push(...buildEmptyChat(6));
+    const isolationKey = mocks.isolationKey;
+    const aiIndicesList = aiIndices(mocks.chat);
+    const rootIndex = aiIndicesList[aiIndicesList.length - 1];
+    seedHeaderOnlyTemplateRoot(mocks.chat, isolationKey, rootIndex);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, isolationKey).length).toBe(1);
+
+    // 当前全局模板仅把 updateFrequency 改为 60（结构完全一致）。
+    mocks.templateObj = {
+      ...templateWithOldConfig,
+      sheet_a: { ...templateWithOldConfig.sheet_a, updateConfig: { updateFrequency: 60 } },
+      sheet_b: { ...templateWithOldConfig.sheet_b, updateConfig: { updateFrequency: 60 } },
+    };
+
+    const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({ isolationKey });
+    expect(demotion.ok).toBe(true);
+    expect(demotion.demoted).toBe(true);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, isolationKey).length).toBe(0);
+    // 结构等价由 scope/guide 承载，降级后模板基线只含表头。
+    const templateBaseline = resolveHeaderOnlyTemplateSnapshot_ACU(mocks.chat, isolationKey);
+    expect((templateBaseline as any).sheet_a.content.length).toBe(1);
+    expect((templateBaseline as any).sheet_b.content.length).toBe(1);
+  });
+
+  it('P0 集成：DDL 物理列变化（删列）→ 拒绝降级，零写入且保留 root', async () => {
+    mocks.chat.push(...buildEmptyChat(6));
+    const isolationKey = mocks.isolationKey;
+    const aiIndicesList = aiIndices(mocks.chat);
+    const rootIndex = aiIndicesList[aiIndicesList.length - 1];
+    seedHeaderOnlyTemplateRoot(mocks.chat, isolationKey, rootIndex);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, isolationKey).length).toBe(1);
+
+    // 当前全局模板对 sheet_a 的 DDL 删除了「值」列 → 物理列身份变化，必须拒绝。
+    mocks.templateObj = {
+      ...(mocks.templateObj as any),
+      sheet_a: {
+        ...(mocks.templateObj as any).sheet_a,
+        content: [['row_id']],
+        sourceData: { ddl: 'CREATE TABLE "表A" ("row_id" INTEGER PRIMARY KEY NOT NULL);' },
+      },
+    };
+
+    const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({ isolationKey });
+    expect(demotion.ok).toBe(false);
+    expect(demotion.demoted).toBe(false);
+    // 结构不一致分支只返回 ok/demoted/reason，不带 noReplayRoot；
+    // 调用方「!ok && noReplayRoot !== true → fail-closed」即阻止保存。
+    expect(demotion.noReplayRoot).toBeUndefined();
     expect(collectV2FullCheckpointIndices_ACU(mocks.chat, isolationKey).length).toBe(1);
   });
 });

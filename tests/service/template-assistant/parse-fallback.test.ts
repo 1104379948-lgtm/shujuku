@@ -5,6 +5,8 @@ import {
   parseTemplateAssistantDraft_ACU,
   resolveAssistantSystemPrompt_ACU,
   TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
+  TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU,
+  buildCoreProtocolCard_ACU,
 } from '../../../src/service/template-assistant/service';
 
 const DRAFT_JSON = JSON.stringify({
@@ -128,5 +130,50 @@ describe('提示词占位符与默认等价', () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]?.role).toBe('SYSTEM');
     expect(messages[0]?.content).toContain('自定义段');
+  });
+
+  it('旧自定义提示词（无核心协议标记）自动追加核心协议卡到最后一个 SYSTEM 卡', () => {
+    const messages = resolveAssistantSystemPrompt_ACU([
+      { role: 'SYSTEM', content: '我的自定义规则' },
+      { role: 'USER', content: '用户补充规则' },
+    ]);
+    expect(messages).toHaveLength(2);
+    const systemContent = messages[0]?.content || '';
+    // 核心协议卡被追加（含操作路由标记）
+    expect(systemContent).toContain(TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU);
+    expect(systemContent).toContain('【操作路由】');
+    expect(systemContent).toContain('patch_sheet_update_config');
+    expect(systemContent).toContain('patch_sheet_source_data');
+    expect(systemContent).toContain('patch_sheet_content');
+    expect(systemContent).toContain('patch_sheet_schema');
+    // 不改变用户消息顺序：USER 卡保持原位
+    expect(messages[1]?.role).toBe('USER');
+    expect(messages[1]?.content).toBe('用户补充规则');
+  });
+
+  it('已含核心协议标记的自定义提示词不重复追加（幂等）', () => {
+    const messages = resolveAssistantSystemPrompt_ACU([
+      { role: 'SYSTEM', content: `${TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU}\n我的规则` },
+      { role: 'USER', content: '用户补充规则' },
+    ]);
+    expect(messages).toHaveLength(2);
+    const systemContent = messages[0]?.content || '';
+    // 标记只出现一次（未重复追加核心协议卡）
+    expect(systemContent.split(TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU).length - 1).toBe(1);
+  });
+
+  it('默认路径（无自定义 segments）不追加核心协议卡（存量字节级兼容）', () => {
+    const messages = resolveAssistantSystemPrompt_ACU(null);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.content).not.toContain(TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU);
+  });
+
+  it('核心协议卡不依赖占位符（$1-$4 与 referenceDocs 均不出现）', () => {
+    const coreCard = buildCoreProtocolCard_ACU();
+    expect(coreCard).not.toContain('$1');
+    expect(coreCard).not.toContain('$2');
+    expect(coreCard).not.toContain('$3');
+    expect(coreCard).not.toContain('$4');
+    expect(coreCard).not.toContain(TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU);
   });
 });

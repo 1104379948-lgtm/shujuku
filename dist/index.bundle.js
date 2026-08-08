@@ -42155,6 +42155,114 @@ $CONTENT
         }
         return projected;
     }
+    /**
+     * 取 Sheet 表头行（content[0]）并做最小归一：null 统一为空串。
+     * 不做别名改写或 trim——任何未归一化的真实差异都应 fail-closed 拒绝降级。
+     */
+    function projectSheetHeaderCells_ACU(sheet) {
+        const content = sheet.content;
+        if (!Array.isArray(content) || !Array.isArray(content[0]))
+            return [];
+        return content[0].map(cell => (cell === null ? '' : String(cell)));
+    }
+    /**
+     * 提取 DDL 的物理列身份，排除显示层注释与 DDL 原文。
+     * 只比较 sqlName/类型/主键/NOT NULL/默认值——「只改显示表头同步 DDL 注释」
+     * 不构成结构差异，不得触发降级阻断。
+     * DDL 缺失或空时返回空数组；两侧 DDL 存在性不同即视为结构差异。
+     */
+    function projectSheetDDLIdentity_ACU(ddl) {
+        const text = typeof ddl === 'string' ? ddl : '';
+        if (!text.trim())
+            return [];
+        return parseDDLColumnInfos_ACU(text).map(column => ({
+            sqlName: column.sqlName,
+            declaredType: column.declaredType,
+            isPrimaryKey: column.isPrimaryKey,
+            isNotNull: column.isNotNull,
+            hasDefault: column.hasDefault,
+            defaultExpression: column.defaultExpression,
+        }));
+    }
+    /**
+     * Header-only 回放比较专用结构投影（P0 修复核心）。
+     *
+     * template_only_root 降级前，候选回放（模板临时基线）与原 checkpoint 比较的是
+     * 「表结构」而非「全部持久化字段」：checkpoint 携带旧模板的 updateConfig、
+     * exportConfig、sourceData.note 等非结构配置，模板基线携带当前配置，全量指纹
+     * 比较必然把「仅改配置」误报为结构不一致。
+     *
+     * 本投影只保留影响表集合与作用域的结构字段：
+     * - mate 仅保留 type/version（格式标识，排除注入配置与 UI sentinel）
+     * - 每张表保留 uid/name/orderNo（身份、显示名、顺序）
+     * - content[0] 完整表头行（row_id 位置与列顺序）
+     * - DDL 物理列身份（见 projectSheetDDLIdentity_ACU）
+     *
+     * 任何真实结构变化（表增删、表头改名、列增删/位移、row_id 变化、DDL 物理列
+     * 变化）都会改变指纹，维持 fail-closed。
+     */
+    function projectHeaderOnlyReplayComparableData_ACU(data) {
+        const projected = {};
+        const mate = data.mate;
+        if (isObjectRecord_ACU$2(mate)) {
+            projected.mate = { type: mate.type, version: mate.version };
+        }
+        for (const [key, value] of Object.entries(data)) {
+            if (!key.startsWith('sheet_') || !isObjectRecord_ACU$2(value))
+                continue;
+            const sheet = value;
+            projected[key] = {
+                uid: sheet.uid,
+                name: sheet.name,
+                orderNo: sheet.orderNo,
+                header: projectSheetHeaderCells_ACU(sheet),
+                ddlColumns: projectSheetDDLIdentity_ACU(sheet.sourceData ? sheet.sourceData.ddl : ''),
+            };
+        }
+        return projected;
+    }
+    /**
+     * 结构差异诊断：与 projectHeaderOnlyReplayComparableData_ACU 的投影字段一一对应，
+     * 保证「指纹不等 ⇒ 本函数至少返回一条差异」。
+     */
+    function diffHeaderOnlyReplayStructures_ACU(checkpointData, replayData) {
+        const details = [];
+        const checkpointKeys = Object.keys(checkpointData).filter(key => key.startsWith('sheet_'));
+        const replayKeys = Object.keys(replayData).filter(key => key.startsWith('sheet_'));
+        const addedSheets = replayKeys.filter(key => !checkpointKeys.includes(key));
+        const removedSheets = checkpointKeys.filter(key => !replayKeys.includes(key));
+        if (addedSheets.length > 0)
+            details.push(`addedSheets=[${addedSheets.join(',')}]`);
+        if (removedSheets.length > 0)
+            details.push(`removedSheets=[${removedSheets.join(',')}]`);
+        const mateA = checkpointData.mate;
+        const mateB = replayData.mate;
+        if (mateA?.type !== mateB?.type)
+            details.push('mate.typeChanged');
+        if (mateA?.version !== mateB?.version)
+            details.push('mate.versionChanged');
+        for (const key of checkpointKeys) {
+            if (!replayKeys.includes(key))
+                continue;
+            const checkpointSheet = checkpointData[key];
+            const replaySheet = replayData[key];
+            if (checkpointSheet.uid !== replaySheet.uid)
+                details.push(`${key}.uidChanged`);
+            if (checkpointSheet.name !== replaySheet.name)
+                details.push(`${key}.nameChanged`);
+            if (checkpointSheet.orderNo !== replaySheet.orderNo)
+                details.push(`${key}.orderChanged`);
+            const checkpointHeader = projectSheetHeaderCells_ACU(checkpointSheet);
+            const replayHeader = projectSheetHeaderCells_ACU(replaySheet);
+            if (JSON.stringify(checkpointHeader) !== JSON.stringify(replayHeader))
+                details.push(`${key}.headerChanged`);
+            const checkpointDdl = projectSheetDDLIdentity_ACU(checkpointSheet.sourceData ? checkpointSheet.sourceData.ddl : '');
+            const replayDdl = projectSheetDDLIdentity_ACU(replaySheet.sourceData ? replaySheet.sourceData.ddl : '');
+            if (JSON.stringify(checkpointDdl) !== JSON.stringify(replayDdl))
+                details.push(`${key}.ddlChanged`);
+        }
+        return details;
+    }
     async function verifyTemporaryBaselineUpgrade_ACU(replayData, operations, afterData) {
         const expected = deepClone_ACU$1(replayData);
         for (const operation of operations)
@@ -42910,18 +43018,16 @@ $CONTENT
                 // header-only content 等价。降级后无 full checkpoint，回放退化为模板临时基线
                 // （resolveHeaderOnlyTemplateSnapshot_ACU 由 guide 派生），因此不能拿“降级前
                 // replay vs 降级后 replay”直接比（两者来源不同）；正确口径是候选回放的 content
-                // 逐表与原 checkpoint 的 header-only content 等价。
-                const afterFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(replayAfter.data));
-                const headerOnlyProjection = deepClone_ACU$1(rootCheckpoint.data);
-                for (const sheetKey of Object.keys(headerOnlyProjection)) {
-                    if (!sheetKey.startsWith('sheet_'))
-                        continue;
-                    const sheet = headerOnlyProjection[sheetKey];
-                    sheet.content = [deepClone_ACU$1(sheet.content?.[0])];
-                }
-                const expectedFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(headerOnlyProjection));
+                // 逐表与原 checkpoint 的 header-only 结构投影等价。投影只保留表集合与作用域
+                // 结构字段（uid/name/orderNo/表头行/DDL 物理列），排除 updateConfig、
+                // exportConfig、sourceData.note 等非结构配置——仅改配置不再被误报为结构
+                // 不一致（P0 缺陷修复）。
+                const afterFingerprint = getTableDataFingerprint_ACU(projectHeaderOnlyReplayComparableData_ACU(replayAfter.data));
+                const expectedFingerprint = getTableDataFingerprint_ACU(projectHeaderOnlyReplayComparableData_ACU(rootCheckpoint.data));
                 if (afterFingerprint !== expectedFingerprint) {
-                    return { ok: false, demoted: false, reason: 'template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。' };
+                    const diffDetails = diffHeaderOnlyReplayStructures_ACU(rootCheckpoint.data, replayAfter.data);
+                    const detailText = diffDetails.length > 0 ? `（${diffDetails.join('; ')}）` : '';
+                    return { ok: false, demoted: false, reason: `template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。${detailText}` };
                 }
                 // 真实写回：直接应用候选的最终容器形态，避免在真实对象上重复判空造成双写不一致。
                 // 正常路径（frame 降级为 {version:2, logEntries:[]} 标准空帧）保留 tagData，
@@ -151313,6 +151419,39 @@ Expected function or array of functions, received type ${typeof value}.`
         ].join('\n');
     }
     /**
+     * AI 改表助手「核心协议卡」：短路由表 + 防误操作边界。
+     *
+     * 与 buildDefaultSystemPrompt_ACU 的区别：默认提示词面向「无自定义 segments」
+     * 的存量路径（字节级兼容），核心协议卡面向「已保存自定义提示词」的兼容注入——
+     * 旧自定义提示词缺新协议规则时，由 resolveAssistantSystemPrompt_ACU 自动追加，
+     * 不覆盖用户内容、不改变 pinned 消息顺序。
+     *
+     * 能力标记：以固定文本指纹 `[ACU 改表助手核心协议]` 判定是否已注入，
+     * 已注入则跳过追加（幂等）。该标记不进入 AI 上下文（追加时保留在内容中，
+     * 作为可读锚点，模型可据此理解协议边界）。
+     */
+    const TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU = '[ACU 改表助手核心协议]';
+    function buildCoreProtocolCard_ACU() {
+        return [
+            TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU,
+            '【操作路由】按用户意图选择唯一操作，不要跨层混写：',
+            '- 只改更新频率/上下文深度/批处理/分组/跳层 → patch_sheet_update_config（只填变更字段，不生成 content/schema/sourceData）',
+            '- 改 Note/Init/Insert/Update/Delete 说明 → patch_sheet_source_data（只允许 note/initNode/insertNode/updateNode/deleteNode 五字段，禁止 ddl/sql/schema/createTable）',
+            '- 改单元格/行数据 → patch_sheet_content（updateCells/addRows/deleteRows，rowNumber 1-based，列用 columnName）',
+            '- 改显示表头/列结构 → patch_sheet_schema（renameColumns/addColumns/deleteColumns；只改中文显示表头用 renameColumns，不输出 headers 字段）',
+            '- DDL → 仅在用户明确要求字段类型/约束/SQLite 建表语句时用 patch_sheet_schema.patch.ddl；中文表头必须英文/ASCII 物理列名 + `-- 中文表头` 注释一一对应，第一列 row_id INTEGER PRIMARY KEY',
+            '- 锁/全局注入 → patch_sheet_locks / patch_global_injection_config',
+            '',
+            '【防误操作边界】',
+            '- 只改更新频率时，禁止顺带输出 updateNode、headers、DDL 或 content patch（示例：仅 {"op":"patch_sheet_update_config","sheetKey":"<目标表 sheetKey>","patch":{"updateFrequency":60}}）',
+            '- 只改显示表头时，用 renameColumns，禁止输出 headers 字段；本地会自动同步既有 DDL 注释',
+            '- 同时改表头与 Note 时，输出两个独立 operation（一个 patch_sheet_schema.renameColumns + 一个 patch_sheet_source_data.note）',
+            '- 物理列名迁移与显示名改名是两件事：只有明确要求物理迁移才输出 migrationIntent，且必须完整提供 physicalColumnMappings/fills/conversions/migrationPolicy',
+            '- 涉及未知表/未知列/删除/类型转换/物理迁移/row_id/DDL 不一致时，不猜测；返回 warnings 说明 + operations=[]',
+            '- 需求信息不足时仍必须返回合法 draft：summary 简述、warnings 写明、operations=[]，禁止输出追问文本',
+        ].join('\n');
+    }
+    /**
      * 解析 assistant 系统提示词：
      * - segments 为空（settings 无自定义或全空）→ 使用默认提示词（与旧硬编码一致，含占位符）。
      * - 每个卡片按 {role, content} 生成消息；content 中的占位符在运行时替换为签名映射的值。
@@ -151349,6 +151488,21 @@ Expected function or array of functions, received type ${typeof value}.`
                 ...resolved[targetIndex],
                 content: `${resolved[targetIndex].content}\n\n${referenceText}`,
             };
+        }
+        // 核心协议卡自动追加（兼容旧自定义提示词）：任何自定义 segments 若未包含
+        // 核心协议标记，则把路由表追加到最后一个 SYSTEM 卡末尾。不改变用户消息顺序
+        // （仅追加到 SYSTEM 卡内容），不覆盖用户编辑内容，幂等（已含标记则跳过）。
+        if (resolved.length > 0) {
+            const hasCoreProtocol = cards.some((seg) => String(seg.content || '').includes(TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU));
+            if (!hasCoreProtocol) {
+                const lastSystemIndex = resolved.map((item) => item.role).lastIndexOf('SYSTEM');
+                const targetIndex = lastSystemIndex >= 0 ? lastSystemIndex : resolved.length - 1;
+                const coreCard = buildCoreProtocolCard_ACU();
+                resolved[targetIndex] = {
+                    ...resolved[targetIndex],
+                    content: `${resolved[targetIndex].content}\n\n${coreCard}`,
+                };
+            }
         }
         return resolved;
     }
@@ -151430,7 +151584,13 @@ Expected function or array of functions, received type ${typeof value}.`
     function buildSessionRoundUserRequest_ACU(options) {
         const chunks = [String(options.userRequest || '').trim()];
         if (options.repairReason) {
-            chunks.push(`修复要求：上一轮 assistant 草稿未通过本地校验，原因是：${options.repairReason}。请修复草稿并继续完成需求，仍然只能输出合法 draft JSON。`);
+            chunks.push('修复要求：上一轮 assistant 草稿未通过本地校验，原因是：'
+                + `${options.repairReason}。`
+                + '请只修复校验失败的那个 operation，不要重新生成整份复杂草稿；'
+                + '不得改变需求中未提及的表与字段。'
+                + '只改更新频率时输出 patch_sheet_update_config；'
+                + '只改显示表头时输出 patch_sheet_schema.renameColumns，不输出 headers 字段。'
+                + '仍然只能输出合法 draft JSON（protocolVersion=2、atomic=true、含 requestId/baseFingerprint/selectedSheetKey）。');
         }
         return chunks.filter(Boolean).join('\n\n');
     }
@@ -152271,7 +152431,7 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!session)
                 return '';
             const stopReasonLabel = {
-                empty_operations: '空操作停止',
+                empty_operations: 'AI 未生成任何修改（可继续重试）',
                 repair_retry_capped: '修复重试已达上限',
                 environment_failure: 'SQLite 引擎不可用',
             };
@@ -152664,7 +152824,7 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!session)
                 return '';
             const stopReasonLabel = {
-                empty_operations: '空操作停止',
+                empty_operations: 'AI 未生成任何修改（可继续重试）',
                 repair_retry_capped: '修复重试已达上限',
                 environment_failure: 'SQLite 引擎不可用',
             };
