@@ -280,6 +280,9 @@ export function parseImportedTemplateData_ACU(templateData: any, importOptions?:
 
     const normalization = normalizeTemplateRowIds_ACU(jsonData, {
         syncDdl: getCurrentStorageMode() === 'sqlite',
+        // 外部模板导入：content 与 seedRows 完全相同的行自动去重（content 优先），
+        // 使截图对应的早期入口在抛 TemplateImportValidationError_ACU 前完成安全过滤。
+        deduplicateIdenticalCrossSourceRows: true,
     });
     if (normalization.blockers.length > 0) {
         const diagnostics: TemplateImportDiagnostic_ACU[] = normalization.blockers.map(issue => ({
@@ -323,12 +326,23 @@ export function parseImportedTemplateData_ACU(templateData: any, importOptions?:
         throw new Error('模板结构无效，无法生成模板快照。');
     }
 
+    const deduplication = normalization.audits
+        .filter(audit => audit.deduplicatedSeedRows.length > 0)
+        .map(audit => ({
+            sheetKey: audit.sheetKey,
+            sheetName: audit.sheetName,
+            removedCount: audit.deduplicatedSeedRows.length,
+            rowIds: audit.deduplicatedSeedRows.map(item => item.rowId),
+        }));
+
     return {
         snapshot,
         templateObj: snapshot.templateObj,
         templateStr: snapshot.templateStr,
         dataMode,
         conflictPolicy,
+        // 跨 content/seedRows 完全重复去重审计（content 优先），供导入结果与日志追踪。
+        deduplication,
     };
 }
 

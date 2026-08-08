@@ -173,6 +173,8 @@ export function preflightTemplateDataImport_ACU(options: TemplateDataPreflightOp
     syncDdl: false,
     assignStableRowIds: true,
     rejectCrossSourceDuplicateRowIds: true,
+    // 模板导入候选允许跨池完全重复安全去重（content 优先），真实冲突仍 blocker。
+    deduplicateIdenticalCrossSourceRows: true,
     validateExistingDdl: false,
   });
   if (normalization.blockers.length > 0) {
@@ -199,6 +201,11 @@ export function preflightTemplateDataImport_ACU(options: TemplateDataPreflightOp
     const sheet = normalized[sheetKey] as SheetLike | undefined;
     const sheetName = String(sheet?.name ?? '');
     const audit = blankAudit_ACU(sheetKey, sheetName);
+    // 透传 normalizer 的跨池完全重复去重审计（content 优先），供调用方追踪与展示。
+    const normalizationAudit = normalization.audits.find(item => item.sheetKey === sheetKey);
+    if (normalizationAudit && normalizationAudit.deduplicatedSeedRows.length > 0) {
+      audit.deduplicatedSeedRows = normalizationAudit.deduplicatedSeedRows;
+    }
     const templateRows = collectTemplateDataRows_ACU(sheet);
     audit.templateRowCount = templateRows.length;
 

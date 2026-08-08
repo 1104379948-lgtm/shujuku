@@ -41,6 +41,8 @@ export interface TemplateSheetImportAudit_ACU {
   conflicts: Array<{ businessKey: string; values: string[] }>;
   /** 行身份映射（row_id ↔ 业务键） */
   rowIdentities: TemplateRowIdentity_ACU[];
+  /** 跨 content/seedRows 完全重复去重信息（content 优先，从 seedRows 删除相同副本） */
+  deduplicatedSeedRows?: Array<{ rowId: string; contentRowIndex: number }>;
   /** 阻塞原因（action=blocked 时非空） */
   blocker?: string;
 }

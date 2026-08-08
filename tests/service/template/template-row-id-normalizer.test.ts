@@ -159,3 +159,92 @@ describe('normalizeTemplateRowIds_ACU', () => {
     expect(result.blockers.map(b => b.code)).toEqual(['misplaced_row_id', 'duplicate_row_id_header']);
   });
 });
+
+describe('normalizeTemplateRowIds_ACU 跨来源完全重复去重', () => {
+  it('content 与 seedRows 相同 row_id 且完整行相同：去重成功，seedRows 删除副本，无 blocker', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [['1', '铁剑']], { seedRows: [['1', '铁剑']] }) });
+    const result = normalizeTemplateRowIds_ACU(input, { deduplicateIdenticalCrossSourceRows: true });
+    expect(result.blockers).toEqual([]);
+    expect(result.changed).toBe(true);
+    expect(result.templateData.sheet_a.content).toEqual([['row_id', '名称'], ['1', '铁剑']]);
+    expect(result.templateData.sheet_a.seedRows).toEqual([]);
+    expect(result.audits[0].deduplicatedSeedRows).toEqual([{ rowId: '1', contentRowIndex: 0 }]);
+  });
+
+  it('row_id 一个为数字一个为字符串但 canonical 相同、其他列相同：去重', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [[1, '铁剑']], { seedRows: [['1', '铁剑']] }) });
+    const result = normalizeTemplateRowIds_ACU(input, { deduplicateIdenticalCrossSourceRows: true });
+    expect(result.blockers).toEqual([]);
+    expect(result.templateData.sheet_a.seedRows).toEqual([]);
+    expect(result.audits[0].deduplicatedSeedRows).toEqual([{ rowId: '1', contentRowIndex: 0 }]);
+  });
+
+  it('相同 row_id 但任一业务字段不同：仍返回跨池冲突', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [['1', '铁剑']], { seedRows: [['1', '盾牌']] }) });
+    const result = normalizeTemplateRowIds_ACU(input, { deduplicateIdenticalCrossSourceRows: true });
+    expect(result.blockers[0].code).toBe('duplicate_row_id');
+    expect(result.blockers[0].message).toContain('seedRows');
+    expect(result.changed).toBe(false);
+  });
+
+  it('同池 content 重复：仍 blocker，不受去重影响', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [['1', '甲'], ['1', '乙']], { seedRows: [['1', '甲']] }) });
+    const result = normalizeTemplateRowIds_ACU(input, { deduplicateIdenticalCrossSourceRows: true });
+    // content 内部重复仍阻断；与 content 完全相同的 seedRows 副本先去重，
+    // 但同池冲突不会因去重而被吞掉（blocker 仍存在，changed=false）。
+    expect(result.blockers[0].code).toBe('duplicate_row_id');
+    expect(result.changed).toBe(false);
+    expect(result.templateData.sheet_a.seedRows).toEqual([]);
+  });
+
+  it('同池 seedRows 重复：仍 blocker', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [['1', '甲']], { seedRows: [['2', '乙'], ['2', '乙']] }) });
+    const result = normalizeTemplateRowIds_ACU(input, { deduplicateIdenticalCrossSourceRows: true });
+    expect(result.blockers[0].code).toBe('duplicate_row_id');
+    expect(result.blockers[0].message).toContain('seedRows');
+  });
+
+  it('多个跨池重复与非重复 seedRows 混合：只删除安全重复，保留其他种子', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [['1', '甲'], ['2', '乙']], { seedRows: [['1', '甲'], ['3', '丙'], ['2', '乙']] }) });
+    const result = normalizeTemplateRowIds_ACU(input, { deduplicateIdenticalCrossSourceRows: true });
+    expect(result.blockers).toEqual([]);
+    expect(result.templateData.sheet_a.seedRows).toEqual([['3', '丙']]);
+    expect(result.audits[0].deduplicatedSeedRows).toEqual([
+      { rowId: '1', contentRowIndex: 0 },
+      { rowId: '2', contentRowIndex: 1 },
+    ]);
+  });
+
+  it('默认关闭：不传选项时不删除跨池相同行', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [['1', '铁剑']], { seedRows: [['1', '铁剑']] }) });
+    const result = normalizeTemplateRowIds_ACU(input);
+    expect(result.blockers[0].code).toBe('duplicate_row_id');
+    expect(result.templateData.sheet_a.seedRows).toEqual([['1', '铁剑']]);
+  });
+
+  it('去重后审计数量/row_id 正确；输入对象不变；二次规范化幂等', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [['1', '铁剑']], { seedRows: [['1', '铁剑']] }) });
+    const snapshot = JSON.stringify(input);
+    const first = normalizeTemplateRowIds_ACU(input, { deduplicateIdenticalCrossSourceRows: true });
+    expect(JSON.stringify(input)).toBe(snapshot);
+    expect(first.audits[0].deduplicatedSeedRows).toEqual([{ rowId: '1', contentRowIndex: 0 }]);
+    const second = normalizeTemplateRowIds_ACU(first.templateData, { deduplicateIdenticalCrossSourceRows: true });
+    expect(second.changed).toBe(false);
+    expect(second.blockers).toEqual([]);
+    expect(second.audits[0].deduplicatedSeedRows).toEqual([]);
+    expect(second.templateData.sheet_a.seedRows).toEqual([]);
+  });
+
+  it('行宽不一致或非法行不能被去重逻辑绕过', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [['1', '铁剑']], { seedRows: [['1', '铁剑', '多余']] }) });
+    const result = normalizeTemplateRowIds_ACU(input, { deduplicateIdenticalCrossSourceRows: true });
+    expect(result.blockers[0].code).toBe('duplicate_row_id');
+    expect(result.templateData.sheet_a.seedRows).toEqual([['1', '铁剑', '多余']]);
+  });
+
+  it('null 与空串不等价，不能误去重', () => {
+    const input = state({ sheet_a: sheet('A', ['row_id', '名称'], [['1', '']], { seedRows: [['1', null]] }) });
+    const result = normalizeTemplateRowIds_ACU(input, { deduplicateIdenticalCrossSourceRows: true });
+    expect(result.blockers[0].code).toBe('duplicate_row_id');
+  });
+});

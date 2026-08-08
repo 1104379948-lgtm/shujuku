@@ -153,6 +153,58 @@ describe('preflightTemplateDataImport_ACU', () => {
     });
   });
 
+  describe('跨来源完全重复去重', () => {
+    it('replace：content 与 seedRows 完全重复时预检成功，审计反映去重', () => {
+      const result = preflightTemplateDataImport_ACU({
+        templateData: state({
+          sheet_a: { ...sheet('A', ['row_id', '名称'], [['1', '甲']]), seedRows: [['1', '甲']] },
+        }),
+        dataMode: 'replace',
+      });
+      expect(result.ok).toBe(true);
+      expect(auditOf(result, 'sheet_a').action).toBe('replaced');
+      expect(auditOf(result, 'sheet_a').templateRowCount).toBe(1);
+      expect(auditOf(result, 'sheet_a').deduplicatedSeedRows).toEqual([{ rowId: '1', contentRowIndex: 0 }]);
+    });
+
+    it('seed：完全重复跨池数据只剩一份 seed 语义，不写 runtime', () => {
+      const result = preflightTemplateDataImport_ACU({
+        templateData: state({
+          sheet_a: { ...sheet('A', ['row_id', '名称'], [['1', '甲']]), seedRows: [['1', '甲']] },
+        }),
+        dataMode: 'seed',
+      });
+      expect(result.ok).toBe(true);
+      expect(auditOf(result, 'sheet_a').action).toBe('seed-only');
+      expect(auditOf(result, 'sheet_a').deduplicatedSeedRows).toEqual([{ rowId: '1', contentRowIndex: 0 }]);
+    });
+
+    it('merge：完全重复跨池数据先去重，再独立验证 runtime 业务键冲突策略', () => {
+      const result = preflightTemplateDataImport_ACU({
+        templateData: state({
+          sheet_a: { ...sheet('A', ['row_id', 'code', 'name'], [['1', 'C1', '铁剑']], UNIQUE_DDL), seedRows: [['1', 'C1', '铁剑']] },
+        }),
+        runtimeData: state({ sheet_a: sheet('A', ['row_id', 'code', 'name'], [['9', 'C1', '旧值']], UNIQUE_DDL) }),
+        dataMode: 'merge',
+        conflictPolicy: 'keep-current',
+      });
+      expect(result.ok).toBe(true);
+      expect(result.mergePlan?.sheet_a.conflictRowIds).toEqual(['1']);
+      expect(auditOf(result, 'sheet_a').deduplicatedSeedRows).toEqual([{ rowId: '1', contentRowIndex: 0 }]);
+    });
+
+    it('同 row_id 不同字段仍映射为 cross_pool_row_id_collision', () => {
+      const result = preflightTemplateDataImport_ACU({
+        templateData: state({
+          sheet_a: { ...sheet('A', ['row_id', '名称'], [['1', '甲']]), seedRows: [['1', '乙']] },
+        }),
+        dataMode: 'replace',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.blockers[0].code).toBe('cross_pool_row_id_collision');
+    });
+  });
+
   describe('跨池与身份', () => {
     it('content 与 seedRows 共享身份空间，重复 row_id 阻断', () => {
       const result = preflightTemplateDataImport_ACU({

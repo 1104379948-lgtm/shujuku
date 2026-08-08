@@ -516,6 +516,45 @@ describe('parseImportedTemplateData_ACU', () => {
     expect(result.dataMode).toBe('merge');
     expect(result.conflictPolicy).toBe('keep-current');
   });
+
+  it('content 与 seedRows 完全重复时导入入口自动去重并返回 deduplication 审计', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: {
+        uid: 'sheet_a', name: '表1',
+        content: [['row_id', '名称'], ['1', '铁剑']],
+        seedRows: [['1', '铁剑']],
+        sourceData: {},
+      },
+    };
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value), templateObj: value,
+    }));
+    const result = parseImportedTemplateData_ACU(template);
+    expect(result).toHaveProperty('snapshot');
+    // 去重后 seedRows 副本被删除，content 保留主行
+    expect(result.templateObj.sheet_a.content).toEqual([['row_id', '名称'], ['1', '铁剑']]);
+    expect(result.templateObj.sheet_a.seedRows).toEqual([]);
+    expect(result.deduplication).toEqual([
+      { sheetKey: 'sheet_a', sheetName: '表1', removedCount: 1, rowIds: ['1'] },
+    ]);
+    // 输入对象不被修改
+    expect(template.sheet_a.seedRows).toEqual([['1', '铁剑']]);
+  });
+
+  it('content 与 seedRows 同 row_id 但内容不同时导入入口仍阻断', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: {
+        uid: 'sheet_a', name: '表1',
+        content: [['row_id', '名称'], ['1', '铁剑']],
+        seedRows: [['1', '盾牌']],
+        sourceData: {},
+      },
+    };
+    expect(() => parseImportedTemplateData_ACU(template)).toThrow(TemplateImportValidationError_ACU);
+    expect(sanitizeTemplateSnapshotForChat_ACU).not.toHaveBeenCalled();
+  });
 });
 
 describe('validateImportedTemplateObject_ACU', () => {

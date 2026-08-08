@@ -124,6 +124,8 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
                         presetName: normalizedPresetName || undefined,
                         dataMode: prepared.dataMode,
                         conflictPolicy: prepared.conflictPolicy,
+                    // 跨 content/seedRows 完全重复去重审计（content 优先），无去重时为空数组
+                    deduplication: prepared.deduplication,
                     };
                 }
 
@@ -158,6 +160,8 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
                     runtimeReady,
                     dataMode: prepared.dataMode,
                     conflictPolicy: prepared.conflictPolicy,
+                    // 跨 content/seedRows 完全重复去重审计（content 优先），无去重时为空数组
+                    deduplication: prepared.deduplication,
                     ...(postCommitWarning ? { warning: postCommitWarning, postCommitWarning } : {}),
                 };
 

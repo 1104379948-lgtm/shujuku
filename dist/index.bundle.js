@@ -48781,6 +48781,7 @@ $CONTENT
             seedRowsUpdated: 0,
             generatedRowIdCount: 0,
             ddlUpdated: false,
+            deduplicatedSeedRows: [],
         };
     }
     /**
@@ -48812,6 +48813,70 @@ $CONTENT
             else
                 row[0] = rowId;
         }
+    }
+    /**
+     * canonical 行比较：row_id 使用既有 trim 规则比较；其余列逐列严格相等（===），
+     * 不做未经证明的业务字段 trim、大小写折叠或 null/空串互换；行宽不一致不判定相同。
+     */
+    function canonicalRowsEqual_ACU(contentRow, seedRow) {
+        if (contentRow.length !== seedRow.length)
+            return false;
+        for (let index = 0; index < contentRow.length; index += 1) {
+            if (index === 0) {
+                // row_id 列：按既有 trim 规则规范化比较（与 rejectDuplicateRowIds_ACU 一致）
+                if (String(contentRow[0] ?? '').trim() !== String(seedRow[0] ?? '').trim())
+                    return false;
+                continue;
+            }
+            if (contentRow[index] !== seedRow[index])
+                return false;
+        }
+        return true;
+    }
+    /**
+     * 跨来源完全重复去重（content 优先，仅处理深拷贝候选）：
+     * 在跨池重复 blocker 生成之前，删除与 content 行完全相同（规范 row_id 相同 + 完整行逐列相同）
+     * 的 seedRows 行。只修改候选 seedRows，不修改 content；输入对象由调用方深拷贝保证不受影响。
+     *
+     * 返回删除的行数；被删除行的 row_id 与对应 content 行索引记录进 audit.deduplicatedSeedRows。
+     */
+    function deduplicateIdenticalCrossSourceSeedRows_ACU(contentRows, seedRows, sheetKey, sheetName, audit, blockers) {
+        // 同池结构错误由既有校验先行阻断；此处假定行均为合法数组（调用方保证）。
+        const contentById = new Map();
+        for (let index = 0; index < contentRows.length; index += 1) {
+            const row = contentRows[index];
+            if (!Array.isArray(row) || row.length === 0)
+                continue;
+            const rowId = String(row[0] ?? '').trim();
+            if (!rowId)
+                continue;
+            // content 内部重复由 rejectDuplicateRowIds_ACU 处理；索引仅记录首个，不覆盖。
+            if (!contentById.has(rowId))
+                contentById.set(rowId, { row, index });
+        }
+        const retained = [];
+        let removed = 0;
+        for (const seedRow of seedRows) {
+            if (!Array.isArray(seedRow) || seedRow.length === 0) {
+                retained.push(seedRow);
+                continue;
+            }
+            const seedRowId = String(seedRow[0] ?? '').trim();
+            const matched = seedRowId ? contentById.get(seedRowId) : undefined;
+            if (matched && canonicalRowsEqual_ACU(matched.row, seedRow)) {
+                removed += 1;
+                audit.deduplicatedSeedRows.push({ rowId: seedRowId, contentRowIndex: matched.index });
+                continue;
+            }
+            retained.push(seedRow);
+        }
+        if (removed > 0) {
+            seedRows.length = 0;
+            for (const row of retained)
+                seedRows.push(row);
+            audit.seedRowsUpdated += removed;
+        }
+        return removed;
     }
     function rejectDuplicateRowIds_ACU(rows, source, sheetKey, sheetName, seen, blockers) {
         for (let index = 0; index < rows.length; index += 1) {
@@ -48941,6 +49006,11 @@ $CONTENT
         normalizeRowIdsForRows_ACU(content.slice(1), options.assignStableRowIds !== false, audit, sharedReserved);
         if (Array.isArray(seedRows)) {
             normalizeRowIdsForRows_ACU(seedRows, options.assignStableRowIds !== false, audit, sharedReserved);
+        }
+        // 跨来源完全重复去重（content 优先）：必须在跨池重复 blocker 生成之前完成。
+        // 只处理深拷贝候选，删除与 content 完全相同的 seedRows 副本，更新审计。
+        if (options.deduplicateIdenticalCrossSourceRows === true && Array.isArray(seedRows) && seedRows.length > 0) {
+            deduplicateIdenticalCrossSourceSeedRows_ACU(content.slice(1), seedRows, sheetKey, sheetName, audit, blockers);
         }
         const rowIds = new Set();
         rejectDuplicateRowIds_ACU(content.slice(1), 'content', sheetKey, sheetName, rowIds, blockers);
@@ -50365,6 +50435,8 @@ $CONTENT
             syncDdl: false,
             assignStableRowIds: true,
             rejectCrossSourceDuplicateRowIds: true,
+            // 模板导入候选允许跨池完全重复安全去重（content 优先），真实冲突仍 blocker。
+            deduplicateIdenticalCrossSourceRows: true,
             validateExistingDdl: false,
         });
         if (normalization.blockers.length > 0) {
@@ -50390,6 +50462,11 @@ $CONTENT
             const sheet = normalized[sheetKey];
             const sheetName = String(sheet?.name ?? '');
             const audit = blankAudit_ACU(sheetKey, sheetName);
+            // 透传 normalizer 的跨池完全重复去重审计（content 优先），供调用方追踪与展示。
+            const normalizationAudit = normalization.audits.find(item => item.sheetKey === sheetKey);
+            if (normalizationAudit && normalizationAudit.deduplicatedSeedRows.length > 0) {
+                audit.deduplicatedSeedRows = normalizationAudit.deduplicatedSeedRows;
+            }
             const templateRows = collectTemplateDataRows_ACU(sheet);
             audit.templateRowCount = templateRows.length;
             const runtimeSheet = runtimeSheets[sheetKey];
@@ -50738,6 +50815,9 @@ $CONTENT
         }
         const normalization = normalizeTemplateRowIds_ACU(jsonData, {
             syncDdl: getCurrentStorageMode() === 'sqlite',
+            // 外部模板导入：content 与 seedRows 完全相同的行自动去重（content 优先），
+            // 使截图对应的早期入口在抛 TemplateImportValidationError_ACU 前完成安全过滤。
+            deduplicateIdenticalCrossSourceRows: true,
         });
         if (normalization.blockers.length > 0) {
             const diagnostics = normalization.blockers.map(issue => ({
@@ -50785,12 +50865,22 @@ $CONTENT
         if (!snapshot?.templateStr || !snapshot?.templateObj) {
             throw new Error('模板结构无效，无法生成模板快照。');
         }
+        const deduplication = normalization.audits
+            .filter(audit => audit.deduplicatedSeedRows.length > 0)
+            .map(audit => ({
+            sheetKey: audit.sheetKey,
+            sheetName: audit.sheetName,
+            removedCount: audit.deduplicatedSeedRows.length,
+            rowIds: audit.deduplicatedSeedRows.map(item => item.rowId),
+        }));
         return {
             snapshot,
             templateObj: snapshot.templateObj,
             templateStr: snapshot.templateStr,
             dataMode,
             conflictPolicy,
+            // 跨 content/seedRows 完全重复去重审计（content 优先），供导入结果与日志追踪。
+            deduplication,
         };
     }
     /**
@@ -100979,6 +101069,8 @@ $CONTENT
                             presetName: normalizedPresetName || undefined,
                             dataMode: prepared.dataMode,
                             conflictPolicy: prepared.conflictPolicy,
+                            // 跨 content/seedRows 完全重复去重审计（content 优先），无去重时为空数组
+                            deduplication: prepared.deduplication,
                         };
                     }
                     // ═══ 聊天导入：应用到当前聊天作用域 ═══
@@ -101011,6 +101103,8 @@ $CONTENT
                         runtimeReady,
                         dataMode: prepared.dataMode,
                         conflictPolicy: prepared.conflictPolicy,
+                        // 跨 content/seedRows 完全重复去重审计（content 优先），无去重时为空数组
+                        deduplication: prepared.deduplication,
                         ...(postCommitWarning ? { warning: postCommitWarning, postCommitWarning } : {}),
                     };
                 }

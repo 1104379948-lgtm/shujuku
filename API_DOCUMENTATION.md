@@ -1114,6 +1114,7 @@ await api.switchTemplatePreset('任务模板', { scope: 'chat' });
 - `dataMode`：实际生效的导入语义（调用方未显式指定时由兼容层推导并回填）。
 - `conflictPolicy`：实际生效的冲突策略（默认 `keep-current`）。
 - `runtimeReady`：聊天导入后 runtime（SQLite/V2 checkpoint）是否已同步；`false` 表示模板已保存但 runtime 重建失败，需检查 `warning`。
+- `deduplication`：跨 content/seedRows 完全重复去重审计（content 优先）。数组元素为 `{ sheetKey, sheetName, removedCount, rowIds }`，仅在有去重发生时非空；无去重时为空数组。
 - `saved`：是否已持久化。
 
 **命名补充说明**:
@@ -1128,6 +1129,13 @@ await api.switchTemplatePreset('任务模板', { scope: 'chat' });
 - 必须包含至少一个 `sheet_*` 键
 - 每个 sheet 必须包含 `name`, `content`, `sourceData` 字段
 - 模板可携带数据行（`content` 首行之后的行，或 `seedRows`），携带的数据按 `dataMode` 语义处理
+
+**跨池完全重复自动去重（导入候选）**:
+- 同一张表内，`content` 数据行与 `seedRows` 行的规范化 `row_id` 相同、且完整行逐列完全相同（`row_id` 按既有 trim 规则比较，其余列严格相等，不做业务字段 trim/大小写折叠/null-空串互换）时，自动删除 `seedRows` 中的重复副本（content 优先），使导入在预检阶段即可继续，不再被误判为跨池身份冲突。
+- 同 `row_id` 但任一业务字段不同、或同池内重复 `row_id`、或行宽/结构非法，仍按 fail-closed 阻断（`cross_pool_row_id_collision` / 结构错误）。
+- 去重只作用于导入候选的深拷贝，不修改调用方输入对象；操作幂等，失败不触碰任何持久化状态。
+- `replace`：去重后的候选作为完整初始快照，不把已删除的重复 seedRows 再次物化；`merge`：去重只清理模板候选内部副本，模板与 runtime 的业务键冲突仍按 `conflictPolicy` 处理；`seed`：去重只清理模板内部重复种子，剩余 seedRows 仍作为待初始化数据，不提前写入 runtime。
+- 导入结果可通过 `deduplication` 字段追踪：每表列出被删除的 `row_id` 列表与删除数量（无去重时不产生该字段）。
 
 **示例**:
 ```javascript
