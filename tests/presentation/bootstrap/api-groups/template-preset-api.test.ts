@@ -11,7 +11,12 @@ vi.mock('../../../../src/service/template/template-preset-service', () => ({
   applyChatTemplateSnapshotWithReconciliation_ACU: mocks.applyChatSnapshot,
   listTemplatePresetNames_ACU: vi.fn(() => []),
   normalizeTemplateOperationScope_ACU: vi.fn((scope: unknown) => scope === 'chat' ? 'chat' : 'global'),
-  parseImportedTemplateData_ACU: vi.fn(() => ({ templateObj: { sheet_a: {} }, templateStr: '{"sheet_a":{}}' })),
+  parseImportedTemplateData_ACU: vi.fn((templateData: unknown, options: any = {}) => ({
+    templateObj: { sheet_a: {} },
+    templateStr: '{"sheet_a":{}}',
+    dataMode: options?.dataMode === 'replace' ? 'replace' : options?.dataMode === 'merge' ? 'merge' : 'seed',
+    conflictPolicy: options?.conflictPolicy === 'reject' ? 'reject' : options?.conflictPolicy === 'template-wins' ? 'template-wins' : 'keep-current',
+  })),
   resolveTemplateForExport_ACU: vi.fn(() => null),
   upsertTemplatePreset_ACU: vi.fn(() => true),
 }));
@@ -149,5 +154,46 @@ describe('template-preset-api 结果契约', () => {
       postCommitWarning: '模板已保存，但 SQLite 运行时重建失败。',
     });
     expect(mocks.refreshUi).toHaveBeenCalledOnce();
+  });
+
+  it('importTemplateFromData 聊天导入透传 dataMode/conflictPolicy 到提交链并回填', async () => {
+    const result = await createApi().importTemplateFromData({}, {
+      scope: 'chat',
+      presetName: 'preset-a',
+      dataMode: 'merge',
+      conflictPolicy: 'reject',
+    });
+
+    expect(mocks.applyChatSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        source: 'api_import_template_chat',
+        presetName: 'preset-a',
+        dataMode: 'merge',
+        conflictPolicy: 'reject',
+      }),
+    );
+    expect(result).toMatchObject({
+      success: true,
+      scope: 'chat',
+      dataMode: 'merge',
+      conflictPolicy: 'reject',
+    });
+  });
+
+  it('importTemplateFromData 全局导入回填推导的 dataMode（不改变仅保存行为）', async () => {
+    const result = await createApi().importTemplateFromData({}, {
+      scope: 'global',
+      presetName: 'preset-a',
+      dataMode: 'seed',
+    });
+
+    expect(mocks.applyChatSnapshot).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: true,
+      scope: 'global',
+      dataMode: 'seed',
+      conflictPolicy: 'keep-current',
+    });
   });
 });

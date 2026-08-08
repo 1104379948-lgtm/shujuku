@@ -1338,39 +1338,33 @@ describe('SqlTableService', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // 删除全表后 seedRows 自动回灌（applyEdits）
+  // [阶段 E] AI 写路径不再 reseed：seed 物化由 loadFromData 建表路径完成，
+  // applyEdits 只执行用户 SQL，空表保持空，等待 AI 初始化（避免双写 UNIQUE 业务键）。
   // ═══════════════════════════════════════════════════════════════
-  describe('删除全表后 applyEdits 自动回灌 seedRows', () => {
+  describe('applyEdits 不再在写路径 reseed', () => {
     beforeEach(async () => {
       mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
       await service.loadFromChat();
     });
 
-    it('DELETE 全表后 UPDATE 自动回灌 seedRows 并命中', () => {
-      // 先删除所有数据
+    it('DELETE 全表后 UPDATE 不自动回灌，直接作用于空表', () => {
       const deleteResult = service.applyEdits('DELETE FROM inventory;');
       expect(deleteResult.success).toBe(true);
 
-      // 验证表已空
       const emptyQuery = service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory');
       expect(emptyQuery.values[0][0]).toBe(0);
 
-      // 设置 seedRows mock
       mockGetEffectiveSeedRows.mockReturnValue([
         ['1', '铁剑', '3'],
         ['2', '治疗药水', '5'],
       ]);
 
-      // 执行 UPDATE（应自动回灌 seedRows 后命中，同一事务）
+      // 表为空，UPDATE 命中 0 行；seedRows 不应被自动回灌
       const result = service.applyEdits("UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑';");
       expect(result.success).toBe(true);
 
-      // 验证 seedRows 已回灌且 UPDATE 生效
       const queryResult = service.executeQuery('SELECT * FROM inventory ORDER BY row_id');
-      expect(queryResult.rowCount).toBe(2);
-      expect(queryResult.values[0]).toContain('铁剑');
-      expect(queryResult.values[0]).toContain(10);
-      expect(queryResult.values[1]).toContain('治疗药水');
+      expect(queryResult.rowCount).toBe(0);
     });
 
     it('非空表不触发 reseed', () => {
@@ -1398,21 +1392,18 @@ describe('SqlTableService', () => {
       expect(queryResult.values[0][0]).toBe(0);
     });
 
-    it('reseed INSERT 与用户 SQL 在同一事务，失败一起回滚', () => {
+    it('空表 + 有 seedRows 时写路径不 reseed，INSERT 由 AI 自行初始化', () => {
       service.applyEdits('DELETE FROM inventory;');
-      // seedRows 的 row_id=1 与后续 INSERT 的 row_id=1 冲突（PRIMARY KEY）
       mockGetEffectiveSeedRows.mockReturnValue([
         ['1', '铁剑', '3'],
       ]);
 
-      // 用户 SQL 包含与 reseed 后 row_id 冲突的 INSERT
-      expect(() => service.applyEdits(
-        "INSERT INTO inventory VALUES (1, '冲突物品', 1);"
-      )).toThrow();
+      // AI 写路径不前置 reseed，INSERT 正常执行（不再与 seedRows 双写）
+      const result = service.applyEdits("INSERT INTO inventory (item_name, quantity) VALUES ('新物品', 1);");
+      expect(result.success).toBe(true);
 
-      // 验证回滚：表仍为空（reseed 被回滚）
       const queryResult = service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory');
-      expect(queryResult.values[0][0]).toBe(0);
+      expect(queryResult.values[0][0]).toBe(1);
     });
   });
 
@@ -1426,7 +1417,7 @@ describe('SqlTableService', () => {
       ]);
     });
 
-    it('空表补种与 AI row_id 分配在同一批次内避开冲突', () => {
+    it('[阶段 E] 空表不再由写路径补种，AI INSERT 从 row_id=1 开始分配', () => {
       const result = service.applyEditsWithSystemRowIds([
         "INSERT INTO inventory (row_id, item_name, quantity) VALUES (999, '魔法书', 1);",
         "INSERT INTO inventory (row_id, item_name, quantity) VALUES (888, '卷轴', 2);",
@@ -1435,22 +1426,20 @@ describe('SqlTableService', () => {
       expect(result.success).toBe(true);
       expect(result.appliedEdits).toBe(2);
       expect(result.materializedSqlTexts).toHaveLength(2);
-      expect(result.materializedSqlTexts[0]).toContain("VALUES (2, '魔法书', 1)");
+      expect(result.materializedSqlTexts[0]).toContain("VALUES (1, '魔法书', 1)");
       expect(result.materializedSqlTexts[0]).not.toContain('999');
-      expect(result.materializedSqlTexts[1]).toContain("VALUES (3, '卷轴', 2)");
+      expect(result.materializedSqlTexts[1]).toContain("VALUES (2, '卷轴', 2)");
       expect(result.materializedSqlTexts[1]).not.toContain('888');
 
       const queryResult = service.executeQuery('SELECT row_id, item_name FROM inventory ORDER BY row_id');
       expect(queryResult.values).toEqual([
-        [1, '铁剑'],
-        [2, '魔法书'],
-        [3, '卷轴'],
+        [1, '魔法书'],
+        [2, '卷轴'],
       ]);
       expect(result.tableData.sheet_0.content).toEqual([
         ['row_id', 'item_name', 'quantity'],
-        ['1', '铁剑', '3'],
-        ['2', '魔法书', '1'],
-        ['3', '卷轴', '2'],
+        ['1', '魔法书', '1'],
+        ['2', '卷轴', '2'],
       ]);
     });
 
@@ -2012,15 +2001,15 @@ describe('SqlTableService', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // 删除全表后 executeMutation 自动回灌 seedRows
+  // [阶段 E] executeMutation 不再在写路径 reseed（同 applyEdits）。
   // ═══════════════════════════════════════════════════════════════
-  describe('删除全表后 executeMutation 自动回灌 seedRows', () => {
+  describe('executeMutation 不再在写路径 reseed', () => {
     beforeEach(async () => {
       mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
       await service.loadFromChat();
     });
 
-    it('DELETE 全表后 executeMutation UPDATE 自动回灌 seedRows 并命中', () => {
+    it('DELETE 全表后 executeMutation UPDATE 不自动回灌，作用于空表', () => {
       service.applyEdits('DELETE FROM inventory;');
       mockGetEffectiveSeedRows.mockReturnValue([
         ['1', '铁剑', '3'],
@@ -2028,12 +2017,11 @@ describe('SqlTableService', () => {
       ]);
 
       const result = service.executeMutation("UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑'");
-      expect(result.changes).toBe(1);
+      expect(result.changes).toBe(0);
       expect(result.errors).toEqual([]);
 
       const queryResult = service.executeQuery('SELECT * FROM inventory ORDER BY row_id');
-      expect(queryResult.rowCount).toBe(2);
-      expect(queryResult.values[0]).toContain(10);
+      expect(queryResult.rowCount).toBe(0);
     });
 
     it('非空表不触发 reseed', () => {
@@ -2060,27 +2048,22 @@ describe('SqlTableService', () => {
       expect(queryResult.values[0][0]).toBe(0);
     });
 
-    it('reseed 成功但用户 SQL 失败时同步 JSON 视图避免状态分裂', () => {
+    it('用户 SQL 失败时表保持空，无 reseed 残留', () => {
       service.applyEdits('DELETE FROM inventory;');
       mockGetEffectiveSeedRows.mockReturnValue([
         ['1', '铁剑', '3'],
       ]);
 
-      // 用户 SQL 故意写错列名使其失败
       const result = service.executeMutation("UPDATE inventory SET nonexistent_col = 1 WHERE row_id = 1");
       expect(result.changes).toBe(0);
       expect(result.errors.length).toBeGreaterThan(0);
 
-      // 验证 reseed 已落库（seedRows 作为初版快照保留）
       const queryResult = service.executeQuery('SELECT * FROM inventory ORDER BY row_id');
-      expect(queryResult.rowCount).toBe(1);
-      expect(queryResult.values[0]).toContain('铁剑');
+      expect(queryResult.rowCount).toBe(0);
 
-      // 验证 JSON 视图已同步（直接检查全局 mockCurrentJsonTableData，绕过 getCurrentData 的二次同步）
       const sheetContent = mockCurrentJsonTableData?.sheet_0?.content;
       expect(Array.isArray(sheetContent)).toBe(true);
-      expect(sheetContent.length).toBeGreaterThanOrEqual(2); // 表头 + 至少 1 行 seedRows
-      expect(sheetContent[1]).toContain('铁剑');
+      expect(sheetContent.length).toBe(1); // 仅表头，无 reseed 数据行
     });
   });
 

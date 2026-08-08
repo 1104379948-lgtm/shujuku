@@ -44,6 +44,7 @@ import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { rebindSqlMutationTableReferences_ACU, rebindSqlMutationColumnsByTarget_ACU } from '../../shared/sql-mutation-table-rebind';
 import { buildSheetTableAliasMap_ACU, buildSheetColumnAliasMap_ACU } from '../../shared/sql-read-resolver';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
+import { extractBusinessKeyColumns_ACU } from '../template/template-data-preflight';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
   workingData?: TableDataObject_ACU;
@@ -1124,12 +1125,10 @@ export class SqlTableService implements ITableStorageProvider {
       return { success: true, modifiedKeys: [], appliedEdits: 0 };
     }
 
-    const reseedInserts = this._collectReseedInsertsForEmptyTables();
-    const statements = [...reseedInserts, ...userStatements];
-    const statementParams = [
-      ...reseedInserts.map((): undefined => undefined),
-      ...userParams,
-    ];
+    // [阶段 E] 不再在 AI 写路径前置 reseed：seed 数据已在 loadFromData →
+    // _buildInitialRuntimeTableData_ACU 建表时物化；此处再补种会与 AI INSERT 双写 UNIQUE 业务键。
+    const statements = userStatements;
+    const statementParams = userParams;
 
     try {
       const result = this.engine.runBatch(statements, statementParams);
@@ -1180,7 +1179,10 @@ export class SqlTableService implements ITableStorageProvider {
       };
     }
 
-    const reseedPlan = this._collectReseedPlanForEmptyTables(scope);
+    // [阶段 E] AI 写路径不再 reseed（seed 已在 loadFromData 建表时物化）。
+    // 保留空 row_id 预留 Map：materializeSystemRowIdsForSqlInserts_ACU 仍会从
+    // runtimeData 自身构建预留，此处无新增预留。
+    const reseedPlan: { inserts: string[]; rowIdsByTable: Map<string, Set<string>> } = { inserts: [], rowIdsByTable: new Map<string, Set<string>>() };
     const runtimeData = this._exportCurrentDataStrict();
     let materializedStatements: string[];
     try {
@@ -1254,13 +1256,6 @@ export class SqlTableService implements ITableStorageProvider {
     this._ensureInitialized();
     this._ensureTablesFromTemplate();
     try {
-      // 收集空表 seedRows INSERT 并执行（与用户 SQL 不在同一事务，计划已记录风险）
-      const reseedInserts = this._collectReseedInsertsForEmptyTables();
-      if (reseedInserts.length > 0) {
-        this.engine.runBatch(reseedInserts);
-        logDebug_ACU(`[SqlTableService] executeMutation 前置补回 ${reseedInserts.length} 条 seedRows`);
-      }
-
       // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
       const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
       const runtimeSql = rebindSqlMutationIdentifiers_ACU(
@@ -1271,7 +1266,7 @@ export class SqlTableService implements ITableStorageProvider {
       this._syncToJson();
       return { changes: result.changes, errors: [] };
     } catch (e: any) {
-      // reseed 可能已成功落库，同步 JSON 视图避免 SQLite/JSON 状态分裂
+      // 同步 JSON 视图避免 SQLite/JSON 状态分裂
       this._syncToJson();
       return { changes: 0, errors: [e?.message || String(e)] };
     }
@@ -1359,7 +1354,52 @@ export class SqlTableService implements ITableStorageProvider {
       const headerRow = Array.isArray(sheet.content?.[0]) ? sheet.content[0] : ['row_id'];
       if (!Array.isArray(sheet.content) || sheet.content.length <= 1) {
         const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
-        sheet.content = [headerRow, ...(Array.isArray(seedRows) ? seedRows : [])];
+        // [阶段 E] seed 物化前唯一键预检：从 DDL 提取业务 UNIQUE 组，剔除与
+        // 既有数据（baseData 已携带的行）重复的 seedRows，避免建表时双写同一业务键。
+        // 不允许依赖 SQLite 失败后再由 AI 猜测。
+        let materializedSeedRows = Array.isArray(seedRows) ? seedRows : [];
+        const existingContent = Array.isArray(sheet.content) ? sheet.content : [];
+        const existingDataRows = existingContent.length > 1 ? existingContent.slice(1) : [];
+        const ddl = String(sheet?.sourceData?.ddl || '');
+        const businessKeyGroups = ddl ? extractBusinessKeyColumns_ACU(ddl) : [];
+        if (businessKeyGroups.length > 0 && existingDataRows.length > 0) {
+          const headerIndex = new Map<string, number>();
+          headerRow.forEach((cell: unknown, index: number) => {
+            const name = String(cell ?? '').trim().toLowerCase();
+            if (name && !headerIndex.has(name)) headerIndex.set(name, index);
+          });
+          const rowKey = (row: unknown[], group: string[]): string | null => {
+            if (!Array.isArray(row)) return null;
+            const parts: string[] = [];
+            for (const col of group) {
+              const idx = headerIndex.get(col.toLowerCase());
+              if (idx === undefined || idx >= row.length) return null;
+              parts.push(String(row[idx] ?? ''));
+            }
+            return parts.join('\u0001');
+          };
+          const existingKeySet = new Set<string>();
+          for (const row of existingDataRows) {
+            for (const group of businessKeyGroups) {
+              const key = rowKey(row, group);
+              if (key !== null) existingKeySet.add(key);
+            }
+          }
+          if (existingKeySet.size > 0) {
+            const unique = materializedSeedRows.filter((row: unknown[]) => {
+              for (const group of businessKeyGroups) {
+                const key = rowKey(row, group);
+                if (key !== null && existingKeySet.has(key)) return false;
+              }
+              return true;
+            });
+            if (unique.length !== materializedSeedRows.length) {
+              logWarn_ACU(`[SqlTableService] 表 ${key} (${sheet.name}) seed 物化预检剔除 ${materializedSeedRows.length - unique.length} 行与既有数据重复的 UNIQUE 业务键行`);
+            }
+            materializedSeedRows = unique;
+          }
+        }
+        sheet.content = [headerRow, ...materializedSeedRows];
       }
       sheet.content = ensureStableRowIdsForSheetContent_ACU(sheet.content);
     }
@@ -1367,22 +1407,6 @@ export class SqlTableService implements ITableStorageProvider {
     return hasSheet ? baseData : null;
   }
 
-  /**
-   * 收集已存在空表的 seedRows INSERT 语句，用于 SQL 写入前补齐基底数据。
-   *
-   * 触发条件（全部满足才处理）：
-   * 1. 表在 SQLite 中已存在（由 _ensureTablesFromTemplate 保证）
-   * 2. SELECT COUNT(*) 返回 0（空表）
-   * 3. getEffectiveSeedRowsForSheet_ACU 返回非空
-   * 4. 表属于当前聊天模板/guide（有 DDL 且可解析表名）
-   *
-   * 幂等：非空表跳过；无 seedRows 跳过；DDL 缺失跳过。
-   *
-   * @returns 需要前置执行的 INSERT 语句数组（可能为空）
-   */
-  private _collectReseedInsertsForEmptyTables(): string[] {
-    return this._collectReseedPlanForEmptyTables().inserts;
-  }
 
   private _exportCurrentDataStrict(): TableDataObject_ACU {
     try {
@@ -1393,78 +1417,6 @@ export class SqlTableService implements ITableStorageProvider {
     }
   }
 
-  private _collectReseedPlanForEmptyTables(scope?: SqlTableApplyScope_ACU): {
-    inserts: string[];
-    rowIdsByTable: Map<string, Set<string>>;
-  } {
-    const inserts: string[] = [];
-    const rowIdsByTable = new Map<string, Set<string>>();
-    if (!currentJsonTableData_ACU) return { inserts, rowIdsByTable };
-    const identitySource = scope?.templateData || currentJsonTableData_ACU;
-    const seedSource = scope?.templateDataWithRows;
-
-    const sheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
-    if (sheetKeys.length === 0) return { inserts, rowIdsByTable };
-
-    for (const sheetKey of sheetKeys) {
-      try {
-        const sheet = (currentJsonTableData_ACU as any)[sheetKey];
-        if (!sheet?.sourceData?.ddl) continue;
-
-        const tableName = getPhysicalTableNameForSheet_ACU((identitySource as any)?.[sheetKey] ? identitySource : currentJsonTableData_ACU, sheetKey);
-
-        const existingTables = this._existingTableSet ??= new Set(this.engine.getTableNames());
-        // 检查表是否存在且为空
-        if (!existingTables.has(tableName)) continue;
-
-        const countResult = this.engine.query(`SELECT COUNT(*) AS cnt FROM "${tableName.replace(/"/g, '""')}";`);
-        const cnt = countResult?.values?.[0]?.[0];
-        if (cnt !== 0) continue; // 非空表，跳过
-
-        // AI 提交链显式携带请求前模板时，补种也必须来自同一快照，不能在 await 后重新读取当前模板。
-        const capturedRows = (seedSource as any)?.[sheetKey]?.content;
-        const seedRows = Array.isArray(capturedRows) && capturedRows.length > 1
-          ? capturedRows.slice(1)
-          : getEffectiveSeedRowsForSheet_ACU(sheetKey, { allowTemplateFallback: true });
-        if (!Array.isArray(seedRows) || seedRows.length === 0) continue;
-
-        // 构造临时 Sheet 对象用于 generateInserts
-        const headerRow = Array.isArray(sheet.content?.[0])
-          ? JSON.parse(JSON.stringify(sheet.content[0]))
-          : ['row_id'];
-        const content = [headerRow, ...seedRows.map((r: any) => Array.isArray(r) ? [...r] : [r])];
-        const stableContent = ensureStableRowIdsForSheetContent_ACU(content);
-
-        const tempSheet = {
-          uid: sheet.uid || sheetKey,
-          name: sheet.name || sheetKey,
-          sourceData: sheet.sourceData,
-          content: stableContent,
-          updateConfig: sheet.updateConfig || {},
-          exportConfig: sheet.exportConfig || {},
-          orderNo: sheet.orderNo ?? 0,
-        };
-
-        const sheetInserts = generateInserts(tempSheet as any, tableName);
-        if (sheetInserts.length > 0) {
-          rowIdsByTable.set(
-            tableName.toLowerCase(),
-            createStableRowIdReservation_ACU(stableContent.slice(1)),
-          );
-          inserts.push(...sheetInserts);
-          logDebug_ACU(`[SqlTableService] 空表 ${sheetKey} (${tableName}) 补回 ${sheetInserts.length} 行 seedRows`);
-        }
-      } catch (e: any) {
-        // 单表失败不阻塞其他表，但记录日志
-        logWarn_ACU(`[SqlTableService] 收集表 ${sheetKey} 的 seedRows INSERT 失败: ${e?.message}`);
-      }
-    }
-
-    if (inserts.length > 0) {
-      logDebug_ACU(`[SqlTableService] 共收集 ${inserts.length} 条 seedRows reseed INSERT 语句`);
-    }
-    return { inserts, rowIdsByTable };
-  }
 
   /**
    * hydrate 成功不等于 runtime 可用：必须确认当前数据对应的物理表和有效列都已真正落入 SQLite。

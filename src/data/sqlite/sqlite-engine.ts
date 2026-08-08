@@ -267,6 +267,17 @@ export class SqliteEngine {
           totalChanges += this.db!.getRowsModified();
         } catch (e: any) {
           const errMsg = e?.message || String(e);
+          // [阶段 E] 解析 UNIQUE 冲突，附冲突键、可能来源与建议动作，
+          // 避免只返回“第 N 条语句失败”而无法定位根因。
+          const uniqueMatch = errMsg.match(/UNIQUE constraint failed:\s*(.+)/i);
+          if (uniqueMatch) {
+            const conflictedColumns = uniqueMatch[1].trim();
+            throw new Error(
+              `第 ${i + 1} 条语句失败: ${stmt} → ${errMsg}；` +
+              `冲突来源：本批次前序语句或 seedRows reseed 与 AI INSERT 命中同一 UNIQUE 键（${conflictedColumns}）。` +
+              `建议：检查是否重复初始化同一业务键；若为 AI 初始化请改为 UPDATE 既有行，若为系统 seed 请确认提交链 dataMode（replace/merge 不应 reseed）。`,
+            );
+          }
           throw new Error(`第 ${i + 1} 条语句失败: ${stmt} → ${errMsg}`);
         }
       }

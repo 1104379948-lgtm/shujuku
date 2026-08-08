@@ -465,6 +465,57 @@ describe('parseImportedTemplateData_ACU', () => {
     expect(sanitizeTemplateSnapshotForChat_ACU).not.toHaveBeenCalled();
     expect(JSON.stringify(mockStore)).toBe(storeBefore);
   });
+
+  it('显式 dataMode=replace 时返回回填的 dataMode/conflictPolicy', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: '表1', content: [['row_id', '名称'], ['1', '铁剑']], sourceData: {} },
+    };
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value), templateObj: value,
+    }));
+    const result = parseImportedTemplateData_ACU(template, { dataMode: 'replace', conflictPolicy: 'reject' });
+    expect(result.dataMode).toBe('replace');
+    expect(result.conflictPolicy).toBe('reject');
+  });
+
+  it('模板带数据且未显式指定时默认推导 replace（runtime 空）', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: '表1', content: [['row_id', '名称'], ['1', '铁剑']], sourceData: {} },
+    };
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value), templateObj: value,
+    }));
+    const result = parseImportedTemplateData_ACU(template);
+    expect(result.dataMode).toBe('replace');
+    expect(result.conflictPolicy).toBe('keep-current');
+  });
+
+  it('模板无数据时默认推导 seed（不凭空造行）', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: '表1', content: [['row_id', '名称']], sourceData: {} },
+    };
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value), templateObj: value,
+    }));
+    const result = parseImportedTemplateData_ACU(template);
+    expect(result.dataMode).toBe('seed');
+  });
+
+  it('显式 dataMode=merge 时保留显式值并规范化 conflictPolicy', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: '表1', content: [['row_id', 'code', 'name'], ['1', 'C1', '铁剑']], sourceData: {} },
+    };
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value), templateObj: value,
+    }));
+    const result = parseImportedTemplateData_ACU(template, { dataMode: 'merge' });
+    expect(result.dataMode).toBe('merge');
+    expect(result.conflictPolicy).toBe('keep-current');
+  });
 });
 
 describe('validateImportedTemplateObject_ACU', () => {

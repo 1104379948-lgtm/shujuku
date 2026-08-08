@@ -776,10 +776,10 @@ describe('manual catch-up provisional bridge 写入准入（t5）', () => {
     expect(rootTagAfter?.manualCatchUpProvisionalBridge?.phase).toBe('provisional_active');
   });
 
-  it('不同 isolationKey 下已存在 active bridge 时，第二个临时根被全局拒绝（provisional_bridge_conflict）', async () => {
+  it('请求隔离键与当前运行时隔离键不匹配时拒绝建立（作用域不匹配，无 diagnosticCode）', async () => {
     mocks.chat.push(...buildV2ChatWithFormalFull());
     const isolationKey = mocks.isolationKey;
-    const runId = 'run-bridge-concurrent-1';
+    const runId = 'run-bridge-scope-mismatch';
 
     const establish = await establishProvisionalBridge_ACU(runId, ['sheet_a'], 0, 6, {
       selectedSheetBaselines: { sheet_a: { lastCompletedAiFloor: 0, headerOnly: true } },
@@ -790,15 +790,58 @@ describe('manual catch-up provisional bridge 写入准入（t5）', () => {
     expect(establish.ok).toBe(true);
     if (!establish.ok) return;
 
-    // 模拟另一隔离键上下文发起第二次建立：切换 isolationKey。
+    // 模拟另一隔离键上下文发起第二次建立：仅切换运行时隔离键。
+    // 当前实现中「请求隔离键 !== 当前运行时隔离键」在前置校验（L419）即拒绝，
+    // 不会进入全局 bridge 冲突检测，因此不携带 provisional_bridge_conflict。
     const otherIsolationKey = 'other-isolation-key';
     mocks.isolationKey = otherIsolationKey;
+
+    const secondEstablish = await establishProvisionalBridge_ACU('run-bridge-scope-mismatch-2', ['sheet_a'], 0, 6, {
+      selectedSheetBaselines: { sheet_a: { lastCompletedAiFloor: 0, headerOnly: true } },
+      templateData: { sheet_a: sheet('表A', [['row_id', '值']]) },
+      chatKey: mocks.chatIdentifier,
+      isolationKey: otherIsolationKey,
+    });
+    expect(secondEstablish.ok).toBe(false);
+    if (!secondEstablish.ok) {
+      expect(secondEstablish.error).toContain('当前隔离键与请求不匹配');
+      // 作用域不匹配不是 bridge 并发冲突，不得误报 provisional_bridge_conflict。
+      expect(secondEstablish.diagnosticCode).toBeUndefined();
+    }
+  });
+
+  it('不同 isolationKey 下已存在 active bridge 时，第二个临时根被全局拒绝（provisional_bridge_conflict）', async () => {
+    mocks.chat.push(...buildV2ChatWithFormalFull());
+    const isolationKey = mocks.isolationKey;
+    const runId = 'run-bridge-concurrent-1';
+
+    // 在当前运行时隔离键之外预置另一个隔离键的 active bridge，
+    // 保持运行时隔离键与请求一致，从而真正进入全局冲突检测（L422）。
+    const otherIsolationKey = 'other-isolation-key';
+    const tag2 = mocks.chat[2]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    tag2.manualCatchUpProvisionalBridge = {
+      version: 1,
+      kind: 'manual_catch_up_provisional_bridge',
+      runId: 'run-bridge-concurrent-other-scope',
+      chatKey: mocks.chatIdentifier,
+      isolationKey: otherIsolationKey,
+      selectedSheetKeys: ['sheet_a'],
+      rangeStartMessageIndex: 0,
+      originalFullCheckpointIndex: 6,
+      phase: 'provisional_active',
+      originalFullFrameFingerprint: 'fnv1a:other-scope',
+      provisionalRootIndex: 0,
+      lastCommittedTargetIndex: -1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      originalFullFrame: { version: 2, logEntries: [] },
+    };
 
     const secondEstablish = await establishProvisionalBridge_ACU('run-bridge-concurrent-2', ['sheet_a'], 0, 6, {
       selectedSheetBaselines: { sheet_a: { lastCompletedAiFloor: 0, headerOnly: true } },
       templateData: { sheet_a: sheet('表A', [['row_id', '值']]) },
       chatKey: mocks.chatIdentifier,
-      isolationKey: otherIsolationKey,
+      isolationKey,
     });
     expect(secondEstablish.ok).toBe(false);
     if (!secondEstablish.ok) {

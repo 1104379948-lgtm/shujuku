@@ -39,6 +39,14 @@ import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../tabl
 import { normalizeTemplateRowIds_ACU } from './template-row-id-normalizer';
 import { abortableDelay } from '../../shared/abortable-delay';
 import { notifyTemplateRuntimeCommitted_ACU } from '../../shared/template-runtime-change';
+import {
+  normalizeTemplateConflictPolicy_ACU,
+  resolveDefaultTemplateDataMode_ACU,
+  type TemplateDataMode_ACU,
+  type TemplateImportDataOptions_ACU,
+  type TemplateMergeConflictPolicy_ACU,
+} from '../../shared/template-data-mode';
+import { preflightTemplateDataImport_ACU } from './template-data-preflight';
 
 // ═══ 预设存储 CRUD（内部辅助） ═══
 
@@ -208,7 +216,35 @@ export function getRuntimeTemplateSnapshot_ACU() {
     return sanitized;
 }
 
-export function parseImportedTemplateData_ACU(templateData: any) {
+/**
+ * 推导模板携带数据语义：
+ * - 显式 dataMode 优先；
+ * - 未显式指定时按模板是否带数据、目标 runtime 是否已有数据推导（兼容旧调用）。
+ */
+function resolveImportDataMode_ACU(templateData: any, options: TemplateImportDataOptions_ACU | undefined): {
+    dataMode: TemplateDataMode_ACU;
+    conflictPolicy: TemplateMergeConflictPolicy_ACU;
+} {
+    const conflictPolicy = normalizeTemplateConflictPolicy_ACU(options?.conflictPolicy);
+    const explicitMode = options?.dataMode;
+    if (explicitMode === 'replace' || explicitMode === 'merge' || explicitMode === 'seed') {
+        return { dataMode: explicitMode, conflictPolicy };
+    }
+    const sheetKeys = Object.keys(templateData || {}).filter(k => k.startsWith('sheet_'));
+    const templateHasData = sheetKeys.some(key => {
+        const sheet = templateData?.[key];
+        const content = Array.isArray(sheet?.content) ? sheet.content : [];
+        const seedRows = Array.isArray(sheet?.seedRows) ? sheet.seedRows : [];
+        return content.length > 1 || seedRows.length > 0;
+    });
+    const dataMode = resolveDefaultTemplateDataMode_ACU({
+        templateHasData,
+        runtimeHasData: false, // 解析阶段不读 runtime；实际 runtime 语义由提交链在 D 阶段判定
+    });
+    return { dataMode, conflictPolicy };
+}
+
+export function parseImportedTemplateData_ACU(templateData: any, importOptions?: TemplateImportDataOptions_ACU) {
     let jsonData;
 
     if (typeof templateData === 'string') {
@@ -231,6 +267,9 @@ export function parseImportedTemplateData_ACU(templateData: any) {
     if (sheetKeys.length === 0) {
         throw new Error('模板中未找到任何表格数据 (缺少 "sheet_..." 键)。');
     }
+
+    // 在结构校验通过后推导数据模式（模板带数据与否此时才可证明）
+    const { dataMode, conflictPolicy } = resolveImportDataMode_ACU(jsonData, importOptions);
 
     for (const key of sheetKeys) {
         const sheet = jsonData[key];
@@ -288,7 +327,65 @@ export function parseImportedTemplateData_ACU(templateData: any) {
         snapshot,
         templateObj: snapshot.templateObj,
         templateStr: snapshot.templateStr,
+        dataMode,
+        conflictPolicy,
     };
+}
+
+/**
+ * merge 模式：把 preflight 的显式合并计划应用到协调后的 candidateData。
+ * - insertRowIds：模板新增行追加到候选表（业务键未命中既有行）。
+ * - overrideRowIds：conflictPolicy=template-wins 时，模板行覆盖既有行（业务键命中但值取模板）。
+ * - matchedRowIds（keep-current）：保留 runtime 行，不写模板行。
+ * 所有追加行都保留模板行原样（row_id 已由规范化器分配，业务值取模板）。
+ */
+function applyMergePlanToCandidate_ACU(
+    candidateData: Record<string, any>,
+    templateData: Record<string, any>,
+    mergePlan: Record<string, import('./template-data-preflight').TemplateSheetMergePlan_ACU>,
+): void {
+    for (const [sheetKey, plan] of Object.entries(mergePlan)) {
+        const candidateSheet = candidateData?.[sheetKey];
+        const templateSheet = templateData?.[sheetKey];
+        if (!candidateSheet || typeof candidateSheet !== 'object' || !templateSheet || typeof templateSheet !== 'object') continue;
+        const candidateContent = Array.isArray(candidateSheet.content) ? candidateSheet.content : [];
+        const templateContent = Array.isArray(templateSheet.content) ? templateSheet.content : [];
+        if (candidateContent.length === 0 || templateContent.length === 0) continue;
+        const headerWidth = Array.isArray(candidateContent[0]) ? candidateContent[0].length : 0;
+        const templateRowByRowId = new Map<string, unknown[]>();
+        for (const row of templateContent.slice(1)) {
+            if (!Array.isArray(row)) continue;
+            const rowId = String(row[0] ?? '').trim();
+            if (rowId) templateRowByRowId.set(rowId, row);
+        }
+        // 插入行：业务键未命中 → 追加模板行（补齐到表头宽度）
+        for (const rowId of plan.insertRowIds) {
+            const templateRow = templateRowByRowId.get(rowId);
+            if (!templateRow) continue;
+            const cells = [...templateRow];
+            while (cells.length < headerWidth) cells.push(null);
+            candidateContent.push(cells);
+        }
+        // 覆盖行：template-wins → 用模板行替换既有行（按 row_id 匹配）
+        if (plan.overrideRowIds.length > 0) {
+            const candidateRowIndexById = new Map<string, number>();
+            for (let index = 1; index < candidateContent.length; index += 1) {
+                const row = candidateContent[index];
+                if (!Array.isArray(row)) continue;
+                const rowId = String(row[0] ?? '').trim();
+                if (rowId) candidateRowIndexById.set(rowId, index);
+            }
+            for (const rowId of plan.overrideRowIds) {
+                const templateRow = templateRowByRowId.get(rowId);
+                if (!templateRow) continue;
+                const index = candidateRowIndexById.get(rowId);
+                if (index === undefined) continue; // 既有行不存在则不覆盖
+                const cells = [...templateRow];
+                while (cells.length < headerWidth) cells.push(null);
+                candidateContent[index] = cells;
+            }
+        }
+    }
 }
 
 // ═══ 模板作用域持久化（纯数据操作） ═══
@@ -537,6 +634,8 @@ async function loadConsistentTemplateBaseline_ACU(isolationKey: string, signal?:
 async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateData: any, {
     source = 'ui',
     presetName = '',
+    dataMode,
+    conflictPolicy,
     destructiveChangeConfirmed = false,
     hardDeleteMissingSheets = false,
     signal,
@@ -544,6 +643,8 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
 }: {
     source?: string;
     presetName?: string;
+    dataMode?: TemplateDataMode_ACU;
+    conflictPolicy?: TemplateMergeConflictPolicy_ACU;
     destructiveChangeConfirmed?: boolean;
     /**
      * 目标模板缺失的既有表默认隐藏保留。仅当调用方确实要跨全历史硬删该表数据时才置 true，
@@ -618,12 +719,36 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
             : { mate: { type: 'chatSheets', version: 1 } };
     }
 
+    // ═══ 阶段 D：seed 模式下，模板 content 数据行不得进入 candidateData（runtime 保持空），
+    // 数据只落到 guide seedRows 作为待初始化种子（计划 D3）。
+    // 因此把模板数据行从 content 剥离到 seedRows 字段，再交给协调层：
+    // introduced 表因此是 header-only，matched 表在"旧表无数据"时也不采用模板行。
+    const effectiveDataMode = dataMode === 'replace' || dataMode === 'merge' || dataMode === 'seed'
+        ? dataMode
+        : 'seed';
+    let reconcileTemplateData = targetTemplateData;
+    if (effectiveDataMode === 'seed' && targetTemplateData && typeof targetTemplateData === 'object') {
+        reconcileTemplateData = JSON.parse(JSON.stringify(targetTemplateData));
+        for (const sheetKey of Object.keys(reconcileTemplateData).filter(k => k.startsWith('sheet_'))) {
+            const sheet = reconcileTemplateData[sheetKey];
+            if (!sheet || typeof sheet !== 'object') continue;
+            const content = Array.isArray(sheet.content) ? sheet.content : [];
+            if (content.length > 1) {
+                const headerRow = content[0];
+                const dataRows = content.slice(1);
+                const existingSeedRows = Array.isArray(sheet.seedRows) ? sheet.seedRows : [];
+                sheet.seedRows = [...existingSeedRows, ...dataRows];
+                sheet.content = [headerRow];
+            }
+        }
+    }
+
     const storageMode = getCurrentStorageMode();
     let plan;
     try {
         plan = await reconcileChatTemplate_ACU({
             baselineData,
-            templateData: targetTemplateData,
+            templateData: reconcileTemplateData,
             destructiveChangeConfirmed,
             hardDeleteMissingSheets,
             lifecycle: lifecycle ?? undefined,
@@ -635,13 +760,58 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
     if (plan.blockers.length > 0) {
         return { saved: false, blockers: plan.blockers, error: plan.blockers.join('；') };
     }
+    // ═══ 阶段 D：merge 模式显式合并（计划 D2）═══
+    // 使用 replay 基线生成候选后，按 DDL UNIQUE 业务键把模板行合并进 candidateData：
+    // 未命中 → 插入；命中且 template-wins → 覆盖；命中且 keep-current → 保留 runtime；
+    // 命中且 reject → preflight 已返回 blocker，直接拒绝提交。
+    if (effectiveDataMode === 'merge') {
+        const preflight = preflightTemplateDataImport_ACU({
+            templateData: targetTemplateData,
+            runtimeData: baselineData,
+            dataMode: 'merge',
+            conflictPolicy,
+        });
+        if (!preflight.ok) {
+            return {
+                saved: false,
+                blockers: preflight.blockers.map(item => item.message),
+                error: preflight.blockers.map(item => item.message).join('；'),
+                importAudit: preflight.audits,
+            };
+        }
+        if (preflight.mergePlan && Object.keys(preflight.mergePlan).length > 0) {
+            // introduced 表的模板数据已由 reconcile 带入 candidateData（asIntroducedSheet_ACU），
+            // 若再按 mergePlan 追加会重复 INSERT 同一 UNIQUE 键。只对 matched 表应用合并。
+            const introducedKeys = new Set(
+                plan.audit
+                    .filter(item => item.match === 'introduced')
+                    .map(item => item.resolvedSheetKey),
+            );
+            const matchedMergePlan: Record<string, import('./template-data-preflight').TemplateSheetMergePlan_ACU> = {};
+            for (const [sheetKey, sheetPlan] of Object.entries(preflight.mergePlan)) {
+                if (!introducedKeys.has(sheetKey)) matchedMergePlan[sheetKey] = sheetPlan;
+            }
+            applyMergePlanToCandidate_ACU(
+                plan.candidateData,
+                targetTemplateData,
+                matchedMergePlan,
+            );
+        }
+    }
     logDebug_ACU(`[TemplateScope] 模板协调计划已生成: requestId=${requestId}, baseRevision=${baseRevision}, changes=${plan.sheetChanges.map(change => `${change.kind}:${change.sheetKey}`).join(',') || 'none'}, deleted=${plan.deletedSheetKeys.join(',') || 'none'}`);
     logDebug_ACU(`[TemplateScope] 模板 Sheet identity 已解析: requestId=${requestId}, mappings=${plan.audit
         .filter(item => item.templateSheetKey)
         .map(item => `${item.templateSheetKey}->${item.resolvedSheetKey}`).join(',') || 'none'}`);
+    // ═══ 阶段 D：guide seedRows 语义由 dataMode 显式决定，禁止隐式分支（计划 D4）═══
+    // - replace/merge：模板数据已物化进 candidateData/checkpoint，guide 只做视图投影，
+    //   不得把模板数据再次写入 seedRows（否则 SQLite reseed 会重复 INSERT 同一 UNIQUE 键）。
+    // - seed：模板数据保留在 guide seedRows，作为待初始化的种子数据。
     const guideData = buildChatSheetGuideDataFromData_ACU(plan.candidateData, {
-        preserveSeedRowsFromGuideData: pristineChat ? null : getChatSheetGuideDataForIsolationKey_ACU(isolationKey),
-        seedRowsFromTemplateObj: targetTemplateData,
+        preserveSeedRowsFromGuideData:
+            effectiveDataMode === 'seed' && !pristineChat
+                ? getChatSheetGuideDataForIsolationKey_ACU(isolationKey)
+                : null,
+        seedRowsFromTemplateObj: effectiveDataMode === 'seed' ? targetTemplateData : null,
     });
     if (!guideData) return { saved: false, error: '无法为协调后的模板生成聊天指导表。' };
 
@@ -655,7 +825,9 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
         // pristine 会话没有任何数据帧，模板结构只需落到聊天级 guide + scope 容器。
         // 刻意不调用 commitCurrentFloorTemplateChanges_ACU：不产生 checkpoint / logEntry，
         // 也不读取任何残留 guide 的 seedRows（避免旧宽度污染新结构）。
-        const pristineGuideData = buildChatSheetGuideDataFromTemplateObj_ACU(targetTemplateData, { stripSeedRows: false });
+        // pristine 会话无既有数据：replace/merge 的数据已进入 candidateData，guide 只留表头；
+        // seed 模式保留模板数据作为初始化种子。
+        const pristineGuideData = buildChatSheetGuideDataFromTemplateObj_ACU(targetTemplateData, { stripSeedRows: effectiveDataMode !== 'seed' });
         if (!pristineGuideData) {
             return { saved: false, error: '目标模板不包含任何表，已取消提交。' };
         }
@@ -737,6 +909,8 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
     return {
         ...committed,
         audit: plan.audit,
+        dataMode: effectiveDataMode,
+        conflictPolicy: normalizeTemplateConflictPolicy_ACU(conflictPolicy),
         ...(postCommitWarning ? { runtimeReady: false, postCommitWarning } : { runtimeReady: true }),
     };
 }
@@ -749,6 +923,8 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
 export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateData: any, options: {
     source?: string;
     presetName?: string;
+    dataMode?: TemplateDataMode_ACU;
+    conflictPolicy?: TemplateMergeConflictPolicy_ACU;
     destructiveChangeConfirmed?: boolean;
     /**
      * 目标模板缺失的既有表默认隐藏保留（数据留在 V2 历史）。置 true 才跨全历史硬删，

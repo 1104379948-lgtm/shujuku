@@ -88,7 +88,7 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
 
         importTemplateFromData: async function(templateData: any, options: any = {}) {
             try {
-                const { scope = 'global', presetName = '' } = options || {};
+                const { scope = 'global', presetName = '', dataMode, conflictPolicy } = options || {};
                 const normalizedScope = normalizeTemplateOperationScope_ACU(scope);
                 const normalizedPresetName = deriveTemplatePresetNameForImport_ACU({
                     presetName,
@@ -96,7 +96,7 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
                         ? `导入模板_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`
                         : '',
                 });
-                const prepared = parseImportedTemplateData_ACU(templateData);
+                const prepared = parseImportedTemplateData_ACU(templateData, { dataMode, conflictPolicy });
 
                 if (normalizedScope === 'global') {
                     // ═══ 全局导入：仅保存到预设库，不自动切换当前生效模板 ═══
@@ -122,6 +122,8 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
                             ? `模板已保存为全局预设：${normalizedPresetName}。你可以在"全局模板预设"下拉中手动切换到它。`
                             : '模板已解析，但未指定预设名称，未保存到预设库。',
                         presetName: normalizedPresetName || undefined,
+                        dataMode: prepared.dataMode,
+                        conflictPolicy: prepared.conflictPolicy,
                     };
                 }
 
@@ -129,6 +131,8 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
                 const applied = await applyChatTemplateSnapshotWithReconciliation_ACU(prepared.templateObj, {
                     source: 'api_import_template_chat',
                     presetName: normalizedPresetName,
+                    dataMode: prepared.dataMode,
+                    conflictPolicy: prepared.conflictPolicy,
                 });
                 if (!applied.saved) {
                     const error = applied.error || '无法应用到当前聊天。';
@@ -152,6 +156,8 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
                     message: postCommitWarning || `模板已成功导入到当前聊天${normalizedPresetName ? `（预设名：${normalizedPresetName}）` : ''}！`,
                     presetName: normalizedPresetName || undefined,
                     runtimeReady,
+                    dataMode: prepared.dataMode,
+                    conflictPolicy: prepared.conflictPolicy,
                     ...(postCommitWarning ? { warning: postCommitWarning, postCommitWarning } : {}),
                 };
 

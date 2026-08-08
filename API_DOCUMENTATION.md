@@ -425,6 +425,113 @@ await window.AutoCardUpdaterAPI.deleteRow({
 
 ---
 
+### `scanSeedPollution()`
+
+seed 双池污染只读诊断（阶段 F）。扫描 global preset、当前聊天 template scope、
+chat guide seedRows、runtime/V2 当前数据四个来源，报告同表同 UNIQUE 值重复、
+content 与 seedRows 双池重复、模板数据与 runtime 数据不一致。
+
+**性质**: 纯只读。不写存储、不修改聊天数据、不触发迁移。
+
+**返回值**: `Promise<SeedPollutionScanResult_ACU>`（同步函数经 async 包装）
+
+```typescript
+interface SeedPollutionScanResult_ACU {
+    diagnostics: SeedPollutionDiagnostic_ACU[];
+    scanned: {
+        globalPresets: number; // 已扫描的 global preset 模板数
+        chatScope: number;     // 已扫描的 chat_override scope 数（0 或 1）
+        guideSheets: number;   // 已扫描的 guide sheet 数
+        runtimeSheets: number; // 已扫描的 runtime 当前数据 sheet 数
+    };
+}
+
+interface SeedPollutionDiagnostic_ACU {
+    severity: 'error' | 'warning' | 'info';
+    code:
+        | 'content_seed_duplicate'   // content 数据行与 seedRows 双池存在相同 UNIQUE 业务键
+        | 'content_runtime_mismatch' // 模板/guide 数据与 runtime 当前数据行不一致
+        | 'guide_seed_pending'       // guide 声明 seedRows 但 runtime 未物化（待定/延迟状态）
+        | 'guide_seed_duplicate'     // guide seedRows 与 runtime 数据存在相同 UNIQUE 业务键
+        | 'seed_row_id_conflict'     // seedRows 池内 row_id 重复或与既有数据冲突
+        | 'info_no_issue';           // 该 sheet 未发现问题
+    source: 'global_preset' | 'chat_scope' | 'guide' | 'runtime' | 'template';
+    sheetKey: string;
+    sheetName: string;
+    businessKeyColumns: string[]; // 由 DDL 解析出的 UNIQUE 业务键列
+    conflictingKeys: string[];    // 冲突的具体业务键值
+    message: string;
+}
+```
+
+**扫描范围**:
+- chat_scope：当前聊天 `chat_override` 模板快照中的 content/seedRows
+- global_preset：global 预设模板库（可枚举时全量，退化时仅已知常用名）
+- guide：当前隔离键下 chat guide 的 seedRows 字段
+- runtime：`currentJsonTableData_ACU` 当前数据视图的 content/seedRows 双池
+
+---
+### `prepareSeedMigration()`
+
+seed 双池污染显式迁移（阶段 F2-F4）——准备阶段。读取当前聊天 guide，
+计算每张表的 seedRows 清理动作（与 runtime/模板 content 同业务键的 seed 视为重复），
+并导出备份快照。**只读**，不写任何存储。
+
+**性质**: 手动触发；不自动运行；global preset 只诊断不迁移。
+
+**参数**: `{ isolationKey?: string }`（缺省用当前隔离键）
+
+**返回值**: `Promise<{ status: 'plan_ready' | 'no_issue'; ... }>`
+
+```typescript
+type PrepareSeedMigrationResult_ACU =
+  | { status: 'plan_ready'; plan: SeedMigrationPlan_ACU }
+  | { status: 'no_issue'; isolationKey: string; message: string };
+```
+
+**语义（已确认）**:
+- 冲突默认 template-wins：模板 content 优先，重复的 seedRows 清理掉；
+- 已物化的 guide seed（与 runtime 同业务键）只清理残留 seed，保留 runtime 数据；
+- 每次迁移生成备份（guide container / scoped config / 聊天快照），commit 后可回滚；
+- 版本开关：`settings_ACU.seedMigrationEnabled` 默认开启；显式置 `false` 时进入纯诊断观察模式，prepare/commit/rollback 全部拒绝执行（fail-closed）。
+
+---
+
+### `commitSeedMigration(planId, options)`
+
+seed 双池污染显式迁移——提交阶段。校验计划有效与作用域未变后，
+在事务内写入修正后的 guide、宿主保存，并在 SQLite 模式下 reload 后置校验。
+
+**参数**: `planId: string`，`options: { confirm?: boolean }`（计划含清理动作时必须 `confirm: true`）
+
+**返回值**: `Promise<SeedMigrationCommitResult_ACU>`
+
+```typescript
+interface SeedMigrationCommitResult_ACU {
+    status: 'committed' | 'commit_failed_rolled_back' | 'committed_postcondition_failed';
+    planId: string;
+    error?: string;
+    appliedActions?: SeedMigrationAction_ACU[];
+}
+```
+
+**失败语义**: 宿主保存失败即回滚内存聊天并返回 `commit_failed_rolled_back`；
+提交后 reload 失败返回 `committed_postcondition_failed`（数据已提交，需人工核查）。
+
+---
+
+### `rollbackSeedMigration(planId)`
+
+seed 双池污染显式迁移——回滚阶段。从计划备份恢复 guide container、scoped config
+与聊天快照，重新 hydrate 并验证。仅对尚未失效的计划可用。
+
+**参数**: `planId: string`
+
+**返回值**: `Promise<SeedMigrationCommitResult_ACU>`（`error: 'rollback_applied'` 表示回滚已执行）
+
+---
+
+
 ## 设置与更新 API
 
 ### `openSettings()`
@@ -993,8 +1100,21 @@ await api.switchTemplatePreset('任务模板', { scope: 'chat' });
 | options | Object | 否 | 可选配置 |
 | options.scope | `'global' \| 'chat'` | 否 | 导入作用域，默认 `global`。传入 `chat` 时仅写入当前聊天模板快照 |
 | options.presetName | string | 否 | 模板名。优先级最高；`scope='global'` 时会尝试保存到全局模板预设库；`scope='chat'` 时作为当前聊天模板快照的标记名 |
+| options.dataMode | `'replace' \| 'merge' \| 'seed'` | 否 | 模板携带数据的导入语义。默认按上下文推导：模板无数据 → `seed`；模板带数据且目标 runtime 为空（首次填表）→ `replace`；模板带数据且已有 runtime 数据 → `seed`（不静默覆盖） |
+| options.conflictPolicy | `'keep-current' \| 'template-wins' \| 'reject'` | 否 | merge 冲突策略。默认 `keep-current`（保留当前运行时数据，不覆盖） |
 
-**返回值**: `Promise<{success: boolean, message: string, scope?: string, presetName?: string}>` - 导入结果
+**返回值**: `Promise<{success: boolean, message: string, scope?: string, presetName?: string, dataMode?: string, conflictPolicy?: string, runtimeReady?: boolean}>` - 导入结果
+
+**dataMode 语义**:
+- `replace`：模板数据作为目标表初始快照整体写入（仅当目标 runtime 为空或调用方显式声明时安全）。
+- `merge`：按 DDL UNIQUE/主键业务键与既有行匹配；无唯一业务键的表会 fail-closed 阻止合并（改用 `replace`/`seed` 或为 DDL 添加 UNIQUE 约束）。
+- `seed`：模板数据只进入 seedRows 作为初始化种子，不直接覆盖既有数据；与系统物化 seedRows 共用同一身份空间，避免重复 INSERT。
+
+**返回值字段说明**:
+- `dataMode`：实际生效的导入语义（调用方未显式指定时由兼容层推导并回填）。
+- `conflictPolicy`：实际生效的冲突策略（默认 `keep-current`）。
+- `runtimeReady`：聊天导入后 runtime（SQLite/V2 checkpoint）是否已同步；`false` 表示模板已保存但 runtime 重建失败，需检查 `warning`。
+- `saved`：是否已持久化。
 
 **命名补充说明**:
 - 如果调用方没有显式传入 `options.presetName`：
@@ -1007,6 +1127,7 @@ await api.switchTemplatePreset('任务模板', { scope: 'chat' });
 - 必须包含 `mate` 对象且 `mate.type` 为 `"chatSheets"`
 - 必须包含至少一个 `sheet_*` 键
 - 每个 sheet 必须包含 `name`, `content`, `sourceData` 字段
+- 模板可携带数据行（`content` 首行之后的行，或 `seedRows`），携带的数据按 `dataMode` 语义处理
 
 **示例**:
 ```javascript
@@ -1021,16 +1142,28 @@ const template = {
 
 const globalResult = await window.AutoCardUpdaterAPI.importTemplateFromData(template, {
     scope: 'global',
-    presetName: '标准模板'
+    presetName: '标准模板',
+    dataMode: 'seed' // 全局导入默认只保存预设，携带数据仅作 seed 语义
 });
 
 const chatResult = await window.AutoCardUpdaterAPI.importTemplateFromData(template, {
     scope: 'chat',
-    presetName: '任务专用模板'
+    presetName: '任务专用模板',
+    dataMode: 'replace', // 首次填表：模板数据作为初始快照
 });
 
 console.log(globalResult.message);
 console.log(chatResult.message);
+```
+
+**merge 示例**（按业务键合并，冲突默认保留当前数据）:
+```javascript
+const mergeResult = await window.AutoCardUpdaterAPI.importTemplateFromData(template, {
+    scope: 'chat',
+    dataMode: 'merge',
+    conflictPolicy: 'keep-current' // 或 'template-wins' / 'reject'
+});
+console.log(mergeResult.dataMode, mergeResult.conflictPolicy, mergeResult.runtimeReady);
 ```
 
 ---

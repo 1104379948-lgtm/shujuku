@@ -12,6 +12,8 @@ import { clearImportLocalStorage_ACU, clearImportedEntries_ACU, deleteImportedEn
 import { handleTxtImportAndSplit_ACU, handleInjectSplitEntriesFull_ACU, handleInjectSplitEntriesStandard_ACU, handleInjectSplitEntriesSummary_ACU } from '../../components/import-status-ui';
 import { deleteImportedEntriesCore_ACU, importTxtTextAndSplitCore_ACU, injectImportedSelectedCore_ACU } from '../../../service/import/import-executor';
 import { commitPreparedV2Recovery_ACU, prepareV2Recovery_ACU } from '../../../service/table/table-v2-recovery-service';
+import { scanSeedPollution_ACU } from '../../../service/template/template-seed-pollution-diagnostics';
+import { commitSeedMigration_ACU, prepareSeedMigration_ACU, rollbackSeedMigration_ACU } from '../../../service/template/template-seed-pollution-migration';
 import type { ApiGroupContext } from './callback-api';
 
 function dataAdminApiError_ACU(error: unknown, fallback: string): { success: false; error: string } {
@@ -136,6 +138,13 @@ export function createDataAdminApi(_ctx: ApiGroupContext): Record<string, Functi
         clearImportedEntries: async function(clearAll = true) { try { return await clearImportedEntries_ACU(!!clearAll); } catch (e) { logError_ACU('clearImportedEntries failed:', e); return false; } },
         clearImportedLorebookEntries: async function(options: any = {}) { try { const normalized = normalizeClearImportedLorebookEntriesOptions_ACU(options); if (normalized.success === false) return { success: false, error: normalized.error }; const deletedCount = await deleteImportedEntriesCore_ACU(normalized.targetWorldbook); return { success: true, deletedCount, targetWorldbook: normalized.targetWorldbook }; } catch (e) { logError_ACU('clearImportedLorebookEntries failed:', e); return dataAdminApiError_ACU(e, '删除外部导入世界书条目失败。'); } },
         clearImportCache: async function(clearAll = true) { try { return await clearImportLocalStorage_ACU(!!clearAll); } catch (e) { logError_ACU('clearImportCache failed:', e); return false; } },
+
+
+        scanSeedPollution: async function() { try { return scanSeedPollution_ACU(); } catch (e) { logError_ACU('scanSeedPollution failed:', e); return dataAdminApiError_ACU(e, 'seed 污染只读诊断失败。'); } },
+
+        prepareSeedMigration: async function(options: any = {}) { try { if (options === null || typeof options !== 'object' || Array.isArray(options)) return { success: false, error: 'seed 迁移准备选项必须是对象。' }; return prepareSeedMigration_ACU({ isolationKey: typeof options.isolationKey === 'string' ? options.isolationKey : undefined }); } catch (e) { logError_ACU('prepareSeedMigration failed:', e); return dataAdminApiError_ACU(e, 'seed 迁移准备失败。'); } },
+        commitSeedMigration: async function(planId: any, options: any = {}) { try { if (typeof planId !== 'string' || !planId.trim()) return { success: false, error: 'planId 必须是非空字符串。' }; if (options === null || typeof options !== 'object' || Array.isArray(options)) return { success: false, error: 'seed 迁移确认选项必须是对象。' }; return await commitSeedMigration_ACU(planId.trim(), { confirm: options.confirm === true }); } catch (e) { logError_ACU('commitSeedMigration failed:', e); return dataAdminApiError_ACU(e, 'seed 迁移提交失败。'); } },
+        rollbackSeedMigration: async function(planId: any) { try { if (typeof planId !== 'string' || !planId.trim()) return { success: false, error: 'planId 必须是非空字符串。' }; return await rollbackSeedMigration_ACU(planId.trim()); } catch (e) { logError_ACU('rollbackSeedMigration failed:', e); return dataAdminApiError_ACU(e, 'seed 迁移回滚失败。'); } },
 
         prepareV2Recovery: async function() { try { return prepareV2Recovery_ACU(); } catch (e) { logError_ACU('prepareV2Recovery failed:', e); return dataAdminApiError_ACU(e, 'V2 恢复诊断失败。'); } },
         commitV2Recovery: async function(planId: any, options: any = {}) { try { if (typeof planId !== 'string' || !planId.trim()) return { success: false, error: 'planId 必须是非空字符串。' }; if (options === null || typeof options !== 'object' || Array.isArray(options)) return { success: false, error: 'V2 恢复确认选项必须是对象。' }; return await commitPreparedV2Recovery_ACU(planId.trim(), { confirmOrphanDataReplace: options.confirmOrphanDataReplace === true }); } catch (e) { logError_ACU('commitV2Recovery failed:', e); return dataAdminApiError_ACU(e, 'V2 恢复提交失败。'); } },

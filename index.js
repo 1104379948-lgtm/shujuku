@@ -8132,6 +8132,15 @@ $CONTENT
                     }
                     catch (e) {
                         const errMsg = e?.message || String(e);
+                        // [阶段 E] 解析 UNIQUE 冲突，附冲突键、可能来源与建议动作，
+                        // 避免只返回“第 N 条语句失败”而无法定位根因。
+                        const uniqueMatch = errMsg.match(/UNIQUE constraint failed:\s*(.+)/i);
+                        if (uniqueMatch) {
+                            const conflictedColumns = uniqueMatch[1].trim();
+                            throw new Error(`第 ${i + 1} 条语句失败: ${stmt} → ${errMsg}；` +
+                                `冲突来源：本批次前序语句或 seedRows reseed 与 AI INSERT 命中同一 UNIQUE 键（${conflictedColumns}）。` +
+                                `建议：检查是否重复初始化同一业务键；若为 AI 初始化请改为 UPDATE 既有行，若为系统 seed 请确认提交链 dataMode（replace/merge 不应 reseed）。`);
+                        }
                         throw new Error(`第 ${i + 1} 条语句失败: ${stmt} → ${errMsg}`);
                     }
                 }
@@ -35579,7 +35588,7 @@ $CONTENT
         return cleaned || '_unknown';
     }
 
-    function canonicalRowId_ACU$1(value) {
+    function canonicalRowId_ACU$2(value) {
         if (value === null || value === undefined)
             return null;
         const rowId = String(value).trim();
@@ -35590,7 +35599,7 @@ $CONTENT
         for (const row of rows || []) {
             if (!Array.isArray(row))
                 continue;
-            const rowId = canonicalRowId_ACU$1(row[0]);
+            const rowId = canonicalRowId_ACU$2(row[0]);
             if (rowId)
                 reserved.add(rowId);
         }
@@ -45327,7 +45336,7 @@ $CONTENT
         'isolated_independent', 'isolated_incremental', 'isolated_tracking_only',
         'top_level_independent', 'top_level_standard', 'top_level_summary', 'top_level_tracking_only',
     ];
-    function clone_ACU$6(value) { return JSON.parse(JSON.stringify(value)); }
+    function clone_ACU$7(value) { return JSON.parse(JSON.stringify(value)); }
     function sortedUnique_ACU(values) {
         return [...new Set(values.filter((value) => typeof value === 'string' && value.startsWith('sheet_')))].sort((a, b) => a.localeCompare(b));
     }
@@ -45548,9 +45557,9 @@ $CONTENT
                 replay = detailed ? {
                     status: 'success',
                     fingerprint: getTableDataFingerprint_ACU(detailed.data),
-                    data: clone_ACU$6(detailed.data),
+                    data: clone_ACU$7(detailed.data),
                     ...(detailed.requiresCheckpointConvergence ? { requiresCheckpointConvergence: true } : {}),
-                    ...(detailed.compatibilityRepairs?.length ? { compatibilityRepairs: clone_ACU$6(detailed.compatibilityRepairs) } : {}),
+                    ...(detailed.compatibilityRepairs?.length ? { compatibilityRepairs: clone_ACU$7(detailed.compatibilityRepairs) } : {}),
                 } : { status: 'unavailable', fingerprint: null };
             }
             catch (error) {
@@ -45562,7 +45571,7 @@ $CONTENT
             ? { present: false }
             : {
                 present: true,
-                value: clone_ACU$6(rawProvenance),
+                value: clone_ACU$7(rawProvenance),
                 validation: validateMigrationProvenanceV1_ACU(rawProvenance),
                 targetMatchesAnchor: rawProvenance.targetMessageIndex === anchor.messageIndex && rawProvenance.targetAiFloor === anchor.aiFloor,
                 isolationKeyMatches: rawProvenance.isolationKey === options.isolationKey,
@@ -45590,7 +45599,7 @@ $CONTENT
         };
     }
 
-    function clone_ACU$5(value) { return JSON.parse(JSON.stringify(value)); }
+    function clone_ACU$6(value) { return JSON.parse(JSON.stringify(value)); }
     function scopeError_ACU(decision) {
         if (getChatArray_ACU() !== decision.scopeSnapshot.chatReference)
             return 'active chat reference changed';
@@ -45671,7 +45680,7 @@ $CONTENT
     function buildDecisionBackup_ACU(decision, action, createdAt) {
         return {
             version: 1, createdAt, action,
-            legacyData: clone_ACU$5(decision.legacyAudit.sourceData),
+            legacyData: clone_ACU$6(decision.legacyAudit.sourceData),
             legacyFingerprint: decision.legacyFingerprint,
             v2Fingerprint: decision.v2Fingerprint,
             sourceMessageIndices: [...decision.evidence.legacy.sourceMessageIndices],
@@ -45707,7 +45716,7 @@ $CONTENT
         catch (error) {
             return commitFailure_ACU(decision, `unable to revalidate mixed storage evidence: ${error instanceof Error ? error.message : String(error)}`);
         }
-        const candidateChat = clone_ACU$5(chat);
+        const candidateChat = clone_ACU$6(chat);
         const isolationKey = decision.scopeSnapshot.activeIsolationKey;
         const originalV2 = v2Projection_ACU(candidateChat, isolationKey);
         const createdAt = Date.now();
@@ -45717,7 +45726,7 @@ $CONTENT
             return commitFailure_ACU(decision, 'verified V2 anchor is unavailable for decision backup');
         }
         if (action === 'commit_merge_candidate') {
-            const candidateData = clone_ACU$5(decision.frozenMergeCandidate);
+            const candidateData = clone_ACU$6(decision.frozenMergeCandidate);
             if (auditTableDataForUpgrade_ACU(candidateData).status !== 'clean') {
                 return commitFailure_ACU(decision, 'frozen merge candidate no longer satisfies the canonical audit');
             }
@@ -45732,7 +45741,7 @@ $CONTENT
                 legacyDataFingerprint: getTableDataFingerprint_ACU(candidateData),
                 legacySourceMessageIndices: [...decision.evidence.legacy.sourceMessageIndices],
                 legacySourceAiFloors: [...decision.evidence.legacy.sourceAiFloors],
-                legacyLastChangedAiFloorBySheet: clone_ACU$5(decision.evidence.legacy.lastChangedAiFloorBySheet),
+                legacyLastChangedAiFloorBySheet: clone_ACU$6(decision.evidence.legacy.lastChangedAiFloorBySheet),
                 targetMessageIndex: targetIndex,
                 targetAiFloor: aiFloor_ACU(candidateChat, targetIndex),
                 isolationKey,
@@ -45775,7 +45784,7 @@ $CONTENT
         const finalScopeError = scopeError_ACU(decision);
         if (finalScopeError)
             return commitFailure_ACU(decision, finalScopeError);
-        const originalChat = clone_ACU$5(chat);
+        const originalChat = clone_ACU$6(chat);
         chat.splice(0, chat.length, ...candidateChat);
         try {
             await saveChatToHostStrict_ACU();
@@ -45806,7 +45815,7 @@ $CONTENT
     }
 
     let decisionSequence_ACU = 0;
-    function clone_ACU$4(value) {
+    function clone_ACU$5(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function deepFreeze_ACU$2(value) {
@@ -45866,7 +45875,7 @@ $CONTENT
             if (v2Row && stableJson_ACU(v2Row) !== stableJson_ACU(legacyRow))
                 return false;
             if (!v2Row)
-                v2Rows.push(clone_ACU$4(legacyRow));
+                v2Rows.push(clone_ACU$5(legacyRow));
         }
         return true;
     }
@@ -45881,7 +45890,7 @@ $CONTENT
         const v2Keys = sheetKeys_ACU(replayedV2Data);
         if (stableJson_ACU(legacyKeys) !== stableJson_ACU(v2Keys))
             return null;
-        const candidate = clone_ACU$4(replayedV2Data);
+        const candidate = clone_ACU$5(replayedV2Data);
         for (const sheetKey of legacyKeys) {
             const legacySheet = legacyData[sheetKey];
             const v2Sheet = candidate[sheetKey];
@@ -45934,7 +45943,7 @@ $CONTENT
         const migrations = resolveHistoricalSheetKeyMigrations_ACU(data, replayedData);
         if (migrations.size === 0)
             return { data, migrations };
-        const normalized = clone_ACU$4(data);
+        const normalized = clone_ACU$5(data);
         for (const [sourceKey, targetKey] of migrations) {
             normalized[targetKey] = normalized[sourceKey];
             const targetSheet = normalized[targetKey];
@@ -46037,14 +46046,14 @@ $CONTENT
             decisionId: `mixed:${createdAt.toString(36)}:${decisionSequence_ACU.toString(36)}`,
             createdAt,
             scopeSnapshot: freezeScopeSnapshot_ACU(scopeSnapshot),
-            evidence: clone_ACU$4(evidence),
-            legacyAudit: clone_ACU$4(legacyAudit),
-            legacyRepair: clone_ACU$4(legacyRepair),
+            evidence: clone_ACU$5(evidence),
+            legacyAudit: clone_ACU$5(legacyAudit),
+            legacyRepair: clone_ACU$5(legacyRepair),
             legacyFingerprint: evidence.legacy.candidateFingerprint,
             v2Fingerprint: evidence.v2.replay.fingerprint,
             diagnosticCodes: [...new Set(diagnostics)],
             allowedActions: actionsFor_ACU(kind),
-            ...(frozenMergeCandidate ? { frozenMergeCandidate: clone_ACU$4(frozenMergeCandidate) } : {}),
+            ...(frozenMergeCandidate ? { frozenMergeCandidate: clone_ACU$5(frozenMergeCandidate) } : {}),
         });
     }
 
@@ -48585,7 +48594,7 @@ $CONTENT
     function issue_ACU(code, sheetKey, sheetName, message, rowIndex, columnIndex) {
         return { code, sheetKey, sheetName, message, rowIndex, columnIndex };
     }
-    function blankAudit_ACU(sheetKey, sheetName) {
+    function blankAudit_ACU$1(sheetKey, sheetName) {
         return {
             sheetKey, sheetName,
             headerAction: 'unchanged',
@@ -48667,7 +48676,7 @@ $CONTENT
     function normalizeSheetRowId_ACU(sheetKey, sheet, options, blockers, audits) {
         const sheetName = String(sheet?.name ?? '');
         const label = sheetLabel_ACU(sheet, sheetKey);
-        const audit = blankAudit_ACU(sheetKey, sheetName);
+        const audit = blankAudit_ACU$1(sheetKey, sheetName);
         if (!isRecordValue_ACU(sheet)) {
             blockers.push(issue_ACU('invalid_sheet', sheetKey, sheetName, `${label} 不是对象，无法规范化。`));
             return;
@@ -48741,7 +48750,7 @@ $CONTENT
             changed = true;
             insertRowIdColumnForRows_ACU(content.slice(1), businessWidth, sheetKey, sheetName, blockers, audit);
             if (Array.isArray(seedRows)) {
-                const seedAudit = blankAudit_ACU(sheetKey, sheetName);
+                const seedAudit = blankAudit_ACU$1(sheetKey, sheetName);
                 insertRowIdColumnForRows_ACU(seedRows, businessWidth, sheetKey, sheetName, blockers, seedAudit);
                 audit.seedRowsUpdated = seedAudit.contentRowsUpdated;
             }
@@ -48848,8 +48857,8 @@ $CONTENT
      * owned by commitCurrentFloorTemplateChanges_ACU; this function deliberately has no I/O.
      */
     async function reconcileChatTemplate_ACU(input) {
-        const baselineData = clone_ACU$3(input.baselineData);
-        const rawTemplateData = clone_ACU$3(input.templateData);
+        const baselineData = clone_ACU$4(input.baselineData);
+        const rawTemplateData = clone_ACU$4(input.templateData);
         const blockers = [];
         const deletedSheetKeys = [];
         const hiddenSheetKeys = [];
@@ -48879,7 +48888,7 @@ $CONTENT
             }
         }
         const candidateData = stripRuntimeSeedRows_ACU(baselineData);
-        candidateData.mate = clone_ACU$3(templateData.mate || baselineData.mate);
+        candidateData.mate = clone_ACU$4(templateData.mate || baselineData.mate);
         for (const [key, sheet] of listSheets_ACU(baselineData)) {
             try {
                 validateBaselineSheetRows_ACU(sheet);
@@ -49026,10 +49035,10 @@ $CONTENT
         }
         // 隐藏表：产出 hide change（sheetData 携带 baseline 结构，persist 层据此定位并保留数据）。
         for (const key of hiddenSheetKeys) {
-            sheetChanges.push({ kind: 'hide', sheetKey: key, sheetData: clone_ACU$3(baselineData[key]) });
+            sheetChanges.push({ kind: 'hide', sheetKey: key, sheetData: clone_ACU$4(baselineData[key]) });
             audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'hide' });
         }
-        candidateData.mate = clone_ACU$3(candidateData.mate);
+        candidateData.mate = clone_ACU$4(candidateData.mate);
         if (input.storageMode !== 'native') {
             for (const [key, sheet] of listSheets_ACU(candidateData)) {
                 try {
@@ -49073,7 +49082,7 @@ $CONTENT
         return { candidateData, sheetChanges, deletedSheetKeys, hiddenSheetKeys, audit, blockers: [] };
     }
     function stripRuntimeSeedRows_ACU(data) {
-        const clone = clone_ACU$3(data);
+        const clone = clone_ACU$4(data);
         for (const [, sheet] of listSheets_ACU(clone))
             delete sheet.seedRows;
         return clone;
@@ -49088,7 +49097,7 @@ $CONTENT
             blockers,
         };
     }
-    function clone_ACU$3(value) {
+    function clone_ACU$4(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function listSheets_ACU(data) {
@@ -49223,7 +49232,7 @@ $CONTENT
      * 两种形态都要求 uid 等于 key，且 seedRows 不随 sheet 落盘（数据已在 content 中）。
      */
     function asIntroducedSheet_ACU(sheet, sheetKey) {
-        const clone = clone_ACU$3(sheet);
+        const clone = clone_ACU$4(sheet);
         clone.uid = sheetKey;
         const headers = headers_ACU(clone);
         const templateRows = Array.isArray(clone.content) ? clone.content.slice(1) : [];
@@ -49327,7 +49336,7 @@ $CONTENT
         const adoptedRows = migratedRows.length === 0 && templateRows.length > 0
             ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, 0)
             : migratedRows;
-        const sheet = clone_ACU$3(template);
+        const sheet = clone_ACU$4(template);
         sheet.uid = before.uid;
         sheet.content = [targetHeaders, ...adoptedRows];
         delete sheet.seedRows;
@@ -49338,7 +49347,7 @@ $CONTENT
         accumulateTableAliases_ACU(sheet, before, template);
         validateBaselineSheetRows_ACU(sheet);
         const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
-        const beforeProjection = clone_ACU$3(before);
+        const beforeProjection = clone_ACU$4(before);
         delete beforeProjection.seedRows;
         const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
         return {
@@ -49396,7 +49405,7 @@ $CONTENT
         // 结构与元数据整体取模板，仅保留既有 sheet key / uid（计划 3.2）。
         const hasBaselineRows = before.content.length > 1;
         if (!hasBaselineRows) {
-            const sheet = clone_ACU$3(template);
+            const sheet = clone_ACU$4(template);
             sheet.uid = before.uid;
             // 模板自带数据行是模板结构的一部分，按目标可见列落地并补齐稳定 row_id。
             const templateRows = Array.isArray(template.content) ? template.content.slice(1) : [];
@@ -49404,7 +49413,7 @@ $CONTENT
                 ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, 0)
                 : [];
             sheet.content = [targetHeaders, ...adoptedRows];
-            sheet.sourceData = clone_ACU$3(template.sourceData);
+            sheet.sourceData = clone_ACU$4(template.sourceData);
             // 旧表无行 ⇒ 所有旧列均无单元格，丢弃无损；不把旧隐藏列/旧别名带进新结构，
             // 避免残留投影指向不存在的 physical column，或跨 key 把无关列误认为同一列。
             // 模板自身声明的 hiddenPhysicalColumns / columnAliases 保留（属于新结构）。
@@ -49413,7 +49422,7 @@ $CONTENT
             accumulateTableAliases_ACU(sheet, before, template);
             validateBaselineSheetRows_ACU(sheet);
             const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
-            const beforeProjection = clone_ACU$3(before);
+            const beforeProjection = clone_ACU$4(before);
             delete beforeProjection.seedRows;
             const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
             // audit 如实记录：旧列全部丢弃（零数据无单元格，无损但必须可审计），
@@ -49546,7 +49555,7 @@ $CONTENT
             fillByTargetCanonical.set(target.canonical, value);
             fillAudit.push({ physicalName: target.physical, kind, literal: value });
         }
-        const sheet = clone_ACU$3(template);
+        const sheet = clone_ACU$4(template);
         sheet.uid = before.uid;
         const retainedHiddenColumns = hiddenEntries.map(entry => beforeColumns[entry.index]);
         const retainedHiddenHeaders = hiddenEntries.map(entry => entry.header);
@@ -49578,7 +49587,7 @@ $CONTENT
             ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, retainedHiddenHeaders.length)
             : migratedRows;
         sheet.content = [nextHeaders, ...adoptedRows];
-        sheet.sourceData = clone_ACU$3(template.sourceData);
+        sheet.sourceData = clone_ACU$4(template.sourceData);
         // 列身份由 canonical 显示名决定，物理列名一旦确立就不再随模板 DDL 文本变动。
         // 若采用模板的物理名，同一显示名会在切模板时被改名（如 last_round_time → prev_scene_time），
         // 而历史 log 里的 SQL 仍按旧物理名书写，回放时必然撞 "has no column named ..."。
@@ -49617,7 +49626,7 @@ $CONTENT
         accumulateTableAliases_ACU(sheet, before, template);
         delete sheet.seedRows;
         const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
-        const beforeProjection = clone_ACU$3(before);
+        const beforeProjection = clone_ACU$4(before);
         delete beforeProjection.seedRows;
         const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
         return { sheet, changed, meta, audit: { sheetKey, resolvedSheetKey: sheetKey, match: 'matched', baselineSheetKey: sheetKey, templateSheetKey, baselineName: before.name,
@@ -49757,8 +49766,8 @@ $CONTENT
         return `CREATE TABLE ${tableName} (\n${entries.map((entry, index) => `  ${entry.definition}${index < entries.length - 1 ? ',' : ''}${entry.comment}`).join('\n')}\n)${suffix ? ` ${suffix}` : ''};`;
     }
     function buildPersistentMetadataUpdate_ACU(before, template) {
-        const beforeSourceData = clone_ACU$3(before.sourceData || {});
-        const targetSourceData = clone_ACU$3(template.sourceData || {});
+        const beforeSourceData = clone_ACU$4(before.sourceData || {});
+        const targetSourceData = clone_ACU$4(template.sourceData || {});
         delete beforeSourceData.ddl;
         delete targetSourceData.ddl;
         const removedSourceDataKeys = Object.keys(beforeSourceData).filter(key => !Object.prototype.hasOwnProperty.call(targetSourceData, key));
@@ -49769,11 +49778,11 @@ $CONTENT
         if (before.orderNo !== template.orderNo)
             meta.orderNo = template.orderNo;
         if (Object.keys(sourceDataDelta).length > 0 || removedSourceDataKeys.length > 0)
-            meta.sourceData = clone_ACU$3(targetSourceData);
+            meta.sourceData = clone_ACU$4(targetSourceData);
         if (!sameValue_ACU(before.updateConfig, template.updateConfig))
-            meta.updateConfig = clone_ACU$3(template.updateConfig);
+            meta.updateConfig = clone_ACU$4(template.updateConfig);
         if (!sameValue_ACU(before.exportConfig, template.exportConfig))
-            meta.exportConfig = clone_ACU$3(template.exportConfig);
+            meta.exportConfig = clone_ACU$4(template.exportConfig);
         return Object.keys(meta).length > 0 ? meta : undefined;
     }
     function sameValue_ACU(left, right) {
@@ -50018,6 +50027,309 @@ $CONTENT
     }
 
     /**
+     * shared/template-data-mode.ts — 模板携带数据导入语义（dataMode）与审计类型
+     *
+     * 计划阶段 A 的产物：统一 replace / merge / seed 三种数据策略的定义、冲突策略、
+     * 每表导入审计结构与兼容行为判定。
+     *
+     * 边界：本模块只定义类型与纯判定函数，不读取聊天、不写存储、不触发 UI 或事务。
+     */
+    /** 兼容推导：旧调用未传 dataMode 时按模板是否带数据、是否有 runtime 数据决定默认行为 */
+    function resolveDefaultTemplateDataMode_ACU(options) {
+        const { templateHasData, runtimeHasData } = options;
+        // 模板无数据：无论当前是否有数据，都不凭空造行 —— 结构与 seed 语义保持不变。
+        if (!templateHasData)
+            return 'seed';
+        // 模板带数据：已有 runtime 数据时禁止静默 replace（保持既有聊天数据优先），
+        // 仅当 runtime 为空（首次填表）才允许 replace 一次性写入。
+        return runtimeHasData ? 'seed' : 'replace';
+    }
+    /** 规范化冲突策略：未指定时默认 keep-current（不静默覆盖） */
+    function normalizeTemplateConflictPolicy_ACU(policy) {
+        return policy === 'template-wins' || policy === 'reject' ? policy : 'keep-current';
+    }
+    /** 规范化 dataMode：未指定时返回 null（由调用方按上下文推导） */
+    function normalizeTemplateDataMode_ACU(mode) {
+        return mode === 'replace' || mode === 'merge' || mode === 'seed' ? mode : null;
+    }
+    /** 判定表是否允许 merge：无法证明唯一业务键时禁止自动 merge（fail-closed） */
+    function canMergeTemplateSheet_ACU(sheet) {
+        const ddl = String(sheet?.sourceData?.ddl ?? '').trim();
+        if (!ddl)
+            return false;
+        // 只有显式 UNIQUE/主键约束才能作为业务身份；缺失时不允许 merge。
+        return /\b(UNIQUE|PRIMARY\s+KEY)\b/i.test(ddl);
+    }
+
+    /**
+     * service/template/template-data-preflight.ts — 模板数据导入预检纯函数
+     *
+     * 计划阶段 B 的产物：在模板进入任何持久化/提交链之前，统一完成
+     * 数据行归一化、row_id 唯一性、业务 UNIQUE 键提取、每表导入审计与 merge 显式计划。
+     *
+     * 边界：本模块是纯函数，不读取聊天、不写存储、不触发 UI 或事务。
+     * 预检失败即返回 blockers，调用方不得继续提交。
+     */
+    function canonicalRowId_ACU$1(value) {
+        if (value === null || value === undefined)
+            return '';
+        return String(value).trim();
+    }
+    /**
+     * 规范化 SQL 标识符用于列名对齐：剥离引号（"x" / `x` / [x]）并转小写。
+     * 与 ddl-utils 的 canonicalSqlIdentifier_ACU 语义一致；SQLite 标识符大小写不敏感。
+     */
+    function canonicalizeColumnName_ACU(value) {
+        const raw = String(value ?? '').trim();
+        if (raw.length >= 2) {
+            const first = raw[0];
+            const last = raw[raw.length - 1];
+            if ((first === '"' && last === '"') || (first === '`' && last === '`') || (first === '[' && last === ']')) {
+                return raw.slice(1, -1).toLowerCase();
+            }
+        }
+        return raw.toLowerCase();
+    }
+    function collectTemplateDataRows_ACU(sheet) {
+        if (!sheet || typeof sheet !== 'object')
+            return [];
+        const rows = [];
+        const content = sheet.content;
+        if (Array.isArray(content) && content.length > 1) {
+            for (const row of content.slice(1)) {
+                if (Array.isArray(row))
+                    rows.push(row.map(cell => (cell === null || cell === undefined ? '' : String(cell))));
+            }
+        }
+        const seedRows = sheet.seedRows;
+        if (Array.isArray(seedRows)) {
+            for (const row of seedRows) {
+                if (Array.isArray(row))
+                    rows.push(row.map(cell => (cell === null || cell === undefined ? '' : String(cell))));
+            }
+        }
+        return rows;
+    }
+    /**
+     * 从 DDL 提取可证明业务身份的唯一键组（列级 UNIQUE / 表级 UNIQUE(...)）。
+     * row_id 本身是系统身份，不参与业务匹配。返回空数组表示无法证明业务身份。
+     */
+    function extractBusinessKeyColumns_ACU(ddl) {
+        const normalizedDdl = String(ddl || '').trim();
+        if (!normalizedDdl)
+            return [];
+        const groups = [];
+        for (const column of parseDDLColumnInfos_ACU(normalizedDdl)) {
+            const sqlName = canonicalizeColumnName_ACU(column.sqlName);
+            if (sqlName === 'row_id')
+                continue;
+            if (/\bUNIQUE\b/i.test(column.normalizedDefinition)) {
+                groups.push([sqlName]);
+            }
+        }
+        for (const constraint of parseDDLTableConstraints_ACU(normalizedDdl)) {
+            const match = constraint.match(/^UNIQUE\s*\(\s*([^)]+)\s*\)$/i);
+            if (!match)
+                continue;
+            const columns = match[1].split(',').map(item => canonicalizeColumnName_ACU(item)).filter(Boolean);
+            if (columns.includes('row_id'))
+                continue; // row_id 是系统身份，含它的组不能作为业务键（fail-closed）
+            if (columns.length > 0)
+                groups.push(columns);
+        }
+        return groups;
+    }
+    function buildHeaderIndexMap_ACU(header) {
+        const map = new Map();
+        header.forEach((cell, index) => {
+            const key = canonicalizeColumnName_ACU(cell);
+            if (key && !map.has(key))
+                map.set(key, index);
+        });
+        return map;
+    }
+    function blocker_ACU(code, sheetKey, sheetName, message) {
+        return { code, sheetKey, sheetName, message };
+    }
+    function blankAudit_ACU(sheetKey, sheetName) {
+        return {
+            sheetKey, sheetName,
+            action: 'no-data',
+            templateRowCount: 0,
+            runtimeRowCount: 0,
+            insertedRowCount: 0,
+            keptRowCount: 0,
+            conflictRowCount: 0,
+            conflicts: [],
+            rowIdentities: [],
+        };
+    }
+    /**
+     * 对模板数据导入做提交前预检，并生成每表审计。
+     *
+     * - replace：模板数据行直接作为初始快照，审计 action=replaced。
+     * - seed：模板数据只进入 seedRows，审计 action=seed-only。
+     * - merge：必须能从 DDL 提取唯一业务键；否则 blocker（fail-closed）。
+     * - 无数据模板：任何模式都不凭空造行，审计 action=no-data。
+     * - content 与 seedRows 跨池 row_id 冲突由 normalizeTemplateRowIds_ACU 拒绝。
+     */
+    function preflightTemplateDataImport_ACU(options) {
+        const { templateData, dataMode, conflictPolicy } = options;
+        const policy = normalizeTemplateConflictPolicy_ACU(conflictPolicy);
+        const blockers = [];
+        const audits = [];
+        const mergePlan = {};
+        if (!templateData || typeof templateData !== 'object' || Array.isArray(templateData)) {
+            return { ok: false, blockers: [blocker_ACU('invalid_template', '', '', '模板必须是对象。')], audits: [] };
+        }
+        const normalization = normalizeTemplateRowIds_ACU(templateData, {
+            syncDdl: false,
+            assignStableRowIds: true,
+            rejectCrossSourceDuplicateRowIds: true,
+            validateExistingDdl: false,
+        });
+        if (normalization.blockers.length > 0) {
+            const normalizationBlockerCode_ACU = (issue) => {
+                // row_id 身份空间冲突（池内重复 / 跨池重复）→ 身份冲突 blocker；
+                // 其余结构性问题（行宽、DDL 歧义、缺 content 等）→ invalid_row，不冒充身份冲突。
+                return issue.code === 'duplicate_row_id' || issue.code === 'duplicate_row_id_header'
+                    ? 'cross_pool_row_id_collision'
+                    : 'invalid_row';
+            };
+            return {
+                ok: false,
+                blockers: normalization.blockers.map(issue => blocker_ACU(normalizationBlockerCode_ACU(issue), issue.sheetKey, issue.sheetName, issue.message)),
+                audits: [],
+            };
+        }
+        const normalized = normalization.templateData;
+        const sheetKeys = Object.keys(normalized).filter(key => key.startsWith('sheet_'));
+        if (sheetKeys.length === 0)
+            return { ok: true, blockers: [], audits: [] };
+        const runtimeSheets = (options.runtimeData && typeof options.runtimeData === 'object' ? options.runtimeData : {});
+        for (const sheetKey of sheetKeys) {
+            const sheet = normalized[sheetKey];
+            const sheetName = String(sheet?.name ?? '');
+            const audit = blankAudit_ACU(sheetKey, sheetName);
+            const templateRows = collectTemplateDataRows_ACU(sheet);
+            audit.templateRowCount = templateRows.length;
+            const runtimeSheet = runtimeSheets[sheetKey];
+            const runtimeRows = collectTemplateDataRows_ACU(runtimeSheet);
+            audit.runtimeRowCount = runtimeRows.length;
+            if (templateRows.length === 0) {
+                audit.action = 'no-data';
+                audits.push(audit);
+                continue;
+            }
+            const headerRow = Array.isArray(sheet?.content?.[0]) ? sheet.content[0].map(String) : ['row_id'];
+            const headerIndexBySql = buildHeaderIndexMap_ACU(headerRow);
+            const ddl = String(sheet?.sourceData?.ddl ?? '');
+            // normalizer 仅在需要插入 row_id 列时校验行宽；首列已是 row_id 时不校验。
+            // preflight 兜底：模板数据行宽度不得超过表头宽度，超宽即数据列错位，fail-closed。
+            const headerWidth = headerRow.length;
+            const oversizedRows = templateRows.filter(row => row.length > headerWidth);
+            if (oversizedRows.length > 0) {
+                audit.action = 'blocked';
+                audit.blocker = `表「${sheetName || sheetKey}」存在 ${oversizedRows.length} 行宽度（>${headerWidth} 列）超过表头，无法安全导入。`;
+                blockers.push(blocker_ACU('invalid_row', sheetKey, sheetName, audit.blocker));
+                audits.push(audit);
+                continue;
+            }
+            const businessKeyGroups = extractBusinessKeyColumns_ACU(ddl);
+            const businessKeyColumns = businessKeyGroups.length > 0 ? businessKeyGroups[0] : [];
+            const businessKeyIndexes = businessKeyColumns
+                .map(sqlName => headerIndexBySql.get(sqlName))
+                .filter((index) => index !== undefined && index > 0);
+            const toRowIdentity = (row) => {
+                const rowId = canonicalRowId_ACU$1(row[0] ?? '');
+                const values = businessKeyIndexes.map(index => row[index] ?? '');
+                const businessKey = businessKeyColumns.length > 0 && businessKeyIndexes.length === businessKeyColumns.length
+                    ? values.map(v => String(v).trim()).join('\u0001')
+                    : null;
+                return { rowId, businessKey };
+            };
+            audit.rowIdentities = templateRows.map(toRowIdentity);
+            if (dataMode === 'replace') {
+                audit.action = 'replaced';
+                audit.insertedRowCount = templateRows.length;
+                audits.push(audit);
+                continue;
+            }
+            if (dataMode === 'seed') {
+                audit.action = 'seed-only';
+                audits.push(audit);
+                continue;
+            }
+            // merge 模式
+            if (businessKeyColumns.length === 0) {
+                audit.action = 'blocked';
+                audit.blocker = `表「${sheetName || sheetKey}」缺少可证明的唯一业务键（DDL UNIQUE/主键），无法安全 merge。请改用 replace 或 seed，或为 DDL 添加 UNIQUE 约束。`;
+                blockers.push(blocker_ACU('missing_business_key', sheetKey, sheetName, audit.blocker));
+                audits.push(audit);
+                continue;
+            }
+            const runtimeIdentityByKey = new Map();
+            for (const row of runtimeRows) {
+                const identity = toRowIdentity(row);
+                if (identity.businessKey)
+                    runtimeIdentityByKey.set(identity.businessKey, identity.rowId);
+            }
+            const plan = {
+                sheetKey,
+                businessKeyColumns,
+                matchedRowIds: [],
+                insertRowIds: [],
+                conflictRowIds: [],
+                rejectedRowIds: [],
+                overrideRowIds: [],
+            };
+            for (const identity of audit.rowIdentities) {
+                if (!identity.businessKey) {
+                    audit.action = 'blocked';
+                    audit.blocker = `表「${sheetName || sheetKey}」存在缺少业务键值的行（row_id=${identity.rowId}），无法安全 merge。`;
+                    blockers.push(blocker_ACU('invalid_row', sheetKey, sheetName, audit.blocker));
+                    continue;
+                }
+                const existing = runtimeIdentityByKey.get(identity.businessKey);
+                if (existing === undefined) {
+                    plan.insertRowIds.push(identity.rowId);
+                    audit.insertedRowCount += 1;
+                    continue;
+                }
+                plan.conflictRowIds.push(identity.rowId);
+                audit.conflictRowCount += 1;
+                const values = businessKeyIndexes.map(index => identity.businessKey?.split('\u0001')[businessKeyIndexes.indexOf(index)] ?? '');
+                audit.conflicts.push({ businessKey: identity.businessKey, values });
+                if (policy === 'reject') {
+                    plan.rejectedRowIds.push(identity.rowId);
+                    audit.action = 'blocked';
+                    audit.blocker = `表「${sheetName || sheetKey}」存在业务键冲突（${identity.businessKey}），conflictPolicy=reject 已阻止提交。`;
+                    blockers.push(blocker_ACU('merge_conflict_rejected', sheetKey, sheetName, audit.blocker));
+                }
+                else {
+                    if (policy === 'template-wins') {
+                        plan.overrideRowIds.push(identity.rowId);
+                        audit.keptRowCount += 1;
+                    }
+                    else {
+                        plan.matchedRowIds.push(identity.rowId);
+                        audit.keptRowCount += 1;
+                    }
+                }
+            }
+            if (audit.action === 'blocked') {
+                mergePlan[sheetKey] = plan;
+                audits.push(audit);
+                continue;
+            }
+            audit.action = 'merged-insert';
+            mergePlan[sheetKey] = plan;
+            audits.push(audit);
+        }
+        return { ok: blockers.length === 0, blockers, audits, ...(Object.keys(mergePlan).length > 0 ? { mergePlan } : {}) };
+    }
+
+    /**
      * service/template/template-preset-service.ts — 模板预设业务逻辑
      *
      * 从 presentation/components/template-preset-ui.ts 真正搬入的纯数据/逻辑函数。
@@ -50190,7 +50502,31 @@ $CONTENT
             return null;
         return sanitized;
     }
-    function parseImportedTemplateData_ACU(templateData) {
+    /**
+     * 推导模板携带数据语义：
+     * - 显式 dataMode 优先；
+     * - 未显式指定时按模板是否带数据、目标 runtime 是否已有数据推导（兼容旧调用）。
+     */
+    function resolveImportDataMode_ACU(templateData, options) {
+        const conflictPolicy = normalizeTemplateConflictPolicy_ACU(options?.conflictPolicy);
+        const explicitMode = options?.dataMode;
+        if (explicitMode === 'replace' || explicitMode === 'merge' || explicitMode === 'seed') {
+            return { dataMode: explicitMode, conflictPolicy };
+        }
+        const sheetKeys = Object.keys(templateData || {}).filter(k => k.startsWith('sheet_'));
+        const templateHasData = sheetKeys.some(key => {
+            const sheet = templateData?.[key];
+            const content = Array.isArray(sheet?.content) ? sheet.content : [];
+            const seedRows = Array.isArray(sheet?.seedRows) ? sheet.seedRows : [];
+            return content.length > 1 || seedRows.length > 0;
+        });
+        const dataMode = resolveDefaultTemplateDataMode_ACU({
+            templateHasData,
+            runtimeHasData: false, // 解析阶段不读 runtime；实际 runtime 语义由提交链在 D 阶段判定
+        });
+        return { dataMode, conflictPolicy };
+    }
+    function parseImportedTemplateData_ACU(templateData, importOptions) {
         let jsonData;
         if (typeof templateData === 'string') {
             try {
@@ -50213,6 +50549,8 @@ $CONTENT
         if (sheetKeys.length === 0) {
             throw new Error('模板中未找到任何表格数据 (缺少 "sheet_..." 键)。');
         }
+        // 在结构校验通过后推导数据模式（模板带数据与否此时才可证明）
+        const { dataMode, conflictPolicy } = resolveImportDataMode_ACU(jsonData, importOptions);
         for (const key of sheetKeys) {
             const sheet = jsonData[key];
             if (!sheet.name || !sheet.content || !sheet.sourceData || !Array.isArray(sheet.content)) {
@@ -50272,7 +50610,71 @@ $CONTENT
             snapshot,
             templateObj: snapshot.templateObj,
             templateStr: snapshot.templateStr,
+            dataMode,
+            conflictPolicy,
         };
+    }
+    /**
+     * merge 模式：把 preflight 的显式合并计划应用到协调后的 candidateData。
+     * - insertRowIds：模板新增行追加到候选表（业务键未命中既有行）。
+     * - overrideRowIds：conflictPolicy=template-wins 时，模板行覆盖既有行（业务键命中但值取模板）。
+     * - matchedRowIds（keep-current）：保留 runtime 行，不写模板行。
+     * 所有追加行都保留模板行原样（row_id 已由规范化器分配，业务值取模板）。
+     */
+    function applyMergePlanToCandidate_ACU(candidateData, templateData, mergePlan) {
+        for (const [sheetKey, plan] of Object.entries(mergePlan)) {
+            const candidateSheet = candidateData?.[sheetKey];
+            const templateSheet = templateData?.[sheetKey];
+            if (!candidateSheet || typeof candidateSheet !== 'object' || !templateSheet || typeof templateSheet !== 'object')
+                continue;
+            const candidateContent = Array.isArray(candidateSheet.content) ? candidateSheet.content : [];
+            const templateContent = Array.isArray(templateSheet.content) ? templateSheet.content : [];
+            if (candidateContent.length === 0 || templateContent.length === 0)
+                continue;
+            const headerWidth = Array.isArray(candidateContent[0]) ? candidateContent[0].length : 0;
+            const templateRowByRowId = new Map();
+            for (const row of templateContent.slice(1)) {
+                if (!Array.isArray(row))
+                    continue;
+                const rowId = String(row[0] ?? '').trim();
+                if (rowId)
+                    templateRowByRowId.set(rowId, row);
+            }
+            // 插入行：业务键未命中 → 追加模板行（补齐到表头宽度）
+            for (const rowId of plan.insertRowIds) {
+                const templateRow = templateRowByRowId.get(rowId);
+                if (!templateRow)
+                    continue;
+                const cells = [...templateRow];
+                while (cells.length < headerWidth)
+                    cells.push(null);
+                candidateContent.push(cells);
+            }
+            // 覆盖行：template-wins → 用模板行替换既有行（按 row_id 匹配）
+            if (plan.overrideRowIds.length > 0) {
+                const candidateRowIndexById = new Map();
+                for (let index = 1; index < candidateContent.length; index += 1) {
+                    const row = candidateContent[index];
+                    if (!Array.isArray(row))
+                        continue;
+                    const rowId = String(row[0] ?? '').trim();
+                    if (rowId)
+                        candidateRowIndexById.set(rowId, index);
+                }
+                for (const rowId of plan.overrideRowIds) {
+                    const templateRow = templateRowByRowId.get(rowId);
+                    if (!templateRow)
+                        continue;
+                    const index = candidateRowIndexById.get(rowId);
+                    if (index === undefined)
+                        continue; // 既有行不存在则不覆盖
+                    const cells = [...templateRow];
+                    while (cells.length < headerWidth)
+                        cells.push(null);
+                    candidateContent[index] = cells;
+                }
+            }
+        }
     }
     // ═══ 模板作用域持久化（纯数据操作） ═══
     function persistTemplateScopeSelectionState_ACU(presetName, { source = 'ui', updateGlobal = false, save = true, persistChatScope = undefined, templateSource = null, guideData = null, archivePreviousChatScope = false, scopeMode = undefined, registerChatPresetEntry = undefined } = {}) {
@@ -50496,7 +50898,7 @@ $CONTENT
         }
         return { error: '当前表格状态在读取模板基线时发生变化，请稍后重试。' };
     }
-    async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateData, { source = 'ui', presetName = '', destructiveChangeConfirmed = false, hardDeleteMissingSheets = false, signal, requestId = createTemplateReconciliationRequestId_ACU(), } = {}) {
+    async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateData, { source = 'ui', presetName = '', dataMode, conflictPolicy, destructiveChangeConfirmed = false, hardDeleteMissingSheets = false, signal, requestId = createTemplateReconciliationRequestId_ACU(), } = {}) {
         const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateData);
         if (!snapshot?.templateObj)
             return { saved: false, error: '模板结构无效，无法生成聊天模板提交。' };
@@ -50567,12 +50969,36 @@ $CONTENT
                 ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
                 : { mate: { type: 'chatSheets', version: 1 } };
         }
+        // ═══ 阶段 D：seed 模式下，模板 content 数据行不得进入 candidateData（runtime 保持空），
+        // 数据只落到 guide seedRows 作为待初始化种子（计划 D3）。
+        // 因此把模板数据行从 content 剥离到 seedRows 字段，再交给协调层：
+        // introduced 表因此是 header-only，matched 表在"旧表无数据"时也不采用模板行。
+        const effectiveDataMode = dataMode === 'replace' || dataMode === 'merge' || dataMode === 'seed'
+            ? dataMode
+            : 'seed';
+        let reconcileTemplateData = targetTemplateData;
+        if (effectiveDataMode === 'seed' && targetTemplateData && typeof targetTemplateData === 'object') {
+            reconcileTemplateData = JSON.parse(JSON.stringify(targetTemplateData));
+            for (const sheetKey of Object.keys(reconcileTemplateData).filter(k => k.startsWith('sheet_'))) {
+                const sheet = reconcileTemplateData[sheetKey];
+                if (!sheet || typeof sheet !== 'object')
+                    continue;
+                const content = Array.isArray(sheet.content) ? sheet.content : [];
+                if (content.length > 1) {
+                    const headerRow = content[0];
+                    const dataRows = content.slice(1);
+                    const existingSeedRows = Array.isArray(sheet.seedRows) ? sheet.seedRows : [];
+                    sheet.seedRows = [...existingSeedRows, ...dataRows];
+                    sheet.content = [headerRow];
+                }
+            }
+        }
         const storageMode = getCurrentStorageMode();
         let plan;
         try {
             plan = await reconcileChatTemplate_ACU({
                 baselineData,
-                templateData: targetTemplateData,
+                templateData: reconcileTemplateData,
                 destructiveChangeConfirmed,
                 hardDeleteMissingSheets,
                 lifecycle: lifecycle ?? undefined,
@@ -50585,13 +51011,52 @@ $CONTENT
         if (plan.blockers.length > 0) {
             return { saved: false, blockers: plan.blockers, error: plan.blockers.join('；') };
         }
+        // ═══ 阶段 D：merge 模式显式合并（计划 D2）═══
+        // 使用 replay 基线生成候选后，按 DDL UNIQUE 业务键把模板行合并进 candidateData：
+        // 未命中 → 插入；命中且 template-wins → 覆盖；命中且 keep-current → 保留 runtime；
+        // 命中且 reject → preflight 已返回 blocker，直接拒绝提交。
+        if (effectiveDataMode === 'merge') {
+            const preflight = preflightTemplateDataImport_ACU({
+                templateData: targetTemplateData,
+                runtimeData: baselineData,
+                dataMode: 'merge',
+                conflictPolicy,
+            });
+            if (!preflight.ok) {
+                return {
+                    saved: false,
+                    blockers: preflight.blockers.map(item => item.message),
+                    error: preflight.blockers.map(item => item.message).join('；'),
+                    importAudit: preflight.audits,
+                };
+            }
+            if (preflight.mergePlan && Object.keys(preflight.mergePlan).length > 0) {
+                // introduced 表的模板数据已由 reconcile 带入 candidateData（asIntroducedSheet_ACU），
+                // 若再按 mergePlan 追加会重复 INSERT 同一 UNIQUE 键。只对 matched 表应用合并。
+                const introducedKeys = new Set(plan.audit
+                    .filter(item => item.match === 'introduced')
+                    .map(item => item.resolvedSheetKey));
+                const matchedMergePlan = {};
+                for (const [sheetKey, sheetPlan] of Object.entries(preflight.mergePlan)) {
+                    if (!introducedKeys.has(sheetKey))
+                        matchedMergePlan[sheetKey] = sheetPlan;
+                }
+                applyMergePlanToCandidate_ACU(plan.candidateData, targetTemplateData, matchedMergePlan);
+            }
+        }
         logDebug_ACU(`[TemplateScope] 模板协调计划已生成: requestId=${requestId}, baseRevision=${baseRevision}, changes=${plan.sheetChanges.map(change => `${change.kind}:${change.sheetKey}`).join(',') || 'none'}, deleted=${plan.deletedSheetKeys.join(',') || 'none'}`);
         logDebug_ACU(`[TemplateScope] 模板 Sheet identity 已解析: requestId=${requestId}, mappings=${plan.audit
         .filter(item => item.templateSheetKey)
         .map(item => `${item.templateSheetKey}->${item.resolvedSheetKey}`).join(',') || 'none'}`);
+        // ═══ 阶段 D：guide seedRows 语义由 dataMode 显式决定，禁止隐式分支（计划 D4）═══
+        // - replace/merge：模板数据已物化进 candidateData/checkpoint，guide 只做视图投影，
+        //   不得把模板数据再次写入 seedRows（否则 SQLite reseed 会重复 INSERT 同一 UNIQUE 键）。
+        // - seed：模板数据保留在 guide seedRows，作为待初始化的种子数据。
         const guideData = buildChatSheetGuideDataFromData_ACU(plan.candidateData, {
-            preserveSeedRowsFromGuideData: pristineChat ? null : getChatSheetGuideDataForIsolationKey_ACU(isolationKey),
-            seedRowsFromTemplateObj: targetTemplateData,
+            preserveSeedRowsFromGuideData: effectiveDataMode === 'seed' && !pristineChat
+                ? getChatSheetGuideDataForIsolationKey_ACU(isolationKey)
+                : null,
+            seedRowsFromTemplateObj: effectiveDataMode === 'seed' ? targetTemplateData : null,
         });
         if (!guideData)
             return { saved: false, error: '无法为协调后的模板生成聊天指导表。' };
@@ -50606,7 +51071,9 @@ $CONTENT
             // pristine 会话没有任何数据帧，模板结构只需落到聊天级 guide + scope 容器。
             // 刻意不调用 commitCurrentFloorTemplateChanges_ACU：不产生 checkpoint / logEntry，
             // 也不读取任何残留 guide 的 seedRows（避免旧宽度污染新结构）。
-            const pristineGuideData = buildChatSheetGuideDataFromTemplateObj_ACU(targetTemplateData, { stripSeedRows: false });
+            // pristine 会话无既有数据：replace/merge 的数据已进入 candidateData，guide 只留表头；
+            // seed 模式保留模板数据作为初始化种子。
+            const pristineGuideData = buildChatSheetGuideDataFromTemplateObj_ACU(targetTemplateData, { stripSeedRows: effectiveDataMode !== 'seed' });
             if (!pristineGuideData) {
                 return { saved: false, error: '目标模板不包含任何表，已取消提交。' };
             }
@@ -50692,6 +51159,8 @@ $CONTENT
         return {
             ...committed,
             audit: plan.audit,
+            dataMode: effectiveDataMode,
+            conflictPolicy: normalizeTemplateConflictPolicy_ACU(conflictPolicy),
             ...(postCommitWarning ? { runtimeReady: false, postCommitWarning } : { runtimeReady: true }),
         };
     }
@@ -53399,12 +53868,10 @@ $CONTENT
             if (userStatements.length === 0) {
                 return { success: true, modifiedKeys: [], appliedEdits: 0 };
             }
-            const reseedInserts = this._collectReseedInsertsForEmptyTables();
-            const statements = [...reseedInserts, ...userStatements];
-            const statementParams = [
-                ...reseedInserts.map(() => undefined),
-                ...userParams,
-            ];
+            // [阶段 E] 不再在 AI 写路径前置 reseed：seed 数据已在 loadFromData →
+            // _buildInitialRuntimeTableData_ACU 建表时物化；此处再补种会与 AI INSERT 双写 UNIQUE 业务键。
+            const statements = userStatements;
+            const statementParams = userParams;
             try {
                 const result = this.engine.runBatch(statements, statementParams);
                 this._syncToJson();
@@ -53440,7 +53907,10 @@ $CONTENT
                     tableData: this._exportCurrentDataStrict(),
                 };
             }
-            const reseedPlan = this._collectReseedPlanForEmptyTables(scope);
+            // [阶段 E] AI 写路径不再 reseed（seed 已在 loadFromData 建表时物化）。
+            // 保留空 row_id 预留 Map：materializeSystemRowIdsForSqlInserts_ACU 仍会从
+            // runtimeData 自身构建预留，此处无新增预留。
+            const reseedPlan = { inserts: [], rowIdsByTable: new Map() };
             const runtimeData = this._exportCurrentDataStrict();
             let materializedStatements;
             try {
@@ -53500,12 +53970,6 @@ $CONTENT
             this._ensureInitialized();
             this._ensureTablesFromTemplate();
             try {
-                // 收集空表 seedRows INSERT 并执行（与用户 SQL 不在同一事务，计划已记录风险）
-                const reseedInserts = this._collectReseedInsertsForEmptyTables();
-                if (reseedInserts.length > 0) {
-                    this.engine.runBatch(reseedInserts);
-                    logDebug_ACU(`[SqlTableService] executeMutation 前置补回 ${reseedInserts.length} 条 seedRows`);
-                }
                 // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
                 const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
                 const runtimeSql = rebindSqlMutationIdentifiers_ACU([normalizedSql], (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }))[0];
@@ -53514,7 +53978,7 @@ $CONTENT
                 return { changes: result.changes, errors: [] };
             }
             catch (e) {
-                // reseed 可能已成功落库，同步 JSON 视图避免 SQLite/JSON 状态分裂
+                // 同步 JSON 视图避免 SQLite/JSON 状态分裂
                 this._syncToJson();
                 return { changes: 0, errors: [e?.message || String(e)] };
             }
@@ -53602,27 +54066,61 @@ $CONTENT
                 const headerRow = Array.isArray(sheet.content?.[0]) ? sheet.content[0] : ['row_id'];
                 if (!Array.isArray(sheet.content) || sheet.content.length <= 1) {
                     const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
-                    sheet.content = [headerRow, ...(Array.isArray(seedRows) ? seedRows : [])];
+                    // [阶段 E] seed 物化前唯一键预检：从 DDL 提取业务 UNIQUE 组，剔除与
+                    // 既有数据（baseData 已携带的行）重复的 seedRows，避免建表时双写同一业务键。
+                    // 不允许依赖 SQLite 失败后再由 AI 猜测。
+                    let materializedSeedRows = Array.isArray(seedRows) ? seedRows : [];
+                    const existingContent = Array.isArray(sheet.content) ? sheet.content : [];
+                    const existingDataRows = existingContent.length > 1 ? existingContent.slice(1) : [];
+                    const ddl = String(sheet?.sourceData?.ddl || '');
+                    const businessKeyGroups = ddl ? extractBusinessKeyColumns_ACU(ddl) : [];
+                    if (businessKeyGroups.length > 0 && existingDataRows.length > 0) {
+                        const headerIndex = new Map();
+                        headerRow.forEach((cell, index) => {
+                            const name = String(cell ?? '').trim().toLowerCase();
+                            if (name && !headerIndex.has(name))
+                                headerIndex.set(name, index);
+                        });
+                        const rowKey = (row, group) => {
+                            if (!Array.isArray(row))
+                                return null;
+                            const parts = [];
+                            for (const col of group) {
+                                const idx = headerIndex.get(col.toLowerCase());
+                                if (idx === undefined || idx >= row.length)
+                                    return null;
+                                parts.push(String(row[idx] ?? ''));
+                            }
+                            return parts.join('\u0001');
+                        };
+                        const existingKeySet = new Set();
+                        for (const row of existingDataRows) {
+                            for (const group of businessKeyGroups) {
+                                const key = rowKey(row, group);
+                                if (key !== null)
+                                    existingKeySet.add(key);
+                            }
+                        }
+                        if (existingKeySet.size > 0) {
+                            const unique = materializedSeedRows.filter((row) => {
+                                for (const group of businessKeyGroups) {
+                                    const key = rowKey(row, group);
+                                    if (key !== null && existingKeySet.has(key))
+                                        return false;
+                                }
+                                return true;
+                            });
+                            if (unique.length !== materializedSeedRows.length) {
+                                logWarn_ACU(`[SqlTableService] 表 ${key} (${sheet.name}) seed 物化预检剔除 ${materializedSeedRows.length - unique.length} 行与既有数据重复的 UNIQUE 业务键行`);
+                            }
+                            materializedSeedRows = unique;
+                        }
+                    }
+                    sheet.content = [headerRow, ...materializedSeedRows];
                 }
                 sheet.content = ensureStableRowIdsForSheetContent_ACU(sheet.content);
             }
             return hasSheet ? baseData : null;
-        }
-        /**
-         * 收集已存在空表的 seedRows INSERT 语句，用于 SQL 写入前补齐基底数据。
-         *
-         * 触发条件（全部满足才处理）：
-         * 1. 表在 SQLite 中已存在（由 _ensureTablesFromTemplate 保证）
-         * 2. SELECT COUNT(*) 返回 0（空表）
-         * 3. getEffectiveSeedRowsForSheet_ACU 返回非空
-         * 4. 表属于当前聊天模板/guide（有 DDL 且可解析表名）
-         *
-         * 幂等：非空表跳过；无 seedRows 跳过；DDL 缺失跳过。
-         *
-         * @returns 需要前置执行的 INSERT 语句数组（可能为空）
-         */
-        _collectReseedInsertsForEmptyTables() {
-            return this._collectReseedPlanForEmptyTables().inserts;
         }
         _exportCurrentDataStrict() {
             try {
@@ -53632,69 +54130,6 @@ $CONTENT
             catch (error) {
                 throw new SqlRuntimeSnapshotError_ACU(error?.message || String(error));
             }
-        }
-        _collectReseedPlanForEmptyTables(scope) {
-            const inserts = [];
-            const rowIdsByTable = new Map();
-            if (!currentJsonTableData_ACU)
-                return { inserts, rowIdsByTable };
-            const identitySource = scope?.templateData || currentJsonTableData_ACU;
-            const seedSource = scope?.templateDataWithRows;
-            const sheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
-            if (sheetKeys.length === 0)
-                return { inserts, rowIdsByTable };
-            for (const sheetKey of sheetKeys) {
-                try {
-                    const sheet = currentJsonTableData_ACU[sheetKey];
-                    if (!sheet?.sourceData?.ddl)
-                        continue;
-                    const tableName = getPhysicalTableNameForSheet_ACU(identitySource?.[sheetKey] ? identitySource : currentJsonTableData_ACU, sheetKey);
-                    const existingTables = this._existingTableSet ?? (this._existingTableSet = new Set(this.engine.getTableNames()));
-                    // 检查表是否存在且为空
-                    if (!existingTables.has(tableName))
-                        continue;
-                    const countResult = this.engine.query(`SELECT COUNT(*) AS cnt FROM "${tableName.replace(/"/g, '""')}";`);
-                    const cnt = countResult?.values?.[0]?.[0];
-                    if (cnt !== 0)
-                        continue; // 非空表，跳过
-                    // AI 提交链显式携带请求前模板时，补种也必须来自同一快照，不能在 await 后重新读取当前模板。
-                    const capturedRows = seedSource?.[sheetKey]?.content;
-                    const seedRows = Array.isArray(capturedRows) && capturedRows.length > 1
-                        ? capturedRows.slice(1)
-                        : getEffectiveSeedRowsForSheet_ACU(sheetKey, { allowTemplateFallback: true });
-                    if (!Array.isArray(seedRows) || seedRows.length === 0)
-                        continue;
-                    // 构造临时 Sheet 对象用于 generateInserts
-                    const headerRow = Array.isArray(sheet.content?.[0])
-                        ? JSON.parse(JSON.stringify(sheet.content[0]))
-                        : ['row_id'];
-                    const content = [headerRow, ...seedRows.map((r) => Array.isArray(r) ? [...r] : [r])];
-                    const stableContent = ensureStableRowIdsForSheetContent_ACU(content);
-                    const tempSheet = {
-                        uid: sheet.uid || sheetKey,
-                        name: sheet.name || sheetKey,
-                        sourceData: sheet.sourceData,
-                        content: stableContent,
-                        updateConfig: sheet.updateConfig || {},
-                        exportConfig: sheet.exportConfig || {},
-                        orderNo: sheet.orderNo ?? 0,
-                    };
-                    const sheetInserts = generateInserts(tempSheet, tableName);
-                    if (sheetInserts.length > 0) {
-                        rowIdsByTable.set(tableName.toLowerCase(), createStableRowIdReservation_ACU(stableContent.slice(1)));
-                        inserts.push(...sheetInserts);
-                        logDebug_ACU(`[SqlTableService] 空表 ${sheetKey} (${tableName}) 补回 ${sheetInserts.length} 行 seedRows`);
-                    }
-                }
-                catch (e) {
-                    // 单表失败不阻塞其他表，但记录日志
-                    logWarn_ACU(`[SqlTableService] 收集表 ${sheetKey} 的 seedRows INSERT 失败: ${e?.message}`);
-                }
-            }
-            if (inserts.length > 0) {
-                logDebug_ACU(`[SqlTableService] 共收集 ${inserts.length} 条 seedRows reseed INSERT 语句`);
-            }
-            return { inserts, rowIdsByTable };
         }
         /**
          * hydrate 成功不等于 runtime 可用：必须确认当前数据对应的物理表和有效列都已真正落入 SQLite。
@@ -100332,7 +100767,7 @@ $CONTENT
             },
             importTemplateFromData: async function (templateData, options = {}) {
                 try {
-                    const { scope = 'global', presetName = '' } = options || {};
+                    const { scope = 'global', presetName = '', dataMode, conflictPolicy } = options || {};
                     const normalizedScope = normalizeTemplateOperationScope_ACU(scope);
                     const normalizedPresetName = deriveTemplatePresetNameForImport_ACU({
                         presetName,
@@ -100340,7 +100775,7 @@ $CONTENT
                             ? `导入模板_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`
                             : '',
                     });
-                    const prepared = parseImportedTemplateData_ACU(templateData);
+                    const prepared = parseImportedTemplateData_ACU(templateData, { dataMode, conflictPolicy });
                     if (normalizedScope === 'global') {
                         // ═══ 全局导入：仅保存到预设库，不自动切换当前生效模板 ═══
                         if (normalizedPresetName) {
@@ -100363,12 +100798,16 @@ $CONTENT
                                 ? `模板已保存为全局预设：${normalizedPresetName}。你可以在"全局模板预设"下拉中手动切换到它。`
                                 : '模板已解析，但未指定预设名称，未保存到预设库。',
                             presetName: normalizedPresetName || undefined,
+                            dataMode: prepared.dataMode,
+                            conflictPolicy: prepared.conflictPolicy,
                         };
                     }
                     // ═══ 聊天导入：应用到当前聊天作用域 ═══
                     const applied = await applyChatTemplateSnapshotWithReconciliation_ACU(prepared.templateObj, {
                         source: 'api_import_template_chat',
                         presetName: normalizedPresetName,
+                        dataMode: prepared.dataMode,
+                        conflictPolicy: prepared.conflictPolicy,
                     });
                     if (!applied.saved) {
                         const error = applied.error || '无法应用到当前聊天。';
@@ -100391,6 +100830,8 @@ $CONTENT
                         message: postCommitWarning || `模板已成功导入到当前聊天${normalizedPresetName ? `（预设名：${normalizedPresetName}）` : ''}！`,
                         presetName: normalizedPresetName || undefined,
                         runtimeReady,
+                        dataMode: prepared.dataMode,
+                        conflictPolicy: prepared.conflictPolicy,
                         ...(postCommitWarning ? { warning: postCommitWarning, postCommitWarning } : {}),
                     };
                 }
@@ -101529,15 +101970,15 @@ $CONTENT
     }
 
     const plans_ACU = new Map();
-    function clone_ACU$2(value) { return JSON.parse(JSON.stringify(value)); }
-    function buildPlanId_ACU() { return `v2_recovery_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`; }
-    function getErrorMessage_ACU(error) {
+    function clone_ACU$3(value) { return JSON.parse(JSON.stringify(value)); }
+    function buildPlanId_ACU$1() { return `v2_recovery_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`; }
+    function getErrorMessage_ACU$1(error) {
         return error instanceof Error ? error.message : String(error || '未知错误');
     }
     function getFrameFingerprint_ACU(frame) {
         return JSON.stringify(frame);
     }
-    function currentScopeMatches_ACU(plan) {
+    function currentScopeMatches_ACU$1(plan) {
         return getChatArray_ACU() === plan.chat
             && String(currentChatFileIdentifier_ACU || '').trim() === plan.chatKey
             && getCurrentIsolationKey_ACU() === plan.isolationKey;
@@ -101674,15 +102115,15 @@ $CONTENT
             if (hasSamePlanScope_ACU(existingPlan, plan))
                 plans_ACU.delete(existingPlanId);
         }
-        const planId = buildPlanId_ACU();
+        const planId = buildPlanId_ACU$1();
         plans_ACU.set(planId, { ...plan, planId });
         return {
             planId,
             status: plan.status,
             isolationKey: plan.isolationKey,
             sourceMessageIndex: plan.sourceMessageIndex,
-            ...(plan.affectedSheetKeys?.length ? { affectedSheetKeys: clone_ACU$2(plan.affectedSheetKeys) } : {}),
-            ...(plan.compatibilityRepairs?.length ? { compatibilityRepairs: clone_ACU$2(plan.compatibilityRepairs) } : {}),
+            ...(plan.affectedSheetKeys?.length ? { affectedSheetKeys: clone_ACU$3(plan.affectedSheetKeys) } : {}),
+            ...(plan.compatibilityRepairs?.length ? { compatibilityRepairs: clone_ACU$3(plan.compatibilityRepairs) } : {}),
             requiresConfirmation: plan.requiresConfirmation,
             message: plan.message,
         };
@@ -101715,7 +102156,7 @@ $CONTENT
         const sourceMessageIndex = plan.sourceMessageIndex;
         if (!Number.isInteger(sourceMessageIndex))
             throw new Error('恢复计划缺少 sourceMessageIndex。');
-        const candidateChat = clone_ACU$2(plan.chat);
+        const candidateChat = clone_ACU$3(plan.chat);
         if (plan.kind === 'redundant_full_checkpoint_convergence') {
             // 多消息降级：保留末位 full（回放根）不动，其余 full 帧无损降级为
             // data_replace fallback entry，原帧整体入 recoveryBackup。
@@ -101731,7 +102172,7 @@ $CONTENT
                 const tagData = readIsolatedTagData_ACU(message, plan.isolationKey);
                 if (!isV2TagData_ACU(tagData))
                     throw new Error(`降级目标消息不再包含 V2 storage frame：messageIndex=${messageIndex}。`);
-                const originalFrame = clone_ACU$2(tagData.storageFrame);
+                const originalFrame = clone_ACU$3(tagData.storageFrame);
                 const fallbackEntry = {
                     seq: 1,
                     entryId: `redundant-full-fallback-${messageIndex}`,
@@ -101742,7 +102183,7 @@ $CONTENT
                     filledSheetKeys: [],
                     changedSheetKeys: [],
                     groupKeys: [],
-                    operations: [{ kind: 'data_replace', data: clone_ACU$2(originalFrame.checkpoint?.data || {}), reason: 'checkpoint_fallback' }],
+                    operations: [{ kind: 'data_replace', data: clone_ACU$3(originalFrame.checkpoint?.data || {}), reason: 'checkpoint_fallback' }],
                 };
                 const downgradedFrame = {
                     version: 2,
@@ -101785,13 +102226,13 @@ $CONTENT
             recoveryKind: plan.kind,
             sourceMessageIndex,
             failedMessageIndex: sourceMessageIndex,
-            storageFrame: clone_ACU$2(sourceTagData.storageFrame),
+            storageFrame: clone_ACU$3(sourceTagData.storageFrame),
         };
         const isolatedData = cloneIsolatedData_ACU(sourceMessage);
         // 修复的是已验证的 checkpoint 基底，不是把其后 artifact 一并抹掉。
         // 只有已被诊断为完整可替换的孤立 frame/临时补锚才收敛为纯 checkpoint。
         const recoveredFrame = plan.kind === 'repaired_full_checkpoint'
-            ? { ...clone_ACU$2(sourceTagData.storageFrame), checkpoint: checkpointBuild.checkpoint }
+            ? { ...clone_ACU$3(sourceTagData.storageFrame), checkpoint: checkpointBuild.checkpoint }
             : { version: 2, checkpoint: checkpointBuild.checkpoint, logEntries: [] };
         const nextTagData = {
             ...isolatedData[plan.isolationKey],
@@ -101900,7 +102341,7 @@ $CONTENT
                     replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
                 }
                 catch (error) {
-                    return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: `full checkpoint 虽通过静态审计，但完整回放失败：${getErrorMessage_ACU(error)}` } };
+                    return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: `full checkpoint 虽通过静态审计，但完整回放失败：${getErrorMessage_ACU$1(error)}` } };
                 }
                 if (replay?.requiresCheckpointConvergence && replay.compatibilityRepairs?.length) {
                     const source = frames[frames.length - 1];
@@ -101909,7 +102350,7 @@ $CONTENT
                     const summary = {
                         status: 'recoverable_temporary_sheet_anchor', isolationKey, sourceMessageIndex: source.messageIndex,
                         affectedSheetKeys: repairedSheetKeys,
-                        compatibilityRepairs: clone_ACU$2(replay.compatibilityRepairs),
+                        compatibilityRepairs: clone_ACU$3(replay.compatibilityRepairs),
                         requiresConfirmation: false,
                         message: `检测到历史回放依赖临时 Sheet 补锚（${repairedSheetKeys.join('、')}，位置 ${repairPositions}）；可通过 integrity_repair full checkpoint 自动收敛。`,
                     };
@@ -102006,7 +102447,7 @@ $CONTENT
         if (plan.requiresConfirmation && options.confirmOrphanDataReplace !== true) {
             return failure('无锚点 data_replace 恢复必须显式确认。');
         }
-        if (!currentScopeMatches_ACU(plan)) {
+        if (!currentScopeMatches_ACU$1(plan)) {
             plans_ACU.delete(planId);
             return failure('恢复计划作用域已变化，请重新诊断。');
         }
@@ -102020,13 +102461,13 @@ $CONTENT
             candidateChat = buildRecoveredCandidateChat_ACU(plan);
         }
         catch (error) {
-            return failure(`恢复候选构造失败：${getErrorMessage_ACU(error)}`);
+            return failure(`恢复候选构造失败：${getErrorMessage_ACU$1(error)}`);
         }
         try {
             await validateRecoveredCandidateReplay_ACU(plan, candidateChat);
         }
         catch (error) {
-            return failure(`恢复候选 replay 校验失败，未保存任何更改：${getErrorMessage_ACU(error)}`);
+            return failure(`恢复候选 replay 校验失败，未保存任何更改：${getErrorMessage_ACU$1(error)}`);
         }
         const commitResult = await runTableWriteTransaction_ACU({
             source: 'system',
@@ -102037,7 +102478,7 @@ $CONTENT
         }, async (ctx) => {
             try {
                 return await ctx.runCommit(async () => {
-                    if (!currentScopeMatches_ACU(plan)) {
+                    if (!currentScopeMatches_ACU$1(plan)) {
                         plans_ACU.delete(planId);
                         return failure('恢复计划作用域已变化，请重新诊断。');
                     }
@@ -102046,8 +102487,580 @@ $CONTENT
                         plans_ACU.delete(planId);
                         return failure(affectedChanged);
                     }
-                    const beforeChat = clone_ACU$2(plan.chat);
+                    const beforeChat = clone_ACU$3(plan.chat);
                     plan.chat.splice(0, plan.chat.length, ...candidateChat);
+                    try {
+                        await saveChatToHostStrict_ACU();
+                    }
+                    catch (error) {
+                        plan.chat.splice(0, plan.chat.length, ...beforeChat);
+                        return failure(`宿主保存失败，已恢复内存聊天：${getErrorMessage_ACU$1(error)}`);
+                    }
+                    plans_ACU.delete(planId);
+                    if (!currentScopeMatches_ACU$1(plan)) {
+                        return failure('宿主保存后恢复计划作用域已变化。');
+                    }
+                    return { status: 'committed', planId };
+                });
+            }
+            catch (error) {
+                return failure(getErrorMessage_ACU$1(error));
+            }
+        });
+        if (commitResult.status !== 'committed')
+            return commitResult;
+        const expectedStorageMode = getCurrentStorageMode();
+        try {
+            if (expectedStorageMode === 'sqlite') {
+                await reloadStorageProvider();
+                if (didSqliteFallbackAfterReload_ACU(expectedStorageMode)) {
+                    throw new Error('SQLite 运行时重载后已静默回退到 native provider。');
+                }
+            }
+            if (!currentScopeMatches_ACU$1(plan))
+                throw new Error('宿主保存后运行时重载期间恢复计划作用域已变化。');
+            return commitResult;
+        }
+        catch (error) {
+            return { status: 'committed_postcondition_failed', planId, error: getErrorMessage_ACU$1(error) };
+        }
+    }
+
+    /**
+     * service/template/template-seed-pollution-diagnostics.ts — seed 双池污染只读诊断（阶段 F）
+     *
+     * 目标：扫描 global preset、当前 chat scope、guide seedRows、runtime/V2 数据，
+     * 报告同表同 UNIQUE 值重复、content/seedRows 双池重复、模板数据与 runtime 数据不一致。
+     *
+     * 边界：纯只读。不写存储、不修改聊天、不触发迁移。调用方拿到报告后自行决定
+     * 是否处理历史数据（当前无内置迁移动作——历史污染仅限测试版数据，不迁移；
+     * 若未来出现真实用户数据污染，再按计划 F 的设计实现备份-去重-回滚迁移链）。
+     */
+    /** 从 sheet 提取 content 数据行（不含表头）与 seedRows 数据行 */
+    function collectSheetPools_ACU(sheet) {
+        const header = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
+        const contentRows = [];
+        const seedRows = [];
+        if (Array.isArray(sheet?.content)) {
+            for (const row of sheet.content.slice(1)) {
+                if (Array.isArray(row))
+                    contentRows.push(row);
+            }
+        }
+        if (Array.isArray(sheet?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])) {
+            for (const row of sheet[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU]) {
+                if (Array.isArray(row))
+                    seedRows.push(row);
+            }
+        }
+        else if (Array.isArray(sheet?._seedRows)) {
+            for (const row of sheet._seedRows) {
+                if (Array.isArray(row))
+                    seedRows.push(row);
+            }
+        }
+        return { contentRows, seedRows, header };
+    }
+    function buildBusinessKeyIndex_ACU(rows, header, keyGroups) {
+        const headerIndex = new Map();
+        header.forEach((cell, index) => {
+            const name = String(cell ?? '').trim().toLowerCase();
+            if (name && !headerIndex.has(name))
+                headerIndex.set(name, index);
+        });
+        const index = new Map();
+        rows.forEach((row, rowIndex) => {
+            for (const group of keyGroups) {
+                const parts = [];
+                let resolvable = true;
+                for (const col of group) {
+                    const idx = headerIndex.get(col.toLowerCase());
+                    if (idx === undefined || idx >= row.length) {
+                        resolvable = false;
+                        break;
+                    }
+                    parts.push(String(row[idx] ?? ''));
+                }
+                if (!resolvable)
+                    continue;
+                const key = parts.join('\u0001');
+                if (!key)
+                    continue;
+                const list = index.get(key) || [];
+                list.push(rowIndex);
+                index.set(key, list);
+            }
+        });
+        return index;
+    }
+    function push_ACU(result, item) {
+        result.push(item);
+    }
+    /**
+     * 扫描单个 sheet 的 content/seedRows 双池重复与 seed 状态。纯只读。
+     */
+    function diagnoseSheetSeedPools_ACU(sheet, options) {
+        const out = [];
+        const { source, sheetKey, sheetName } = options;
+        const { contentRows, seedRows, header } = collectSheetPools_ACU(sheet);
+        const ddl = String(sheet?.sourceData?.ddl || '');
+        const keyGroups = ddl ? extractBusinessKeyColumns_ACU(ddl) : [];
+        const seenRowIds = new Map();
+        const rowIdIndex = header.findIndex(h => String(h ?? '').trim().toLowerCase() === 'row_id');
+        for (const row of seedRows) {
+            if (rowIdIndex >= 0 && rowIdIndex < row.length) {
+                const rid = String(row[rowIdIndex] ?? '').trim();
+                if (rid && seenRowIds.has(rid)) {
+                    push_ACU(out, {
+                        severity: 'error', code: 'seed_row_id_conflict', source, sheetKey, sheetName,
+                        businessKeyColumns: ['row_id'], conflictingKeys: [rid],
+                        message: `表 ${sheetName} (${sheetKey}) 的 seedRows 池内存在重复 row_id=${rid}，身份空间冲突。`,
+                    });
+                }
+                else if (rid) {
+                    seenRowIds.set(rid, 0);
+                }
+            }
+        }
+        if (keyGroups.length > 0 && contentRows.length > 0 && seedRows.length > 0) {
+            const contentIndex = buildBusinessKeyIndex_ACU(contentRows, header, keyGroups);
+            const headerIndex = new Map();
+            header.forEach((cell, index) => headerIndex.set(String(cell ?? '').trim().toLowerCase(), index));
+            for (const seedRow of seedRows) {
+                for (const group of keyGroups) {
+                    const parts = [];
+                    let resolvable = true;
+                    for (const col of group) {
+                        const idx = headerIndex.get(col.toLowerCase());
+                        if (idx === undefined) {
+                            resolvable = false;
+                            break;
+                        }
+                        parts.push(String(seedRow[idx] ?? ''));
+                    }
+                    if (!resolvable)
+                        continue;
+                    const key = parts.join('\u0001');
+                    if (key && contentIndex.has(key)) {
+                        push_ACU(out, {
+                            severity: 'error', code: 'content_seed_duplicate', source, sheetKey, sheetName,
+                            businessKeyColumns: group, conflictingKeys: [key],
+                            message: `表 ${sheetName} (${sheetKey}) 的 content 与 seedRows 存在同 UNIQUE 业务键（${group.join(', ')}=${key.replace(/\u0001/g, '/')}），双池重复。`,
+                        });
+                    }
+                }
+            }
+        }
+        if (options.runtimeRows && options.runtimeHeader && keyGroups.length > 0 && seedRows.length > 0) {
+            const runtimeIndex = buildBusinessKeyIndex_ACU(options.runtimeRows, options.runtimeHeader, keyGroups);
+            const headerIndex = new Map();
+            header.forEach((cell, index) => headerIndex.set(String(cell ?? '').trim().toLowerCase(), index));
+            for (const seedRow of seedRows) {
+                for (const group of keyGroups) {
+                    const parts = [];
+                    let resolvable = true;
+                    for (const col of group) {
+                        const idx = headerIndex.get(col.toLowerCase());
+                        if (idx === undefined) {
+                            resolvable = false;
+                            break;
+                        }
+                        parts.push(String(seedRow[idx] ?? ''));
+                    }
+                    if (!resolvable)
+                        continue;
+                    const key = parts.join('\u0001');
+                    if (key && runtimeIndex.has(key)) {
+                        push_ACU(out, {
+                            severity: 'warning', code: 'guide_seed_duplicate', source, sheetKey, sheetName,
+                            businessKeyColumns: group, conflictingKeys: [key],
+                            message: `guide 表 ${sheetName} (${sheetKey}) 的 seedRows 已与 runtime 数据存在同 UNIQUE 业务键（${group.join(', ')}=${key.replace(/\u0001/g, '/')}），可能已物化但未清理 seed。`,
+                        });
+                    }
+                }
+            }
+        }
+        if (out.length === 0) {
+            push_ACU(out, {
+                severity: 'info', code: 'info_no_issue', source, sheetKey, sheetName,
+                businessKeyColumns: keyGroups.flat(), conflictingKeys: [],
+                message: `表 ${sheetName} (${sheetKey}) 未检测到 seed 双池污染。`,
+            });
+        }
+        return out;
+    }
+    /**
+     * 全量只读扫描：global preset + 当前 chat scope + guide seedRows + runtime。
+     * 不写任何存储。返回结构化诊断列表。
+     */
+    function scanSeedPollution_ACU() {
+        const result = {
+            diagnostics: [],
+            scanned: { globalPresets: 0, chatScope: 0, guideSheets: 0, runtimeSheets: 0 },
+        };
+        // A) 当前聊天模板 scope（chat_override 快照）
+        const scopeState = getCurrentChatTemplateScopeState_ACU();
+        if (scopeState?.mode === 'chat_override' && typeof scopeState.templateStr === 'string') {
+            result.scanned.chatScope += 1;
+            const parsed = safeJsonParse_ACU(scopeState.templateStr, null);
+            if (parsed && typeof parsed === 'object') {
+                for (const sheetKey of Object.keys(parsed).filter(k => k.startsWith('sheet_'))) {
+                    const sheet = parsed[sheetKey];
+                    const sheetName = String(sheet?.name ?? sheetKey);
+                    const runtimeSheet = currentJsonTableData_ACU?.[sheetKey];
+                    result.diagnostics.push(...diagnoseSheetSeedPools_ACU(sheet, {
+                        source: 'chat_scope', sheetKey, sheetName,
+                        runtimeRows: Array.isArray(runtimeSheet?.content) ? runtimeSheet.content.slice(1) : undefined,
+                        runtimeHeader: Array.isArray(runtimeSheet?.content?.[0]) ? runtimeSheet.content[0] : undefined,
+                    }));
+                }
+            }
+        }
+        // B) global preset 库（只读 getTemplatePreset_ACU；无法枚举全部预设名时退化为已知常用名）
+        const presetNames = (() => {
+            try {
+                const s = globalThis.__templatePresetsStoreForDiagnostics_ACU;
+                return Array.isArray(s) ? s.map((item) => item?.name).filter(Boolean) : [];
+            }
+            catch {
+                return [];
+            }
+        })();
+        const candidates = presetNames.length > 0 ? presetNames : ['默认模板', '标准模板'];
+        for (const name of candidates) {
+            const preset = getTemplatePreset_ACU(name);
+            if (!preset?.templateStr)
+                continue;
+            result.scanned.globalPresets += 1;
+            const parsed = safeJsonParse_ACU(preset.templateStr, null);
+            if (!parsed || typeof parsed !== 'object')
+                continue;
+            for (const sheetKey of Object.keys(parsed).filter(k => k.startsWith('sheet_'))) {
+                const sheet = parsed[sheetKey];
+                result.diagnostics.push(...diagnoseSheetSeedPools_ACU(sheet, {
+                    source: 'global_preset', sheetKey, sheetName: String(sheet?.name ?? sheetKey),
+                }));
+            }
+        }
+        // C) 当前隔离键的 guide seedRows
+        const isolationKey = getCurrentIsolationKey_ACU();
+        const guide = getChatSheetGuideDataForIsolationKey_ACU(isolationKey);
+        if (guide && typeof guide === 'object') {
+            for (const sheetKey of Object.keys(guide).filter(k => k.startsWith('sheet_'))) {
+                const sheet = guide[sheetKey];
+                const hasSeedRows = Array.isArray(sheet?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])
+                    && sheet[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU].length > 0;
+                result.scanned.guideSheets += 1;
+                if (hasSeedRows) {
+                    const runtimeSheet = currentJsonTableData_ACU?.[sheetKey];
+                    result.diagnostics.push(...diagnoseSheetSeedPools_ACU(sheet, {
+                        source: 'guide', sheetKey, sheetName: String(sheet?.name ?? sheetKey),
+                        runtimeRows: Array.isArray(runtimeSheet?.content) ? runtimeSheet.content.slice(1) : undefined,
+                        runtimeHeader: Array.isArray(runtimeSheet?.content?.[0]) ? runtimeSheet.content[0] : undefined,
+                    }));
+                }
+            }
+        }
+        // D) runtime 自身的 content/seedRows 双池（当前数据视图）
+        if (currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object') {
+            for (const sheetKey of Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'))) {
+                const sheet = currentJsonTableData_ACU[sheetKey];
+                result.scanned.runtimeSheets += 1;
+                result.diagnostics.push(...diagnoseSheetSeedPools_ACU(sheet, {
+                    source: 'runtime', sheetKey, sheetName: String(sheet?.name ?? sheetKey),
+                }));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * service/template/template-seed-pollution-migration.ts — seed 双池污染显式迁移（阶段 F2-F4）
+     *
+     * 目标：对当前聊天执行显式、可回滚的 seed 污染清理，不在启动时静默修改历史数据。
+     * 语义（用户已拍板）：
+     *   - 冲突默认 template-wins：模板 content 优先，重复的 seedRows 清理掉；
+     *   - 已物化的 guide seed（guide_seed_duplicate）只清理残留 seed，保留 runtime 数据；
+     *   - row_id 冲突重排身份，不丢行；
+     *   - 手动触发：prepare 生成计划 + 备份，commit 事务执行，失败回滚内存，reload 后置校验；
+     *   - global preset 只诊断不迁移。
+     *
+     * 边界：不写 SQLite runtime 数据本身（runtime 已由物化路径持有，保留用户数据）；
+     * 只修正 guide seedRows 与 chat scope。迁移前 prepare 已导出备份快照，commit 后可回滚。
+     */
+    const seedMigrationPlans_ACU = new Map();
+    /**
+     * F5 版本开关：默认开启（用户已拍板）。显式 `settings_ACU.seedMigrationEnabled === false`
+     * 时进入纯诊断/日志观察模式，prepare/commit/rollback 全部拒绝执行（fail-closed）。
+     * 未定义视为开启，保证升级后历史聊天不被隐式修改（执行仍需手动触发）。
+     */
+    function isSeedMigrationEnabled_ACU() {
+        return settings_ACU?.seedMigrationEnabled !== false;
+    }
+    function clone_ACU$2(value) {
+        return value === undefined ? value : JSON.parse(JSON.stringify(value));
+    }
+    function buildPlanId_ACU() {
+        return `seed-cleanup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+    function getErrorMessage_ACU(error) {
+        return error instanceof Error ? error.message : String(error);
+    }
+    function currentScopeMatches_ACU(plan) {
+        return plan.chat === getChatArray_ACU();
+    }
+    /** 从 guide sheet 提取 seedRows（含下划线旧字段兼容） */
+    function readSeedRows_ACU(sheet) {
+        const rows = [];
+        if (Array.isArray(sheet?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])) {
+            for (const row of sheet[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU]) {
+                if (Array.isArray(row))
+                    rows.push(row);
+            }
+        }
+        else if (Array.isArray(sheet?._seedRows)) {
+            for (const row of sheet._seedRows) {
+                if (Array.isArray(row))
+                    rows.push(row);
+            }
+        }
+        return rows;
+    }
+    function writeSeedRows_ACU(sheet, rows) {
+        sheet[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = clone_ACU$2(rows);
+        delete sheet._seedRows;
+    }
+    /** 按 header 列名构建小写列名 -> 索引映射 */
+    function buildHeaderIndex_ACU(header) {
+        const idx = new Map();
+        header.forEach((cell, index) => {
+            const name = String(cell ?? '').trim().toLowerCase();
+            if (name && !idx.has(name))
+                idx.set(name, index);
+        });
+        return idx;
+    }
+    /** 计算单 sheet 修正后的 seedRows 与动作。纯函数，不改入参。 */
+    function buildSeedCleanupPlanForSheet_ACU(sheet, options) {
+        const { sheetKey, sheetName, keyGroups } = options;
+        const header = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
+        const seedRows = readSeedRows_ACU(sheet);
+        if (seedRows.length === 0) {
+            return { nextSeedRows: [], action: { kind: 'no_change', sheetKey, sheetName } };
+        }
+        const headerIndex = buildHeaderIndex_ACU(header);
+        const rowIdIndex = headerIndex.get('row_id');
+        // 与 runtime 同业务键的 seed 视为已物化残留 -> 清理（保留 runtime 数据）
+        // 与 content（模板数据）同业务键的 seed 视为双池重复 -> template-wins 清理 seed
+        const runtimeIndex = new Map();
+        const contentIndex = new Map();
+        if (options.runtimeRows && options.runtimeHeader) {
+            const rtIdx = buildHeaderIndex_ACU(options.runtimeHeader);
+            options.runtimeRows.forEach((row, i) => {
+                for (const group of keyGroups) {
+                    const parts = [];
+                    let ok = true;
+                    for (const col of group) {
+                        const c = rtIdx.get(col.toLowerCase());
+                        if (c === undefined || c >= row.length) {
+                            ok = false;
+                            break;
+                        }
+                        parts.push(String(row[c] ?? ''));
+                    }
+                    if (ok && parts.join('\u0001'))
+                        runtimeIndex.set(parts.join('\u0001'), i);
+                }
+            });
+        }
+        const contentRows = Array.isArray(sheet?.content) ? sheet.content.slice(1).filter((r) => Array.isArray(r)) : [];
+        contentRows.forEach((row, i) => {
+            for (const group of keyGroups) {
+                const parts = [];
+                let ok = true;
+                for (const col of group) {
+                    const c = headerIndex.get(col.toLowerCase());
+                    if (c === undefined || c >= row.length) {
+                        ok = false;
+                        break;
+                    }
+                    parts.push(String(row[c] ?? ''));
+                }
+                if (ok && parts.join('\u0001'))
+                    contentIndex.set(parts.join('\u0001'), i);
+            }
+        });
+        const droppedKeys = [];
+        const keptKeys = [];
+        const nextSeedRows = [];
+        for (const row of seedRows) {
+            let isDuplicate = false;
+            for (const group of keyGroups) {
+                const parts = [];
+                let ok = true;
+                for (const col of group) {
+                    const c = headerIndex.get(col.toLowerCase());
+                    if (c === undefined || c >= row.length) {
+                        ok = false;
+                        break;
+                    }
+                    parts.push(String(row[c] ?? ''));
+                }
+                const key = ok ? parts.join('\u0001') : '';
+                if (key && (runtimeIndex.has(key) || contentIndex.has(key))) {
+                    isDuplicate = true;
+                    droppedKeys.push(key);
+                    break;
+                }
+            }
+            if (isDuplicate)
+                continue;
+            keptKeys.push(String(row[rowIdIndex ?? -1] ?? ''));
+            nextSeedRows.push(row);
+        }
+        const action = droppedKeys.length > 0
+            ? { kind: 'drop_duplicate_seed_rows', sheetKey, sheetName, businessKeyColumns: keyGroups.flat(), droppedKeys, keptKeys }
+            : { kind: 'no_change', sheetKey, sheetName };
+        return { nextSeedRows, action };
+    }
+    /**
+     * 生成迁移计划：读取当前 guide，计算每 sheet 清理动作，导出备份。只读，不写存储。
+     * 无任何可执行动作时返回 no_issue。
+     */
+    function prepareSeedMigration_ACU(options = {}) {
+        if (!isSeedMigrationEnabled_ACU()) {
+            return { status: 'no_issue', isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(), message: 'seed 迁移开关已关闭（诊断观察模式），不生成计划。' };
+        }
+        const chat = options.chat || getChatArray_ACU();
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        const guideData = getChatSheetGuideDataForIsolationKey_ACU(isolationKey);
+        if (!guideData || typeof guideData !== 'object') {
+            return { status: 'no_issue', isolationKey, message: '当前聊天不存在 guide 数据，无需迁移。' };
+        }
+        const actions = [];
+        let hasAction = false;
+        const guideClone = clone_ACU$2(guideData);
+        const runtimeData = globalThis.currentJsonTableData_ACU ?? globalThis.__currentJsonTableData_ACU;
+        for (const sheetKey of Object.keys(guideClone).filter(k => k.startsWith('sheet_'))) {
+            const sheet = guideClone[sheetKey];
+            if (!sheet || typeof sheet !== 'object')
+                continue;
+            const ddl = String(sheet?.sourceData?.ddl || '');
+            const keyGroups = ddl ? extractBusinessKeyColumns_ACU(ddl) : [];
+            const runtimeSheet = runtimeData?.[sheetKey];
+            const runtimeHeader = Array.isArray(runtimeSheet?.content?.[0]) ? runtimeSheet.content[0] : undefined;
+            const runtimeRows = Array.isArray(runtimeSheet?.content) ? runtimeSheet.content.slice(1) : undefined;
+            const { nextSeedRows, action } = buildSeedCleanupPlanForSheet_ACU(sheet, {
+                sheetKey,
+                sheetName: String(sheet?.name ?? sheetKey),
+                keyGroups,
+                runtimeHeader,
+                runtimeRows,
+            });
+            if (action.kind !== 'no_change') {
+                hasAction = true;
+                writeSeedRows_ACU(sheet, nextSeedRows);
+            }
+            actions.push(action);
+        }
+        if (!hasAction) {
+            return { status: 'no_issue', isolationKey, message: '当前 guide 无 seed 双池污染，无需迁移。' };
+        }
+        const plan = {
+            planId: buildPlanId_ACU(),
+            kind: 'seed_pollution_cleanup',
+            chatKey: String(globalThis.currentChatFileIdentifier_ACU ?? '').trim() || 'current-chat',
+            isolationKey,
+            createdAt: Date.now(),
+            actions,
+            requiresConfirmation: actions.some(a => a.kind === 'drop_duplicate_seed_rows'),
+            backup: {
+                guideContainer: clone_ACU$2(getChatSheetGuideContainer_ACU(chat)),
+                scopedConfigContainer: clone_ACU$2(getChatScopedConfigContainer_ACU(chat)),
+                chatSnapshot: clone_ACU$2(chat),
+            },
+            chat,
+        };
+        seedMigrationPlans_ACU.set(plan.planId, plan);
+        return { status: 'plan_ready', plan };
+    }
+    /**
+     * 提交迁移：校验计划有效与作用域未变 -> 事务内写入修正后的 guide -> 宿主保存 -> reload 后置校验。
+     * 任一步失败即回滚内存聊天并返回失败。
+     */
+    async function commitSeedMigration_ACU(planId, options = {}) {
+        if (!isSeedMigrationEnabled_ACU()) {
+            return { status: 'commit_failed_rolled_back', planId, error: 'seed 迁移开关已关闭（诊断观察模式），拒绝提交。' };
+        }
+        const plan = seedMigrationPlans_ACU.get(planId);
+        const failure = (error) => ({ status: 'commit_failed_rolled_back', planId, error });
+        if (!plan)
+            return failure('迁移计划不存在或已失效，请重新准备。');
+        if (plan.requiresConfirmation && options.confirm !== true) {
+            return failure('迁移包含清理动作，必须显式确认（confirm: true）后才能执行。');
+        }
+        if (!currentScopeMatches_ACU(plan)) {
+            seedMigrationPlans_ACU.delete(planId);
+            return failure('迁移计划作用域已变化，请重新准备。');
+        }
+        const appliedActions = [];
+        const commitResult = await runTableWriteTransaction_ACU({
+            source: 'system',
+            reason: 'seed_pollution_cleanup',
+            isolationKey: plan.isolationKey,
+            writeSet: [{ kind: 'all' }],
+            maintenanceMode: 'exclusive',
+        }, async (ctx) => {
+            try {
+                return await ctx.runCommit(async () => {
+                    if (!currentScopeMatches_ACU(plan)) {
+                        seedMigrationPlans_ACU.delete(planId);
+                        return failure('迁移计划作用域已变化，请重新准备。');
+                    }
+                    // 基于 plan.backup 重建修正后的 guide，保证幂等：重复 commit 以备份为基准重算，不叠加。
+                    const baseGuide = plan.backup.guideContainer;
+                    const guideData = (baseGuide?.tags?.[plan.isolationKey]?.data) ?? null;
+                    if (!guideData || typeof guideData !== 'object') {
+                        seedMigrationPlans_ACU.delete(planId);
+                        return failure('备份 guide 数据缺失，无法执行迁移。');
+                    }
+                    const nextGuide = clone_ACU$2(guideData);
+                    const runtimeData = globalThis.currentJsonTableData_ACU ?? globalThis.__currentJsonTableData_ACU;
+                    for (const action of plan.actions) {
+                        if (action.kind === 'no_change') {
+                            appliedActions.push(action);
+                            continue;
+                        }
+                        const sheet = nextGuide[action.sheetKey];
+                        if (!sheet || typeof sheet !== 'object') {
+                            appliedActions.push(action);
+                            continue;
+                        }
+                        const ddl = String(sheet?.sourceData?.ddl || '');
+                        const keyGroups = ddl ? extractBusinessKeyColumns_ACU(ddl) : [];
+                        const runtimeSheet = runtimeData?.[action.sheetKey];
+                        const runtimeHeader = Array.isArray(runtimeSheet?.content?.[0]) ? runtimeSheet.content[0] : undefined;
+                        const runtimeRows = Array.isArray(runtimeSheet?.content) ? runtimeSheet.content.slice(1) : undefined;
+                        const { nextSeedRows } = buildSeedCleanupPlanForSheet_ACU(sheet, {
+                            sheetKey: action.sheetKey,
+                            sheetName: action.sheetName,
+                            keyGroups,
+                            runtimeHeader,
+                            runtimeRows,
+                        });
+                        writeSeedRows_ACU(sheet, nextSeedRows);
+                        appliedActions.push(action);
+                    }
+                    const beforeChat = clone_ACU$2(plan.chat);
+                    const saved = setChatSheetGuideDataForIsolationKey_ACU(plan.isolationKey, nextGuide, {
+                        reason: 'seed_pollution_cleanup',
+                        syncTemplateScope: true,
+                        source: 'migration',
+                        presetName: String(globalThis.currentTemplatePresetName_ACU ?? ''),
+                    });
+                    if (!saved) {
+                        return failure('guide 写入被拒绝（normalize 失败或空数据），已回滚内存。');
+                    }
                     try {
                         await saveChatToHostStrict_ACU();
                     }
@@ -102055,11 +103068,8 @@ $CONTENT
                         plan.chat.splice(0, plan.chat.length, ...beforeChat);
                         return failure(`宿主保存失败，已恢复内存聊天：${getErrorMessage_ACU(error)}`);
                     }
-                    plans_ACU.delete(planId);
-                    if (!currentScopeMatches_ACU(plan)) {
-                        return failure('宿主保存后恢复计划作用域已变化。');
-                    }
-                    return { status: 'committed', planId };
+                    seedMigrationPlans_ACU.delete(planId);
+                    return { status: 'committed', planId, appliedActions };
                 });
             }
             catch (error) {
@@ -102076,13 +103086,54 @@ $CONTENT
                     throw new Error('SQLite 运行时重载后已静默回退到 native provider。');
                 }
             }
-            if (!currentScopeMatches_ACU(plan))
-                throw new Error('宿主保存后运行时重载期间恢复计划作用域已变化。');
             return commitResult;
         }
         catch (error) {
-            return { status: 'committed_postcondition_failed', planId, error: getErrorMessage_ACU(error) };
+            return { status: 'committed_postcondition_failed', planId, error: getErrorMessage_ACU(error), appliedActions };
         }
+    }
+    /**
+     * 回滚：从计划备份恢复 guide container / scoped config / 聊天快照，并重新 hydrate 验证。
+     * 仅对尚未失效的计划可用；执行后删除计划。
+     */
+    async function rollbackSeedMigration_ACU(planId) {
+        if (!isSeedMigrationEnabled_ACU()) {
+            return { status: 'commit_failed_rolled_back', planId, error: 'seed 迁移开关已关闭（诊断观察模式），拒绝回滚。' };
+        }
+        const plan = seedMigrationPlans_ACU.get(planId);
+        if (!plan)
+            return { status: 'commit_failed_rolled_back', planId, error: '迁移计划不存在或已失效。' };
+        if (!currentScopeMatches_ACU(plan)) {
+            seedMigrationPlans_ACU.delete(planId);
+            return { status: 'commit_failed_rolled_back', planId, error: '迁移计划作用域已变化，无法回滚。' };
+        }
+        const beforeChat = clone_ACU$2(plan.chat);
+        try {
+            // 恢复 guide / scoped config 容器到迁移前快照
+            setChatSheetGuideContainer_ACU(plan.chat, plan.backup.guideContainer);
+            setChatScopedConfigContainer_ACU(plan.chat, plan.backup.scopedConfigContainer);
+            // 恢复聊天快照（覆盖内存中已提交的变更）
+            plan.chat.splice(0, plan.chat.length, ...clone_ACU$2(plan.backup.chatSnapshot));
+            await saveChatToHostStrict_ACU();
+            seedMigrationPlans_ACU.delete(planId);
+        }
+        catch (error) {
+            plan.chat.splice(0, plan.chat.length, ...beforeChat);
+            return { status: 'commit_failed_rolled_back', planId, error: `回滚保存失败，已恢复内存：${getErrorMessage_ACU(error)}` };
+        }
+        try {
+            if (getCurrentStorageMode() === 'sqlite') {
+                await reloadStorageProvider();
+            }
+            return { status: 'committed', planId, error: 'rollback_applied' };
+        }
+        catch (error) {
+            return { status: 'committed_postcondition_failed', planId, error: `回滚后 reload 失败：${getErrorMessage_ACU(error)}` };
+        }
+    }
+    /** 供测试与审计：查询当前是否持有指定计划 */
+    function hasSeedMigrationPlan_ACU(planId) {
+        return seedMigrationPlans_ACU.has(planId);
     }
 
     /**
@@ -102327,6 +103378,42 @@ $CONTENT
             catch (e) {
                 logError_ACU('clearImportCache failed:', e);
                 return false;
+            } },
+            scanSeedPollution: async function () { try {
+                return scanSeedPollution_ACU();
+            }
+            catch (e) {
+                logError_ACU('scanSeedPollution failed:', e);
+                return dataAdminApiError_ACU(e, 'seed 污染只读诊断失败。');
+            } },
+            prepareSeedMigration: async function (options = {}) { try {
+                if (options === null || typeof options !== 'object' || Array.isArray(options))
+                    return { success: false, error: 'seed 迁移准备选项必须是对象。' };
+                return prepareSeedMigration_ACU({ isolationKey: typeof options.isolationKey === 'string' ? options.isolationKey : undefined });
+            }
+            catch (e) {
+                logError_ACU('prepareSeedMigration failed:', e);
+                return dataAdminApiError_ACU(e, 'seed 迁移准备失败。');
+            } },
+            commitSeedMigration: async function (planId, options = {}) { try {
+                if (typeof planId !== 'string' || !planId.trim())
+                    return { success: false, error: 'planId 必须是非空字符串。' };
+                if (options === null || typeof options !== 'object' || Array.isArray(options))
+                    return { success: false, error: 'seed 迁移确认选项必须是对象。' };
+                return await commitSeedMigration_ACU(planId.trim(), { confirm: options.confirm === true });
+            }
+            catch (e) {
+                logError_ACU('commitSeedMigration failed:', e);
+                return dataAdminApiError_ACU(e, 'seed 迁移提交失败。');
+            } },
+            rollbackSeedMigration: async function (planId) { try {
+                if (typeof planId !== 'string' || !planId.trim())
+                    return { success: false, error: 'planId 必须是非空字符串。' };
+                return await rollbackSeedMigration_ACU(planId.trim());
+            }
+            catch (e) {
+                logError_ACU('rollbackSeedMigration failed:', e);
+                return dataAdminApiError_ACU(e, 'seed 迁移回滚失败。');
             } },
             prepareV2Recovery: async function () { try {
                 return prepareV2Recovery_ACU();
