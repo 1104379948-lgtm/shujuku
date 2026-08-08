@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   chat: [{ is_user: false }] as any[],
   data: null as any,
+  chatFile: 'test-chat',
+  lifecycleEpoch: 0,
+  hydrate: vi.fn(async () => ({ ok: true, degraded: false })),
   replayData: null as any,
   sqlite: false,
   migration: vi.fn(async () => ({ success: true, migrated: false })),
@@ -23,6 +26,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => mocks.chat }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentJsonTableData_ACU() { return mocks.data; },
+  get currentChatFileIdentifier_ACU() { return mocks.chatFile; },
   getCurrentIsolationKey_ACU: () => 'iso-test',
   _set_currentJsonTableData_ACU: mocks.setCurrentData,
 }));
@@ -36,7 +40,11 @@ vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
   loadTableStateFromFramesV2Detailed_ACU: mocks.replay,
   hasStructuralReplayCompatibilityRepairs_ACU: (repairs: any[] | undefined) => Boolean(repairs?.some(repair => repair.severity !== 'provisional')),
 }));
-vi.mock('../../../src/service/table/table-storage-strategy', () => ({ reloadStorageProvider: mocks.reload }));
+vi.mock('../../../src/service/table/table-storage-strategy', () => ({
+  reloadStorageProvider: mocks.reload,
+  getRuntimeLifecycleEpoch_ACU: () => mocks.lifecycleEpoch,
+  hydrateStorageProviderFromSnapshot_ACU: mocks.hydrate,
+}));
 vi.mock('../../../src/service/table/table-write-transaction', () => ({ runTableWriteTransaction_ACU: mocks.transaction }));
 vi.mock('../../../src/service/table/storage-mode', () => ({ isSqliteMode: () => mocks.sqlite }));
 
@@ -77,6 +85,9 @@ describe('visualizer-data-ops V2 replay save', () => {
     mocks.fullCheckpoint.mockReset().mockReturnValue(0);
     mocks.sheetReplay.mockReset().mockReturnValue(-1);
     mocks.setCurrentData.mockClear();
+    mocks.hydrate.mockReset().mockResolvedValue({ ok: true, degraded: false });
+    mocks.chatFile = 'test-chat';
+    mocks.lifecycleEpoch = 0;
   });
 
   it('只生成 V2 row operation，并按每张表的 replay layer 路由', async () => {
@@ -89,7 +100,7 @@ describe('visualizer-data-ops V2 replay save', () => {
 
     const result = await applyVisualizerPendingDataOps_ACU(draft);
 
-    expect(result).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '2' } });
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '2' } }));
     // First load is the write base; second is post-save runtime refresh.
     expect(mocks.replay).toHaveBeenCalled();
     expect(mocks.transaction).toHaveBeenCalledWith(expect.objectContaining({ reason: 'visualizer_save_v2_replay' }), expect.any(Function));
@@ -114,7 +125,7 @@ describe('visualizer-data-ops V2 replay save', () => {
 
     const result = await applyVisualizerPendingDataOps_ACU(draft);
 
-    expect(result).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '4' } });
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '4' } }));
     expect(mocks.persist.mock.calls[0][0].afterData.sheet_a.content).toEqual([
       ['row_id', 'value'], ['1', 'old-a'], ['3', 'old-c'], ['4', 'new-a'],
     ]);
@@ -130,7 +141,7 @@ describe('visualizer-data-ops V2 replay save', () => {
 
     const result = await applyVisualizerPendingDataOps_ACU(draft);
 
-    expect(result).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '4', __acu_vis_tmp_row_y: '5' } });
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '4', __acu_vis_tmp_row_y: '5' } }));
     expect(mocks.persist.mock.calls[0][0].afterData.sheet_a.content).toEqual([
       ['row_id', 'value'], ['1', 'old-a'], ['3', 'old-c'], ['4', 'new-a'], ['5', 'new-b'],
     ]);
@@ -200,7 +211,7 @@ describe('visualizer-data-ops V2 replay save', () => {
 
     const result = await applyVisualizerPendingDataOps_ACU(draft);
 
-    expect(result).toEqual({ success: true, changed: true });
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true }));
     expect(mocks.transaction).toHaveBeenCalledOnce();
     expect(mocks.persist).toHaveBeenCalledOnce();
     expect(mocks.persist.mock.calls[0][0].afterData.sheet_a.content).toEqual([['row_id', 'value'], ['1', 'new-a']]);
@@ -254,7 +265,7 @@ describe('visualizer-data-ops V2 replay save', () => {
     mocks.replay.mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: draft.pendingDataOps.committed.afterData });
     const second = await applyVisualizerPendingDataOps_ACU(draft);
 
-    expect(second).toEqual({ success: true, changed: true });
+    expect(second).toEqual(expect.objectContaining({ success: true, changed: true }));
     expect(mocks.persist).toHaveBeenCalledTimes(1);
     expect(mocks.transaction).toHaveBeenCalledTimes(1);
   });
@@ -274,5 +285,72 @@ describe('visualizer-data-ops V2 replay save', () => {
 
     expect(draft.tempData.sheet_a.content).toEqual([['row_id'], ['11'], ['__acu_vis_tmp_row_unmatched']]);
     expect(draft.tempData.sheet_b.content).toEqual([['row_id'], ['12']]);
+  });
+
+  describe('阶段 E：committed 保存后 canonical hydrate 收敛（不重复 reload）', () => {
+    it('sqlite 模式下 committed 刷新用 snapshot hydrate，不调用 reloadStorageProvider', async () => {
+      mocks.sqlite = true;
+      const draft = state();
+      draft.tempData.sheet_a.content.push(['__acu_vis_tmp_row_x', 'new-a']);
+      recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_x');
+
+      const first = await applyVisualizerPendingDataOps_ACU(draft);
+      expect(first.success).toBe(true);
+      expect(draft.pendingDataOps.committed).toBeDefined();
+
+      // committed 保存后：replay 一次 → hydrate provider（不 reload）。
+      // canonicalData 透出给外层 merged refresh，避免其再整链 replay 一次。
+      mocks.hydrate.mockClear();
+      mocks.reload.mockClear();
+      mocks.replay.mockClear();
+      const second = await applyVisualizerPendingDataOps_ACU(draft);
+
+      expect(second).toEqual({
+        success: true,
+        changed: true,
+        insertedRowIds: { __acu_vis_tmp_row_x: '2' },
+        canonicalData: expect.objectContaining({ sheet_a: expect.objectContaining({ name: 'A' }) }),
+      });
+      expect(mocks.replay).toHaveBeenCalledTimes(1);
+      expect(mocks.hydrate).toHaveBeenCalledTimes(1);
+      expect(mocks.reload).not.toHaveBeenCalled();
+      const envelope = mocks.hydrate.mock.calls[0][0];
+      expect(envelope.storageMode).toBe('sqlite');
+      expect(envelope.source).toBe('post_save_replay');
+      expect(envelope.isolationKey).toBe('iso-test');
+      expect(envelope.data).toEqual(draft.pendingDataOps.committed.afterData);
+      expect(second.canonicalData).toEqual(draft.pendingDataOps.committed.afterData);
+    });
+
+    it('native 模式下 committed 刷新不触发 hydrate 也不触发 reload', async () => {
+      mocks.sqlite = false;
+      const draft = state();
+      draft.tempData.sheet_a.content.push(['__acu_vis_tmp_row_x', 'new-a']);
+      recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_x');
+
+      await applyVisualizerPendingDataOps_ACU(draft);
+      mocks.hydrate.mockClear();
+      mocks.reload.mockClear();
+      await applyVisualizerPendingDataOps_ACU(draft);
+
+      expect(mocks.hydrate).not.toHaveBeenCalled();
+      expect(mocks.reload).not.toHaveBeenCalled();
+    });
+
+    it('snapshot 身份漂移（stale_load_discarded）时回退冷 reload，保证 committed 语义成立', async () => {
+      mocks.sqlite = true;
+      const draft = state();
+      draft.tempData.sheet_a.content.push(['__acu_vis_tmp_row_x', 'new-a']);
+      recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_x');
+
+      await applyVisualizerPendingDataOps_ACU(draft);
+      mocks.hydrate.mockReset().mockResolvedValue({ ok: false, failureCode: 'stale_load_discarded' });
+      mocks.reload.mockClear();
+
+      const second = await applyVisualizerPendingDataOps_ACU(draft);
+
+      expect(second).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '2' } });
+      expect(mocks.reload).toHaveBeenCalledTimes(1);
+    });
   });
 });

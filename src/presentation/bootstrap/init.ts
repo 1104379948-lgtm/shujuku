@@ -11,7 +11,8 @@ import { currentChatFileIdentifier_ACU, discardLatestGenerationContext_ACU, gene
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
-import { reloadStorageProvider, disposeStorageProvider } from '../../service/table/table-storage-strategy';
+import { reloadStorageProvider, disposeStorageProvider, getRuntimeLifecycleEpoch_ACU, hydrateStorageProviderFromSnapshot_ACU } from '../../service/table/table-storage-strategy';
+import { createCanonicalSnapshotEnvelope_ACU } from '../../service/table/canonical-snapshot-envelope';
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from '../../service/table/manual-catch-up-provisional-bridge';
 import { loadAllChatMessages_ACU } from '../../service/worldbook/pipeline';
@@ -271,19 +272,51 @@ export   function mainInitialize_ACU() {
              await loadAllChatMessages_ACU();
              applyTemplateScopeForCurrentChat_ACU();
 
-            // [6.7.3] SQLite 模式下，切换聊天后需要重建内存数据库（初始化 SQLite 引擎）
+            // 阶段 D：合并刷新（一轮 V2 replay，产出 canonical）与 provider hydrate 收敛。
+            // 先执行 merged refresh 拿到最终 canonical 数据，SQLite 模式下用 envelope
+            // hydrate provider（零 replay）；refresh 失败/degraded/身份漂移时回退冷
+            // reloadStorageProvider（保持既有两轮链路的完整语义与 fallback 状态机）。
+            // UI 通知由 refreshMergedDataAndNotifyWithUI_ACU 内部完成。
+            const refreshResult = await refreshMergedDataAndNotifyWithUI_ACU();
             if (isSqliteMode()) {
-                logDebug_ACU('[SQLite] CHAT_CHANGED: 重建内存数据库...');
-                try {
-                    await reloadStorageProvider();
-                    logDebug_ACU('[SQLite] CHAT_CHANGED: 内存数据库重建完成');
-                } catch (e: any) {
-                    logError_ACU(`[SQLite] CHAT_CHANGED: 数据库重建失败: ${e?.message}`);
+                const envelope = refreshResult
+                    && !refreshResult.degraded
+                    && refreshResult.mergedData
+                    ? createCanonicalSnapshotEnvelope_ACU({
+                        data: refreshResult.mergedData,
+                        chatIdentity: String(currentChatFileIdentifier_ACU || ''),
+                        isolationKey: getCurrentIsolationKey_ACU(),
+                        storageMode: 'sqlite',
+                        lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+                        source: 'merged_refresh',
+                    })
+                    : null;
+                if (envelope) {
+                    logDebug_ACU('[SQLite] CHAT_CHANGED: 用 canonical snapshot hydrate 内存数据库...');
+                    const hydrated = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+                    if (hydrated.ok) {
+                        logDebug_ACU('[SQLite] CHAT_CHANGED: snapshot hydrate 完成');
+                    } else if (hydrated.failureCode === 'stale_load_discarded') {
+                        logDebug_ACU(`[SQLite] CHAT_CHANGED: snapshot 身份漂移（${hydrated.failureCode}），回退冷 reload。`);
+                        try {
+                            await reloadStorageProvider();
+                        } catch (e: any) {
+                            logError_ACU(`[SQLite] CHAT_CHANGED: 冷 reload 失败: ${e?.message}`);
+                        }
+                    } else {
+                        // provider_fallback（SQLite hydrate 失败已自动回退 native）或
+                        // provider_load_failed：保持 hydrate 返回的 fallback 状态机。
+                        logError_ACU(`[SQLite] CHAT_CHANGED: snapshot hydrate 失败: ${hydrated.failureCode || 'unknown'}${hydrated.error ? `: ${hydrated.error}` : ''}`);
+                    }
+                } else {
+                    logDebug_ACU('[SQLite] CHAT_CHANGED: merged refresh 未产出可用 canonical（degraded/空数据），回退冷 reload。');
+                    try {
+                        await reloadStorageProvider();
+                    } catch (e: any) {
+                        logError_ACU(`[SQLite] CHAT_CHANGED: 数据库重建失败: ${e?.message}`);
+                    }
                 }
             }
-
-            // 3. 刷新数据（UI 刷新由 presentation 层负责）
-            await refreshMergedDataAndNotifyWithUI_ACU();
 
             // [交火向量索引] 聊天数据刷新完成后，预热当前聊天对应的外置分片缓存。
             // 注意：必须放在 refreshMergedDataAndNotifyWithUI_ACU 之后，否则可能读取到旧聊天的 manifest。
@@ -561,20 +594,47 @@ export   function mainInitialize_ACU() {
             logError_ACU(`[ManualCatchUpBridge] 启动恢复残留 provisional bridge 失败：${(bridgeGate as { ok: false; error: string }).error}`);
           }
 
-          // [修复] SQLite 模式下，启动时初始化内存数据库
-          // 老卡（有聊天历史数据）会从聊天记录合并数据建表
-          // 新卡（无数据）只初始化引擎，建表延迟到第一次填表时
+          // 阶段 D：启动补偿同样收敛为“一轮 merged refresh → snapshot hydrate”。
+          // 老卡（有聊天历史）从聊天记录合并数据建表；新卡（无数据）由 refresh
+          // 走 guide/模板基底，hydrate 失败或 degraded 时回退冷 reload。
+          const refreshResult = await refreshMergedDataAndNotifyWithUI_ACU();
           if (isSqliteMode()) {
-              logDebug_ACU('[SQLite] initWithChatId: 初始化内存数据库...');
-              try {
-                  await reloadStorageProvider();
-                  logDebug_ACU('[SQLite] initWithChatId: 内存数据库初始化完成');
-              } catch (e: any) {
-                  logError_ACU(`[SQLite] initWithChatId: 数据库初始化失败: ${e?.message}`);
+              const envelope = refreshResult
+                  && !refreshResult.degraded
+                  && refreshResult.mergedData
+                  ? createCanonicalSnapshotEnvelope_ACU({
+                      data: refreshResult.mergedData,
+                      chatIdentity: String(currentChatFileIdentifier_ACU || ''),
+                      isolationKey: getCurrentIsolationKey_ACU(),
+                      storageMode: 'sqlite',
+                      lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+                      source: 'merged_refresh',
+                  })
+                  : null;
+              if (envelope) {
+                  logDebug_ACU('[SQLite] initWithChatId: 用 canonical snapshot hydrate 内存数据库...');
+                  const hydrated = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+                  if (hydrated.ok) {
+                      logDebug_ACU('[SQLite] initWithChatId: snapshot hydrate 完成');
+                  } else if (hydrated.failureCode === 'stale_load_discarded') {
+                      logDebug_ACU('[SQLite] initWithChatId: snapshot 身份漂移，回退冷 reload。');
+                      try {
+                          await reloadStorageProvider();
+                      } catch (e: any) {
+                          logError_ACU(`[SQLite] initWithChatId: 冷 reload 失败: ${e?.message}`);
+                      }
+                  } else {
+                      logError_ACU(`[SQLite] initWithChatId: snapshot hydrate 失败: ${hydrated.failureCode || 'unknown'}${hydrated.error ? `: ${hydrated.error}` : ''}`);
+                  }
+              } else {
+                  logDebug_ACU('[SQLite] initWithChatId: merged refresh 未产出可用 canonical（degraded/空数据），回退冷 reload。');
+                  try {
+                      await reloadStorageProvider();
+                  } catch (e: any) {
+                      logError_ACU(`[SQLite] initWithChatId: 数据库初始化失败: ${e?.message}`);
+                  }
               }
           }
-
-          await refreshMergedDataAndNotifyWithUI_ACU();
       };
 
       if (SillyTavern_API_ACU && SillyTavern_API_ACU.chatId) {

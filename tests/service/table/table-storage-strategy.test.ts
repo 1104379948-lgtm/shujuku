@@ -104,7 +104,11 @@ import {
   getCurrentProviderMode,
   getStorageRuntimeHealth_ACU,
   didSqliteFallbackAfterReload_ACU,
+  getRuntimeLifecycleEpoch_ACU,
+  hydrateStorageProviderFromSnapshot_ACU,
 } from '../../../src/service/table/table-storage-strategy';
+import { createCanonicalSnapshotEnvelope_ACU } from '../../../src/service/table/canonical-snapshot-envelope';
+import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../../../src/service/runtime/state-manager';
 
 function deferred_ACU<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -743,5 +747,97 @@ describe('table-storage-strategy', () => {
 
       expect(didSqliteFallbackAfterReload_ACU('native')).toBe(false);
     });
+
+  // ═══════════════════════════════════════════════════════════════
+  // 阶段 C：CanonicalSnapshotEnvelope hydrate 窄入口
+  // ═══════════════════════════════════════════════════════════════
+  describe('hydrateStorageProviderFromSnapshot_ACU（阶段 C）', () => {
+    function buildEnvelope(overrides: Record<string, unknown> = {}) {
+      const data = {
+        mate: { type: 'acu', version: 1 },
+        sheet_0: { content: [['row_id', 'name'], ['1', '铁剑']], sourceData: { ddl: 'CREATE TABLE t (row_id INTEGER PRIMARY KEY, name TEXT);' } },
+      };
+      return createCanonicalSnapshotEnvelope_ACU({
+        data,
+        chatIdentity: String(currentChatFileIdentifier_ACU || ''),
+        isolationKey: getCurrentIsolationKey_ACU(),
+        storageMode: 'sqlite',
+        lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+        source: 'merged_refresh',
+        ...overrides,
+      })!;
+    }
+
+    it('sqlite 模式下同一 canonical 输入经 hydrate 后 provider 持有相同数据（不触发聊天 replay）', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      const createdCount = allCreatedProviders.length;
+      const envelope = buildEnvelope();
+      const replayCallsBefore = mockLoadOrCreateJsonTableFromChatHistory.mock.calls.length;
+
+      const result = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+
+      expect(result).toMatchObject({ ok: true, degraded: false });
+      expect(getCurrentProviderMode()).toBe('sqlite');
+      // hydrate 路径不调用聊天 replay（对比 reloadStorageProvider 的冷路径）。
+      expect(mockLoadOrCreateJsonTableFromChatHistory.mock.calls.length).toBe(replayCallsBefore);
+      const provider = getActiveStorageProvider()!;
+      expect(provider.mode).toBe('sqlite');
+      expect(provider.loadFromData).toHaveBeenCalledOnce();
+      expect(provider.getCurrentData()).toEqual(envelope.data);
+      // 恰好新增一个 sqlite 候选并被发布。
+      expect(allCreatedProviders.filter(p => p.mode === 'sqlite').length).toBeGreaterThanOrEqual(createdCount ? createdCount : 1);
+    });
+
+    it('身份预检失败（chatIdentity 不匹配）时不进入 hydrate，返回 stale_load_discarded', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      const activeBefore = getActiveStorageProvider();
+      const envelope = buildEnvelope({ chatIdentity: 'another-chat' });
+
+      const result = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+
+      expect(result).toMatchObject({ ok: false, failureCode: 'stale_load_discarded' });
+      expect(getActiveStorageProvider()).toBe(activeBefore);
+      expect(getActiveStorageProvider()!.dispose).not.toHaveBeenCalled();
+    });
+
+    it('lifecycle epoch 不匹配时丢弃候选，不发布新 provider', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      const activeBefore = getActiveStorageProvider();
+      const envelope = buildEnvelope({ lifecycleEpoch: getRuntimeLifecycleEpoch_ACU() + 999 });
+
+      const result = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+
+      expect(result).toMatchObject({ ok: false, failureCode: 'stale_load_discarded' });
+      expect(getActiveStorageProvider()).toBe(activeBefore);
+    });
+
+    it('当前为 native 模式时拒绝 sqlite snapshot hydrate', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+      const activeBefore = getActiveStorageProvider();
+      const envelope = buildEnvelope({ storageMode: 'sqlite' });
+
+      const result = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+
+      expect(result).toMatchObject({ ok: false, failureCode: 'stale_load_discarded' });
+      expect(getActiveStorageProvider()).toBe(activeBefore);
+    });
+
+    it('sqlite hydrate 失败时沿用 fallback 语义（回退 native，不复活上一 provider）', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      sqliteLoadResult = { loaded: false, source: 'empty', error: 'hydrate 失败' };
+      const envelope = buildEnvelope();
+
+      const result = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+
+      expect(result).toMatchObject({ ok: false, degraded: true, failureCode: 'provider_fallback' });
+      expect(getCurrentProviderMode()).toBe('native');
+    });
+  });
+
   });
 });

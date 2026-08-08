@@ -51,6 +51,10 @@ const SAFE_METRIC_KEYS_ACU = new Set([
   'frameCount', 'logEntryCount', 'checkpointIndex', 'maxMessageIndex',
   'targetMessageIndex', 'storageMode', 'baseKind', 'source', 'outcome',
   'sqlite', 'success', 'strictSave', 'replacement', 'temporaryBaselineUpgrade',
+  // v2-replay 纯数值安全指标（阶段 A）：只允许有限整数计数，绝不记录 SQL 文本、
+  // 表名、角色内容、单元格、DDL 原文或聊天标识。
+  'sqlOperationCount', 'tableAliasBuildCount', 'columnAliasBuildCount',
+  'aliasInvalidateCount', 'sqliteHydrateCount', 'sqliteMaterializeCount',
 ]);
 
 let nextSpanId_ACU = 1;

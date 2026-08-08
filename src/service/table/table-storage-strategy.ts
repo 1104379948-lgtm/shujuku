@@ -11,8 +11,9 @@ import { NativeTableServiceAdapter } from './native-table-service-adapter';
 import { SqlTableService } from './sql-table-service';
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from './table-service';
-import { _set_currentJsonTableData_ACU, _set_independentTableStates_ACU } from '../runtime/state-manager';
+import { _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { invalidateTableRuntimeRevision_ACU, runTableWriteTransaction_ACU } from './table-write-transaction';
+import { type CanonicalSnapshotEnvelope_ACU, isCanonicalSnapshotEnvelope_ACU } from './canonical-snapshot-envelope';
 
 /** 当前活跃的 Provider 实例 */
 let currentProvider: ITableStorageProvider | null = null;
@@ -47,6 +48,16 @@ let activeInitialization: { mode: StorageMode; promise: Promise<StorageRuntimeLo
 let initializationEpoch_ACU = 0;
 let activeReload_ACU: Promise<StorageRuntimeLoadResult_ACU> | null = null;
 let runtimeLifecycleEpoch_ACU = 0;
+
+/**
+ * 当前存储 runtime 生命周期 epoch（只读）。阶段 D/E 编排层用它构造
+ * CanonicalSnapshotEnvelope 并在 hydrate 前后复核身份；模块内其余路径
+ * 仍直接访问私有 runtimeLifecycleEpoch_ACU，不经过本 getter。
+ */
+export function getRuntimeLifecycleEpoch_ACU(): number {
+  return runtimeLifecycleEpoch_ACU;
+}
+
 
 function canonicalRuntimeData_ACU(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalRuntimeData_ACU).join(',')}]`;
@@ -388,6 +399,87 @@ export async function reloadStorageProvider(): Promise<StorageRuntimeLoadResult_
     if (activeReload_ACU === promise) activeReload_ACU = null;
   }
 }
+
+/**
+ * 阶段 C：经身份复核的 canonical snapshot hydrate 窄入口。
+ *
+ * 与 reloadStorageProvider 的区别：不重新 replay 聊天，直接用调用链刚完成的
+ * canonical snapshot（CanonicalSnapshotEnvelope_ACU）hydrate 候选 provider。
+ *
+ * 安全边界（计划 §3.3）：
+ * - 调用开始捕获 chat/isolation/mode/lifecycle token；
+ * - hydrate 前、后各校验一次 envelope 身份；仅两次校验均通过才原子发布；
+ * - stale 候选立即 dispose，返回结构化 stale_load_discarded；
+ * - hydrate 失败沿用现有 fallback/health 语义，不复活上一聊天 provider；
+ * - 仅接受 sqlite 模式（native 不创建 SQLite provider，直接返回 ok）。
+ * - envelope 不是缓存：本函数消费后立即失效，调用方不得复用同一 envelope 重复发布。
+ */
+export async function hydrateStorageProviderFromSnapshot_ACU(
+  envelope: CanonicalSnapshotEnvelope_ACU,
+): Promise<StorageRuntimeLoadResult_ACU> {
+  if (!isCanonicalSnapshotEnvelope_ACU(envelope)) {
+    return { ok: false, degraded: false, failureCode: 'provider_load_failed', error: '[StorageStrategy] 非法 canonical snapshot envelope。' };
+  }
+  const lifecycleEpoch = runtimeLifecycleEpoch_ACU;
+  const mode = getCurrentStorageMode();
+  const chatIdentity = String(currentChatFileIdentifier_ACU || '');
+  const isolationKey = getCurrentIsolationKey_ACU();
+
+  // 身份预检：envelope 与当前运行时目标不一致时直接丢弃，不得进入 hydrate。
+  if (mode !== envelope.storageMode
+    || lifecycleEpoch !== envelope.lifecycleEpoch
+    || chatIdentity !== envelope.chatIdentity
+    || isolationKey !== envelope.isolationKey) {
+    logDebug_ACU('[StorageStrategy] snapshot hydrate 身份预检失败，丢弃候选（stale_load_discarded）。');
+    return { ok: false, degraded: false, failureCode: 'stale_load_discarded' };
+  }
+  if (mode !== 'sqlite') {
+    // native 模式不创建 SQLite provider；调用方不应在 native 下请求 hydrate。
+    return { ok: true, degraded: false, source: 'merged' };
+  }
+
+  const nextProvider = createProvider('sqlite');
+  try {
+    const result = await nextProvider.loadFromData(envelope.data);
+    if (!result.loaded) {
+      nextProvider.dispose();
+      logError_ACU(`[StorageStrategy] snapshot hydrate 失败: ${result.error || 'unknown'}`);
+      // 沿用现有 fallback 语义：SQLite hydrate 失败回退 native。
+      replaceActiveProvider_ACU(createProvider('native'));
+      setRuntimeHealth_ACU({
+        status: 'degraded', expectedMode: 'sqlite', activeMode: 'native', source: result.source,
+        failureCode: 'provider_fallback', error: result.error,
+      });
+      return { ok: false, degraded: true, source: result.source, failureCode: 'provider_fallback', error: result.error };
+    }
+
+    // 身份复检：hydrate 期间 chat/isolation/mode/lifecycle 变化则丢弃候选。
+    if (lifecycleEpoch !== runtimeLifecycleEpoch_ACU
+      || getCurrentStorageMode() !== mode
+      || String(currentChatFileIdentifier_ACU || '') !== chatIdentity
+      || getCurrentIsolationKey_ACU() !== isolationKey) {
+      nextProvider.dispose();
+      logDebug_ACU('[StorageStrategy] snapshot hydrate 复检失败（stale_load_discarded），候选已销毁。');
+      return { ok: false, degraded: false, source: result.source, failureCode: 'stale_load_discarded' };
+    }
+
+    replaceActiveProvider_ACU(nextProvider);
+    setRuntimeHealth_ACU({ status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', source: result.source });
+    return { ok: true, degraded: false, source: result.source };
+  } catch (error: any) {
+    const message = error?.message || String(error);
+    if (lifecycleEpoch !== runtimeLifecycleEpoch_ACU) {
+      nextProvider.dispose();
+      return { ok: false, degraded: false, failureCode: 'stale_load_discarded' };
+    }
+    nextProvider.dispose();
+    logError_ACU(`[StorageStrategy] snapshot hydrate 异常，fallback 到原生模式: ${message}`);
+    replaceActiveProvider_ACU(createProvider('native'));
+    setRuntimeHealth_ACU({ status: 'degraded', expectedMode: 'sqlite', activeMode: 'native', failureCode: 'provider_fallback', error: message });
+    return { ok: false, degraded: true, failureCode: 'provider_fallback', error: message };
+  }
+}
+
 
 /**
  * 获取当前 Provider 的模式

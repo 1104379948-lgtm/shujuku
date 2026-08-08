@@ -580,8 +580,22 @@ function migrateLegacyAutoMergedOrderBeforeTailRepair_ACU(data: Record<string, a
     return changed;
 }
 
-export   async function refreshMergedDataAndNotify_ACU() {
-      // 重新加载聊天记录
+/**
+ * 阶段 E：可选 canonical 输入。
+ *
+ * 调用链刚完成的 authoritative post-save replay（来自 applyVisualizerPendingDataOps_ACU）
+ * 可直接作为 merged refresh 的基底，避免 mergeAllIndependentTables_ACU 内部再从聊天
+ * 完整 replay 一次（v2 模式内部调用 loadTableStateFromFramesV2_ACU）。
+ *
+ * 提供 canonicalData 时：
+ * - 仍执行 loadAllChatMessages_ACU（世界书/其他派生刷新需要最新聊天数组）；
+ * - 跳过 mergeAllIndependentTables_ACU 的整链重放，直接用调用方提供的 canonical 数据；
+ * - 规范化、自愈、排序、世界书、UI 副作用照常执行（不把去重 replay 写成跳过 refresh）。
+ *
+ * 不提供时保持原行为（冷路径全量回放），兼容全部既有调用方。
+ */
+export async function refreshMergedDataAndNotify_ACU(options: { canonicalData?: Record<string, any> | null } = {}) {
+      // 重新加载聊天记录（canonical 快照路径也保留：世界书派生刷新依赖最新聊天数组）
     await loadAllChatMessages_ACU();
     let removedNullRowCount = 0;
     let canonicalIssues: Array<{ sheetKey: string; rowIndex: number; reason: string }> = [];
@@ -594,7 +608,11 @@ export   async function refreshMergedDataAndNotify_ACU() {
     // 合并数据 (使用新的独立表合并逻辑)
     let mergedData: Record<string, any> | null = null;
     try {
-        mergedData = await mergeAllIndependentTables_ACU();
+        if (options.canonicalData && typeof options.canonicalData === 'object') {
+            mergedData = JSON.parse(JSON.stringify(options.canonicalData));
+        } else {
+            mergedData = await mergeAllIndependentTables_ACU();
+        }
         // 单表隔离信息在合并函数内已做逐表 try/catch，正常路径下不会整体抛错。
         // 这里仅用于捕获非预期异常并补充诊断上下文，不吞掉异常。
         const quarantined = consumeLastMergeQuarantinedSheetKeys_ACU();

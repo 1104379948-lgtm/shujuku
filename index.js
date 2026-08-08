@@ -7331,6 +7331,10 @@ $CONTENT
         'frameCount', 'logEntryCount', 'checkpointIndex', 'maxMessageIndex',
         'targetMessageIndex', 'storageMode', 'baseKind', 'source', 'outcome',
         'sqlite', 'success', 'strictSave', 'replacement', 'temporaryBaselineUpgrade',
+        // v2-replay 纯数值安全指标（阶段 A）：只允许有限整数计数，绝不记录 SQL 文本、
+        // 表名、角色内容、单元格、DDL 原文或聊天标识。
+        'sqlOperationCount', 'tableAliasBuildCount', 'columnAliasBuildCount',
+        'aliasInvalidateCount', 'sqliteHydrateCount', 'sqliteMaterializeCount',
     ]);
     let nextSpanId_ACU = 1;
     let recentSpans_ACU = [];
@@ -39306,6 +39310,38 @@ $CONTENT
     function hasStructuralReplayCompatibilityRepairs_ACU(repairs) {
         return Boolean(repairs?.some(repair => repair.severity !== 'provisional'));
     }
+    function createReplayMetrics_ACU() {
+        return {
+            frameCount: 0,
+            logEntryCount: 0,
+            operationCount: 0,
+            sqlOperationCount: 0,
+            tableAliasBuildCount: 0,
+            columnAliasBuildCount: 0,
+            aliasInvalidateCount: 0,
+            sqliteHydrateCount: 0,
+            sqliteMaterializeCount: 0,
+        };
+    }
+    function createReplayAliasContext_ACU(metrics) {
+        return {
+            stateEpoch: 0,
+            tableAliasRegistry: null,
+            tableConflictRegistry: null,
+            columnAliasRegistry: null,
+            metrics,
+            enabled: false,
+        };
+    }
+    /** 结构事件使 epoch 递增并清空全部 registry 缓存。 */
+    function invalidateReplayAliasContext_ACU(context) {
+        context.stateEpoch += 1;
+        context.tableAliasRegistry = null;
+        context.tableConflictRegistry = null;
+        context.columnAliasRegistry = null;
+        if (context.metrics)
+            context.metrics.aliasInvalidateCount += 1;
+    }
     function deepClone_ACU$3(value) {
         return JSON.parse(JSON.stringify(value));
     }
@@ -40064,6 +40100,9 @@ $CONTENT
             runtime.syncBridge.loadSpv79LegacyDuplicateRowIdHistory(state);
         else
             runtime.syncBridge.loadFromTableData(state, { strict: true });
+        if (options.metrics) {
+            options.metrics.sqliteHydrateCount += 1;
+        }
         runtime.loaded = true;
         runtime.mode = 'sqlite_loaded';
     }
@@ -40092,6 +40131,8 @@ $CONTENT
         if (runtime.mode !== 'sqlite_loaded' || !runtime.loaded)
             return;
         const exported = getExportedSqlReplayRuntimeState_ACU(runtime, state, options);
+        if (options.metrics)
+            options.metrics.sqliteMaterializeCount += 1;
         // 先导出成功再 dispose：导出抛错时保持 SQLite 权威状态不变，由上层 finally 清理。
         replaceState_ACU(state, exported);
         disposeSqlReplayRuntime_ACU(runtime);
@@ -40103,11 +40144,15 @@ $CONTENT
             ? getExportedSqlReplayRuntimeState_ACU(runtime, state, options)
             : deepClone_ACU$3(state);
     }
-    async function applySheetCheckpointsForReplay_ACU(state, checkpoints, runtime) {
+    async function applySheetCheckpointsForReplay_ACU(state, checkpoints, runtime, metrics, context) {
         if (checkpoints.length === 0)
             return;
+        if (context?.enabled)
+            invalidateReplayAliasContext_ACU(context);
+        else if (metrics)
+            metrics.aliasInvalidateCount += checkpoints.length;
         // sheet checkpoint 属 JS 语义：离开 SQL 段先 materialize（导出并 dispose）。
-        await materializeSqlRuntimeToState_ACU(runtime, state);
+        await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
         const candidate = deepClone_ACU$3(state);
         for (const checkpoint of checkpoints) {
             if (checkpoint.timeline?.kind === 'sheet_hide') {
@@ -40121,16 +40166,55 @@ $CONTENT
         }
         replaceState_ACU(state, candidate);
     }
-    function buildReplaySqlTableAliases_ACU(state, operation) {
+    function buildReplaySqlTableAliases_ACU(state, operation, metrics, context) {
         const isPlainSqlIdentifier = (value) => (typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(value));
-        // 与实时 SQL/Strict JSON 复用同一表身份别名来源；V2 仅额外保留已写入
-        // 历史日志的短 sheetKey 和 operation.tableName 兼容语义。
-        const sharedRegistry = buildSheetTableAliasMap_ACU([state], { includeExtendedAliases: true });
+        // 基础 registry（buildSheetTableAliasMap_ACU + 短 sheetKey 别名）在同一
+        // stateEpoch 内不变，按 epoch 缓存；operation 特有的历史 tableName 是
+        // per-operation 派生叠加（派生副本，不污染缓存）。
+        const useCache = Boolean(context?.enabled);
+        let sharedRegistry;
+        let baseConflicts;
+        if (useCache && context.tableAliasRegistry && context.tableConflictRegistry) {
+            sharedRegistry = { aliases: context.tableAliasRegistry, conflicts: context.tableConflictRegistry };
+            baseConflicts = context.tableConflictRegistry;
+        }
+        else {
+            sharedRegistry = buildSheetTableAliasMap_ACU([state], { includeExtendedAliases: true });
+            baseConflicts = new Set(sharedRegistry.conflicts);
+            // 短 sheetKey 别名也属基础不变部分，合并进基础 registry。
+            const addBaseAlias = (alias, runtimeName) => {
+                const normalized = decodeSqlIdentifier_ACU(alias).normalize('NFKC').trim().toLocaleLowerCase('en-US');
+                if (!normalized || baseConflicts.has(normalized) || sharedRegistry.conflicts.has(normalized))
+                    return;
+                const existing = sharedRegistry.aliases.get(normalized);
+                if (existing && existing !== runtimeName) {
+                    sharedRegistry.aliases.delete(normalized);
+                    baseConflicts.add(normalized);
+                    return;
+                }
+                sharedRegistry.aliases.set(normalized, runtimeName);
+            };
+            for (const [sheetKey, value] of Object.entries(state)) {
+                if (!sheetKey.startsWith('sheet_'))
+                    continue;
+                const sheet = value;
+                const runtimeName = getPhysicalTableNameForSheet_ACU(state, sheetKey);
+                if (isPlainSqlIdentifier(sheetKey.slice('sheet_'.length)))
+                    addBaseAlias(sheetKey.slice('sheet_'.length), runtimeName);
+            }
+            if (useCache) {
+                context.tableAliasRegistry = sharedRegistry.aliases;
+                context.tableConflictRegistry = baseConflicts;
+            }
+            if (metrics)
+                metrics.tableAliasBuildCount += 1;
+        }
+        // 派生副本：当前 operation 专属的历史 tableName 别名叠加。
         const aliases = new Map(sharedRegistry.aliases);
-        const conflicts = new Set();
+        const conflicts = new Set(baseConflicts);
         const addAlias = (alias, runtimeName) => {
             const normalized = decodeSqlIdentifier_ACU(alias).normalize('NFKC').trim().toLocaleLowerCase('en-US');
-            if (!normalized || conflicts.has(normalized) || sharedRegistry.conflicts.has(normalized))
+            if (!normalized || conflicts.has(normalized) || baseConflicts.has(normalized))
                 return;
             const existing = aliases.get(normalized);
             if (existing && existing !== runtimeName) {
@@ -40140,15 +40224,6 @@ $CONTENT
             }
             aliases.set(normalized, runtimeName);
         };
-        for (const [sheetKey, value] of Object.entries(state)) {
-            if (!sheetKey.startsWith('sheet_'))
-                continue;
-            const sheet = value;
-            const runtimeName = getPhysicalTableNameForSheet_ACU(state, sheetKey);
-            // historical V2 logs emitted this short key; it is not a current public alias.
-            if (isPlainSqlIdentifier(sheetKey.slice('sheet_'.length)))
-                addAlias(sheetKey.slice('sheet_'.length), runtimeName);
-        }
         if (operation.kind === 'sql_sheet_batch') {
             // operation.tableName 是写入当时的历史物理表名，属于历史事实。
             // 表可能已改名（原名/拼音名互换）或该 sheetKey 暂不在当前 replay state 中，
@@ -40173,12 +40248,19 @@ $CONTENT
         }
         return { aliases, conflicts };
     }
-    async function applySqlBatchOperationV2_ACU(state, operation, runtime, supplementalTemplate, options = {}) {
+    async function applySqlBatchOperationV2_ACU(state, operation, runtime, supplementalTemplate, options = {}, context) {
         const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
         if (statements.length === 0)
             return;
+        if (options.metrics)
+            options.metrics.sqlOperationCount += statements.length;
         await ensureSqlReplayRuntime_ACU(runtime, state, options);
-        const { aliases, conflicts } = buildReplaySqlTableAliases_ACU(state, operation);
+        // 结构 SQL（CREATE/ALTER/DROP/RENAME）改变 runtime schema，无法证明与 JS
+        // state 在连续语句间保持同步；首版对含结构 SQL 的 operation 强制走冷 registry
+        // 路径（本次重建，不读取也不写入缓存），保证后续 DML 仍可用同 epoch 缓存。
+        const hasStructuralSql = statements.some(statement => /^\s*(CREATE|ALTER|DROP|RENAME)\b/i.test(statement));
+        const effectiveContext = hasStructuralSql ? null : context;
+        const { aliases, conflicts } = buildReplaySqlTableAliases_ACU(state, operation, options.metrics, effectiveContext);
         const replayStatements = rebindSqlMutationTableReferences_ACU(statements, aliases, {
             lenient: true,
             ambiguousAliases: conflicts,
@@ -40197,10 +40279,29 @@ $CONTENT
             // 这里天然拿到补锚后的最新 state，无需额外重建（计划 4.3 确认项）。
             // target-first（计划 5.2）：target=state（checkpoint 权威），
             // supplemental=当前模板 header-only（只提供别名证据，绝不提供目标列）。
-            const { aliases: columnAliases, conflicts: columnConflicts, sourceByAlias, conflictCandidates } = buildSheetColumnAliasMap_ACU(state, {
-                supplementalSources: [supplementalTemplate],
-                skipInvalidSupplementalSources: true,
-            });
+            // 列 registry 按 stateEpoch + supplementalFingerprint 缓存（阶段 B）。
+            // 同一 epoch 内 supplemental 模板结构不变时直接复用；结构 SQL 操作强制
+            // 冷构建且不写入缓存（与表 alias 同策略）。
+            const useColumnCache = Boolean(context?.enabled) && !hasStructuralSql;
+            let columnResult;
+            if (useColumnCache && context.columnAliasRegistry) {
+                // 同一 replay 内 supplemental 模板只解析一次（headerOnlyTemplateFingerprint
+                // 恒定），epoch 失效由 invalidateReplayAliasContext_ACU 保证，因此
+                // epoch 内 columnAliasRegistry 非空即可命中。
+                columnResult = context.columnAliasRegistry;
+            }
+            else {
+                columnResult = buildSheetColumnAliasMap_ACU(state, {
+                    supplementalSources: [supplementalTemplate],
+                    skipInvalidSupplementalSources: true,
+                });
+                if (useColumnCache) {
+                    context.columnAliasRegistry = columnResult;
+                }
+                if (options.metrics)
+                    options.metrics.columnAliasBuildCount += 1;
+            }
+            const { aliases: columnAliases, conflicts: columnConflicts, sourceByAlias, conflictCandidates } = columnResult;
             const evidenceByAlias = sourceByAlias.get(targetTableName);
             const candidatesByAlias = conflictCandidates.get(targetTableName);
             columnReboundStatements = rebindSqlMutationColumnReferences_ACU(replayStatements, columnAliases, targetTableName, {
@@ -40503,10 +40604,10 @@ $CONTENT
             }
         }
     }
-    async function applyTableOperationV2_ACU(state, operation, runtime, supplementalTemplate) {
-        await applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate);
+    async function applyTableOperationV2_ACU(state, operation, runtime, supplementalTemplate, metrics, context) {
+        await applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate, undefined, metrics, context);
     }
-    async function applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate, options = {}) {
+    async function applyTableOperationV2Core_ACU(state, operation, runtime, supplementalTemplate, options = {}, metrics, context) {
         if (!operation || typeof operation !== 'object' || typeof operation.kind !== 'string') {
             throw new Error('[V2 Replay] operation 缺少有效 kind。');
         }
@@ -40518,9 +40619,13 @@ $CONTENT
         const effectiveRuntime = runtime || ownedRuntime || null;
         try {
             if (operation.kind === 'data_replace') {
+                if (context?.enabled)
+                    invalidateReplayAliasContext_ACU(context);
+                else if (metrics)
+                    metrics.aliasInvalidateCount += 1;
                 // JS-native 提交：先退出 SQL 段（materialize + dispose），再以 JS state 提交全量替换。
                 if (effectiveRuntime)
-                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
                 const candidate = deepClone_ACU$3(operation.data);
                 if (options.legacyDuplicateRowIds) {
                     // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize；由上层 finally dispose。
@@ -40533,14 +40638,18 @@ $CONTENT
             if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
                 if (!effectiveRuntime)
                     throw new Error(`${operation.kind} replay requires runtime`);
-                await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime, supplementalTemplate, options);
+                await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime, supplementalTemplate, { ...options, metrics }, context);
                 if (ownedRuntime)
                     exportSqlReplayRuntime_ACU(ownedRuntime, state, options);
                 return;
             }
             if (operation.kind === 'sheet_schema_migrate') {
+                if (context?.enabled)
+                    invalidateReplayAliasContext_ACU(context);
+                else if (metrics)
+                    metrics.aliasInvalidateCount += 1;
                 if (effectiveRuntime)
-                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
                 const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 const candidate = await applySheetSchemaMigrationOperation_ACU(sourceState, operation);
                 if (options.legacyDuplicateRowIds) {
@@ -40552,8 +40661,12 @@ $CONTENT
                 return;
             }
             if (operation.kind === 'sheet_replace') {
+                if (context?.enabled)
+                    invalidateReplayAliasContext_ACU(context);
+                else if (metrics)
+                    metrics.aliasInvalidateCount += 1;
                 if (effectiveRuntime)
-                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 candidate[operation.sheetKey] = deepClone_ACU$3(operation.sheet);
                 if (options.legacyDuplicateRowIds) {
@@ -40567,9 +40680,13 @@ $CONTENT
             if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
                 if (operation.kind === 'meta_update') {
                     assertMetaUpdateDoesNotChangeDdl_ACU(operation);
+                    if (context?.enabled)
+                        invalidateReplayAliasContext_ACU(context);
+                    else if (metrics)
+                        metrics.aliasInvalidateCount += 1;
                 }
                 if (effectiveRuntime)
-                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 if (options.legacyDuplicateRowIds)
                     applyTablePatchLegacyDuplicateRowIds_ACU(candidate, operation);
@@ -40584,8 +40701,12 @@ $CONTENT
                 return;
             }
             if (operation.kind === 'table_edit_dsl') {
+                if (context?.enabled)
+                    invalidateReplayAliasContext_ACU(context);
+                else if (metrics)
+                    metrics.aliasInvalidateCount += 1;
                 if (effectiveRuntime)
-                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, options);
+                    await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
                 applyTableEditDslOperationV2_ACU(candidate, operation.text);
                 if (options.legacyDuplicateRowIds) {
@@ -40727,7 +40848,13 @@ $CONTENT
         let headerOnlyTemplate;
         let headerOnlyTemplateFingerprint = '';
         runtime.syncBridge = new SyncBridge(runtime.engine);
+        const metrics = createReplayMetrics_ACU();
         try {
+            // 阶段 B：单次回放调用内复用的 alias registry 上下文。仅在此调用内
+            // 存活（不写模块全局/跨请求复用），enabled 由 options.enableAliasContext
+            // 控制，默认关闭，保证 flag 关闭时与基线行为完全一致。
+            const aliasContext = createReplayAliasContext_ACU(metrics);
+            aliasContext.enabled = Boolean(options.enableAliasContext);
             // 列重绑 supplemental 与补锚共用同一份当前模板 header-only 快照：
             // 提前解析一次并缓存（惰性），避免每个 operation 重复解析。
             // 解析失败 → null，列重绑退化为无 supplemental（仍 target-first fail closed）。
@@ -40737,6 +40864,7 @@ $CONTENT
             for (const ref of frameRefs) {
                 if (ref.messageIndex < replayStartMessageIndex)
                     continue;
+                metrics.frameCount += 1;
                 const frameArtifactsAfterCutoff = !transitionRef
                     || isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint);
                 const checkpoints = frameArtifactsAfterCutoff
@@ -40748,8 +40876,9 @@ $CONTENT
                 // that same frame have no ordering marker proving they occurred after
                 // it, so replaying them would resurrect superseded data. Timeline
                 // checkpoints are retained below and only become due after anchor seq.
-                checkpoints.filter(checkpoint => checkpoint.timeline === undefined && !isAnchorFrame), runtime);
+                checkpoints.filter(checkpoint => checkpoint.timeline === undefined && !isAnchorFrame), runtime, metrics, aliasContext);
                 const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
+                metrics.logEntryCount += entries.length;
                 const pendingIntroductions = isAnchorFrame
                     ? introductions.filter(checkpoint => checkpoint.timeline.afterSeq > replacementAnchorCursor.seq)
                     : [...introductions];
@@ -40757,7 +40886,7 @@ $CONTENT
                     const due = pendingIntroductions.filter(checkpoint => checkpoint.timeline.afterSeq < nextSeq);
                     if (due.length === 0)
                         return;
-                    await applySheetCheckpointsForReplay_ACU(state, due, runtime);
+                    await applySheetCheckpointsForReplay_ACU(state, due, runtime, metrics, aliasContext);
                     for (const checkpoint of due) {
                         if (options.updateRuntimeState !== false) {
                             replayEventForState_ACU(checkpoint.event, ref.aiFloor);
@@ -40771,6 +40900,7 @@ $CONTENT
                     try {
                         await applyDueIntroductions(entry.seq);
                         if (Array.isArray(entry.operations) && entry.operations.length > 0) {
+                            metrics.operationCount += entry.operations.length;
                             for (const [operationIndex, operation] of entry.operations.entries()) {
                                 if (transitionRef && !isAfterSpv79TransitionCutoff_ACU(ref.messageIndex, entry.seq, operationIndex, transitionRef.checkpoint))
                                     continue;
@@ -40793,6 +40923,8 @@ $CONTENT
                                             candidate[operation.sheetKey] = deepClone_ACU$3(templateSheet);
                                             normalizeHistoricalReplayState_ACU(candidate, 'temporary sheet anchor');
                                             replaceState_ACU(state, candidate);
+                                            if (aliasContext.enabled)
+                                                invalidateReplayAliasContext_ACU(aliasContext);
                                             compatibilityRepairs.push({
                                                 kind: 'temporary_sheet_anchor',
                                                 severity: 'provisional',
@@ -40806,7 +40938,7 @@ $CONTENT
                                             logWarn_ACU(`[V2 Replay] operation 执行点缺少目标表，已从当前聊天模板临时补锚：sheetKey=${operation.sheetKey}, messageIndex=${ref.messageIndex}, seq=${entry.seq}, operationIndex=${operationIndex}。该状态需要由 recovery 或 compaction 固化。`);
                                         }
                                     }
-                                    await applyTableOperationV2_ACU(state, operation, runtime, headerOnlyTemplate);
+                                    await applyTableOperationV2_ACU(state, operation, runtime, headerOnlyTemplate, metrics, aliasContext);
                                 }
                                 catch (error) {
                                     const message = error instanceof Error ? error.message : String(error);
@@ -40818,7 +40950,7 @@ $CONTENT
                             if (transitionRef && !isEntryAfterSpv79TransitionCutoff_ACU(ref.messageIndex, entry.seq, transitionRef.checkpoint))
                                 continue;
                             // legacy patches 是 JS 语义：先退出 SQL 段再应用补丁。
-                            await materializeSqlRuntimeToState_ACU(runtime, state);
+                            await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
                             const candidate = deepClone_ACU$3(state);
                             // 兼容旧版 derived patch log；新 V2 不再写 patches。
                             for (const patch of entry.patches || []) {
@@ -40840,10 +40972,11 @@ $CONTENT
                 await applyDueIntroductions(Number.POSITIVE_INFINITY);
             }
             // replay 结束：SQLite 仍为权威状态时最后导出一次并 dispose，保持单 Database 峰值。
-            await materializeSqlRuntimeToState_ACU(runtime, state);
+            await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
             return {
                 data: state,
                 baseKind,
+                metrics,
                 ...(compatibilityRepairs.length > 0 ? { compatibilityRepairs } : {}),
                 ...(compatibilityRepairs.length > 0 ? { requiresCheckpointConvergence: true } : {}),
             };
@@ -40876,6 +41009,17 @@ $CONTENT
                 sheetCount: result?.data
                     ? Object.keys(result.data).filter(key => key.startsWith('sheet_')).length
                     : 0,
+                ...(result?.metrics ? {
+                    frameCount: result.metrics.frameCount,
+                    logEntryCount: result.metrics.logEntryCount,
+                    operationCount: result.metrics.operationCount,
+                    sqlOperationCount: result.metrics.sqlOperationCount,
+                    tableAliasBuildCount: result.metrics.tableAliasBuildCount,
+                    columnAliasBuildCount: result.metrics.columnAliasBuildCount,
+                    aliasInvalidateCount: result.metrics.aliasInvalidateCount,
+                    sqliteHydrateCount: result.metrics.sqliteHydrateCount,
+                    sqliteMaterializeCount: result.metrics.sqliteMaterializeCount,
+                } : {}),
             });
             return result;
         }
@@ -54810,6 +54954,60 @@ $CONTENT
     }
 
     /**
+     * service/table/canonical-snapshot-envelope.ts — CanonicalSnapshotEnvelope 内部契约
+     *
+     * 阶段 C：同一调用链内可信 canonical 数据的显式载体（不是缓存）。
+     *
+     * 约束（计划 §3.2）：
+     * - 不暴露为公共插件 API；仅本扩展内部 service/table 与 worldbook pipeline 使用。
+     * - envelope 只能被当前 orchestration 立即消费；函数返回后不得进入长期 Map、store 或单例。
+     * - 构造入口使用白名单（createCanonicalSnapshotEnvelope_ACU），禁止任意调用方自称 canonical。
+     * - data 必须是与调用方隔离的深克隆：provider 与 UI/runtime 不共享可变引用。
+     * - createdAt 仅用于诊断，不作为 freshness 判据；freshness 由调用方在 hydrate 前后
+     *   复核 chat/isolation/storageMode/lifecycleEpoch 决定。
+     */
+    /**
+     * 白名单构造 helper。data 为 null/undefined 时返回 null（禁止伪造 canonical）。
+     * data 被深克隆，调用方对入参的后续修改不影响 envelope。
+     */
+    function createCanonicalSnapshotEnvelope_ACU(params) {
+        if (!params.data || typeof params.data !== 'object')
+            return null;
+        const data = JSON.parse(JSON.stringify(params.data));
+        return {
+            data,
+            chatIdentity: String(params.chatIdentity || ''),
+            isolationKey: String(params.isolationKey || ''),
+            storageMode: params.storageMode,
+            lifecycleEpoch: params.lifecycleEpoch,
+            ...(params.headRevision ? { headRevision: String(params.headRevision) } : {}),
+            source: params.source,
+            fingerprint: getTableDataFingerprint_ACU(data),
+            createdAt: Date.now(),
+        };
+    }
+    /**
+     * 结构校验：确认对象确实是本契约的 envelope（不含身份比对）。
+     * 身份比对（chat/isolation/mode/lifecycle）由调用方在 hydrate 前后执行。
+     */
+    function isCanonicalSnapshotEnvelope_ACU(value) {
+        if (!value || typeof value !== 'object')
+            return false;
+        const candidate = value;
+        return typeof candidate.data === 'object'
+            && candidate.data !== null
+            && typeof candidate.chatIdentity === 'string'
+            && typeof candidate.isolationKey === 'string'
+            && (candidate.storageMode === 'native' || candidate.storageMode === 'sqlite')
+            && typeof candidate.lifecycleEpoch === 'number'
+            && (candidate.source === 'merged_refresh'
+                || candidate.source === 'post_save_replay'
+                || candidate.source === 'system_reload_replay')
+            && typeof candidate.fingerprint === 'string'
+            && typeof candidate.createdAt === 'number';
+    }
+
+    /**
      * service/table/table-storage-strategy.ts — 表格存储策略选择器
      *
      * 根据用户设置选择 native 或 sqlite 模式的 Provider。
@@ -54827,6 +55025,14 @@ $CONTENT
     let initializationEpoch_ACU = 0;
     let activeReload_ACU = null;
     let runtimeLifecycleEpoch_ACU = 0;
+    /**
+     * 当前存储 runtime 生命周期 epoch（只读）。阶段 D/E 编排层用它构造
+     * CanonicalSnapshotEnvelope 并在 hydrate 前后复核身份；模块内其余路径
+     * 仍直接访问私有 runtimeLifecycleEpoch_ACU，不经过本 getter。
+     */
+    function getRuntimeLifecycleEpoch_ACU() {
+        return runtimeLifecycleEpoch_ACU;
+    }
     function canonicalRuntimeData_ACU(value) {
         if (Array.isArray(value))
             return `[${value.map(canonicalRuntimeData_ACU).join(',')}]`;
@@ -55146,6 +55352,80 @@ $CONTENT
         finally {
             if (activeReload_ACU === promise)
                 activeReload_ACU = null;
+        }
+    }
+    /**
+     * 阶段 C：经身份复核的 canonical snapshot hydrate 窄入口。
+     *
+     * 与 reloadStorageProvider 的区别：不重新 replay 聊天，直接用调用链刚完成的
+     * canonical snapshot（CanonicalSnapshotEnvelope_ACU）hydrate 候选 provider。
+     *
+     * 安全边界（计划 §3.3）：
+     * - 调用开始捕获 chat/isolation/mode/lifecycle token；
+     * - hydrate 前、后各校验一次 envelope 身份；仅两次校验均通过才原子发布；
+     * - stale 候选立即 dispose，返回结构化 stale_load_discarded；
+     * - hydrate 失败沿用现有 fallback/health 语义，不复活上一聊天 provider；
+     * - 仅接受 sqlite 模式（native 不创建 SQLite provider，直接返回 ok）。
+     * - envelope 不是缓存：本函数消费后立即失效，调用方不得复用同一 envelope 重复发布。
+     */
+    async function hydrateStorageProviderFromSnapshot_ACU(envelope) {
+        if (!isCanonicalSnapshotEnvelope_ACU(envelope)) {
+            return { ok: false, degraded: false, failureCode: 'provider_load_failed', error: '[StorageStrategy] 非法 canonical snapshot envelope。' };
+        }
+        const lifecycleEpoch = runtimeLifecycleEpoch_ACU;
+        const mode = getCurrentStorageMode();
+        const chatIdentity = String(currentChatFileIdentifier_ACU || '');
+        const isolationKey = getCurrentIsolationKey_ACU();
+        // 身份预检：envelope 与当前运行时目标不一致时直接丢弃，不得进入 hydrate。
+        if (mode !== envelope.storageMode
+            || lifecycleEpoch !== envelope.lifecycleEpoch
+            || chatIdentity !== envelope.chatIdentity
+            || isolationKey !== envelope.isolationKey) {
+            logDebug_ACU('[StorageStrategy] snapshot hydrate 身份预检失败，丢弃候选（stale_load_discarded）。');
+            return { ok: false, degraded: false, failureCode: 'stale_load_discarded' };
+        }
+        if (mode !== 'sqlite') {
+            // native 模式不创建 SQLite provider；调用方不应在 native 下请求 hydrate。
+            return { ok: true, degraded: false, source: 'merged' };
+        }
+        const nextProvider = createProvider('sqlite');
+        try {
+            const result = await nextProvider.loadFromData(envelope.data);
+            if (!result.loaded) {
+                nextProvider.dispose();
+                logError_ACU(`[StorageStrategy] snapshot hydrate 失败: ${result.error || 'unknown'}`);
+                // 沿用现有 fallback 语义：SQLite hydrate 失败回退 native。
+                replaceActiveProvider_ACU(createProvider('native'));
+                setRuntimeHealth_ACU({
+                    status: 'degraded', expectedMode: 'sqlite', activeMode: 'native', source: result.source,
+                    failureCode: 'provider_fallback', error: result.error,
+                });
+                return { ok: false, degraded: true, source: result.source, failureCode: 'provider_fallback', error: result.error };
+            }
+            // 身份复检：hydrate 期间 chat/isolation/mode/lifecycle 变化则丢弃候选。
+            if (lifecycleEpoch !== runtimeLifecycleEpoch_ACU
+                || getCurrentStorageMode() !== mode
+                || String(currentChatFileIdentifier_ACU || '') !== chatIdentity
+                || getCurrentIsolationKey_ACU() !== isolationKey) {
+                nextProvider.dispose();
+                logDebug_ACU('[StorageStrategy] snapshot hydrate 复检失败（stale_load_discarded），候选已销毁。');
+                return { ok: false, degraded: false, source: result.source, failureCode: 'stale_load_discarded' };
+            }
+            replaceActiveProvider_ACU(nextProvider);
+            setRuntimeHealth_ACU({ status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', source: result.source });
+            return { ok: true, degraded: false, source: result.source };
+        }
+        catch (error) {
+            const message = error?.message || String(error);
+            if (lifecycleEpoch !== runtimeLifecycleEpoch_ACU) {
+                nextProvider.dispose();
+                return { ok: false, degraded: false, failureCode: 'stale_load_discarded' };
+            }
+            nextProvider.dispose();
+            logError_ACU(`[StorageStrategy] snapshot hydrate 异常，fallback 到原生模式: ${message}`);
+            replaceActiveProvider_ACU(createProvider('native'));
+            setRuntimeHealth_ACU({ status: 'degraded', expectedMode: 'sqlite', activeMode: 'native', failureCode: 'provider_fallback', error: message });
+            return { ok: false, degraded: true, failureCode: 'provider_fallback', error: message };
         }
     }
     /**
@@ -68128,8 +68408,22 @@ $CONTENT
         });
         return changed;
     }
-    async function refreshMergedDataAndNotify_ACU() {
-        // 重新加载聊天记录
+    /**
+     * 阶段 E：可选 canonical 输入。
+     *
+     * 调用链刚完成的 authoritative post-save replay（来自 applyVisualizerPendingDataOps_ACU）
+     * 可直接作为 merged refresh 的基底，避免 mergeAllIndependentTables_ACU 内部再从聊天
+     * 完整 replay 一次（v2 模式内部调用 loadTableStateFromFramesV2_ACU）。
+     *
+     * 提供 canonicalData 时：
+     * - 仍执行 loadAllChatMessages_ACU（世界书/其他派生刷新需要最新聊天数组）；
+     * - 跳过 mergeAllIndependentTables_ACU 的整链重放，直接用调用方提供的 canonical 数据；
+     * - 规范化、自愈、排序、世界书、UI 副作用照常执行（不把去重 replay 写成跳过 refresh）。
+     *
+     * 不提供时保持原行为（冷路径全量回放），兼容全部既有调用方。
+     */
+    async function refreshMergedDataAndNotify_ACU(options = {}) {
+        // 重新加载聊天记录（canonical 快照路径也保留：世界书派生刷新依赖最新聊天数组）
         await loadAllChatMessages_ACU();
         let removedNullRowCount = 0;
         let canonicalIssues = [];
@@ -68141,7 +68435,12 @@ $CONTENT
         // 合并数据 (使用新的独立表合并逻辑)
         let mergedData = null;
         try {
-            mergedData = await mergeAllIndependentTables_ACU();
+            if (options.canonicalData && typeof options.canonicalData === 'object') {
+                mergedData = JSON.parse(JSON.stringify(options.canonicalData));
+            }
+            else {
+                mergedData = await mergeAllIndependentTables_ACU();
+            }
             // 单表隔离信息在合并函数内已做逐表 try/catch，正常路径下不会整体抛错。
             // 这里仅用于捕获非预期异常并补充诊断上下文，不吞掉异常。
             const quarantined = consumeLastMergeQuarantinedSheetKeys_ACU();
@@ -99170,19 +99469,56 @@ $CONTENT
                         // 此处是“持久化 → 派生缓存”的唯一重建入口，不能依赖切换前遗留的 TABLE_TEMPLATE/currentJsonTableData。
                         await loadAllChatMessages_ACU();
                         applyTemplateScopeForCurrentChat_ACU();
-                        // [6.7.3] SQLite 模式下，切换聊天后需要重建内存数据库（初始化 SQLite 引擎）
+                        // 阶段 D：合并刷新（一轮 V2 replay，产出 canonical）与 provider hydrate 收敛。
+                        // 先执行 merged refresh 拿到最终 canonical 数据，SQLite 模式下用 envelope
+                        // hydrate provider（零 replay）；refresh 失败/degraded/身份漂移时回退冷
+                        // reloadStorageProvider（保持既有两轮链路的完整语义与 fallback 状态机）。
+                        // UI 通知由 refreshMergedDataAndNotifyWithUI_ACU 内部完成。
+                        const refreshResult = await refreshMergedDataAndNotifyWithUI_ACU();
                         if (isSqliteMode()) {
-                            logDebug_ACU('[SQLite] CHAT_CHANGED: 重建内存数据库...');
-                            try {
-                                await reloadStorageProvider();
-                                logDebug_ACU('[SQLite] CHAT_CHANGED: 内存数据库重建完成');
+                            const envelope = refreshResult
+                                && !refreshResult.degraded
+                                && refreshResult.mergedData
+                                ? createCanonicalSnapshotEnvelope_ACU({
+                                    data: refreshResult.mergedData,
+                                    chatIdentity: String(currentChatFileIdentifier_ACU || ''),
+                                    isolationKey: getCurrentIsolationKey_ACU(),
+                                    storageMode: 'sqlite',
+                                    lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+                                    source: 'merged_refresh',
+                                })
+                                : null;
+                            if (envelope) {
+                                logDebug_ACU('[SQLite] CHAT_CHANGED: 用 canonical snapshot hydrate 内存数据库...');
+                                const hydrated = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+                                if (hydrated.ok) {
+                                    logDebug_ACU('[SQLite] CHAT_CHANGED: snapshot hydrate 完成');
+                                }
+                                else if (hydrated.failureCode === 'stale_load_discarded') {
+                                    logDebug_ACU(`[SQLite] CHAT_CHANGED: snapshot 身份漂移（${hydrated.failureCode}），回退冷 reload。`);
+                                    try {
+                                        await reloadStorageProvider();
+                                    }
+                                    catch (e) {
+                                        logError_ACU(`[SQLite] CHAT_CHANGED: 冷 reload 失败: ${e?.message}`);
+                                    }
+                                }
+                                else {
+                                    // provider_fallback（SQLite hydrate 失败已自动回退 native）或
+                                    // provider_load_failed：保持 hydrate 返回的 fallback 状态机。
+                                    logError_ACU(`[SQLite] CHAT_CHANGED: snapshot hydrate 失败: ${hydrated.failureCode || 'unknown'}${hydrated.error ? `: ${hydrated.error}` : ''}`);
+                                }
                             }
-                            catch (e) {
-                                logError_ACU(`[SQLite] CHAT_CHANGED: 数据库重建失败: ${e?.message}`);
+                            else {
+                                logDebug_ACU('[SQLite] CHAT_CHANGED: merged refresh 未产出可用 canonical（degraded/空数据），回退冷 reload。');
+                                try {
+                                    await reloadStorageProvider();
+                                }
+                                catch (e) {
+                                    logError_ACU(`[SQLite] CHAT_CHANGED: 数据库重建失败: ${e?.message}`);
+                                }
                             }
                         }
-                        // 3. 刷新数据（UI 刷新由 presentation 层负责）
-                        await refreshMergedDataAndNotifyWithUI_ACU();
                         // [交火向量索引] 聊天数据刷新完成后，预热当前聊天对应的外置分片缓存。
                         // 注意：必须放在 refreshMergedDataAndNotifyWithUI_ACU 之后，否则可能读取到旧聊天的 manifest。
                         const vectorCacheResult = await preloadSummaryVectorIndexCacheForCurrentChat_ACU();
@@ -99469,20 +99805,52 @@ $CONTENT
                 if (!bridgeGate.ok) {
                     logError_ACU(`[ManualCatchUpBridge] 启动恢复残留 provisional bridge 失败：${bridgeGate.error}`);
                 }
-                // [修复] SQLite 模式下，启动时初始化内存数据库
-                // 老卡（有聊天历史数据）会从聊天记录合并数据建表
-                // 新卡（无数据）只初始化引擎，建表延迟到第一次填表时
+                // 阶段 D：启动补偿同样收敛为“一轮 merged refresh → snapshot hydrate”。
+                // 老卡（有聊天历史）从聊天记录合并数据建表；新卡（无数据）由 refresh
+                // 走 guide/模板基底，hydrate 失败或 degraded 时回退冷 reload。
+                const refreshResult = await refreshMergedDataAndNotifyWithUI_ACU();
                 if (isSqliteMode()) {
-                    logDebug_ACU('[SQLite] initWithChatId: 初始化内存数据库...');
-                    try {
-                        await reloadStorageProvider();
-                        logDebug_ACU('[SQLite] initWithChatId: 内存数据库初始化完成');
+                    const envelope = refreshResult
+                        && !refreshResult.degraded
+                        && refreshResult.mergedData
+                        ? createCanonicalSnapshotEnvelope_ACU({
+                            data: refreshResult.mergedData,
+                            chatIdentity: String(currentChatFileIdentifier_ACU || ''),
+                            isolationKey: getCurrentIsolationKey_ACU(),
+                            storageMode: 'sqlite',
+                            lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+                            source: 'merged_refresh',
+                        })
+                        : null;
+                    if (envelope) {
+                        logDebug_ACU('[SQLite] initWithChatId: 用 canonical snapshot hydrate 内存数据库...');
+                        const hydrated = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+                        if (hydrated.ok) {
+                            logDebug_ACU('[SQLite] initWithChatId: snapshot hydrate 完成');
+                        }
+                        else if (hydrated.failureCode === 'stale_load_discarded') {
+                            logDebug_ACU('[SQLite] initWithChatId: snapshot 身份漂移，回退冷 reload。');
+                            try {
+                                await reloadStorageProvider();
+                            }
+                            catch (e) {
+                                logError_ACU(`[SQLite] initWithChatId: 冷 reload 失败: ${e?.message}`);
+                            }
+                        }
+                        else {
+                            logError_ACU(`[SQLite] initWithChatId: snapshot hydrate 失败: ${hydrated.failureCode || 'unknown'}${hydrated.error ? `: ${hydrated.error}` : ''}`);
+                        }
                     }
-                    catch (e) {
-                        logError_ACU(`[SQLite] initWithChatId: 数据库初始化失败: ${e?.message}`);
+                    else {
+                        logDebug_ACU('[SQLite] initWithChatId: merged refresh 未产出可用 canonical（degraded/空数据），回退冷 reload。');
+                        try {
+                            await reloadStorageProvider();
+                        }
+                        catch (e) {
+                            logError_ACU(`[SQLite] initWithChatId: 数据库初始化失败: ${e?.message}`);
+                        }
                     }
                 }
-                await refreshMergedDataAndNotifyWithUI_ACU();
             };
             if (SillyTavern_API_ACU && SillyTavern_API_ACU.chatId) {
                 // chatId 已可用，延迟初始化
@@ -130964,18 +131332,47 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!replay)
             throw new Error('V2 replay 未产生表格数据，已阻止刷新运行时。');
         _set_currentJsonTableData_ACU(replay.data);
-        if (isSqliteMode())
+        if (isSqliteMode()) {
+            // 阶段 E：post-save replay 的 canonical 直接 hydrate provider，避免
+            // reloadStorageProvider 内部再从聊天 replay 一次（普通路径 -1 轮）。
+            const envelope = createCanonicalSnapshotEnvelope_ACU({
+                data: replay.data,
+                chatIdentity: String(currentChatFileIdentifier_ACU || ''),
+                isolationKey,
+                storageMode: 'sqlite',
+                lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+                source: 'post_save_replay',
+            });
+            if (envelope) {
+                const hydrated = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+                if (hydrated.ok)
+                    return replay.data;
+                if (hydrated.failureCode === 'stale_load_discarded') {
+                    // 身份已漂移：回退冷 reload（其内部会重新 replay），交还既有冷路径语义。
+                    // 无法保证 reload 后的数据与本函数一致，因此不返回 canonicalData，
+                    // 上层将走原 merged refresh 冷路径。
+                    await reloadStorageProvider();
+                    return undefined;
+                }
+                // provider_fallback / provider_load_failed：hydrate 已按 fallback 语义回退 native，
+                // runtime 数据仍以本轮 replay 为准，可安全返回。
+                logDebug_ACU(`[Visualizer] snapshot hydrate 未就绪（${hydrated.failureCode || 'unknown'}），SQLite provider 已按 fallback 语义处理。`);
+                return replay.data;
+            }
             await reloadStorageProvider();
+            return undefined;
+        }
+        return replay.data;
     }
     async function applyVisualizerPendingDataOps_ACU(state) {
         const pending = ensurePendingOps_ACU(state);
         if (pending.committed) {
             try {
-                await refreshVisualizerRuntimeFromReplay_ACU(getCurrentIsolationKey_ACU());
+                const canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(getCurrentIsolationKey_ACU());
                 const insertedRowIds = pending.committed.insertedRowIds;
                 return Object.keys(insertedRowIds).length > 0
-                    ? { success: true, changed: true, insertedRowIds }
-                    : { success: true, changed: true };
+                    ? { success: true, changed: true, insertedRowIds, ...(canonicalData ? { canonicalData } : {}) }
+                    : { success: true, changed: true, ...(canonicalData ? { canonicalData } : {}) };
             }
             catch (error) {
                 return { success: false, changed: false, error: `数据已持久化，但本地运行时刷新失败：${error?.message || String(error)}` };
@@ -131104,14 +131501,15 @@ Expected function or array of functions, received type ${typeof value}.`
             });
             pending.committed = result;
             try {
-                await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
+                const canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
+                const payload = { insertedRowIds: result.insertedRowIds, ...(canonicalData ? { canonicalData } : {}) };
+                return Object.keys(result.insertedRowIds).length > 0
+                    ? { success: true, changed: true, ...payload }
+                    : { success: true, changed: true, ...payload };
             }
             catch (error) {
                 return { success: false, changed: false, error: `数据已持久化，但本地运行时刷新失败：${error?.message || String(error)}` };
             }
-            return Object.keys(result.insertedRowIds).length > 0
-                ? { success: true, changed: true, insertedRowIds: result.insertedRowIds }
-                : { success: true, changed: true };
         }
         catch (error) {
             return { success: false, changed: false, error: error?.message || String(error) };
@@ -149034,7 +149432,11 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (hasLockChanges)
                     saveLockDrafts(visualizer.tableLockDrafts);
                 try {
-                    await refreshMergedDataAndNotify_ACU();
+                    // 阶段 E：行数据保存路径复用 applyVisualizerPendingDataOps_ACU 已完成的
+                    // post-save canonical replay 结果，避免 merged refresh 内部再整链 replay 一次
+                    // （普通保存由四轮收敛为三轮）。删表等结构操作不携带 canonicalData，
+                    // 保持冷路径全量刷新。
+                    await refreshMergedDataAndNotify_ACU({ canonicalData: result.canonicalData || null });
                 }
                 catch (error) {
                     if (visualizer.pendingDataOps?.committed) {

@@ -1,14 +1,16 @@
 import { getChatArray_ACU } from '../chat/chat-service';
-import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
+import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { getLatestV2FullCheckpointMessageIndex_ACU, getLatestV2SheetReplayMessageIndex_ACU } from '../table/table-history';
 import { ensureLegacyStorageMigratedBeforeWrite_ACU } from '../table/table-service';
 import { persistTableMutationLogBatchV2_ACU } from '../table/storage-frame-v2-persist';
 import { hasStructuralReplayCompatibilityRepairs_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
-import { reloadStorageProvider } from '../table/table-storage-strategy';
+import { reloadStorageProvider, getRuntimeLifecycleEpoch_ACU, hydrateStorageProviderFromSnapshot_ACU } from '../table/table-storage-strategy';
+import { createCanonicalSnapshotEnvelope_ACU } from '../table/canonical-snapshot-envelope';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { isSqliteMode } from '../table/storage-mode';
 import type { TableMutationOperationV2_ACU, TableWriteConflictUnitV2_ACU } from '../table/storage-frame-v2-types';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
+import { logDebug_ACU } from '../../shared/utils';
 
 const TEMP_ROW_ID_PREFIX_ACU = '__acu_vis_tmp_row_';
 
@@ -230,22 +232,51 @@ export function replaceVisualizerTemporaryRowIds_ACU(state: any, insertedRowIds:
     });
 }
 
-async function refreshVisualizerRuntimeFromReplay_ACU(isolationKey: string): Promise<void> {
+async function refreshVisualizerRuntimeFromReplay_ACU(isolationKey: string): Promise<any | undefined> {
     const replay = await loadTableStateFromFramesV2Detailed_ACU(getChatArray_ACU(), isolationKey);
     if (!replay) throw new Error('V2 replay 未产生表格数据，已阻止刷新运行时。');
     _set_currentJsonTableData_ACU(replay.data);
-    if (isSqliteMode()) await reloadStorageProvider();
+    if (isSqliteMode()) {
+        // 阶段 E：post-save replay 的 canonical 直接 hydrate provider，避免
+        // reloadStorageProvider 内部再从聊天 replay 一次（普通路径 -1 轮）。
+        const envelope = createCanonicalSnapshotEnvelope_ACU({
+            data: replay.data,
+            chatIdentity: String(currentChatFileIdentifier_ACU || ''),
+            isolationKey,
+            storageMode: 'sqlite',
+            lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+            source: 'post_save_replay',
+        });
+        if (envelope) {
+            const hydrated = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+            if (hydrated.ok) return replay.data;
+            if (hydrated.failureCode === 'stale_load_discarded') {
+                // 身份已漂移：回退冷 reload（其内部会重新 replay），交还既有冷路径语义。
+                // 无法保证 reload 后的数据与本函数一致，因此不返回 canonicalData，
+                // 上层将走原 merged refresh 冷路径。
+                await reloadStorageProvider();
+                return undefined;
+            }
+            // provider_fallback / provider_load_failed：hydrate 已按 fallback 语义回退 native，
+            // runtime 数据仍以本轮 replay 为准，可安全返回。
+            logDebug_ACU(`[Visualizer] snapshot hydrate 未就绪（${hydrated.failureCode || 'unknown'}），SQLite provider 已按 fallback 语义处理。`);
+            return replay.data;
+        }
+        await reloadStorageProvider();
+        return undefined;
+    }
+    return replay.data;
 }
 
-export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ success: boolean; changed: boolean; insertedRowIds?: Record<string, string>; error?: string }> {
+export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ success: boolean; changed: boolean; insertedRowIds?: Record<string, string>; canonicalData?: any; error?: string }> {
     const pending = ensurePendingOps_ACU(state);
     if (pending.committed) {
         try {
-            await refreshVisualizerRuntimeFromReplay_ACU(getCurrentIsolationKey_ACU());
+            const canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(getCurrentIsolationKey_ACU());
             const insertedRowIds = pending.committed.insertedRowIds;
             return Object.keys(insertedRowIds).length > 0
-                ? { success: true, changed: true, insertedRowIds }
-                : { success: true, changed: true };
+                ? { success: true, changed: true, insertedRowIds, ...(canonicalData ? { canonicalData } : {}) }
+                : { success: true, changed: true, ...(canonicalData ? { canonicalData } : {}) };
         } catch (error: any) {
             return { success: false, changed: false, error: `数据已持久化，但本地运行时刷新失败：${error?.message || String(error)}` };
         }
@@ -362,13 +393,14 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
         });
         pending.committed = result;
         try {
-            await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
+            const canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
+            const payload = { insertedRowIds: result.insertedRowIds, ...(canonicalData ? { canonicalData } : {}) };
+            return Object.keys(result.insertedRowIds).length > 0
+                ? { success: true, changed: true, ...payload }
+                : { success: true, changed: true, ...payload };
         } catch (error: any) {
             return { success: false, changed: false, error: `数据已持久化，但本地运行时刷新失败：${error?.message || String(error)}` };
         }
-        return Object.keys(result.insertedRowIds).length > 0
-            ? { success: true, changed: true, insertedRowIds: result.insertedRowIds }
-            : { success: true, changed: true };
     } catch (error: any) {
         return { success: false, changed: false, error: error?.message || String(error) };
     }

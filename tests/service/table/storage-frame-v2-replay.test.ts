@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import validV2FrameFixture from '../../fixtures/migrations/spv7.9/v2-valid-full-checkpoint.json';
 import invalidV2FrameFixture from '../../fixtures/migrations/spv7.9/v2-invalid-duplicate-row-id.json';
 import orphanV2FrameFixture from '../../fixtures/migrations/spv7.9/v2-orphan-data-replace.json';
+import { buildLongHistoryFixture_ACU } from './v2-long-history-fixture';
 
 const { mockLogWarn } = vi.hoisted(() => ({
   mockLogWarn: vi.fn(),
@@ -4916,6 +4917,231 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     expect(projection.activeSheetKeys).toEqual(['sheet_kept']);
     expect(projection.hiddenSheetKeys).toEqual(['sheet_hidden']);
     expect(projection.statusBySheetKey.sheet_hidden.restoreSourceData?.content).toEqual(hidden.content);
+  });
+
+  it('阶段 A 观测：sql_sheet_batch 回放上报纯数值 replay metrics', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData() },
+            logEntries: [{
+              seq: 1,
+              entryId: 'metrics-sql-sheet-batch',
+              createdAt: 2,
+              source: 'manual_crud',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: ['sheet_0'],
+              changedSheetKeys: ['sheet_0'],
+              groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch',
+                sheetKey: 'sheet_0',
+                tableName: 'inventory',
+                statements: ['INSERT INTO inventory (name) VALUES (?)'],
+                params: [['钢剑']],
+                reason: 'system',
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const detailed = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(detailed?.metrics).toEqual({
+      frameCount: 1,
+      logEntryCount: 1,
+      operationCount: 1,
+      sqlOperationCount: 1,
+      tableAliasBuildCount: 1,
+      columnAliasBuildCount: 1,
+      aliasInvalidateCount: 0,
+      sqliteHydrateCount: 1,
+      sqliteMaterializeCount: 1,
+    });
+  });
+
+  it('阶段 A 观测：JS-native 路径（row_upsert）不触发 SQLite runtime 计数', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData() },
+            logEntries: [{
+              seq: 1,
+              entryId: 'metrics-row-upsert',
+              createdAt: 2,
+              source: 'manual_crud',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: [],
+              changedSheetKeys: ['sheet_0'],
+              groupKeys: [],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', '钢剑'] }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const detailed = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(detailed?.metrics).toEqual({
+      frameCount: 1,
+      logEntryCount: 1,
+      operationCount: 1,
+      sqlOperationCount: 0,
+      tableAliasBuildCount: 0,
+      columnAliasBuildCount: 0,
+      aliasInvalidateCount: 0,
+      sqliteHydrateCount: 0,
+      sqliteMaterializeCount: 0,
+    });
+  });
+
+
+  it('阶段 A 基线：17 表/62 帧/约 660 operation 长历史下 alias registry 近似逐 operation 构建', async () => {
+    const { chat, totalSqlOperations, frameCount, totalOperations } = buildLongHistoryFixture_ACU();
+
+    const detailed = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(detailed).not.toBeNull();
+    expect(detailed?.metrics).toBeDefined();
+    const m = detailed!.metrics!;
+    expect(m.frameCount).toBe(frameCount);
+    expect(m.operationCount).toBe(totalOperations);
+    expect(m.sqlOperationCount).toBe(totalSqlOperations);
+
+    // 基线裁决：当前实现每个 sql_sheet_batch 都重建表/列 alias registry，
+    // 因此 tableAliasBuildCount / columnAliasBuildCount 约等于 sql operation 数，
+    // 而非每个 state epoch 一次。该断言是阶段 B 的对照基线。
+    expect(m.tableAliasBuildCount).toBeGreaterThanOrEqual(totalSqlOperations);
+    expect(m.columnAliasBuildCount).toBe(totalSqlOperations);
+    // 每帧末尾 data_replace 触发结构失效：aliasInvalidateCount 应等于非首帧数。
+    expect(m.aliasInvalidateCount).toBe(frameCount - 1);
+    // 连续 SQL 段跨 data_replace 时 runtime 反复 hydrate/materialize：
+    // 每帧 row_upsert 与 data_replace 之间各 materialize 一次（2 次/帧，非首帧）。
+    expect(m.sqliteHydrateCount).toBeGreaterThanOrEqual(frameCount - 1);
+    expect(m.sqliteMaterializeCount).toBe((frameCount - 1) * 2);
+  });
+
+  it('阶段 A 基线：长历史回放结果确定性（两次回放 canonical 数据一致）', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+
+    const first = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const second = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(first?.data).toEqual(second?.data);
+  });
+
+
+
+  it('阶段 B：enableAliasContext 后 alias registry 从逐 operation 构建降至每 state epoch 一次', async () => {
+    const { chat, totalSqlOperations, frameCount } = buildLongHistoryFixture_ACU();
+
+    const cold = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const warm = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      enableAliasContext: true,
+    });
+
+    expect(cold?.data).toEqual(warm?.data);
+    const coldM = cold!.metrics!;
+    const warmM = warm!.metrics!;
+
+    // 基线：每个 sql_sheet_batch 都重建表/列 registry（≥ sql operation 数）。
+    expect(coldM.tableAliasBuildCount).toBeGreaterThanOrEqual(totalSqlOperations);
+    expect(coldM.columnAliasBuildCount).toBe(totalSqlOperations);
+
+    // 优化：每帧仅第一个 sql_sheet_batch 冷构建（其后 DML 命中缓存），
+    // data_replace 使 epoch 递增一次 → 构建次数 = 非首帧数。
+    expect(warmM.tableAliasBuildCount).toBe(frameCount - 1);
+    expect(warmM.columnAliasBuildCount).toBe(frameCount - 1);
+    // 结构事件计数语义不变（flag 开/关均由失效点计数一次）。
+    expect(warmM.aliasInvalidateCount).toBe(frameCount - 1);
+    // SQL 执行次数不受缓存影响，语义等价。
+    expect(warmM.sqlOperationCount).toBe(coldM.sqlOperationCount);
+    expect(warmM.sqliteHydrateCount).toBe(coldM.sqliteHydrateCount);
+    expect(warmM.sqliteMaterializeCount).toBe(coldM.sqliteMaterializeCount);
+  });
+
+  it('阶段 B：结构 SQL 强制冷构建（不读不写缓存），同 epoch 后续 DML 仍命中', async () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const chat = makeChat([
+      {
+        frame: {
+          version: 2,
+          checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: sheet } },
+          logEntries: [],
+        },
+      },
+      {
+        frame: {
+          version: 2,
+          logEntries: [{
+            seq: 2,
+            entryId: 'e2',
+            createdAt: 2,
+            source: 'auto_fill',
+            targetMessageIndex: 1,
+            aiFloor: 1,
+            filledSheetKeys: [],
+            changedSheetKeys: [],
+            groupKeys: [],
+            operations: [
+              {
+                kind: 'sql_sheet_batch',
+                sheetKey: 'sheet_a',
+                tableName: 'a',
+                statements: ['INSERT INTO a (row_id, value) VALUES (?, ?)'],
+                params: [[2, 'y']],
+                reason: 'system',
+              },
+              {
+                kind: 'sql_sheet_batch',
+                sheetKey: 'sheet_a',
+                tableName: 'a',
+                // 结构 SQL（ALTER）不经过表名重绑（mutationTarget 仅识别 DML），
+                // 必须使用当前物理表名直写；DML 的别名重绑不受影响（见下两条）。
+                statements: ['ALTER TABLE sheeta ADD COLUMN extra TEXT'],
+                params: [],
+                reason: 'system',
+              },
+              {
+                kind: 'sql_sheet_batch',
+                sheetKey: 'sheet_a',
+                tableName: 'a',
+                statements: ['INSERT INTO a (row_id, value) VALUES (?, ?)'],
+                params: [[3, 'z']],
+                reason: 'system',
+              },
+            ],
+          }],
+        },
+      },
+    ]);
+
+    const result = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      enableAliasContext: true,
+    });
+    expect(result).not.toBeNull();
+    const m = result!.metrics!;
+    // DML#1 冷构建（epoch 0）→ CREATE 强制冷构建 → DML#2 命中 epoch 0 缓存：共 2 次。
+    expect(m.tableAliasBuildCount).toBe(2);
+    expect(m.columnAliasBuildCount).toBe(2);
+    expect(m.sqlOperationCount).toBe(3);
+    // 结构 SQL 是真实 SQLite 执行、JS state 不随之同步（计划第 6 条已知边界），
+    // 本测试只断言构建次数与计数路径，不把 JS state 当 canonical。
   });
 
   it('full checkpoint 起算点：基底之前 hide 后又 reveal 的表，可见性由基底快照裁决', () => {

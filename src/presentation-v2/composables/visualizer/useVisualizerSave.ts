@@ -496,7 +496,11 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       }
       if (hasLockChanges) saveLockDrafts(visualizer.tableLockDrafts);
       try {
-        await refreshMergedDataAndNotify_ACU();
+        // 阶段 E：行数据保存路径复用 applyVisualizerPendingDataOps_ACU 已完成的
+        // post-save canonical replay 结果，避免 merged refresh 内部再整链 replay 一次
+        // （普通保存由四轮收敛为三轮）。删表等结构操作不携带 canonicalData，
+        // 保持冷路径全量刷新。
+        await refreshMergedDataAndNotify_ACU({ canonicalData: result.canonicalData || null });
       } catch (error: any) {
         if (visualizer.pendingDataOps?.committed) {
           throw new Error(`数据已持久化，但本地运行时刷新失败：${error?.message || String(error)}`);

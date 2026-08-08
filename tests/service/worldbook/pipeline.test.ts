@@ -1445,6 +1445,43 @@ describe('refreshMergedDataAndNotify_ACU', () => {
       expect.objectContaining({ mate: expect.objectContaining({ type: 'chatSheets', version: 1 }) })
     );
   });
+
+  it('提供 canonicalData 时跳过 mergeAllIndependentTables 重放，但仍更新运行时与世界书', async () => {
+    const canonicalData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_0: { name: '测试表', content: [['row_id', '列1'], ['1', '值1']] },
+    };
+    mockMergeAllIndependentTables.mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } });
+    mockGetSortedSheetKeys.mockReturnValue(['sheet_0']);
+    mockReorderDataBySheetKeys.mockReturnValue(canonicalData);
+
+    const result = await refreshMergedDataAndNotify_ACU({ canonicalData });
+
+    // canonical 路径不得再从聊天完整 replay（mergeAllIndependentTables 内部会 loadTableStateFromFramesV2_ACU）
+    expect(mockMergeAllIndependentTables).not.toHaveBeenCalled();
+    expect(mockSetCurrentJsonTableData).toHaveBeenCalledWith(
+      expect.objectContaining({ sheet_0: expect.objectContaining({ name: '测试表' }) })
+    );
+    // 规范化/排序/世界书副作用仍执行
+    expect(mockGetSortedSheetKeys).toHaveBeenCalled();
+    expect(result?.mergedData).toEqual(expect.objectContaining({ sheet_0: expect.objectContaining({ name: '测试表' }) }));
+  });
+
+  it('未提供 canonicalData 时保持冷路径全量合并（兼容既有调用方）', async () => {
+    const mergedData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_0: { name: '冷路径表', content: [['row_id', '列1'], ['1', '值1']] },
+    };
+    mockMergeAllIndependentTables.mockResolvedValue(mergedData);
+    mockGetSortedSheetKeys.mockReturnValue(['sheet_0']);
+    mockReorderDataBySheetKeys.mockReturnValue(mergedData);
+
+    const result = await refreshMergedDataAndNotify_ACU();
+
+    expect(mockMergeAllIndependentTables).toHaveBeenCalledTimes(1);
+    expect(result?.mergedData).toEqual(expect.objectContaining({ sheet_0: expect.objectContaining({ name: '冷路径表' }) }));
+  });
+
 });
 
 describe('updateReadableLorebookEntry_ACU', () => {
