@@ -5152,6 +5152,8 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
       // 未传 evidence：既不命中复用，也不计入失配。
       replayReuseCount: 0,
       replayReuseFallbackCount: 0,
+      // 未并发：in-flight 去重未命中。
+      replayShareCount: 0,
       // 未传 yieldBudgetMs：不让出事件循环。
       yieldCount: 0,
     });
@@ -5199,6 +5201,8 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
       sqliteMaterializeCount: 0,
       replayReuseCount: 0,
       replayReuseFallbackCount: 0,
+      // 未并发：in-flight 去重未命中。
+      replayShareCount: 0,
       // 未传 yieldBudgetMs：不让出事件循环。
       yieldCount: 0,
     });
@@ -5643,6 +5647,71 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     // 9999 的快照 = 全量 replay（无上限），其 frameCount 应为 62（0..61 全部帧）。
     expect(captured.get(9999)!.metrics!.frameCount).toBe(62);
   });
+
+  it('阶段 G2：并发同 key 只读 replay 共享一次全量回放（in-flight 去重）', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+
+    // 两个并发调用，相同 chat + isolationKey + 无 maxMessageIndex（latest）。
+    // 第一个启动全量 replay，第二个应共享同一 promise 而非再跑一次。
+    const [first, second] = await Promise.all([
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false }),
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false }),
+    ]);
+
+    expect(first?.data).toEqual(second?.data);
+    expect(first).not.toBe(second);
+    // 第二个是等待方：replayShareCount=1（共享命中），且不应是 evidence 复用。
+    expect(second?.metrics?.replayShareCount).toBe(1);
+    expect(second?.metrics?.replayReuseCount).toBe(0);
+    // 第一个是启动方：真实冷 replay，无共享标记（其 frameCount 反映全量扫描）。
+    expect(first?.metrics?.replayShareCount).toBe(0);
+    expect(first?.metrics?.frameCount).toBe(62);
+  });
+
+  it('阶段 G2：不同 boundary 的并发调用不共享（各跑各的全量回放）', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+
+    const [latest, bounded] = await Promise.all([
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false }),
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false, maxMessageIndex: 20 }),
+    ]);
+
+    // boundary 不同 → key 不同 → 各自独立 replay。
+    expect(bounded?.metrics?.replayShareCount).toBe(0);
+    expect(bounded?.metrics?.frameCount).toBe(21); // 0..20 共 21 帧。
+    expect(latest?.metrics?.frameCount).toBe(62);
+  });
+
+  it('阶段 G2：副作用路径（updateRuntimeState:true）不参与 in-flight 去重', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+
+    const [a, b] = await Promise.all([
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: true }),
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: true }),
+    ]);
+
+    // 副作用路径不共享：各自独立执行（不设 replayShareCount）。
+    expect(a?.metrics?.replayShareCount).toBe(0);
+    expect(b?.metrics?.replayShareCount).toBe(0);
+  });
+
+  it('阶段 G2：in-flight 去重只在并发窗口内生效，settle 后重新冷 replay', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+
+    // 第一次并发：共享。
+    const [first] = await Promise.all([
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false }),
+      loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false }),
+    ]);
+    expect(first?.metrics?.replayShareCount).toBe(0);
+
+    // settle 后再次调用：Map 已清理，重新冷 replay（不再是共享命中）。
+    const after = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    expect(after?.metrics?.replayShareCount).toBe(0);
+    expect(after?.metrics?.replayReuseCount).toBe(0);
+    expect(after?.data).toEqual(first?.data);
+  });
+
 
 
 

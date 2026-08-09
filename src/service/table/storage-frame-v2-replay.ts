@@ -30,6 +30,54 @@ interface V2FrameRef_ACU {
   frame: TableStorageFrameV2_ACU;
 }
 
+
+/**
+ * 阶段 G2：in-flight replay 去重（只对并发/紧邻的相同纯只读调用生效）。
+ *
+ * 聊天加载、worldbook 处理、可视化刷新等路径可能在同一生命周期内紧邻触发
+ * 对同一 chat + isolationKey + boundary 的全量 replay。若每次调用都重建
+ * SQLite runtime 并从 checkpoint 全量回放，同一份 canonical 数据被重复计算。
+ *
+ * key 由「影响 replay 结果的全部 options 字段」构成：chat 引用、isolationKey、
+ * maxMessageIndex、allowTemporaryTemplateBaseline、compatibilityMode、
+ * enableAliasContext。缺任一字段都会导致共享错误结果（例如临时基线 vs null、
+ * 冷/热 alias metrics 不同）。
+ *
+ * 排除的调用：updateRuntimeState:true（副作用路径改写 schedule，不可共享）、
+ * captureBoundaries/captureSink（阶段 H 多边界捕获，各自消费 sink）、
+ * replayEvidence（自带 evidence 复用语义）、signal/yieldBudgetMs（取消与调度
+ * 是调用方私有意图，共享会丢失取消语义与独立让出）。
+ *
+ * 生命周期：Promise settle（resolve/reject）后立即删除，只合并并发窗口内的
+ * 重复调用，不缓存历史结果（与计划「有界 in-flight」一致，无跨调用泄漏）。
+ */
+const inflightV2Replays_ACU = new Map<string, Promise<TableReplayResultV2_ACU | null>>();
+
+function buildInflightReplayKey_ACU(
+  chat: any[],
+  isolationKey: string,
+  options: LoadTableStateFromFramesV2Options_ACU,
+): string | null {
+  if (options.updateRuntimeState) return null;
+  if (Array.isArray(options.captureBoundaries) && options.captureBoundaries.length > 0) return null;
+  if (options.replayEvidence) return null;
+  if (options.signal) return null;
+  if (Number(options.yieldBudgetMs) > 0) return null;
+  return [
+    'chat-ref',
+    // chat 引用（数组对象身份）。同一数组内容原地变化时引用仍相同，但调用方
+    // 若在两次调用间原地 mutate chat（fill run 每批提交），in-flight 窗口内
+    // 引用相同而内容不同——由调用方保证 fill 提交不在并发 replay 窗口内发生
+    // （commit lock 内串行），否则此处只合并同一时刻的请求，语义安全。
+    String(chat),
+    'iso', isolationKey,
+    'max', options.maxMessageIndex ?? 'latest',
+    'tpl', options.allowTemporaryTemplateBaseline ? 1 : 0,
+    'compat', options.compatibilityMode ?? 'default',
+    'alias', options.enableAliasContext === false ? 0 : 1,
+  ].join('|');
+}
+
 export type TableScheduleSummaryV2_ACU = NonNullable<TableCheckpointV2_ACU['scheduleSummary']>;
 
 export type TableReplayBaseKindV2_ACU = 'full_checkpoint' | 'replacement_anchor' | 'temporary_template_baseline' | 'spv79_transition_checkpoint';
@@ -205,6 +253,8 @@ export interface TableReplayMetricsV2_ACU {
   replayReuseCount: number;
   /** 传入了 evidence 但判定失配、回退冷回放的次数。单次调用最多 1。 */
   replayReuseFallbackCount: number;
+  /** 阶段 G2：本次结果与并发/紧邻的同 key 调用共享（in-flight 去重命中）。单次调用最多 1。 */
+  replayShareCount: number;
   /** 阶段 I：本调用实际让出事件循环的次数（时间预算耗尽才 +1）。 */
   yieldCount: number;
 }
@@ -224,6 +274,7 @@ export function createReplayMetrics_ACU(): TableReplayMetricsV2_ACU {
     sqliteMaterializeCount: 0,
     replayReuseCount: 0,
     replayReuseFallbackCount: 0,
+    replayShareCount: 0,
     yieldCount: 0,
   };
 }
@@ -2266,6 +2317,46 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
       metrics: reuseMetrics,
     };
   }
+
+  // 阶段 G2：in-flight 去重（evidence 未命中后、core 调用前）。
+  // 同 key 的并发/紧邻纯只读调用共享一次全量 replay：第一个调用方启动 core，
+  // 后续调用方 await 同一 promise。共享结果深克隆 data（不共享引用，保持纯函数
+  // 性质），metrics 标记 replayShareCount=1 以区分 evidence 复用（replayReuseCount）。
+  // 仅合并并发窗口内的重复调用：promise settle 后从 Map 删除，不缓存历史。
+  const inflightKey = buildInflightReplayKey_ACU(chat, isolationKey, options);
+  if (inflightKey) {
+    const existing = inflightV2Replays_ACU.get(inflightKey);
+    if (existing) {
+      try {
+        const shared = await existing;
+        if (!shared) return null;
+        const sharedMetrics = createReplayMetrics_ACU();
+        sharedMetrics.replayShareCount = 1;
+        startRuntimePerformanceSpan_ACU('v2-replay', {
+          runId: options.performanceRunId,
+          parentSpanId: options.performanceParentSpanId,
+          settings: settings_ACU,
+          metrics: {
+            messageCount: Array.isArray(chat) ? chat.length : 0,
+            maxMessageIndex: options.maxMessageIndex ?? -1,
+          },
+        }).end({
+          success: true,
+          baseKind: shared.baseKind,
+          sheetCount: Object.keys(shared.data || {}).filter(key => key.startsWith('sheet_')).length,
+          replayShareCount: 1,
+        });
+        return {
+          data: deepClone_ACU(shared.data),
+          baseKind: shared.baseKind,
+          metrics: sharedMetrics,
+        };
+      } finally {
+        // 等待方不负责清理：清理由启动方在 settle 后执行（见下方 finally）。
+      }
+    }
+  }
+
   // 候选回放、bounded 验证和导入诊断必须保持纯函数性质；只有宿主当前聊天的
   // 首次真实加载才允许把 duplicate_row_id 升级为持久化过渡根。
   const mayCreateTransition = chat === getChatArray_ACU()
@@ -2280,7 +2371,33 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
     },
   });
   try {
-    const result = await loadTableStateFromFramesV2DetailedCore_ACU(chatArg, isolationKeyArg, options);
+    // 阶段 G2：in-flight 启动方。若 key 存在（且此前未被并发方占用），把 core 调用
+    // 包成共享 promise 存入 Map，让同 key 的并发调用等待同一结果；settle 后清理。
+    // 共享 promise 必须包含 duplicate_row_id 恢复逻辑（等待方不应拿到原始失败），
+    // 因此把「core 调用 + 恢复」整体包入，任何路径 settle 后删除。
+    const inflightStarted = inflightKey
+      ? (() => {
+        const sharedPromise = (async (): Promise<TableReplayResultV2_ACU | null> => {
+          try {
+            return await loadTableStateFromFramesV2DetailedCore_ACU(chatArg, isolationKeyArg, options);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (mayCreateTransition && message.includes('duplicate_row_id')) {
+              await createSpv79TransitionCheckpointForDuplicateRowId_ACU(chat, isolationKey);
+              return await loadTableStateFromFramesV2DetailedCore_ACU(chat, isolationKey, options);
+            }
+            throw error;
+          } finally {
+            inflightV2Replays_ACU.delete(inflightKey);
+          }
+        })();
+        inflightV2Replays_ACU.set(inflightKey, sharedPromise);
+        return sharedPromise;
+      })()
+      : null;
+    const result = inflightStarted
+      ? await inflightStarted
+      : await loadTableStateFromFramesV2DetailedCore_ACU(chatArg, isolationKeyArg, options);
     // 传入了 evidence 却走到这里 = 判定失配并回退冷回放（fail-open）。
     // 首次调用（空 evidence 对象）同样计入失配，命中率才有分母意义。
     if (evidence && !evidenceReusable && result?.metrics) {
@@ -2332,7 +2449,9 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (mayCreateTransition && message.includes('duplicate_row_id')) {
+    // duplicate_row_id 恢复已在共享 promise 内处理（启动方与等待方一致拿到恢复结果）。
+    // 非 in-flight 路径（inflightKey 为 null）的恢复仍由外层处理：保持与既有语义一致。
+    if (!inflightKey && mayCreateTransition && message.includes('duplicate_row_id')) {
       try {
         await createSpv79TransitionCheckpointForDuplicateRowId_ACU(chat, isolationKey);
         const recovered = await loadTableStateFromFramesV2DetailedCore_ACU(chat, isolationKey, options);

@@ -57,6 +57,7 @@ const SAFE_METRIC_KEYS_ACU = new Set([
   'columnRebindCount', 'aliasInvalidateCount', 'aliasCacheHitCount',
   'sqliteHydrateCount', 'sqliteMaterializeCount',
   'replayReuseCount', 'replayReuseFallbackCount',
+  'replayShareCount',
   'yieldCount',
 ]);
 
