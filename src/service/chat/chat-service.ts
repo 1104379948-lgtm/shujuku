@@ -2632,6 +2632,129 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
     });
 }
 
+/**
+ * 手动重填清理删除唯一 full checkpoint 后，立即用冻结模板重建模板临时根。
+ *
+ * 背景：全范围 + 全选表重填会删除范围内唯一整库 full checkpoint（见
+ * purgeSheetKeysFromStorageFrameV2_ACU 的删锚逻辑）。此后任何 bucket 写入都会命中
+ * persist 层 usesImplicitMigrationCheckpoint 守卫（storage-frame-v2-persist.ts），
+ * 因为状态是「有 V2 空信封、无任何 full checkpoint、无 artifact」——清理方承诺的
+ * 「由后续写入按初始 checkpoint 重建」与守卫语义直接冲突。
+ *
+ * 本函数在清理完成后、第一个 bucket 写入前，把末尾 commit 阶段的
+ * fallbackRequired 建根动作提前执行：用冻结模板在同一 run 的起始楼层写入
+ * reason='manual' + fallbackProvenance 的模板临时根，让后续 bucket 写入有合法锚点。
+ * 末尾 commitManualRefillSheetSnapshotInRangeAtomic_ACU 检测到已有唯一根后，
+ * fallbackRequired 为 false，走既有 perSheetCheckpoints rebase 路径，不再重复建根。
+ *
+ * 与 establishProvisionalBridge_ACU（manual-catch-up-provisional-bridge.ts）不同：
+ * 该函数要求原 full checkpoint 存在（fail-closed），本场景恰好是它已被删除，
+ * 因此不复用其状态机，只复用其「临时根 → 边界折叠」的设计思想。
+ */
+export async function establishManualRefillTemplateRoot_ACU(options: {
+    isolationKey: string;
+    targetSheetKeys: string[];
+    targetMessageIndices: number[];
+    templateData: Record<string, any> | null;
+}): Promise<{ success: boolean; changed: boolean; targetMessageIndex: number; error?: string }> {
+    const { isolationKey, targetSheetKeys, targetMessageIndices, templateData } = options;
+    if (!Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0) {
+        return { success: false, changed: false, targetMessageIndex: -1, error: '手动重填临时根建立必须指定目标表。' };
+    }
+    if (!templateData || typeof templateData !== 'object' || Array.isArray(templateData)) {
+        return { success: false, changed: false, targetMessageIndex: -1, error: '手动重填临时根建立失败：缺少有效的冻结模板。' };
+    }
+    if (!templateData.mate || typeof templateData.mate !== 'object') {
+        return { success: false, changed: false, targetMessageIndex: -1, error: '手动重填临时根建立失败：冻结模板缺少有效 mate 根元数据。' };
+    }
+    const missingTemplateSheet = targetSheetKeys.find(sheetKey => !templateData[sheetKey] || typeof templateData[sheetKey] !== 'object');
+    if (missingTemplateSheet) {
+        return { success: false, changed: false, targetMessageIndex: -1, error: `手动重填临时根建立失败：冻结模板缺少目标表 ${missingTemplateSheet}。` };
+    }
+
+    const chat = getChatArray_ACU();
+    if (!Array.isArray(chat) || chat.length === 0) {
+        return { success: false, changed: false, targetMessageIndex: -1, error: '聊天记录为空，无法建立手动重填临时根。' };
+    }
+
+    const normalizedIndices = [...new Set(targetMessageIndices.filter((idx): idx is number => Number.isInteger(idx) && idx >= 0 && idx < chat.length))].sort((a, b) => a - b);
+    if (normalizedIndices.length === 0) {
+        return { success: false, changed: false, targetMessageIndex: -1, error: '手动重填临时根建立失败：目标消息范围不含有效楼层。' };
+    }
+
+    // 与末尾 commitManualRefillSheetSnapshotInRangeAtomic_ACU 同一口径：
+    // resolveManualRefillReplayAnchor_ACU 的 fullCheckpointIndices（全局唯一 full 根判定）
+    // 与 earliestV2FrameIndex（fallback 根落点）必须在此处复用，避免提前建根与末尾
+    // 校验对「根在哪」产生分歧。
+    const anchor = resolveManualRefillReplayAnchor_ACU(chat, isolationKey, normalizedIndices);
+    if (anchor.fullCheckpointIndices.length > 0) {
+        // 清理后仍有 full checkpoint（部分选表/范围未覆盖 checkpoint 楼层）：
+        // 不需要建根，直接返回 no-op。
+        return { success: true, changed: false, targetMessageIndex: -1 };
+    }
+    const rootMessageIndex = anchor.fallbackRootIndex;
+    if (rootMessageIndex < 0 || chat[rootMessageIndex]?.is_user) {
+        return { success: false, changed: false, targetMessageIndex: -1, error: `手动重填临时根建立失败：找不到可承载临时根的 AI 楼层（fallbackRootIndex=${rootMessageIndex}）。` };
+    }
+
+    // 与末尾 commit 相同的 runId 公式：isolationKey + 范围 + 模板指纹。
+    // 提前建根与末尾核对必须命中同一个 runId，否则幂等判定失效。
+    const templateFingerprint = getTableDataFingerprint_ACU(templateData);
+    const fallbackRunId = `manual-refill:${isolationKey}:${normalizedIndices.join(',')}:${templateFingerprint}`;
+    const createdAt = Date.now();
+    const checkpointBuild = buildCanonicalFullCheckpoint_ACU({
+        createdAt,
+        reason: 'manual',
+        data: templateData as TableDataObject_ACU,
+        fallbackProvenance: {
+            version: 1,
+            kind: 'manual_refill_template_root',
+            runId: fallbackRunId,
+            isolationKey,
+            targetSheetKeys: [...new Set(targetSheetKeys)].sort(),
+            rangeStartMessageIndex: normalizedIndices[0],
+            rangeEndMessageIndex: normalizedIndices[normalizedIndices.length - 1],
+            templateFingerprint,
+            createdAt,
+        },
+        context: { messageIndex: rootMessageIndex, isolationKey, reason: 'manual' },
+    });
+    if (!checkpointBuild.checkpoint) {
+        return { success: false, changed: false, targetMessageIndex: -1, error: `手动重填临时根建立失败：${checkpointBuild.error}` };
+    }
+
+    // 候选克隆上写入临时根，strict save 成功后才 apply 到 live chat（与清理同款原子性）。
+    const snapshots = new Map<number, ReturnType<typeof messageFieldSnapshot_ACU>>();
+    snapshots.set(rootMessageIndex, messageFieldSnapshot_ACU(chat[rootMessageIndex]));
+    try {
+        const candidateChat = cloneCandidateChat_ACU(chat);
+        const rootMessage = candidateChat[rootMessageIndex];
+        rootMessage.TavernDB_ACU_IsolatedData = rootMessage.TavernDB_ACU_IsolatedData && typeof rootMessage.TavernDB_ACU_IsolatedData === 'object' && !Array.isArray(rootMessage.TavernDB_ACU_IsolatedData)
+            ? rootMessage.TavernDB_ACU_IsolatedData
+            : {};
+        const rootTagData = rootMessage.TavernDB_ACU_IsolatedData[isolationKey];
+        const rootFrame: TableStorageFrameV2_ACU = isV2TagData_ACU(rootTagData)
+            ? rootTagData.storageFrame
+            : { version: 2, logEntries: [] };
+        if (!isV2TagData_ACU(rootTagData)) {
+            rootMessage.TavernDB_ACU_IsolatedData[isolationKey] = { ...(rootTagData && typeof rootTagData === 'object' ? rootTagData : {}), _acu_storage_version: 2, storageFrame: rootFrame };
+        }
+        rootFrame.checkpoint = checkpointBuild.checkpoint;
+        writeMessageIdentity_ACU(rootMessage, { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode });
+
+        applyCandidateMessageFields_ACU(chat[rootMessageIndex], candidateChat[rootMessageIndex]);
+        await saveChatToHostStrict_ACU();
+        logDebug_ACU(`[手动重填临时根] 已在 AI 楼层 #${rootMessageIndex} 为 ${targetSheetKeys.join(', ')} 建立模板临时根（runId=${fallbackRunId}）。`);
+        return { success: true, changed: true, targetMessageIndex: rootMessageIndex };
+    } catch (error: any) {
+        snapshots.forEach((snapshot, idx) => restoreMessageFieldSnapshot_ACU(chat[idx], snapshot));
+        const failureError = error?.message || String(error || '手动重填临时根建立异常。');
+        logError_ACU('[手动重填临时根] 建立 strict save 失败，已原位恢复聊天内存状态:', error);
+        return { success: false, changed: false, targetMessageIndex: -1, error: `手动重填临时根建立失败：${failureError}` };
+    }
+}
+
+
 export async function replaceManualRefillSheetBaselineInRangeAtomic_ACU(
     options: ManualRefillSheetBaselineReplaceOptions_ACU,
 ): Promise<ManualRefillSheetBaselineReplaceResult_ACU> {

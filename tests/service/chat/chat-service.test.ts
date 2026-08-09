@@ -123,6 +123,7 @@ import {
   isFullRangeDeletionRequest_ACU,
   purgeCurrentChatDatabaseState_ACU,
   ensureManualCatchUpAnchorBeforeTarget_ACU,
+  establishManualRefillTemplateRoot_ACU,
   overrideLatestLayerWithTemplateCore_ACU,
   saveCurrentDataForTable_ACU,
 } from '../../../src/service/chat/chat-service';
@@ -4120,4 +4121,151 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
     expect(JSON.parse(JSON.stringify(chat))).toEqual(before);
   });
 
+});
+
+
+describe('establishManualRefillTemplateRoot_ACU', () => {
+  const makeEmptyFrameMessage = (mes: string): any => ({
+    is_user: false,
+    mes,
+    TavernDB_ACU_IsolatedData: {
+      '': {
+        _acu_storage_version: 2,
+        storageFrame: { version: 2, logEntries: [] },
+      },
+    },
+  });
+  const templateData = {
+    mate: { type: 'acu' },
+    sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] },
+  };
+
+  beforeEach(() => {
+    mockSaveChatToHostStrict.mockResolvedValue(undefined);
+  });
+
+  it('清理后全局无 full checkpoint 时，在 earliestV2FrameIndex 建立模板临时根', async () => {
+    const chat = [
+      makeEmptyFrameMessage('AI楼层0'),
+      makeEmptyFrameMessage('AI楼层1'),
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await establishManualRefillTemplateRoot_ACU({
+      isolationKey: '',
+      targetSheetKeys: ['sheet_0'],
+      targetMessageIndices: [0, 1],
+      templateData,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.targetMessageIndex).toBe(0);
+    const rootFrame = chat[0].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(rootFrame.checkpoint.kind).toBe('full');
+    expect(rootFrame.checkpoint.reason).toBe('manual');
+    expect(rootFrame.checkpoint.fallbackProvenance.kind).toBe('manual_refill_template_root');
+    expect(rootFrame.checkpoint.fallbackProvenance.rangeStartMessageIndex).toBe(0);
+    expect(rootFrame.checkpoint.fallbackProvenance.rangeEndMessageIndex).toBe(1);
+    expect(rootFrame.checkpoint.fallbackProvenance.targetSheetKeys).toEqual(['sheet_0']);
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+    // 落点：earliestV2FrameIndex（与末尾 commit 同口径）
+    expect(chat[1].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
+  });
+
+  it('清理后仍有 full checkpoint 时 no-op（部分选表/范围未覆盖场景）', async () => {
+    const chat = [
+      {
+        is_user: false,
+        mes: 'AI楼层0',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full',
+                reason: 'manual',
+                data: { sheet_1: { name: '保留表', content: [['row_id'], ['keep']] } },
+              },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      makeEmptyFrameMessage('AI楼层1'),
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const before = JSON.parse(JSON.stringify(chat));
+
+    const result = await establishManualRefillTemplateRoot_ACU({
+      isolationKey: '',
+      targetSheetKeys: ['sheet_0'],
+      targetMessageIndices: [0, 1],
+      templateData,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.changed).toBe(false);
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+    expect(chat).toEqual(before);
+  });
+
+  it('模板缺少目标表时失败且不写聊天', async () => {
+    const chat = [makeEmptyFrameMessage('AI楼层0')];
+    mockGetChatArray.mockReturnValue(chat);
+    const before = JSON.parse(JSON.stringify(chat));
+
+    const result = await establishManualRefillTemplateRoot_ACU({
+      isolationKey: '',
+      targetSheetKeys: ['sheet_missing'],
+      targetMessageIndices: [0],
+      templateData,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('缺少目标表');
+    expect(chat).toEqual(before);
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
+  it('严格保存失败时原位恢复聊天内存状态', async () => {
+    const chat = [makeEmptyFrameMessage('AI楼层0')];
+    mockGetChatArray.mockReturnValue(chat);
+    const before = JSON.parse(JSON.stringify(chat));
+    mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('save failed'));
+
+    const result = await establishManualRefillTemplateRoot_ACU({
+      isolationKey: '',
+      targetSheetKeys: ['sheet_0'],
+      targetMessageIndices: [0],
+      templateData,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('save failed');
+    expect(JSON.parse(JSON.stringify(chat))).toEqual(before);
+  });
+
+  it('runId 与末尾 commit 同公式：isolationKey+范围+模板指纹', async () => {
+    const chat = [
+      makeEmptyFrameMessage('AI楼层0'),
+      makeEmptyFrameMessage('AI楼层1'),
+      makeEmptyFrameMessage('AI楼层2'),
+      makeEmptyFrameMessage('AI楼层3'),
+      makeEmptyFrameMessage('AI楼层4'),
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    await establishManualRefillTemplateRoot_ACU({
+      isolationKey: 'tag-1',
+      targetSheetKeys: ['sheet_0'],
+      targetMessageIndices: [0, 2, 4],
+      templateData,
+    });
+
+    const fallbackRunId = chat[0].TavernDB_ACU_IsolatedData['tag-1'].storageFrame.checkpoint.fallbackProvenance.runId;
+    const expectedRunId = `manual-refill:tag-1:0,2,4:${getTableDataFingerprint_ACU(templateData)}`;
+    expect(fallbackRunId).toBe(expectedRunId);
+  });
 });

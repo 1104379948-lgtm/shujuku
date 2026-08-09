@@ -207,7 +207,7 @@
                 导出已保存的原始 frame 备份
               </AcuButton>
               <AcuButton
-                v-if="flow.v2RecoverySummary.value.status === 'recoverable_repaired_checkpoint' || flow.v2RecoverySummary.value.status === 'recoverable_temporary_sheet_anchor' || flow.v2RecoverySummary.value.status === 'recoverable_redundant_full_checkpoint'"
+                v-if="flow.v2RecoverySummary.value.status === 'recoverable_repaired_checkpoint' || flow.v2RecoverySummary.value.status === 'recoverable_temporary_sheet_anchor' || flow.v2RecoverySummary.value.status === 'recoverable_redundant_full_checkpoint' || flow.v2RecoverySummary.value.status === 'recoverable_from_recovery_backup'"
                 block
                 variant="danger"
                 :disabled="runtimeDiagnostic.busy.value"

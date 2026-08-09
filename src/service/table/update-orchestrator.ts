@@ -5,8 +5,9 @@
  */
 
 import { currentChatFileIdentifier_ACU, isAutoUpdatingCard_ACU, pendingFinalGenerationGreenlights_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
+import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { callCustomOpenAI_ACU, RetryableAiResponseError_ACU } from '../ai/prompt-builder';
-import { clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
+import { clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, establishManualRefillTemplateRoot_ACU, getChatArray_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
@@ -4099,8 +4100,27 @@ export async function orchestrateManualUpdate_ACU(
             // 跨根 staging 判定：重填范围首个目标早于原 full checkpoint 时，
             // 中间 bucket 若按普通 persist 写入会撞 persist 层 fail-fast（写目标早于回放根）。
             // 必须改为边界前 stage_only（不写聊天帧）、边界处原子汇合、边界后普通 persist。
+            // 例外：清理会删除该 checkpoint 时（全选表且 checkpoint.data 不含其它表），
+            // staging 的「原 full 边界」前提在清理后消失，汇合必以 full_checkpoint_root_mismatch
+            // fail-closed。此时禁用 staging，改走普通路径 + 清理后临时根前置，由末尾
+            // commitManualRefillSheetSnapshotInRangeAtomic_ACU 以既有 fallbackRequired 分支重建根。
             const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, currentIsolationKey);
-            const requiresBoundaryStaging = originalFullIndex >= 0 && contextScopeIndices.length > 0 && contextScopeIndices[0] < originalFullIndex;
+            let requiresBoundaryStaging = originalFullIndex >= 0 && contextScopeIndices.length > 0 && contextScopeIndices[0] < originalFullIndex;
+            if (requiresBoundaryStaging && contextScopeIndices.includes(originalFullIndex)) {
+                // 原 checkpoint 在重填范围内：检查清理是否会删除它（checkpoint.data 的
+                // sheet 键集合是否被 targetKeys 全量覆盖）。
+                const originalTag = readIsolatedTagData_ACU(liveChat[originalFullIndex], currentIsolationKey) as any;
+                const originalCheckpointData = originalTag?.storageFrame?.checkpoint?.data;
+                if (originalCheckpointData && typeof originalCheckpointData === 'object' && !Array.isArray(originalCheckpointData)) {
+                    const checkpointSheetKeys = Object.keys(originalCheckpointData).filter(key => key.startsWith('sheet_'));
+                    const targetKeySet = new Set(targetKeys);
+                    const fullyCoversCheckpoint = checkpointSheetKeys.length > 0 && checkpointSheetKeys.every(key => targetKeySet.has(key));
+                    if (fullyCoversCheckpoint) {
+                        logDebug_ACU(`[Manual Refill] 原 full checkpoint 位于重填范围内（#${originalFullIndex}）且目标表覆盖其全部数据表，清理将删除该 checkpoint；已禁用跨根 staging，改用清理后临时根前置。`);
+                        requiresBoundaryStaging = false;
+                    }
+                }
+            }
             if (requiresBoundaryStaging) {
                 const templateFingerprint = getTableDataFingerprint_ACU(parseTableTemplateJson_ACU({ stripSeedRows: true }) || {});
                 boundaryPlan = planTableFillBoundaryStaging_ACU({
@@ -4157,6 +4177,29 @@ export async function orchestrateManualUpdate_ACU(
                 return { success: false, error: failureError };
             }
             logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${contextScopeIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
+
+            // 手动重填临时根前置：全范围 + 全选表清理会删除范围内唯一整库 full checkpoint，
+            // 此后任何 bucket 写入都会命中 persist 层 usesImplicitMigrationCheckpoint 守卫
+            // （storage-frame-v2-persist.ts:2208-2215），导致重填永久失败。
+            // 在清理后、任何 bucket 写入前，用冻结模板建立 manual_refill_template_root
+            // 临时根，让后续写入有合法锚点。末尾 commitManualRefillSheetSnapshotInRangeAtomic_ACU
+            // 检测到已有唯一根后走 perSheetCheckpoints rebase 路径，不再重复建根。
+            // 若清理后仍有 full checkpoint（部分选表/范围未覆盖），本函数内部判定为 no-op。
+            if (manualRefillEnabled && frozenManualRefillTemplateData) {
+                const rootEstablish = await establishManualRefillTemplateRoot_ACU({
+                    isolationKey: currentIsolationKey,
+                    targetSheetKeys: targetKeys,
+                    targetMessageIndices: contextScopeIndices,
+                    templateData: frozenManualRefillTemplateData,
+                });
+                if (!rootEstablish.success) {
+                    logError_ACU('[Manual Refill] 清理后建立模板临时根失败:', rootEstablish.error);
+                    return await failManualRefillSession(rootEstablish.error || '手动重填清理后建立模板临时根失败。');
+                }
+                if (rootEstablish.changed) {
+                    logDebug_ACU(`[Manual Refill] 已在 AI 楼层 #${rootEstablish.targetMessageIndex} 建立模板临时根，后续 bucket 写入将有合法锚点。`);
+                }
+            }
 
             try {
                 const reloadResult = await reloadStorageProvider();

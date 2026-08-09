@@ -79377,6 +79377,117 @@ $CONTENT
             }
         });
     }
+    /**
+     * 手动重填清理删除唯一 full checkpoint 后，立即用冻结模板重建模板临时根。
+     *
+     * 背景：全范围 + 全选表重填会删除范围内唯一整库 full checkpoint（见
+     * purgeSheetKeysFromStorageFrameV2_ACU 的删锚逻辑）。此后任何 bucket 写入都会命中
+     * persist 层 usesImplicitMigrationCheckpoint 守卫（storage-frame-v2-persist.ts），
+     * 因为状态是「有 V2 空信封、无任何 full checkpoint、无 artifact」——清理方承诺的
+     * 「由后续写入按初始 checkpoint 重建」与守卫语义直接冲突。
+     *
+     * 本函数在清理完成后、第一个 bucket 写入前，把末尾 commit 阶段的
+     * fallbackRequired 建根动作提前执行：用冻结模板在同一 run 的起始楼层写入
+     * reason='manual' + fallbackProvenance 的模板临时根，让后续 bucket 写入有合法锚点。
+     * 末尾 commitManualRefillSheetSnapshotInRangeAtomic_ACU 检测到已有唯一根后，
+     * fallbackRequired 为 false，走既有 perSheetCheckpoints rebase 路径，不再重复建根。
+     *
+     * 与 establishProvisionalBridge_ACU（manual-catch-up-provisional-bridge.ts）不同：
+     * 该函数要求原 full checkpoint 存在（fail-closed），本场景恰好是它已被删除，
+     * 因此不复用其状态机，只复用其「临时根 → 边界折叠」的设计思想。
+     */
+    async function establishManualRefillTemplateRoot_ACU(options) {
+        const { isolationKey, targetSheetKeys, targetMessageIndices, templateData } = options;
+        if (!Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0) {
+            return { success: false, changed: false, targetMessageIndex: -1, error: '手动重填临时根建立必须指定目标表。' };
+        }
+        if (!templateData || typeof templateData !== 'object' || Array.isArray(templateData)) {
+            return { success: false, changed: false, targetMessageIndex: -1, error: '手动重填临时根建立失败：缺少有效的冻结模板。' };
+        }
+        if (!templateData.mate || typeof templateData.mate !== 'object') {
+            return { success: false, changed: false, targetMessageIndex: -1, error: '手动重填临时根建立失败：冻结模板缺少有效 mate 根元数据。' };
+        }
+        const missingTemplateSheet = targetSheetKeys.find(sheetKey => !templateData[sheetKey] || typeof templateData[sheetKey] !== 'object');
+        if (missingTemplateSheet) {
+            return { success: false, changed: false, targetMessageIndex: -1, error: `手动重填临时根建立失败：冻结模板缺少目标表 ${missingTemplateSheet}。` };
+        }
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0) {
+            return { success: false, changed: false, targetMessageIndex: -1, error: '聊天记录为空，无法建立手动重填临时根。' };
+        }
+        const normalizedIndices = [...new Set(targetMessageIndices.filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < chat.length))].sort((a, b) => a - b);
+        if (normalizedIndices.length === 0) {
+            return { success: false, changed: false, targetMessageIndex: -1, error: '手动重填临时根建立失败：目标消息范围不含有效楼层。' };
+        }
+        // 与末尾 commitManualRefillSheetSnapshotInRangeAtomic_ACU 同一口径：
+        // resolveManualRefillReplayAnchor_ACU 的 fullCheckpointIndices（全局唯一 full 根判定）
+        // 与 earliestV2FrameIndex（fallback 根落点）必须在此处复用，避免提前建根与末尾
+        // 校验对「根在哪」产生分歧。
+        const anchor = resolveManualRefillReplayAnchor_ACU(chat, isolationKey, normalizedIndices);
+        if (anchor.fullCheckpointIndices.length > 0) {
+            // 清理后仍有 full checkpoint（部分选表/范围未覆盖 checkpoint 楼层）：
+            // 不需要建根，直接返回 no-op。
+            return { success: true, changed: false, targetMessageIndex: -1 };
+        }
+        const rootMessageIndex = anchor.fallbackRootIndex;
+        if (rootMessageIndex < 0 || chat[rootMessageIndex]?.is_user) {
+            return { success: false, changed: false, targetMessageIndex: -1, error: `手动重填临时根建立失败：找不到可承载临时根的 AI 楼层（fallbackRootIndex=${rootMessageIndex}）。` };
+        }
+        // 与末尾 commit 相同的 runId 公式：isolationKey + 范围 + 模板指纹。
+        // 提前建根与末尾核对必须命中同一个 runId，否则幂等判定失效。
+        const templateFingerprint = getTableDataFingerprint_ACU(templateData);
+        const fallbackRunId = `manual-refill:${isolationKey}:${normalizedIndices.join(',')}:${templateFingerprint}`;
+        const createdAt = Date.now();
+        const checkpointBuild = buildCanonicalFullCheckpoint_ACU({
+            createdAt,
+            reason: 'manual',
+            data: templateData,
+            fallbackProvenance: {
+                version: 1,
+                kind: 'manual_refill_template_root',
+                runId: fallbackRunId,
+                isolationKey,
+                targetSheetKeys: [...new Set(targetSheetKeys)].sort(),
+                rangeStartMessageIndex: normalizedIndices[0],
+                rangeEndMessageIndex: normalizedIndices[normalizedIndices.length - 1],
+                templateFingerprint,
+                createdAt,
+            },
+            context: { messageIndex: rootMessageIndex, isolationKey, reason: 'manual' },
+        });
+        if (!checkpointBuild.checkpoint) {
+            return { success: false, changed: false, targetMessageIndex: -1, error: `手动重填临时根建立失败：${checkpointBuild.error}` };
+        }
+        // 候选克隆上写入临时根，strict save 成功后才 apply 到 live chat（与清理同款原子性）。
+        const snapshots = new Map();
+        snapshots.set(rootMessageIndex, messageFieldSnapshot_ACU(chat[rootMessageIndex]));
+        try {
+            const candidateChat = cloneCandidateChat_ACU(chat);
+            const rootMessage = candidateChat[rootMessageIndex];
+            rootMessage.TavernDB_ACU_IsolatedData = rootMessage.TavernDB_ACU_IsolatedData && typeof rootMessage.TavernDB_ACU_IsolatedData === 'object' && !Array.isArray(rootMessage.TavernDB_ACU_IsolatedData)
+                ? rootMessage.TavernDB_ACU_IsolatedData
+                : {};
+            const rootTagData = rootMessage.TavernDB_ACU_IsolatedData[isolationKey];
+            const rootFrame = isV2TagData_ACU(rootTagData)
+                ? rootTagData.storageFrame
+                : { version: 2, logEntries: [] };
+            if (!isV2TagData_ACU(rootTagData)) {
+                rootMessage.TavernDB_ACU_IsolatedData[isolationKey] = { ...(rootTagData && typeof rootTagData === 'object' ? rootTagData : {}), _acu_storage_version: 2, storageFrame: rootFrame };
+            }
+            rootFrame.checkpoint = checkpointBuild.checkpoint;
+            writeMessageIdentity_ACU(rootMessage, { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode });
+            applyCandidateMessageFields_ACU(chat[rootMessageIndex], candidateChat[rootMessageIndex]);
+            await saveChatToHostStrict_ACU();
+            logDebug_ACU(`[手动重填临时根] 已在 AI 楼层 #${rootMessageIndex} 为 ${targetSheetKeys.join(', ')} 建立模板临时根（runId=${fallbackRunId}）。`);
+            return { success: true, changed: true, targetMessageIndex: rootMessageIndex };
+        }
+        catch (error) {
+            snapshots.forEach((snapshot, idx) => restoreMessageFieldSnapshot_ACU(chat[idx], snapshot));
+            const failureError = error?.message || String(error || '手动重填临时根建立异常。');
+            logError_ACU('[手动重填临时根] 建立 strict save 失败，已原位恢复聊天内存状态:', error);
+            return { success: false, changed: false, targetMessageIndex: -1, error: `手动重填临时根建立失败：${failureError}` };
+        }
+    }
     async function replaceManualRefillSheetBaselineInRangeAtomic_ACU(options) {
         if (!Array.isArray(options.targetSheetKeys) || options.targetSheetKeys.length === 0) {
             return { success: false, changed: false, clearedCount: 0, checkpointCount: 0, error: '手动重填基底替换必须指定目标表。' };
@@ -95425,8 +95536,27 @@ $CONTENT
                 // 跨根 staging 判定：重填范围首个目标早于原 full checkpoint 时，
                 // 中间 bucket 若按普通 persist 写入会撞 persist 层 fail-fast（写目标早于回放根）。
                 // 必须改为边界前 stage_only（不写聊天帧）、边界处原子汇合、边界后普通 persist。
+                // 例外：清理会删除该 checkpoint 时（全选表且 checkpoint.data 不含其它表），
+                // staging 的「原 full 边界」前提在清理后消失，汇合必以 full_checkpoint_root_mismatch
+                // fail-closed。此时禁用 staging，改走普通路径 + 清理后临时根前置，由末尾
+                // commitManualRefillSheetSnapshotInRangeAtomic_ACU 以既有 fallbackRequired 分支重建根。
                 const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, currentIsolationKey);
-                const requiresBoundaryStaging = originalFullIndex >= 0 && contextScopeIndices.length > 0 && contextScopeIndices[0] < originalFullIndex;
+                let requiresBoundaryStaging = originalFullIndex >= 0 && contextScopeIndices.length > 0 && contextScopeIndices[0] < originalFullIndex;
+                if (requiresBoundaryStaging && contextScopeIndices.includes(originalFullIndex)) {
+                    // 原 checkpoint 在重填范围内：检查清理是否会删除它（checkpoint.data 的
+                    // sheet 键集合是否被 targetKeys 全量覆盖）。
+                    const originalTag = readIsolatedTagData_ACU(liveChat[originalFullIndex], currentIsolationKey);
+                    const originalCheckpointData = originalTag?.storageFrame?.checkpoint?.data;
+                    if (originalCheckpointData && typeof originalCheckpointData === 'object' && !Array.isArray(originalCheckpointData)) {
+                        const checkpointSheetKeys = Object.keys(originalCheckpointData).filter(key => key.startsWith('sheet_'));
+                        const targetKeySet = new Set(targetKeys);
+                        const fullyCoversCheckpoint = checkpointSheetKeys.length > 0 && checkpointSheetKeys.every(key => targetKeySet.has(key));
+                        if (fullyCoversCheckpoint) {
+                            logDebug_ACU(`[Manual Refill] 原 full checkpoint 位于重填范围内（#${originalFullIndex}）且目标表覆盖其全部数据表，清理将删除该 checkpoint；已禁用跨根 staging，改用清理后临时根前置。`);
+                            requiresBoundaryStaging = false;
+                        }
+                    }
+                }
                 if (requiresBoundaryStaging) {
                     const templateFingerprint = getTableDataFingerprint_ACU(parseTableTemplateJson_ACU({ stripSeedRows: true }) || {});
                     boundaryPlan = planTableFillBoundaryStaging_ACU({
@@ -95482,6 +95612,28 @@ $CONTENT
                     return { success: false, error: failureError };
                 }
                 logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${contextScopeIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
+                // 手动重填临时根前置：全范围 + 全选表清理会删除范围内唯一整库 full checkpoint，
+                // 此后任何 bucket 写入都会命中 persist 层 usesImplicitMigrationCheckpoint 守卫
+                // （storage-frame-v2-persist.ts:2208-2215），导致重填永久失败。
+                // 在清理后、任何 bucket 写入前，用冻结模板建立 manual_refill_template_root
+                // 临时根，让后续写入有合法锚点。末尾 commitManualRefillSheetSnapshotInRangeAtomic_ACU
+                // 检测到已有唯一根后走 perSheetCheckpoints rebase 路径，不再重复建根。
+                // 若清理后仍有 full checkpoint（部分选表/范围未覆盖），本函数内部判定为 no-op。
+                if (manualRefillEnabled && frozenManualRefillTemplateData) {
+                    const rootEstablish = await establishManualRefillTemplateRoot_ACU({
+                        isolationKey: currentIsolationKey,
+                        targetSheetKeys: targetKeys,
+                        targetMessageIndices: contextScopeIndices,
+                        templateData: frozenManualRefillTemplateData,
+                    });
+                    if (!rootEstablish.success) {
+                        logError_ACU('[Manual Refill] 清理后建立模板临时根失败:', rootEstablish.error);
+                        return await failManualRefillSession(rootEstablish.error || '手动重填清理后建立模板临时根失败。');
+                    }
+                    if (rootEstablish.changed) {
+                        logDebug_ACU(`[Manual Refill] 已在 AI 楼层 #${rootEstablish.targetMessageIndex} 建立模板临时根，后续 bucket 写入将有合法锚点。`);
+                    }
+                }
                 try {
                     const reloadResult = await reloadStorageProvider();
                     if (!reloadResult.ok) {
@@ -105225,6 +105377,37 @@ $CONTENT
                 return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: item.messageIndex, requiresConfirmation: false, message: '无锚点 data_replace 不满足无损自动修复条件。' } };
             const summary = { status: 'recoverable_orphan_data_replace', isolationKey, sourceMessageIndex: item.messageIndex, requiresConfirmation: true, message: '检测到无锚点 data_replace；必须明确确认后才会提升为 full checkpoint。' };
             return { summary, plan: { ...summary, kind: 'confirmed_orphan_data_replace', chat, chatKey: String(currentChatFileIdentifier_ACU || '').trim(), sourceFrameFingerprint: getFrameFingerprint_ACU(item.frame), candidateData: repair.candidateData || candidateData } };
+        }
+        // 空信封无锚点状态（手动重填全范围清理删除唯一 full checkpoint 后遗留）：
+        // 无任何 full checkpoint、无 artifact，但 tagData 上可能保留 recoveryBackup
+        // （demote/清理/恢复动作写入的原帧证据）。若 backup 内 frame 携带合法 full
+        // checkpoint，可用其 data 作为 integrity_repair 根的无损重建基底。
+        for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
+            const message = chat[messageIndex];
+            if (!message || message.is_user)
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (!tagData || typeof tagData !== 'object')
+                continue;
+            const backup = tagData.recoveryBackup;
+            if (!backup || typeof backup !== 'object' || !backup.storageFrame || typeof backup.storageFrame !== 'object')
+                continue;
+            const backupCheckpoint = backup.storageFrame.checkpoint;
+            if (!backupCheckpoint || backupCheckpoint.kind !== 'full' || !backupCheckpoint.data)
+                continue;
+            const candidateData = backupCheckpoint.data;
+            const repair = repairCandidate_ACU(candidateData);
+            if (repair.status !== 'clean' && !repair.candidateData) {
+                return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: messageIndex, requiresConfirmation: false, message: 'recoveryBackup 内的 full checkpoint 数据不满足无损自动修复条件。' } };
+            }
+            const summary = {
+                status: 'recoverable_from_recovery_backup',
+                isolationKey,
+                sourceMessageIndex: messageIndex,
+                requiresConfirmation: false,
+                message: `检测到无锚点 V2 空信封，但其 tagData 保留 recoveryBackup（kind=${backup.recoveryKind || 'unknown'}）；可用备份中的 full checkpoint 数据重建 integrity_repair 根。应用修复时原始 frame 会保留为隔离备份。`,
+            };
+            return { summary, plan: { ...summary, kind: 'restored_from_recovery_backup', chat, chatKey: String(currentChatFileIdentifier_ACU || '').trim(), sourceFrameFingerprint: getFrameFingerprint_ACU(backup.storageFrame), candidateData: repair.candidateData || candidateData } };
         }
         return { summary: { status: 'unrecoverable_no_base', isolationKey, requiresConfirmation: false, message: '仅检测到无 base 的 V2 日志；无法编造恢复数据。' } };
     }
@@ -146218,8 +146401,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-3eb473ba] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-3eb473ba] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-3eb473ba] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-3eb473ba] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-3eb473ba] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-3eb473ba] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-3eb473ba] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-3eb473ba] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-3eb473ba] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-3eb473ba] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-3eb473ba] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-3eb473ba] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-3eb473ba] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-3eb473ba] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-3eb473ba] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-3eb473ba],\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-3eb473ba] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-3eb473ba] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-3eb473ba] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-3eb473ba] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-3eb473ba] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3eb473ba] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3eb473ba] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-3eb473ba] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-3eb473ba] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3eb473ba] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-3eb473ba] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-3eb473ba");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_3eb473ba_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-3ee0a2bc] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-3ee0a2bc] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-3ee0a2bc] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-3ee0a2bc] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-3ee0a2bc] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-3ee0a2bc] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-3ee0a2bc] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-3ee0a2bc] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-3ee0a2bc] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-3ee0a2bc] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-3ee0a2bc] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-3ee0a2bc] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-3ee0a2bc] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-3ee0a2bc] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-3ee0a2bc] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-3ee0a2bc],\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-3ee0a2bc] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-3ee0a2bc] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-3ee0a2bc] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-3ee0a2bc] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-3ee0a2bc] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3ee0a2bc] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3ee0a2bc] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-3ee0a2bc] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-3ee0a2bc] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3ee0a2bc] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-3ee0a2bc] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-3ee0a2bc");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_3ee0a2bc_lang = null;
 
     const _hoisted_1$g = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$f = { class: "acu-v2-data-mgmt-page__panel-stack" };
@@ -146653,7 +146836,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							)])]),
     							_: 1
     						}, 8, ["disabled", "onClick"]),
-    						$setup.flow.v2RecoverySummary.value.status === "recoverable_repaired_checkpoint" || $setup.flow.v2RecoverySummary.value.status === "recoverable_temporary_sheet_anchor" || $setup.flow.v2RecoverySummary.value.status === "recoverable_redundant_full_checkpoint" ? (openBlock(), createBlock($setup["AcuButton"], {
+    						$setup.flow.v2RecoverySummary.value.status === "recoverable_repaired_checkpoint" || $setup.flow.v2RecoverySummary.value.status === "recoverable_temporary_sheet_anchor" || $setup.flow.v2RecoverySummary.value.status === "recoverable_redundant_full_checkpoint" || $setup.flow.v2RecoverySummary.value.status === "recoverable_from_recovery_backup" ? (openBlock(), createBlock($setup["AcuButton"], {
     							key: 0,
     							block: "",
     							variant: "danger",
@@ -146996,7 +147179,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		_: 1
     	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-3eb473ba"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-3ee0a2bc"]]);
 
     var _sfc_main$f = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',

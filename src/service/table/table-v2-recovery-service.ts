@@ -13,8 +13,8 @@ import { loadTableStateFromFramesV2Detailed_ACU, type TableReplayCompatibilityRe
 import type { TableMutationOperationV2_ACU, TablePatchV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
-type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence' | 'redundant_full_checkpoint_convergence';
-export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'recoverable_redundant_full_checkpoint' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable';
+type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence' | 'redundant_full_checkpoint_convergence' | 'restored_from_recovery_backup';
+export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'recoverable_redundant_full_checkpoint' | 'recoverable_from_recovery_backup' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable';
 export type V2RecoveryCommitStatus_ACU = 'committed' | 'committed_postcondition_failed' | 'commit_failed_rolled_back';
 
 export interface V2RecoveryCommitResult_ACU {
@@ -476,6 +476,33 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
     if (repair.status !== 'clean' && !repair.candidateData) return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: item.messageIndex, requiresConfirmation: false, message: '无锚点 data_replace 不满足无损自动修复条件。' } };
     const summary: V2RecoverySummary_ACU = { status: 'recoverable_orphan_data_replace', isolationKey, sourceMessageIndex: item.messageIndex, requiresConfirmation: true, message: '检测到无锚点 data_replace；必须明确确认后才会提升为 full checkpoint。' };
     return { summary, plan: { ...summary, kind: 'confirmed_orphan_data_replace', chat, chatKey: String(currentChatFileIdentifier_ACU || '').trim(), sourceFrameFingerprint: getFrameFingerprint_ACU(item.frame), candidateData: repair.candidateData || candidateData } };
+  }
+  // 空信封无锚点状态（手动重填全范围清理删除唯一 full checkpoint 后遗留）：
+  // 无任何 full checkpoint、无 artifact，但 tagData 上可能保留 recoveryBackup
+  // （demote/清理/恢复动作写入的原帧证据）。若 backup 内 frame 携带合法 full
+  // checkpoint，可用其 data 作为 integrity_repair 根的无损重建基底。
+  for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
+    const message = chat[messageIndex];
+    if (!message || message.is_user) continue;
+    const tagData = readIsolatedTagData_ACU(message, isolationKey) as any;
+    if (!tagData || typeof tagData !== 'object') continue;
+    const backup = tagData.recoveryBackup as TableV2RecoveryBackup_ACU | undefined;
+    if (!backup || typeof backup !== 'object' || !backup.storageFrame || typeof backup.storageFrame !== 'object') continue;
+    const backupCheckpoint = backup.storageFrame.checkpoint;
+    if (!backupCheckpoint || backupCheckpoint.kind !== 'full' || !backupCheckpoint.data) continue;
+    const candidateData = backupCheckpoint.data as TableDataObject_ACU;
+    const repair = repairCandidate_ACU(candidateData);
+    if (repair.status !== 'clean' && !repair.candidateData) {
+      return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: messageIndex, requiresConfirmation: false, message: 'recoveryBackup 内的 full checkpoint 数据不满足无损自动修复条件。' } };
+    }
+    const summary: V2RecoverySummary_ACU = {
+      status: 'recoverable_from_recovery_backup',
+      isolationKey,
+      sourceMessageIndex: messageIndex,
+      requiresConfirmation: false,
+      message: `检测到无锚点 V2 空信封，但其 tagData 保留 recoveryBackup（kind=${backup.recoveryKind || 'unknown'}）；可用备份中的 full checkpoint 数据重建 integrity_repair 根。应用修复时原始 frame 会保留为隔离备份。`,
+    };
+    return { summary, plan: { ...summary, kind: 'restored_from_recovery_backup', chat, chatKey: String(currentChatFileIdentifier_ACU || '').trim(), sourceFrameFingerprint: getFrameFingerprint_ACU(backup.storageFrame), candidateData: repair.candidateData || candidateData } };
   }
   return { summary: { status: 'unrecoverable_no_base', isolationKey, requiresConfirmation: false, message: '仅检测到无 base 的 V2 日志；无法编造恢复数据。' } };
 }

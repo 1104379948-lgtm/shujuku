@@ -102,7 +102,7 @@ vi.mock('../../../src/service/ai/prompt-builder', () => ({
   },
 }));
 
-const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_ACU, mockClearManualRefillIncrementalDataInRange, mockClearManualRefillSheetDataInRange, mockCommitManualRefillSheetSnapshot, mockEnsureManualCatchUpAnchor, mockEnsureBoundaryCheckpoint, mockShouldRotateBoundaryCheckpoint, mockPurgeSheetKeysFromChatHistoryHard } = vi.hoisted(() => {
+const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_ACU, mockClearManualRefillIncrementalDataInRange, mockClearManualRefillSheetDataInRange, mockCommitManualRefillSheetSnapshot, mockEstablishManualRefillTemplateRoot, mockEnsureManualCatchUpAnchor, mockEnsureBoundaryCheckpoint, mockShouldRotateBoundaryCheckpoint, mockPurgeSheetKeysFromChatHistoryHard } = vi.hoisted(() => {
   const chatArray: any[] = [];
   const independentTableStates: Record<string, any> = {};
   return {
@@ -112,6 +112,7 @@ const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_
     mockClearManualRefillIncrementalDataInRange: vi.fn().mockResolvedValue(0),
     mockClearManualRefillSheetDataInRange: vi.fn().mockResolvedValue(0),
     mockCommitManualRefillSheetSnapshot: vi.fn().mockResolvedValue({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 0 }),
+    mockEstablishManualRefillTemplateRoot: vi.fn().mockResolvedValue({ success: true, changed: true, targetMessageIndex: 0 }),
     mockEnsureManualCatchUpAnchor: vi.fn().mockResolvedValue({ status: 'ready', checkpointMessageIndex: 0 }),
     mockEnsureBoundaryCheckpoint: vi.fn().mockResolvedValue({ success: true, changed: false, skipped: true }),
     mockShouldRotateBoundaryCheckpoint: vi.fn(() => false),
@@ -124,6 +125,7 @@ vi.mock('../../../src/service/chat/chat-service', () => ({
   clearManualRefillIncrementalDataInRange_ACU: mockClearManualRefillIncrementalDataInRange,
   clearManualRefillSheetDataInRange_ACU: mockClearManualRefillSheetDataInRange,
   commitManualRefillSheetSnapshotInRangeAtomic_ACU: mockCommitManualRefillSheetSnapshot,
+  establishManualRefillTemplateRoot_ACU: mockEstablishManualRefillTemplateRoot,
   ensureManualCatchUpAnchorBeforeTarget_ACU: mockEnsureManualCatchUpAnchor,
   ensureV2BoundaryCheckpointForRetainedBuffer_ACU: mockEnsureBoundaryCheckpoint,
   shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU: mockShouldRotateBoundaryCheckpoint,
@@ -340,6 +342,7 @@ beforeEach(() => {
   mockClearManualRefillIncrementalDataInRange.mockResolvedValue(0);
   mockClearManualRefillSheetDataInRange.mockResolvedValue(0);
   mockCommitManualRefillSheetSnapshot.mockResolvedValue({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 0 });
+  mockEstablishManualRefillTemplateRoot.mockResolvedValue({ success: true, changed: true, targetMessageIndex: 0 });
   mockEnsureManualCatchUpAnchor.mockResolvedValue({ status: 'ready', checkpointMessageIndex: 0 });
   mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
   mockPurgeSheetKeysFromChatHistoryHard.mockResolvedValue({ changed: true, changedCount: 1 });
@@ -2334,7 +2337,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
   });
 
-  it('范围末端存在 full checkpoint 时预清理并跨根 staging：pre 段不写聊天帧，边界汇合后 post 段 persist', async () => {
+  it('范围末端 full checkpoint 被目标表全覆盖时禁用跨根 staging：清理后建模板临时根，各层普通 persist', async () => {
     const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
@@ -2410,8 +2413,16 @@ describe('orchestrateManualUpdate_ACU', () => {
     }));
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
     expect(mockReloadStorageProvider).toHaveBeenCalledTimes(1);
-    // 跨根 staging：pre 段（[0,2]）stage_only 不写聊天帧，仅 post 段（[4]）普通 persist。
-    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    // 原 full checkpoint（#4）落在重填范围内，且其 checkpoint.data 的 sheet 键被 targetKeys
+    // 全量覆盖 —— 清理必然删除该 checkpoint，跨根 staging 失去汇合目标，因此被禁用，
+    // 改由清理后的模板临时根承载后续写入锚点。此时没有 stage_only 段，
+    // 范围内三个 AI 楼层（[0,2,4]）都走普通 persist。
+    expect(mockEstablishManualRefillTemplateRoot).toHaveBeenCalledWith(expect.objectContaining({
+      isolationKey: '',
+      targetSheetKeys: ['sheet_0'],
+      targetMessageIndices: [0, 2, 4],
+    }));
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(3);
   });
   it('跨根 staging 的 pre 段失败时不继续 post 段写入，不回滚保留已清理状态', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
