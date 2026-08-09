@@ -3,7 +3,7 @@ import { readIsolatedDataContainer_ACU, writeMessageIdentity_ACU } from '../../d
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { logDebug_ACU } from '../../shared/utils';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
-import { loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
+import { loadTableStatesAtBoundariesFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { buildCanonicalSheetCheckpoint_ACU } from './canonical-checkpoint-builder';
 import type { TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
@@ -354,12 +354,13 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
 
     // 5. 候选 replay 验证：原 full 边界与聊天末端双边界。
     try {
-      for (const boundary of [options.originalFullIndex, candidateChat.length - 1]) {
-        const verifyReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
-          maxMessageIndex: boundary,
-          updateRuntimeState: false,
-          compatibilityMode: 'disabled',
-        });
+      // 阶段 H：双边界一次前向捕获（同根）或回退逐次冷 replay，校验语义不变。
+      const boundaryStates = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(
+        candidateChat, isolationKey,
+        [options.originalFullIndex, candidateChat.length - 1],
+        { updateRuntimeState: false, compatibilityMode: 'disabled' },
+      );
+      for (const [boundary, verifyReplay] of boundaryStates) {
         if (!verifyReplay || verifyReplay.baseKind !== 'full_checkpoint' || !verifyReplay.data) {
           return { ok: false, error: `boundary commit 候选 replay 未建立正式基底：boundary=${boundary}。`, diagnosticCode: 'boundary_replay_mismatch' };
         }

@@ -80,6 +80,8 @@ export interface TableReplayResultV2_ACU {
   requiresCheckpointConvergence?: boolean;
   /** 阶段 A 观测：单次回放的纯数值安全指标（可选，兼容既有调用方）。 */
   metrics?: TableReplayMetricsV2_ACU;
+  /** 阶段 H：本次调用实际捕获到的 boundary 消息索引（前向捕获命中时设置）。 */
+  capturedBoundary?: number;
 }
 
 export interface LoadTableStateFromFramesV2Options_ACU {
@@ -135,6 +137,32 @@ export interface LoadTableStateFromFramesV2Options_ACU {
    * 未传 = 不让出（与基线行为完全一致）。恢复后由同一边界的取消检查复查 signal。
    */
   yieldBudgetMs?: number;
+  /**
+   * 阶段 H：多 boundary 前向捕获（可选）。
+   *
+   * 传入严格递增的消息索引数组时，本次调用在 frame 循环中按消息顺序推进，
+   * 每当 frameRefs 的消息索引命中该数组就 materialize 并深克隆捕获一次快照，
+   * 返回 Map<boundary, TableReplayResultV2_ACU>。
+   *
+   * 只对「所有 boundary 共享同一起算 full checkpoint」的场景生效：此时从同一
+   * checkpoint 起算、沿 frame 顺序推进到各 boundary，语义与「分别冷 replay 到
+   * 每个 boundary」完全一致（同一 state/aliasContext/runtime 生命周期，alias
+   * registry 推导不丢）。任何 boundary 起算 checkpoint 不同（跨 checkpoint 段）
+   * 时，本选项被忽略，调用方应回退逐次冷 replay。
+   *
+   * 仅在 updateRuntimeState:false（只读路径）生效；副作用路径不得用多 boundary
+   * 捕获（中间 materialize 会破坏 schedule replay 的连续性）。
+   */
+  captureBoundaries?: number[];
+  /**
+   * 阶段 H：前向捕获结果写入的目标容器（可选）。
+   *
+   * 与 captureBoundaries 配合：core 在每个命中 boundary 处 materialize 并深克隆
+   * 快照后写入此 Map（key=boundary 消息索引）。仅 updateRuntimeState:false 生效。
+   * 未传入时 core 使用内部临时 Map（快照随调用结束丢弃，等价于无 capture 消费方，
+   * 零额外成本）。外层多 boundary API 必须传入才能读回各 boundary 快照。
+   */
+  captureSink?: Map<number, TableReplayResultV2_ACU>;
 }
 
 /**
@@ -1934,6 +1962,21 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
   let headerOnlyTemplateFingerprint = '';
   runtime.syncBridge = new SyncBridge(runtime.engine);
   const metrics = createReplayMetrics_ACU();
+  // 阶段 H：多 boundary 前向捕获状态。captureBoundarySet 是待捕获的 boundary
+  // 集合（递增），capturedBoundaries 收集已捕获快照。仅当调用方传入
+  // captureBoundaries 且当前是只读路径时才初始化；否则为空 Set/Map，捕获逻辑
+  // 零开销（has/delete 对空 Set 恒 false）。
+  //
+  // 捕获结果写入调用方传入的 captureSink（外层多 boundary API 借此读回各 boundary
+  // 快照）；未传则用内部临时 Map，快照随本次调用结束丢弃（等价于无消费方，零
+  // 额外成本）。主结果不携带捕获 Map，避免在 result 上引入与现有契约不符的新字段。
+  const captureBoundarySet = new Set<number>(
+    options.updateRuntimeState === false
+      ? (Array.isArray(options.captureBoundaries) ? options.captureBoundaries : [])
+      : [],
+  );
+  const capturedBoundaries = options.captureSink
+    ?? new Map<number, TableReplayResultV2_ACU>();
 
   try {
     // 阶段 B2：单次回放调用内复用的 alias registry 上下文。仅在此调用内
@@ -2120,10 +2163,42 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
         }
       }
       await applyDueIntroductions(Number.POSITIVE_INFINITY);
+      // 阶段 H：多 boundary 前向捕获。命中 captureBoundaries 的消息索引在
+      // 该 frame 处理完毕（state 完整、SQLite 已 materialize）后捕获一次快照。
+      // 仅只读路径（updateRuntimeState:false）允许：中间 materialize 不会破坏
+      // schedule replay（只读路径本就不写 schedule），且捕获的是该 boundary 的
+      // canonical 完整状态。同起算 checkpoint 语义下，此快照与「单独 replay 到
+      // 该 boundary」完全一致。
+      if (captureBoundarySet.size > 0 && captureBoundarySet.has(ref.messageIndex)) {
+        if (options.updateRuntimeState !== false) {
+          throw new Error('[V2 Replay] captureBoundaries 仅在 updateRuntimeState:false 的只读路径下允许。');
+        }
+        // captureBoundaries 非空时 capturedBoundaries 恒为实际容器（传入的
+        // captureSink 或内部临时 Map），此处直接写入。快照携带该 boundary 的
+        // baseKind 与 repair 状态：外层 API 须据此校验（任一 boundary 依赖 repair
+        // 即整体失败，不得返回不完整快照）。metrics 为该 boundary 捕获时的累计值
+        // 浅拷贝（不共享同一引用，外层可安全持有各快照）。
+        await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+        const snapshotBaseKind = baseKind;
+        const snapshotRepairs = compatibilityRepairs.length > 0 ? [...compatibilityRepairs] : undefined;
+        capturedBoundaries.set(ref.messageIndex, {
+          data: deepClone_ACU(state),
+          baseKind: snapshotBaseKind,
+          metrics: { ...metrics },
+          capturedBoundary: ref.messageIndex,
+          ...(snapshotRepairs ? { compatibilityRepairs: snapshotRepairs } : {}),
+          ...(snapshotRepairs ? { requiresCheckpointConvergence: true } : {}),
+        });
+        captureBoundarySet.delete(ref.messageIndex);
+      }
     }
 
     // replay 结束：SQLite 仍为权威状态时最后导出一次并 dispose，保持单 Database 峰值。
     await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+    // 阶段 H：捕获全部命中后，主结果 data 以最终 state 为准（与单边界语义一致）；
+    // capturedBoundaries 由调用方通过 loadTableStatesAtBoundariesFromFramesV2Detailed_ACU
+    // 读取。若捕获列表非空（部分 boundary 未命中——例如 boundary 早于起算 checkpoint
+    // 或超出 frameRefs 范围），按失败处理：调用方应回退逐次冷 replay。
     return {
       data: state,
       baseKind,
@@ -2150,8 +2225,15 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
   const currentHeadRevisionDigest = computeReplayHeadRevisionDigest_ACU(chat, isolationKey);
   // updateRuntimeState:true 时不得复用（需副作用）；此处证据仅由 false 路径写入，
   // 命中必然为 false，但防御性再确认一次。
+  // 阶段 H：captureBoundaries 非空（多 boundary 前向捕获）时禁止 evidence 复用与
+  // 写入——捕获路径必须真实跑完 core 才能把各 boundary 快照写入 captureSink，
+  // 命中 evidence 直接 return 会绕过 core 导致 sink 为空（外层误判全部未命中而
+  // 回退冷 replay）；且 capture 最终态（maxMessageIndex:undefined）若被写成
+  // evidence，会命中普通加载的复用校验、污染语义。捕获路径与 evidence 严格互斥。
+  const captureMode = Array.isArray(options.captureBoundaries) && options.captureBoundaries.length > 0;
   const evidenceReusable = !!evidence
   && !options.updateRuntimeState
+    && !captureMode
     && validateV2ReplayEvidenceFresh_ACU(
       evidence, chat, isolationKey,
       { maxMessageIndex: options.maxMessageIndex },
@@ -2233,6 +2315,7 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
     if (evidence
       && result
       && !options.updateRuntimeState
+      && !captureMode
       && result.baseKind === 'full_checkpoint'
       && !result.compatibilityRepairs?.length
       && !result.requiresCheckpointConvergence) {
@@ -2264,6 +2347,113 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
     throw error;
   }
 }
+
+/**
+ * 阶段 H：多 boundary 一次前向 replay（简化版）。
+ *
+ * 对同一 candidateChat/isolationKey 上的多个递增 boundary 捕获 canonical 快照。
+ * 仅当**所有 boundary 共享同一起算 full checkpoint**（从各自 frameRefs 反向查找
+ * 的最后一个 full checkpoint 完全相同）时走前向捕获：从该 checkpoint 起算、沿
+ * frame 顺序推进，在每个命中 boundary 处 materialize 并深克隆快照。此语义与
+ * 「分别冷 replay 到每个 boundary」完全一致（同一 state/aliasContext/runtime
+ * 生命周期，alias registry 推导不丢），但 frame 扫描与 SQL 执行只发生一次。
+ *
+ * 任一起算 checkpoint 不同（跨 checkpoint 段）时回退**逐次冷 replay**（与当前
+ * 行为完全一致），不做部分前向捕获——避免在共享前缀不完整时产生错误快照。
+ *
+ * 仅支持 updateRuntimeState:false（只读路径）；副作用路径拒绝多 boundary 捕获。
+ * 任一 boundary 的 replay 失败（baseKind 非 full_checkpoint / 依赖 repair /
+ * 抛错）时整体失败并抛出，调用方保持原有逐边界校验语义。
+ *
+ * @returns Map<boundary, TableReplayResultV2_ACU>，key 严格递增，每个结果的
+ *   capturedBoundary 标记对应 boundary。
+ */
+export async function loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(
+  chatArg: any[] | null | undefined,
+  isolationKeyArg: string,
+  boundaries: readonly number[],
+  options: Omit<LoadTableStateFromFramesV2Options_ACU, 'captureBoundaries' | 'maxMessageIndex'> = {},
+): Promise<Map<number, TableReplayResultV2_ACU>> {
+  const chat = chatArg || getChatArray_ACU();
+  if (!Array.isArray(chat) || chat.length === 0) return new Map();
+  if (options.updateRuntimeState !== false) {
+    throw new Error('[V2 Replay] loadTableStatesAtBoundariesFromFramesV2Detailed_ACU 仅支持 updateRuntimeState:false 只读路径。');
+  }
+  if (!Array.isArray(boundaries) || boundaries.length === 0) return new Map();
+
+  const isolationKey = isolationKeyArg ?? getCurrentIsolationKey_ACU();
+  // 注意 boundary 语义：maxMessageIndex 是「处理 messageIndex ≤ boundary 的所有
+  // 帧」的上界，而非「boundary 处必须有帧」。聊天末尾可能是无 storage frame 的
+  // 消息（例如末尾 AI 楼层未落盘），boundary=chat.length-1 依然合法：replay 到
+  // 不晚于它的最后一个帧。因此**不做**越界拒绝——超出最大帧的 boundary 等价于
+  // 不设上限（处理全量），与既有 maxMessageIndex 语义完全一致。
+  const allFrameRefs = getV2FrameRefs_ACU(chat, isolationKey);
+  // 每个 boundary 的起算 checkpoint：该 boundary 的 frameRefs 中最后一个 full checkpoint。
+  // 全部相同才允许前向捕获；否则回退逐次冷 replay。
+  const roots = new Map<number, number | null>();
+  for (const boundary of boundaries) {
+    const frameRefs = allFrameRefs
+      .filter(ref => ref.messageIndex <= boundary);
+    const checkpointRef = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+    roots.set(boundary, checkpointRef?.messageIndex ?? null);
+  }
+  const firstRoot = roots.values().next().value as number | null;
+  const allShareRoot = [...roots.values()].every(root => root === firstRoot && root !== null);
+
+  if (allShareRoot) {
+    // 前向捕获：单次 replay，captureBoundaries 驱动中间快照。
+    const sorted = [...boundaries].sort((a, b) => a - b);
+    // 调用方传入的可写容器：core 在捕获时写入，此处读回各 boundary 快照。
+    // 若不传容器，core 使用内部临时 Map（结果随调用结束丢弃），本函数将读不到
+    // 中间快照——因此必须显式传入，杜绝「静默只返回最终态」的错误语义。
+    const captureSink = new Map<number, TableReplayResultV2_ACU>();
+    const result = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+      ...options,
+      updateRuntimeState: false,
+      captureBoundaries: sorted,
+      captureSink,
+    });
+    if (!result || result.baseKind !== 'full_checkpoint') {
+      throw new Error('[V2 Replay] 多 boundary 前向捕获未建立正式 full checkpoint 基底。');
+    }
+    // 主结果只反映最终 boundary 的 state；各 boundary 快照从 sink 读回。校验：
+    // 1) 每个 boundary 都命中（sink 覆盖全部传入值）——部分未命中说明该 boundary
+    //    早于起算 checkpoint 或超出 frameRefs 范围，返回不完整 Map 会误导调用方；
+    // 2) 任一快照依赖 repair 或非 full_checkpoint 基——拒绝返回不完整快照。
+    // 任一校验失败都回退逐次冷 replay（与既有逐边界语义一致，保证正确性优先）。
+    const missing = sorted.filter(boundary => !captureSink.has(boundary));
+    const invalid = [...captureSink.entries()].filter(
+      ([, snap]) => snap.baseKind !== 'full_checkpoint'
+        || snap.compatibilityRepairs?.length
+        || snap.requiresCheckpointConvergence,
+    );
+    if (missing.length === 0 && invalid.length === 0) {
+      const results = new Map<number, TableReplayResultV2_ACU>();
+      for (const boundary of sorted) results.set(boundary, captureSink.get(boundary)!);
+      return results;
+    }
+    // 覆盖不全或有 repair：回退逐次冷 replay（下方共用回退路径）。
+  }
+
+  // 回退路径：逐次冷 replay（与既有逐边界语义完全一致）。
+  const results = new Map<number, TableReplayResultV2_ACU>();
+  for (const boundary of [...boundaries].sort((a, b) => a - b)) {
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+      ...options,
+      updateRuntimeState: false,
+      maxMessageIndex: boundary,
+    });
+    if (!replay || replay.baseKind !== 'full_checkpoint') {
+      throw new Error(`[V2 Replay] 多 boundary 回退 replay 未建立正式基底：boundary=${boundary}。`);
+    }
+    if (replay.compatibilityRepairs?.length || replay.requiresCheckpointConvergence) {
+      throw new Error(`[V2 Replay] 多 boundary 回退 replay 依赖兼容修复：boundary=${boundary}。`);
+    }
+    results.set(boundary, { ...replay, capturedBoundary: boundary });
+  }
+  return results;
+}
+
 
 export async function loadTableStateFromFramesV2_ACU(
   chatArg?: any[],

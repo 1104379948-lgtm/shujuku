@@ -21,7 +21,7 @@ import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-histor
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { logDebug_ACU, logWarn_ACU, logError_ACU } from '../../shared/utils';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
-import { loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
+import { loadTableStateFromFramesV2Detailed_ACU, loadTableStatesAtBoundariesFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from './canonical-checkpoint-builder';
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import type {
@@ -554,12 +554,14 @@ export async function establishProvisionalBridge_ACU(
 
     // 5. 候选聊天验证：首 bucket 前、原 full 边界、聊天末端。
     try {
-      for (const boundary of [rangeStartMessageIndex, originalFullCheckpointIndex - 1, candidateChat.length - 1]) {
-        const replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
-          maxMessageIndex: boundary,
-          updateRuntimeState: false,
-          compatibilityMode: 'disabled',
-        });
+      // 阶段 H：三个 boundary 共享同一起算根时一次前向捕获；跨根/越界时
+      // 内部回退逐次冷 replay 或抛错。校验语义与逐边界完全一致（下方循环不变）。
+      const boundaryStates = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(
+        candidateChat, isolationKey,
+        [rangeStartMessageIndex, originalFullCheckpointIndex - 1, candidateChat.length - 1],
+        { updateRuntimeState: false, compatibilityMode: 'disabled' },
+      );
+      for (const [boundary, replay] of boundaryStates) {
         if (!replay || replay.baseKind !== 'full_checkpoint') {
           return { ok: false, error: `provisional bridge 候选 replay 未建立正式基底：boundary=${boundary}。`, diagnosticCode: 'bridge_replay_mismatch' };
         }
@@ -756,12 +758,13 @@ export async function finalizeProvisionalBridge_ACU(
 
     // 5. 候选 replay 验证：原 full 边界与聊天末端。
     try {
-      for (const boundary of [bridge.originalFullCheckpointIndex, candidateChat.length - 1]) {
-        const verifyReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
-          maxMessageIndex: boundary,
-          updateRuntimeState: false,
-          compatibilityMode: 'disabled',
-        });
+      // 阶段 H：双边界一次前向捕获（同根）或回退逐次冷 replay，校验语义不变。
+      const boundaryStates = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(
+        candidateChat, isolationKey,
+        [bridge.originalFullCheckpointIndex, candidateChat.length - 1],
+        { updateRuntimeState: false, compatibilityMode: 'disabled' },
+      );
+      for (const [boundary, verifyReplay] of boundaryStates) {
         if (!verifyReplay || verifyReplay.baseKind !== 'full_checkpoint' || !verifyReplay.data) {
           return { ok: false, error: `bridge finalize 候选 replay 未建立正式基底：boundary=${boundary}。`, diagnosticCode: 'bridge_replay_mismatch' };
         }

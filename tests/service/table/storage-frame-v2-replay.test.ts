@@ -13,7 +13,7 @@ vi.mock('../../../src/shared/utils', async () => {
   return { ...actual, logWarn_ACU: mockLogWarn };
 });
 
-import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU, V2ReplayAbortedError_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU, loadTableStatesAtBoundariesFromFramesV2Detailed_ACU, V2ReplayAbortedError_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU, buildSheetSchemaMigrationOperationV2_ACU } from '../../../src/service/table/table-schema-migration';
 import { applySqlEditsToTableDataSnapshot_ACU } from '../../../src/service/table/sql-table-service';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
@@ -5529,6 +5529,119 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
 
     // 副作用路径禁止 yield：中途让出会引入重入窗口，改写全局 schedule state。
     expect(result?.metrics?.yieldCount).toBe(0);
+  });
+
+
+  it('阶段 H：同 checkpoint 根多 boundary 前向捕获，结果与分别冷 replay 完全一致', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+    const boundaries = [10, 30, 50];
+
+    // 基线：对每个 boundary 分别冷 replay（逐次冷回放，语义权威）。
+    const coldByBoundary = new Map<number, any>();
+    for (const boundary of boundaries) {
+      const cold = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+        updateRuntimeState: false,
+        maxMessageIndex: boundary,
+      });
+      expect(cold).not.toBeNull();
+      expect(cold!.baseKind).toBe('full_checkpoint');
+      coldByBoundary.set(boundary, cold!.data);
+    }
+
+    // 前向捕获：单次 replay，captureBoundaries 驱动中间快照。
+    const captured = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(chat, '', boundaries, {
+      updateRuntimeState: false,
+    });
+
+    expect(captured.size).toBe(boundaries.length);
+    for (const boundary of boundaries) {
+      const snap = captured.get(boundary);
+      expect(snap).toBeDefined();
+      expect(snap!.baseKind).toBe('full_checkpoint');
+      expect(snap!.capturedBoundary).toBe(boundary);
+      // 核心正确性：前向捕获快照与分别冷 replay 的 canonical data 完全一致。
+      expect(snap!.data).toEqual(coldByBoundary.get(boundary));
+    }
+    // 快路径可观测性：前向捕获是「单次 SQL 扫描、多快照」——各快照 metrics
+    // 是同一轮累计的递增序列，且起算根是 messageIndex 0（replayStart=0），
+    // 最大 boundary 快照的 frameCount = 0..50 共 51 帧。若悄悄回退逐次冷 replay，
+    // 各快照 frameCount 会等于各自 boundary 的截断值（6/31/51），此处可区分。
+    const frameCounts = [...captured.values()].map(snap => snap!.metrics!.frameCount);
+    expect(frameCounts[0]).toBeLessThan(frameCounts[1]);
+    expect(frameCounts[1]).toBeLessThan(frameCounts[2]);
+    expect(frameCounts).toEqual([11, 31, 51]);
+    // key 严格递增。
+    expect([...captured.keys()]).toEqual([10, 30, 50]);
+  });
+
+  it('阶段 H：跨 checkpoint 段（不同起算根）时回退逐次冷 replay，结果仍一致', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+    // 在第 10 帧后插入第二个 full checkpoint：使 [0..9] 与 [10..61] 起算根不同。
+    const secondCheckpointChat = [...chat];
+    // 第二个 checkpoint 必须包含全部 17 张表（后续帧的 sql_sheet_batch 引用
+    // tbl_11 等物理表），因此直接深拷贝初始 checkpoint 数据作为其内容。
+    const secondCheckpointData = structuredClone(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data);
+    secondCheckpointChat[10] = {
+      ...secondCheckpointChat[10],
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 999, reason: 'second', data: secondCheckpointData },
+            logEntries: [],
+          },
+        },
+      },
+    };
+    const boundaries = [5, 12, 20];
+
+    // 分别冷 replay（基线）。
+    const coldByBoundary = new Map<number, any>();
+    for (const boundary of boundaries) {
+      const cold = await loadTableStateFromFramesV2Detailed_ACU(secondCheckpointChat, '', {
+        updateRuntimeState: false,
+        maxMessageIndex: boundary,
+      });
+      expect(cold).not.toBeNull();
+      coldByBoundary.set(boundary, cold!.data);
+    }
+
+    // 跨 checkpoint 段：allShareRoot 应为 false，走回退逐次冷 replay。
+    const captured = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(secondCheckpointChat, '', boundaries, {
+      updateRuntimeState: false,
+    });
+
+    expect(captured.size).toBe(boundaries.length);
+    for (const boundary of boundaries) {
+      const snap = captured.get(boundary);
+      expect(snap).toBeDefined();
+      expect(snap!.data).toEqual(coldByBoundary.get(boundary));
+      expect(snap!.capturedBoundary).toBe(boundary);
+    }
+    // 回退路径可观测性：逐次冷 replay 时每个快照 frameCount = 该 boundary 的
+    // replayStart 起算帧数。boundary=5 从根 0 起算 → 0..5 共 6 帧；boundary=12/20
+    // 从第二个 checkpoint（messageIndex 10）起算 → 10..12 共 3 帧、10..20 共 11 帧。
+    const frameCounts = [...captured.values()].map(snap => snap!.metrics!.frameCount);
+    expect(frameCounts).toEqual([6, 3, 11]);
+  });
+
+  it('阶段 H：boundary 超出 frameRefs 范围时等价于全量上界（与原 maxMessageIndex 语义一致）', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+    const boundaries = [10, 30, 9999]; // 9999 超出 frameRefs 范围。
+
+    // maxMessageIndex 是「处理 ≤ boundary 的所有帧」的上界：chat 只有 62 条消息，
+    // 9999 等价于不设上限（处理全量）。capture 对 9999 不会命中（core 只遍历实际
+    // frameRefs）→ sink 缺 key → 回退逐次冷 replay。回退路径 maxMessageIndex=9999
+    // 返回全量末尾态——这正是原 maxMessageIndex 语义，不是错误快照。
+    const captured = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(chat, '', boundaries, {
+      updateRuntimeState: false,
+    });
+
+    expect(captured.size).toBe(3);
+    expect(captured.get(9999)).toBeDefined();
+    // 9999 的快照 = 全量 replay（无上限），其 frameCount 应为 62（0..61 全部帧）。
+    expect(captured.get(9999)!.metrics!.frameCount).toBe(62);
   });
 
 
