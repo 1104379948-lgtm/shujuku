@@ -29,7 +29,7 @@ import {
 import { allocateStableSheetKeys_ACU } from '../../shared/sheet-identity';
 import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
 import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
-import { deriveSheetLifecycleFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
+import { deriveSheetLifecycleFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, loadTableStateFromFramesV2Detailed_ACU, V2ReplayAbortedError_ACU } from '../table/storage-frame-v2-replay';
 import type { TableSheetLifecycleProjectionV2_ACU } from '../table/storage-frame-v2-types';
 import { resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { resolveTemplateSwitchMode_ACU } from '../table/template-switch-mode-resolver';
@@ -621,7 +621,20 @@ async function loadConsistentTemplateBaseline_ACU(isolationKey: string, signal?:
     for (let attempt = 0; attempt < 2; attempt += 1) {
         if (signal?.aborted) return { error: '模板提交已取消。' };
         const beforeRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
-        const replay = await loadTableStateFromFramesV2Detailed_ACU(undefined, isolationKey, { updateRuntimeState: false });
+        // 阶段 I：把 signal 交给 replay 本身。长历史冷回放需数秒，此前只能在
+        // replay 前后检查取消，期间用户切聊天/取消只能干等；现在可在 frame/entry
+        // 边界中断。abort 必须转换成既有 { error } 契约上报，不得向上抛——本函数
+        // 的调用方按返回值分支处理，抛出会绕过它们的取消提示与状态复位。
+        let replay: Awaited<ReturnType<typeof loadTableStateFromFramesV2Detailed_ACU>>;
+        try {
+            replay = await loadTableStateFromFramesV2Detailed_ACU(undefined, isolationKey, {
+                updateRuntimeState: false,
+                ...(signal ? { signal } : {}),
+            });
+        } catch (error) {
+            if (error instanceof V2ReplayAbortedError_ACU) return { error: '模板提交已取消。' };
+            throw error;
+        }
         if (signal?.aborted) return { error: '模板提交已取消。' };
         if (hasStructuralReplayCompatibilityRepairs_ACU(replay?.compatibilityRepairs)) {
             const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];

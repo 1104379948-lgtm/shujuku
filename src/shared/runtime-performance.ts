@@ -54,7 +54,9 @@ const SAFE_METRIC_KEYS_ACU = new Set([
   // v2-replay 纯数值安全指标（阶段 A）：只允许有限整数计数，绝不记录 SQL 文本、
   // 表名、角色内容、单元格、DDL 原文或聊天标识。
   'sqlOperationCount', 'tableAliasBuildCount', 'columnAliasBuildCount',
-  'aliasInvalidateCount', 'sqliteHydrateCount', 'sqliteMaterializeCount',
+  'columnRebindCount', 'aliasInvalidateCount', 'aliasCacheHitCount',
+  'sqliteHydrateCount', 'sqliteMaterializeCount',
+  'replayReuseCount', 'replayReuseFallbackCount',
 ]);
 
 let nextSpanId_ACU = 1;

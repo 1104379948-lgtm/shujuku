@@ -13,7 +13,7 @@ vi.mock('../../../src/shared/utils', async () => {
   return { ...actual, logWarn_ACU: mockLogWarn };
 });
 
-import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU, V2ReplayAbortedError_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU, buildSheetSchemaMigrationOperationV2_ACU } from '../../../src/service/table/table-schema-migration';
 import { applySqlEditsToTableDataSnapshot_ACU } from '../../../src/service/table/sql-table-service';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
@@ -1489,6 +1489,188 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       sheet_0: expect.objectContaining({ content: [['row_id', 'name'], ['1', '铁剑'], ['2', '药水']] }),
     });
   });
+
+  it('阶段 B1：DML → legacy meta_update(name/tableAliases) → DML：warm 与 cold 结果一致且发生失效', async () => {
+    // 场景：legacy patches 中 meta_update 修改 sheet.name 与 sourceData.tableAliases
+    // （身份证据变化），后续 sql_sheet_batch 必须用新身份重绑，否则旧 registry 会
+    // 错误映射并写错表。
+    const makeChat = () => [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init',
+              data: {
+                mate: { type: 'acu', version: 1 },
+                sheet_0: {
+                  uid: 'uid_0', name: '旧名称',
+                  content: [['row_id', 'name'], ['1', '铁剑']],
+                  sourceData: {
+                    ddl: 'CREATE TABLE tbl_0 (row_id INTEGER PRIMARY KEY, name TEXT);',
+                    tableAliases: ['旧名称'],
+                  },
+                  updateConfig: {}, exportConfig: {}, orderNo: 0,
+                },
+              },
+            },
+            logEntries: [
+              {
+                seq: 1, entryId: 'patch-meta', createdAt: 2, source: 'manual_crud',
+                targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: ['sheet_0'],
+                groupKeys: [],
+                patches: [{
+                  kind: 'meta_update', sheetKey: 'sheet_0',
+                  meta: { name: '新名称', sourceData: { tableAliases: ['新名称'] } },
+                }],
+              },
+              {
+                seq: 2, entryId: 'sql-after-meta', createdAt: 3, source: 'manual_crud',
+                targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: ['sheet_0'],
+                groupKeys: [],
+                operations: [{
+                  kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'tbl_0',
+                  statements: ['INSERT INTO 新名称 (name) VALUES (?)'],
+                  params: [['旧名SQL']], reason: 'system',
+                }],
+              },
+            ],
+          },
+        },
+      },
+    }];
+
+    const warm = await loadTableStateFromFramesV2Detailed_ACU(makeChat(), '', { updateRuntimeState: false });
+    const cold = await loadTableStateFromFramesV2Detailed_ACU(makeChat(), '',
+      { updateRuntimeState: false, enableAliasContext: false });
+
+    // canonical 数据一致（meta_update 后新表名/别名生效，后续 SQL 命中新身份）。
+    expect(warm?.data).toEqual(cold?.data);
+    expect(warm?.data.sheet_0.name).toBe('新名称');
+    expect(warm?.data.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑'], ['2', '旧名SQL']]);
+    // legacy patches 身份变更触发失效：warm 计数一次（enabled 路径）。
+    expect(warm?.metrics?.aliasInvalidateCount).toBeGreaterThanOrEqual(1);
+    expect(cold?.metrics?.aliasInvalidateCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('阶段 B1：DML → legacy sheet_replace → DML：warm 与 cold 一致且发生失效', async () => {
+    const makeChat = () => [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init',
+              data: {
+                mate: { type: 'acu', version: 1 },
+                sheet_0: {
+                  uid: 'uid_0', name: '旧表',
+                  content: [['row_id', 'name'], ['1', '铁剑']],
+                  sourceData: { ddl: 'CREATE TABLE old_tbl (row_id INTEGER PRIMARY KEY, name TEXT);' },
+                  updateConfig: {}, exportConfig: {}, orderNo: 0,
+                },
+              },
+            },
+            logEntries: [
+              {
+                seq: 1, entryId: 'patch-replace', createdAt: 2, source: 'manual_crud',
+                targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: ['sheet_0'],
+                groupKeys: [],
+                patches: [{
+                  kind: 'sheet_replace', sheetKey: 'sheet_0',
+                  reason: 'schema_change',
+                  sheet: {
+                    uid: 'uid_0', name: '新表',
+                    content: [['row_id', 'name'], ['1', '铁剑']],
+                    sourceData: { ddl: 'CREATE TABLE new_tbl (row_id INTEGER PRIMARY KEY, name TEXT);' },
+                    updateConfig: {}, exportConfig: {}, orderNo: 0,
+                  },
+                }],
+              },
+              {
+                seq: 2, entryId: 'sql-after-replace', createdAt: 3, source: 'manual_crud',
+                targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: ['sheet_0'],
+                groupKeys: [],
+                operations: [{
+                  kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'old_tbl',
+                  statements: ['INSERT INTO new_tbl (name) VALUES (?)'],
+                  params: [['替换后SQL']], reason: 'system',
+                }],
+              },
+            ],
+          },
+        },
+      },
+    }];
+
+    const warm = await loadTableStateFromFramesV2Detailed_ACU(makeChat(), '', { updateRuntimeState: false });
+    const cold = await loadTableStateFromFramesV2Detailed_ACU(makeChat(), '',
+      { updateRuntimeState: false, enableAliasContext: false });
+
+    expect(warm?.data).toEqual(cold?.data);
+    expect(warm?.data.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑'], ['2', '替换后SQL']]);
+    expect(warm?.metrics?.aliasInvalidateCount).toBeGreaterThanOrEqual(1);
+    expect(cold?.metrics?.aliasInvalidateCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('阶段 B1：DML → legacy row_upsert/row_delete → DML：不失效但结果一致', async () => {
+    const makeChat = () => [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init',
+              data: {
+                mate: { type: 'acu', version: 1 },
+                sheet_0: {
+                  uid: 'uid_0', name: '表',
+                  content: [['row_id', 'name'], ['1', '铁剑'], ['2', '药水']],
+                  sourceData: { ddl: 'CREATE TABLE tbl_0 (row_id INTEGER PRIMARY KEY, name TEXT);' },
+                  updateConfig: {}, exportConfig: {}, orderNo: 0,
+                },
+              },
+            },
+            logEntries: [
+              {
+                seq: 1, entryId: 'patch-upsert', createdAt: 2, source: 'manual_crud',
+                targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: ['sheet_0'],
+                groupKeys: [],
+                patches: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '改名药水'] }],
+              },
+              {
+                seq: 2, entryId: 'sql-after-data', createdAt: 3, source: 'manual_crud',
+                targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: ['sheet_0'],
+                groupKeys: [],
+                operations: [{
+                  kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'tbl_0',
+                  statements: ['INSERT INTO tbl_0 (name) VALUES (?)'],
+                  params: [['数据行SQL']], reason: 'system',
+                }],
+              },
+            ],
+          },
+        },
+      },
+    }];
+
+    const warm = await loadTableStateFromFramesV2Detailed_ACU(makeChat(), '', { updateRuntimeState: false });
+    const cold = await loadTableStateFromFramesV2Detailed_ACU(makeChat(), '',
+      { updateRuntimeState: false, enableAliasContext: false });
+
+    expect(warm?.data).toEqual(cold?.data);
+    expect(warm?.data.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑'], ['2', '改名药水'], ['3', '数据行SQL']]);
+    // row_upsert/row_delete 不改身份：aliasInvalidateCount 不因数据 patch 递增。
+    expect(warm?.metrics?.aliasInvalidateCount).toBe(0);
+    expect(cold?.metrics?.aliasInvalidateCount).toBe(0);
+  });
+
 
   it('DSL 删除中间行后插入使用最大 row_id + 1，且保留 0 和 false', async () => {
     const checkpointData = makeCheckpointData();
@@ -4959,11 +5141,17 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
       logEntryCount: 1,
       operationCount: 1,
       sqlOperationCount: 1,
+      columnRebindCount: 0,
       tableAliasBuildCount: 1,
       columnAliasBuildCount: 1,
       aliasInvalidateCount: 0,
+      // 单条 sql operation：表/列 registry 均为冷构建，无命中。
+      aliasCacheHitCount: 0,
       sqliteHydrateCount: 1,
       sqliteMaterializeCount: 1,
+      // 未传 evidence：既不命中复用，也不计入失配。
+      replayReuseCount: 0,
+      replayReuseFallbackCount: 0,
     });
   });
 
@@ -5000,11 +5188,15 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
       logEntryCount: 1,
       operationCount: 1,
       sqlOperationCount: 0,
+      columnRebindCount: 0,
       tableAliasBuildCount: 0,
       columnAliasBuildCount: 0,
       aliasInvalidateCount: 0,
+      aliasCacheHitCount: 0,
       sqliteHydrateCount: 0,
       sqliteMaterializeCount: 0,
+      replayReuseCount: 0,
+      replayReuseFallbackCount: 0,
     });
   });
 
@@ -5012,7 +5204,9 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
   it('阶段 A 基线：17 表/62 帧/约 660 operation 长历史下 alias registry 近似逐 operation 构建', async () => {
     const { chat, totalSqlOperations, frameCount, totalOperations } = buildLongHistoryFixture_ACU();
 
-    const detailed = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    // 阶段 B2：alias context 默认开启；冷基线必须显式关闭，保持逐 operation 构建语义。
+    const detailed = await loadTableStateFromFramesV2Detailed_ACU(chat, '',
+      { updateRuntimeState: false, enableAliasContext: false });
 
     expect(detailed).not.toBeNull();
     expect(detailed?.metrics).toBeDefined();
@@ -5048,10 +5242,10 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
   it('阶段 B：enableAliasContext 后 alias registry 从逐 operation 构建降至每 state epoch 一次', async () => {
     const { chat, totalSqlOperations, frameCount } = buildLongHistoryFixture_ACU();
 
-    const cold = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const cold = await loadTableStateFromFramesV2Detailed_ACU(chat, '',
+      { updateRuntimeState: false, enableAliasContext: false });
     const warm = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
       updateRuntimeState: false,
-      enableAliasContext: true,
     });
 
     expect(cold?.data).toEqual(warm?.data);
@@ -5062,10 +5256,13 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     expect(coldM.tableAliasBuildCount).toBeGreaterThanOrEqual(totalSqlOperations);
     expect(coldM.columnAliasBuildCount).toBe(totalSqlOperations);
 
-    // 优化：每帧仅第一个 sql_sheet_batch 冷构建（其后 DML 命中缓存），
-    // data_replace 使 epoch 递增一次 → 构建次数 = 非首帧数。
+    // 优化（阶段 B）：每帧仅第一个 sql_sheet_batch 冷构建（其后 DML 命中缓存），
+    // data_replace 使 epoch 递增一次 → 表 registry 构建次数 = 非首帧数。
     expect(warmM.tableAliasBuildCount).toBe(frameCount - 1);
-    expect(warmM.columnAliasBuildCount).toBe(frameCount - 1);
+    // 优化（阶段 D）：列 registry 按 physicalName 惰性构建，每 epoch 只构建
+    // 被 sql_sheet_batch 命中的表。fixture 每帧 8 张不同表各一条 sql_sheet_batch
+    // （17 表中 8 张被命中，epoch 每帧失效一次），因此列构建次数 = 总 SQL operation 数。
+    expect(warmM.columnAliasBuildCount).toBe(totalSqlOperations);
     // 结构事件计数语义不变（flag 开/关均由失效点计数一次）。
     expect(warmM.aliasInvalidateCount).toBe(frameCount - 1);
     // SQL 执行次数不受缓存影响，语义等价。
@@ -5143,6 +5340,159 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     // 结构 SQL 是真实 SQLite 执行、JS state 不随之同步（计划第 6 条已知边界），
     // 本测试只断言构建次数与计数路径，不把 JS state 当 canonical。
   });
+
+  it('阶段 E：同 chat 同 boundary 的重复 replay 复用 evidence，且返回深克隆（不共享引用）', async () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const chat = makeChat([{
+      frame: {
+        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: sheet } },
+        logEntries: [{
+          seq: 1, entryId: 'e1', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+          filledSheetKeys: [], changedSheetKeys: ['sheet_a'], groupKeys: [],
+          operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '2', cells: ['2', 'y'] }],
+        }],
+      },
+    }]);
+
+    // 首次冷 replay 写入 evidence。
+    const evidence = {
+      data: null as any, chatIdentity: null as any, isolationKey: '', maxMessageIndex: undefined,
+      baseKind: 'full_checkpoint' as const, compatibilityRepairs: null as any, requiresCheckpointConvergence: false, headRevisionDigest: '', createdAt: 0,
+    };
+    const first = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      replayEvidence: evidence as any,
+    });
+    expect(first?.data.sheet_a.content).toEqual([['row_id', 'value'], ['1', 'x'], ['2', 'y']]);
+    expect(evidence.chatIdentity).toBe(chat);
+    expect(evidence.baseKind).toBe('full_checkpoint');
+    // 首次传入的是空 evidence（chatIdentity 未绑定）→ 判定失配、走冷回放并计入 fallback。
+    expect(first?.metrics?.replayReuseCount).toBe(0);
+    expect(first?.metrics?.replayReuseFallbackCount).toBe(1);
+
+    // 第二次同 chat 同 boundary 调用命中复用：内容一致且返回深克隆。
+    const second = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      replayEvidence: evidence as any,
+    });
+    expect(second?.data.sheet_a.content).toEqual(first?.data.sheet_a.content);
+    expect(second?.data).not.toBe(first?.data);
+    expect(second?.data.sheet_a).not.toBe(first?.data.sheet_a);
+    // 命中复用：整轮冷回放被跳过，reuse 计数为 1 且 frame/operation 均未再扫描。
+    expect(second?.metrics?.replayReuseCount).toBe(1);
+    expect(second?.metrics?.replayReuseFallbackCount).toBe(0);
+    expect(second?.metrics?.frameCount).toBe(0);
+  });
+
+  it('阶段 E：boundary 不同或 chat 引用不同时不命中，回退冷 replay', async () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const chat = makeChat([{
+      frame: {
+        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: sheet } },
+        logEntries: [],
+      },
+    }]);
+    const evidence = {
+      data: { sheet_a: { name: 'stale' } } as any, chatIdentity: chat, isolationKey: ISOLATION, maxMessageIndex: undefined,
+      baseKind: 'full_checkpoint' as const, compatibilityRepairs: null as any, requiresCheckpointConvergence: false, headRevisionDigest: '', createdAt: 0,
+    };
+
+    // boundary 不同（evidence 未定义 vs 调用 0）→ 不命中，返回真实 replay 结果。
+    const result = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      maxMessageIndex: 0,
+      replayEvidence: evidence as any,
+    });
+    expect(result?.data.sheet_a.name).toBe('sheet_a');
+    expect(result?.data.sheet_a.name).not.toBe('stale');
+    expect(result?.metrics?.replayReuseCount).toBe(0);
+    expect(result?.metrics?.replayReuseFallbackCount).toBe(1);
+
+    // chat 引用不同 → 不命中。
+    const otherChat = makeChat([{
+      frame: { checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: sheet } }, logEntries: [] },
+    }]);
+    const staleEvidence = {
+      ...evidence, chatIdentity: otherChat, maxMessageIndex: undefined,
+    };
+    const result2 = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      replayEvidence: staleEvidence as any,
+    });
+    expect(result2?.data.sheet_a.name).toBe('sheet_a');
+    expect(result2?.metrics?.replayReuseFallbackCount).toBe(1);
+  });
+
+  it('阶段 G：chat 内容原地变化（headRevision 递增）时 evidence 失效，回退冷 replay', async () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const chat = makeChat([{
+      frame: {
+        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: sheet } },
+        logEntries: [],
+      },
+    }]);
+    const evidence = {
+      data: { sheet_a: { name: 'stale' } } as any, chatIdentity: chat, isolationKey: ISOLATION, maxMessageIndex: undefined,
+      baseKind: 'full_checkpoint' as const, compatibilityRepairs: null as any, requiresCheckpointConvergence: false,
+      headRevisionDigest: 'rev:old', createdAt: 0,
+    };
+    // digest 不匹配（chat 实际无 headRevision → digest 空串）→ 不命中，返回真实 replay 结果。
+    const result = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      replayEvidence: evidence as any,
+    });
+    expect(result?.data.sheet_a.name).toBe('sheet_a');
+    expect(result?.data.sheet_a.name).not.toBe('stale');
+    // digest 失配必须计入 fallback：这是「快路径是否真的在拦截陈旧证据」的唯一可观测信号。
+    expect(result?.metrics?.replayReuseCount).toBe(0);
+    expect(result?.metrics?.replayReuseFallbackCount).toBe(1);
+  });
+
+  it('阶段 I：只读 replay 在 signal 已取消时于 frame 边界抛 V2ReplayAbortedError_ACU', async () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const chat = makeChat([{
+      frame: {
+        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: sheet } },
+        logEntries: [{
+          seq: 1, entryId: 'e1', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+          filledSheetKeys: [], changedSheetKeys: ['sheet_a'], groupKeys: [],
+          operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '2', cells: ['2', 'y'] }],
+        }],
+      },
+    }]);
+    const controller = new AbortController();
+    controller.abort();
+
+    // 专用错误类型而非裸 Error：调用方必须能把「用户取消/切聊天」与「回放真的失败」
+    // 分开，否则取消会被误记为回放故障并可能触发 V2 恢复流程。
+    await expect(loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      signal: controller.signal,
+    })).rejects.toBeInstanceOf(V2ReplayAbortedError_ACU);
+  });
+
+  it('阶段 I：未取消的 signal 不改变只读 replay 的正常结果', async () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const chat = makeChat([{
+      frame: {
+        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: sheet } },
+        logEntries: [{
+          seq: 1, entryId: 'e1', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+          filledSheetKeys: [], changedSheetKeys: ['sheet_a'], groupKeys: [],
+          operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '2', cells: ['2', 'y'] }],
+        }],
+      },
+    }]);
+    const controller = new AbortController();
+
+    const result = await loadTableStateFromFramesV2Detailed_ACU(chat, ISOLATION, {
+      updateRuntimeState: false,
+      signal: controller.signal,
+    });
+    expect(result?.data.sheet_a.content).toEqual([['row_id', 'value'], ['1', 'x'], ['2', 'y']]);
+  });
+
+
 
   it('full checkpoint 起算点：基底之前 hide 后又 reveal 的表，可见性由基底快照裁决', () => {
     const sheet = makeSheet('sheet_a', [['1', 'x']]);

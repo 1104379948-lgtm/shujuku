@@ -130,10 +130,24 @@ export function resolvePhysicalTableNames_ACU(data: TableDataObject_ACU | Record
   return result;
 }
 
+/**
+ * Reads a sheetKey out of an already-resolved physical-name map (see
+ * resolvePhysicalTableNames_ACU). Throws the same error as
+ * getPhysicalTableNameForSheet_ACU when the sheetKey is absent.
+ * Hot loops that hold a resolved map MUST use this instead of re-resolving
+ * the whole table data per sheet (O(S^2) pinyin slug work).
+ */
+export function getPhysicalTableNameFromResolvedMap_ACU(
+  resolved: ReadonlyMap<string, string>,
+  sheetKey: string,
+): string {
+  const physicalName = resolved.get(sheetKey);
+  if (!physicalName) throw new Error(`无法为 Sheet 分配 SQLite runtime 表名：${sheetKey}`);
+  return physicalName;
+}
+
 export function getPhysicalTableNameForSheet_ACU(data: TableDataObject_ACU | Record<string, unknown>, sheetKey: string): string {
-  const resolved = resolvePhysicalTableNames_ACU(data).get(sheetKey);
-  if (!resolved) throw new Error(`无法为 Sheet 分配 SQLite runtime 表名：${sheetKey}`);
-  return resolved;
+  return getPhysicalTableNameFromResolvedMap_ACU(resolvePhysicalTableNames_ACU(data), sheetKey);
 }
 
 /** Use resolvePhysicalTableNames_ACU whenever collision arbitration is possible. */

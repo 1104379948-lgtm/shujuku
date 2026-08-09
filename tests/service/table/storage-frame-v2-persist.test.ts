@@ -444,7 +444,19 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
 
     expect(result.saved).toBe(true);
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual(operations);
-    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', { maxMessageIndex: 0, updateRuntimeState: false });
+    // 阶段 F：单目标 persist 内部两次同 boundary replay 会透传去重 evidence，
+    // 故只断言 boundary 与只读语义，不锁定完整选项对象。
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', expect.objectContaining({ maxMessageIndex: 0, updateRuntimeState: false }));
+    // 去重通道保护：两次同 boundary replay 必须收到同一个 evidence 对象引用。
+    // mock 不会写回 evidence，因此引用共享是「第二次能复用第一次结果」的唯一可验证信号；
+    // 若哪次重构把它拆成两个独立对象，去重会静默退回两次冷回放而测试仍全绿。
+    const evidenceArgs = mocks.loadReplayDetailed.mock.calls
+      .map((call: any[]) => call[2]?.replayEvidence)
+      .filter((value: unknown) => Boolean(value));
+    expect(evidenceArgs.length).toBeGreaterThanOrEqual(2);
+    for (const passed of evidenceArgs) {
+      expect(passed).toBe(evidenceArgs[0]);
+    }
     expect(mocks.saveChat).toHaveBeenCalledOnce();
   });
 
@@ -546,10 +558,10 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
 
     expect(result.saved).toBe(true);
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
-    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', {
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', expect.objectContaining({
       maxMessageIndex: 0,
       updateRuntimeState: false,
-    });
+    }));
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual([operation]);
     expect(mocks.saveChat).toHaveBeenCalledOnce();
   });
@@ -1708,10 +1720,10 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result).toMatchObject({ saved: true });
-    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', {
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', expect.objectContaining({
       maxMessageIndex: 0,
       updateRuntimeState: false,
-    });
+    }));
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden).toMatchObject({
       timeline: { kind: 'sheet_reveal', activateAtMessageIndex: 0, afterSeq: 0 },
       data: { content: [['row_id', 'value']] },

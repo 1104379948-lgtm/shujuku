@@ -2104,6 +2104,26 @@ async function persistTableMutationLogV2Core_ACU(
   const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
   const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
   const writesReplayArtifact = operations.length > 0 || hasMetadataOnlyFillEvent || hasManualRefillProgress || replacement !== null;
+  // 阶段 F：单目标 persist 内部两次同 boundary 冷 replay 的去重证据。
+  // provisional convergence 校验（hasExistingCheckpoint 分支）与 append 前的 active
+  // sheet state 校验都用 maxMessageIndex=target.index + updateRuntimeState:false，
+  // boundary 与选项完全一致；两者之间 chat 只读不改（写入全部落在 cloneIsolatedData_ACU
+  // 派生的候选帧与 replacementIsolatedDataByMessageIndex 上），headRevision digest 不变，
+  // 因此第二次可复用第一次结果，省一整轮冷回放。
+  //
+  // 只在两次调用必定同时触发时才创建证据：hasExistingCheckpoint 为真必然
+  // hasCheckpointAnywhere 为真 → shouldCheckpoint 为假 → 必走 shouldAppendLogEntry 分支。
+  // 否则传 null：只写不读时 replay 仍会为写回付一次全表 deepClone —— 纯亏（阶段 G1 已实证）。
+  //
+  // 语义等价性：evidence 仅在无 compatibilityRepairs 且无 requiresCheckpointConvergence 时
+  // 写入，故命中时第二处的 repairs 判定与冷回放同为空集；有 repair 时不写证据、第二处自然冷回放。
+  const bothBoundaryReplaysWillRun = hasExistingCheckpoint
+    && writesReplayArtifact
+    && operations.some(operation => typeof (operation as any)?.sheetKey === 'string'
+      && (operation as any).sheetKey.startsWith('sheet_'));
+  const boundaryReplayEvidence = bothBoundaryReplaysWillRun
+    ? ({} as import('./v2-replay-session').V2ReplayEvidence_ACU)
+    : null;
   // V2 replay 只从最后一个 full checkpoint 开始。向该 checkpoint 之前写入任何
   // operation、填表事件或追平进度都会制造“保存成功但永远无法回放”的伪提交；不能等到
   // terminal progress-only 写入时才暴露问题。
@@ -2149,6 +2169,7 @@ async function persistTableMutationLogV2Core_ACU(
       replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
         maxMessageIndex: target.index,
         updateRuntimeState: false,
+        ...(boundaryReplayEvidence ? { replayEvidence: boundaryReplayEvidence } : {}),
         ...(options.performanceRunId ? { performanceRunId: options.performanceRunId } : {}),
         ...(options.performanceParentSpanId
           ? { performanceParentSpanId: options.performanceParentSpanId }
@@ -2385,6 +2406,7 @@ async function persistTableMutationLogV2Core_ACU(
         replayBeforeAppend = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
           maxMessageIndex: target.index,
           updateRuntimeState: false,
+          ...(boundaryReplayEvidence ? { replayEvidence: boundaryReplayEvidence } : {}),
           ...(options.performanceRunId ? { performanceRunId: options.performanceRunId } : {}),
           ...(options.performanceParentSpanId
             ? { performanceParentSpanId: options.performanceParentSpanId }

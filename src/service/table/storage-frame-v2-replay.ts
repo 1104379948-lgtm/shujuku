@@ -14,7 +14,7 @@ import { ensureStableRowIdsForSeedRows_ACU, getCurrentChatTemplateScopeState_ACU
 import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU, restoreLegacyRowIdentity_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
-import { getPhysicalTableNameForSheet_ACU } from '../../shared/sheet-identity';
+import { getPhysicalTableNameFromResolvedMap_ACU, getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { parseDDLTableName } from '../../shared/ddl-utils';
 import { decodeSqlIdentifier_ACU, rebindSqlMutationColumnReferences_ACU, rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
 import { buildSheetColumnAliasMap_ACU, buildSheetTableAliasMap_ACU, type SheetAliasMapResult_ACU, type SheetColumnAliasMapResult_ACU, type SheetColumnAliasEvidence_ACU } from '../../shared/sql-read-resolver';
@@ -22,6 +22,7 @@ import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './tab
 import { repairTableDataFromAudit_ACU } from './table-data-repair';
 import { cloneSpv79TransitionData_ACU, findLatestSpv79TransitionCheckpoint_ACU, isAfterSpv79TransitionCutoff_ACU, isEntryAfterSpv79TransitionCutoff_ACU, isFrameArtifactAfterSpv79TransitionCutoff_ACU, reindexSpv79TransitionState_ACU } from './spv79-transition-checkpoint';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
+import { computeReplayHeadRevisionDigest_ACU, validateV2ReplayEvidenceFresh_ACU } from './v2-replay-session';
 
 interface V2FrameRef_ACU {
   messageIndex: number;
@@ -96,12 +97,48 @@ export interface LoadTableStateFromFramesV2Options_ACU {
   performanceRunId?: string;
   performanceParentSpanId?: string;
   /**
-   * 阶段 B：单轮 replay alias registry 复用（默认关闭，独立回滚 flag）。
-   * 开启后同一 stateEpoch 内的连续 DML SQL 复用表/列 alias registry，
-   * 结构事件（data_replace / sheet checkpoint / schema migrate / sheet_replace /
-   * meta_update / table_edit_dsl / temporary anchor）使 epoch 递增并失效缓存。
+   * 阶段 B2：单轮 replay alias registry 复用（默认开启；显式 false 关闭，
+   * 供冷基线测试与紧急回滚）。同一 stateEpoch 内的连续 DML SQL 复用表/列
+   * alias registry，结构事件（data_replace / sheet checkpoint / schema migrate /
+   * sheet_replace / meta_update / table_edit_dsl / temporary anchor / legacy patch
+   * 的 sheet_replace/meta_update）使 epoch 递增并失效缓存。
    */
   enableAliasContext?: boolean;
+  /**
+   * 阶段 E：单次 v2-replay 的仅内存复用证据（可选）。传入时，本调用在满足
+   * validateV2ReplayEvidenceFresh_ACU 全部条件后直接复用上次 replay 结果；
+   * 不满足或未传入 = 照常冷 replay（fail-open）。只有满足严格条件（full_checkpoint
+   * 基、无结构 repair、同 chat 引用、同 boundary、updateRuntimeState:false）的
+   * 成功结果才会写入 evidence。绝不持久化。
+   */
+  replayEvidence?: import('./v2-replay-session').V2ReplayEvidence_ACU | null;
+  /**
+   * 阶段 I：只读 replay 的取消信号（可选）。
+   *
+   * 仅在 `updateRuntimeState === false` 时生效：副作用路径会改写全局 schedule
+   * state，中途抛出会留下半完成的 mutation，因此不接受取消。取消只在 frame/entry
+   * 边界、replay state 完整时检查，绝不在单条 SQLite batch 或事务半执行状态中断。
+   *
+   * 命中取消时抛 V2ReplayAbortedError_ACU，调用方须据此区分「用户取消/切聊天」与
+   * 「回放真的失败」，并且不得让被取消的旧结果覆盖新聊天状态。
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * 阶段 I：只读 replay 被 AbortSignal 取消时抛出的专用错误。
+ *
+ * 独立类型而非裸 Error：调用方必须能把取消与真实失败区分开——前者不应触发 V2 恢复
+ * 流程、不应记为回放故障。消息刻意不含 `duplicate_row_id`，因此不会被
+ * loadTableStateFromFramesV2Detailed_ACU 的 SPv7.9 过渡 checkpoint 分支误捕
+ * （那条分支会写持久化数据，绝不能由取消触发）。
+ */
+export class V2ReplayAbortedError_ACU extends Error {
+  readonly code = 'v2_replay_aborted';
+  constructor(message = '[V2 Replay] 回放已取消。') {
+    super(message);
+    this.name = 'V2ReplayAbortedError_ACU';
+  }
 }
 
 /**
@@ -116,11 +153,18 @@ export interface TableReplayMetricsV2_ACU {
   logEntryCount: number;
   operationCount: number;
   sqlOperationCount: number;
+  columnRebindCount: number;
   tableAliasBuildCount: number;
   columnAliasBuildCount: number;
   aliasInvalidateCount: number;
+  /** 表/列 alias registry 命中已缓存 registry 的次数（与 build 次数互补）。 */
+  aliasCacheHitCount: number;
   sqliteHydrateCount: number;
   sqliteMaterializeCount: number;
+  /** evidence 复用命中次数（整轮冷回放被跳过）。单次调用最多 1。 */
+  replayReuseCount: number;
+  /** 传入了 evidence 但判定失配、回退冷回放的次数。单次调用最多 1。 */
+  replayReuseFallbackCount: number;
 }
 
 export function createReplayMetrics_ACU(): TableReplayMetricsV2_ACU {
@@ -129,11 +173,15 @@ export function createReplayMetrics_ACU(): TableReplayMetricsV2_ACU {
     logEntryCount: 0,
     operationCount: 0,
     sqlOperationCount: 0,
+    columnRebindCount: 0,
     tableAliasBuildCount: 0,
     columnAliasBuildCount: 0,
     aliasInvalidateCount: 0,
+    aliasCacheHitCount: 0,
     sqliteHydrateCount: 0,
     sqliteMaterializeCount: 0,
+    replayReuseCount: 0,
+    replayReuseFallbackCount: 0,
   };
 }
 
@@ -158,8 +206,12 @@ interface ReplayAliasContext_ACU {
   tableAliasRegistry: Map<string, string> | null;
   /** 按 epoch 缓存的基础表 alias 冲突集。 */
   tableConflictRegistry: Set<string> | null;
-  /** 按 epoch + supplementalFingerprint 缓存的列身份 registry。 */
-  columnAliasRegistry: import('../../shared/sql-read-resolver').SheetColumnAliasMapResult_ACU | null;
+  /**
+   * 按 epoch + supplementalFingerprint 缓存的列身份 registry，按 physicalName
+   * 惰性构建：只包含本 epoch 内被 sql_sheet_batch 实际命中的表（阶段 D）。
+   * 每表构建一次并缓存，结构事件经 invalidateReplayAliasContext_ACU 整体清空。
+   */
+  columnAliasRegistry: Map<string, import('../../shared/sql-read-resolver').SheetColumnAliasMapResult_ACU> | null;
   /** 观测计数引用（与 metrics 同一对象）。 */
   metrics: TableReplayMetricsV2_ACU;
   /** 测试和回滚开关。 */
@@ -184,6 +236,44 @@ function invalidateReplayAliasContext_ACU(context: ReplayAliasContext_ACU): void
   context.tableConflictRegistry = null;
   context.columnAliasRegistry = null;
   if (context.metrics) context.metrics.aliasInvalidateCount += 1;
+}
+
+/**
+ * 阶段 B1：集中失效判定——operation 是否改变表/列身份证据。
+ *
+ * 失效矩阵（与计划 4.1 一致）：
+ * - 必须失效：full/replacement base 切换、per-sheet checkpoint/timeline introduction、
+ *   temporary anchor、data_replace、sheet_schema_migrate、sheet_replace、meta_update、
+ *   table_edit_dsl、legacy patch 中的 sheet_replace/meta_update；
+ * - 不失效：row_upsert、row_delete 及仅数据行变化。
+ *
+ * 禁止继续在各分支散落凭感觉判断；所有调用点必须经此函数判定。
+ */
+function operationInvalidatesReplayAliasContext_ACU(
+  operation: Pick<TableMutationOperationV2_ACU, 'kind'>,
+): boolean {
+  switch (operation.kind) {
+    case 'data_replace':
+    case 'sheet_schema_migrate':
+    case 'sheet_replace':
+    case 'meta_update':
+    case 'table_edit_dsl':
+      return true;
+    case 'row_upsert':
+    case 'row_delete':
+    case 'sql_batch':
+    case 'sql_sheet_batch':
+      return false;
+    default:
+      // 未知 kind 由 applyTableOperationV2Core_ACU 末尾 fail closed，
+      // 此处不提前抛错；按最保守语义视为结构事件。
+      return true;
+  }
+}
+
+/** 阶段 B1：legacy patch 是否改变表/列身份证据（与 operation 矩阵同源）。 */
+function patchInvalidatesReplayAliasContext_ACU(patch: Pick<TablePatchV2_ACU, 'kind'>): boolean {
+  return patch.kind === 'sheet_replace' || patch.kind === 'meta_update';
 }
 
 function deepClone_ACU<T>(value: T): T {
@@ -1116,7 +1206,7 @@ function buildReplaySqlTableAliases_ACU(
   operation: Extract<TableMutationOperationV2_ACU, { kind: 'sql_batch' | 'sql_sheet_batch' }>,
   metrics?: TableReplayMetricsV2_ACU,
   context?: ReplayAliasContext_ACU | null,
-): { aliases: Map<string, string>; conflicts: Set<string> } {
+): { aliases: Map<string, string>; conflicts: Set<string>; physicalNames: ReadonlyMap<string, string> | null } {
   const isPlainSqlIdentifier = (value: unknown): value is string => (
     typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(value)
   );
@@ -1125,13 +1215,23 @@ function buildReplaySqlTableAliases_ACU(
   // stateEpoch 内不变，按 epoch 缓存；operation 特有的历史 tableName 是
   // per-operation 派生叠加（派生副本，不污染缓存）。
   const useCache = Boolean(context?.enabled);
+  // 冷构建路径：整个 state 的物理表名只解析一次（O(S^2) → O(S) 拼音计算），
+  // 短 key 循环与 sql_sheet_batch 分支全部查 Map；缓存命中路径不重解析。
+  const resolvedPhysicalNames = useCache && context!.tableAliasRegistry
+    ? null
+    : resolvePhysicalTableNames_ACU(state);
   let sharedRegistry: SheetAliasMapResult_ACU;
   let baseConflicts: Set<string>;
   if (useCache && context!.tableAliasRegistry && context!.tableConflictRegistry) {
     sharedRegistry = { aliases: context!.tableAliasRegistry, conflicts: context!.tableConflictRegistry };
     baseConflicts = context!.tableConflictRegistry;
+    if (metrics) metrics.aliasCacheHitCount += 1;
   } else {
-    sharedRegistry = buildSheetTableAliasMap_ACU([state], { includeExtendedAliases: true });
+    sharedRegistry = buildSheetTableAliasMap_ACU([state], {
+      includeExtendedAliases: true,
+      // 冷构建已解析一次：直接复用，避免 buildSheetTableAliasMap_ACU 内重解析。
+      preResolvedPhysicalNames: resolvedPhysicalNames ? [resolvedPhysicalNames] : undefined,
+    });
     baseConflicts = new Set(sharedRegistry.conflicts);
     // 短 sheetKey 别名也属基础不变部分，合并进基础 registry。
     const addBaseAlias = (alias: unknown, runtimeName: string): void => {
@@ -1148,7 +1248,9 @@ function buildReplaySqlTableAliases_ACU(
     for (const [sheetKey, value] of Object.entries(state)) {
       if (!sheetKey.startsWith('sheet_')) continue;
       const sheet = value as Sheet_ACU;
-      const runtimeName = getPhysicalTableNameForSheet_ACU(state, sheetKey);
+      const runtimeName = resolvedPhysicalNames
+        ? getPhysicalTableNameFromResolvedMap_ACU(resolvedPhysicalNames, sheetKey)
+        : getPhysicalTableNameForSheet_ACU(state, sheetKey);
       if (isPlainSqlIdentifier(sheetKey.slice('sheet_'.length))) addBaseAlias(sheetKey.slice('sheet_'.length), runtimeName);
     }
     if (useCache) {
@@ -1179,7 +1281,9 @@ function buildReplaySqlTableAliases_ACU(
     // no such table 让整次回放失败。
     let target: string | null = null;
     if (state[operation.sheetKey]) {
-      target = getPhysicalTableNameForSheet_ACU(state, operation.sheetKey);
+      target = resolvedPhysicalNames
+        ? getPhysicalTableNameFromResolvedMap_ACU(resolvedPhysicalNames, operation.sheetKey)
+        : getPhysicalTableNameForSheet_ACU(state, operation.sheetKey);
       const historical = decodeSqlIdentifier_ACU(operation.tableName).trim().toLowerCase();
       const existingTarget = aliases.get(historical);
       if (historical && existingTarget && existingTarget !== target) {
@@ -1194,7 +1298,7 @@ function buildReplaySqlTableAliases_ACU(
     }
     if (target) addAlias(operation.tableName, target);
   }
-  return { aliases, conflicts };
+  return { aliases, conflicts, physicalNames: resolvedPhysicalNames };
 }
 
 async function applySqlBatchOperationV2_ACU(
@@ -1214,7 +1318,7 @@ async function applySqlBatchOperationV2_ACU(
   // 路径（本次重建，不读取也不写入缓存），保证后续 DML 仍可用同 epoch 缓存。
   const hasStructuralSql = statements.some(statement => /^\s*(CREATE|ALTER|DROP|RENAME)\b/i.test(statement));
   const effectiveContext = hasStructuralSql ? null : context;
-  const { aliases, conflicts } = buildReplaySqlTableAliases_ACU(state, operation, options.metrics, effectiveContext);
+  const { aliases, conflicts, physicalNames } = buildReplaySqlTableAliases_ACU(state, operation, options.metrics, effectiveContext);
   const replayStatements = rebindSqlMutationTableReferences_ACU(statements, aliases, {
     lenient: true,
     ambiguousAliases: conflicts,
@@ -1228,34 +1332,45 @@ async function applySqlBatchOperationV2_ACU(
     && typeof operation.sheetKey === 'string'
     && state[operation.sheetKey]) {
     const sheetKey = operation.sheetKey;
-    const targetTableName = getPhysicalTableNameForSheet_ACU(state, sheetKey);
+    const targetTableName = physicalNames
+      ? getPhysicalTableNameFromResolvedMap_ACU(physicalNames, sheetKey)
+      : getPhysicalTableNameForSheet_ACU(state, sheetKey);
     // 每个 operation 内构造：补锚经 commitReplayCandidate_ACU 更新 state 后，
     // 这里天然拿到补锚后的最新 state，无需额外重建（计划 4.3 确认项）。
     // target-first（计划 5.2）：target=state（checkpoint 权威），
     // supplemental=当前模板 header-only（只提供别名证据，绝不提供目标列）。
-    // 列 registry 按 stateEpoch + supplementalFingerprint 缓存（阶段 B）。
-    // 同一 epoch 内 supplemental 模板结构不变时直接复用；结构 SQL 操作强制
-    // 冷构建且不写入缓存（与表 alias 同策略）。
+    // 列 registry 按 stateEpoch + supplementalFingerprint 缓存（阶段 B），
+    // 并按 physicalName 惰性构建（阶段 D）：同一 epoch 内每张被 sql_sheet_batch
+    // 命中的表只构建一次；结构 SQL 操作强制冷构建且不写入缓存（与表 alias 同策略）。
+    // columnAliasBuildCount 语义 = 每 epoch 每命中表一次构建（与既有单表断言一致）。
     const useColumnCache = Boolean(context?.enabled) && !hasStructuralSql;
-    let columnResult: SheetColumnAliasMapResult_ACU;
+    const targetTableKey = targetTableName.toLowerCase();
+    let columnResult: SheetColumnAliasMapResult_ACU | null = null;
     if (useColumnCache && context!.columnAliasRegistry) {
-      // 同一 replay 内 supplemental 模板只解析一次（headerOnlyTemplateFingerprint
-      // 恒定），epoch 失效由 invalidateReplayAliasContext_ACU 保证，因此
-      // epoch 内 columnAliasRegistry 非空即可命中。
-      columnResult = context!.columnAliasRegistry;
-    } else {
+      // 命中本表已缓存的 registry（同一 epoch 内第二次及以后的 sql_sheet_batch）。
+      columnResult = context!.columnAliasRegistry.get(targetTableKey) || null;
+      // 命中即计数；未命中会走下方冷构建并累加 columnAliasBuildCount。
+      if (columnResult && options.metrics) options.metrics.aliasCacheHitCount += 1;
+    }
+    if (!columnResult) {
       columnResult = buildSheetColumnAliasMap_ACU(state, {
         supplementalSources: [supplementalTemplate],
         skipInvalidSupplementalSources: true,
+        // 惰性：只构建本 operation 命中的单张表（阶段 D）。等价性前提已由
+        // resolvePhysicalTableNames_ACU fail-loud 冲突保证：无物理名冲突时单表
+        // 构建与整库构建对该 physicalName 的 aliases/conflicts/evidence 逐字节一致。
+        targetSheetKeys: new Set([sheetKey]),
       });
       if (useColumnCache) {
-        context!.columnAliasRegistry = columnResult;
+        if (!context!.columnAliasRegistry) context!.columnAliasRegistry = new Map();
+        context!.columnAliasRegistry.set(targetTableKey, columnResult);
       }
       if (options.metrics) options.metrics.columnAliasBuildCount += 1;
     }
     const { aliases: columnAliases, conflicts: columnConflicts, sourceByAlias, conflictCandidates } = columnResult;
     const evidenceByAlias = sourceByAlias.get(targetTableName);
     const candidatesByAlias = conflictCandidates.get(targetTableName);
+    let reboundCount = 0;
     columnReboundStatements = rebindSqlMutationColumnReferences_ACU(
       replayStatements,
       columnAliases,
@@ -1266,12 +1381,20 @@ async function applySqlBatchOperationV2_ACU(
         resolveAmbiguity: candidatesByAlias
           ? alias => candidatesByAlias.get(alias.toLowerCase()) || []
           : undefined,
-        onRebound: ({ from, to }) => logWarn_ACU(
-          `[V2 Replay][column-rebind] sheetKey=${sheetKey}, from=${from}, to=${to}, `
-          + `evidence=${evidenceByAlias?.get(from.toLowerCase()) || 'unknown'}`,
-        ),
+        onRebound: ({ from, to }) => {
+          reboundCount += 1;
+          // 阶段 B：列重绑日志聚合。历史长 SQL 段会产生大量重绑，逐条 warn
+          // 会在主线程制造 console 开销并淹没真实告警；仅显式诊断开关下输出明细。
+          if (settings_ACU.performanceDiagnosticsEnabled) {
+            logWarn_ACU(
+              `[V2 Replay][column-rebind] sheetKey=${sheetKey}, from=${from}, to=${to}, `
+              + `evidence=${evidenceByAlias?.get(from.toLowerCase()) || 'unknown'}`,
+            );
+          }
+        },
       },
     );
+    if (options.metrics) options.metrics.columnRebindCount += reboundCount;
   }
   const params = Array.isArray(operation.params) ? operation.params : undefined;
   runtime.engine.runBatch(columnReboundStatements, params);
@@ -1581,9 +1704,15 @@ async function applyTableOperationV2Core_ACU(
   const effectiveRuntime = runtime || ownedRuntime || null;
 
   try {
-    if (operation.kind === 'data_replace') {
+    // 阶段 B1：集中失效判定。任何改变表/列身份证据的 operation 使 epoch 递增
+    // 并清空 registry 缓存；仅数据行变化（row_upsert/row_delete）不失效。
+    // 结构 SQL（CREATE/ALTER/DROP/RENAME）在 applySqlBatchOperationV2_ACU 内部
+    // 按冷 registry 语义处理，不在此重复失效。
+    if (operationInvalidatesReplayAliasContext_ACU(operation)) {
       if (context?.enabled) invalidateReplayAliasContext_ACU(context);
       else if (metrics) metrics.aliasInvalidateCount += 1;
+    }
+    if (operation.kind === 'data_replace') {
       // JS-native 提交：先退出 SQL 段（materialize + dispose），再以 JS state 提交全量替换。
       if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
       const candidate = deepClone_ACU(operation.data);
@@ -1600,8 +1729,6 @@ async function applyTableOperationV2Core_ACU(
       return;
     }
     if (operation.kind === 'sheet_schema_migrate') {
-      if (context?.enabled) invalidateReplayAliasContext_ACU(context);
-      else if (metrics) metrics.aliasInvalidateCount += 1;
       if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
       const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       const candidate = await applySheetSchemaMigrationOperation_ACU(sourceState, operation);
@@ -1612,8 +1739,6 @@ async function applyTableOperationV2Core_ACU(
       return;
     }
     if (operation.kind === 'sheet_replace') {
-      if (context?.enabled) invalidateReplayAliasContext_ACU(context);
-      else if (metrics) metrics.aliasInvalidateCount += 1;
       if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       candidate[operation.sheetKey] = deepClone_ACU(operation.sheet);
@@ -1626,8 +1751,6 @@ async function applyTableOperationV2Core_ACU(
     if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
       if (operation.kind === 'meta_update') {
         assertMetaUpdateDoesNotChangeDdl_ACU(operation);
-        if (context?.enabled) invalidateReplayAliasContext_ACU(context);
-        else if (metrics) metrics.aliasInvalidateCount += 1;
       }
       if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
@@ -1640,8 +1763,6 @@ async function applyTableOperationV2Core_ACU(
       return;
     }
     if (operation.kind === 'table_edit_dsl') {
-      if (context?.enabled) invalidateReplayAliasContext_ACU(context);
-      else if (metrics) metrics.aliasInvalidateCount += 1;
       if (effectiveRuntime) await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
       applyTableEditDslOperationV2_ACU(candidate, operation.text);
@@ -1800,18 +1921,33 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
   const metrics = createReplayMetrics_ACU();
 
   try {
-    // 阶段 B：单次回放调用内复用的 alias registry 上下文。仅在此调用内
-    // 存活（不写模块全局/跨请求复用），enabled 由 options.enableAliasContext
-    // 控制，默认关闭，保证 flag 关闭时与基线行为完全一致。
+    // 阶段 B2：单次回放调用内复用的 alias registry 上下文。仅在此调用内
+    // 存活（不写模块全局/跨请求复用），默认安全启用（options.enableAliasContext
+    // !== false）；显式 false 作为测试与紧急回滚开关，保证关闭时与基线一致。
     const aliasContext = createReplayAliasContext_ACU(metrics);
-    aliasContext.enabled = Boolean(options.enableAliasContext);
+    aliasContext.enabled = options.enableAliasContext !== false;
     // 列重绑 supplemental 与补锚共用同一份当前模板 header-only 快照：
     // 提前解析一次并缓存（惰性），避免每个 operation 重复解析。
     // 解析失败 → null，列重绑退化为无 supplemental（仍 target-first fail closed）。
     headerOnlyTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
     if (headerOnlyTemplate) headerOnlyTemplateFingerprint = getTableDataFingerprint_ACU(headerOnlyTemplate);
+    // 阶段 I：只读 replay 的取消检查点。
+    //
+    // 只在 updateRuntimeState===false 时生效：副作用路径（replayEventForState_ACU /
+    // replayCheckpointSchedule_ACU）会改写全局 schedule state，中途抛出会留下半完成
+    // mutation，比让它跑完更危险，因此不接受取消。
+    //
+    // 只在 frame/entry 边界调用（replay state 完整、未处于单条 SQLite batch 或事务
+    // 半执行状态）；runtime 由外层 finally 的 disposeSqlReplayRuntime_ACU 释放，
+    // 因此在这两处抛出不会泄漏 Database。
+    const throwIfReplayAborted_ACU = (): void => {
+      if (options.updateRuntimeState === false && options.signal?.aborted) {
+        throw new V2ReplayAbortedError_ACU();
+      }
+    };
     for (const ref of frameRefs) {
       if (ref.messageIndex < replayStartMessageIndex) continue;
+      throwIfReplayAborted_ACU();
       metrics.frameCount += 1;
       const frameArtifactsAfterCutoff = !transitionRef
         || isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint);
@@ -1848,6 +1984,9 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
       };
       for (const entry of entries) {
         if (isAnchorFrame && entry.seq < replacementAnchorCursor!.seq) continue;
+        // 取消检查放在 try 之前：try 的 catch 会把异常包装成「应用日志失败」并上报
+        // logError_ACU，取消若落进去就会被误判为回放故障。
+        throwIfReplayAborted_ACU();
         try {
           await applyDueIntroductions(entry.seq);
           if (Array.isArray(entry.operations) && entry.operations.length > 0) {
@@ -1913,6 +2052,15 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
             )) continue;
             // legacy patches 是 JS 语义：先退出 SQL 段再应用补丁。
             await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+            // 阶段 B1：legacy patches 中 sheet_replace/meta_update 会改变表/列身份
+            // 证据（物理表名、tableAliases、columnAliases、name 等），必须先失效
+            // alias registry，否则后续 SQL 会用旧 registry 错误重绑并被持久化。
+            // 同一 entry 多个结构 patch 只失效一次（不重复清空计数）。
+            const invalidatesAliasContext = (entry.patches || []).some(patchInvalidatesReplayAliasContext_ACU);
+            if (invalidatesAliasContext) {
+              if (aliasContext.enabled) invalidateReplayAliasContext_ACU(aliasContext);
+              else if (metrics) metrics.aliasInvalidateCount += 1;
+            }
             const candidate = deepClone_ACU(state);
             // 兼容旧版 derived patch log；新 V2 不再写 patches。
             for (const patch of entry.patches || []) {
@@ -1956,6 +2104,47 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
 ): Promise<TableReplayResultV2_ACU | null> {
   const chat = chatArg || getChatArray_ACU();
   const isolationKey = isolationKeyArg ?? getCurrentIsolationKey_ACU();
+  // 阶段 E：仅内存 evidence 复用。同 chat 引用 + 同 isolationKey + 同 boundary +
+  // full_checkpoint 基 + 无结构 repair 时直接复用上次结果（深克隆，不共享引用，
+  // 保持纯函数性质）。不满足一律走冷 replay（fail-open）。
+  const evidence = options.replayEvidence;
+  const currentHeadRevisionDigest = computeReplayHeadRevisionDigest_ACU(chat, isolationKey);
+  // updateRuntimeState:true 时不得复用（需副作用）；此处证据仅由 false 路径写入，
+  // 命中必然为 false，但防御性再确认一次。
+  const evidenceReusable = !!evidence
+  && !options.updateRuntimeState
+    && validateV2ReplayEvidenceFresh_ACU(
+      evidence, chat, isolationKey,
+      { maxMessageIndex: options.maxMessageIndex },
+      currentHeadRevisionDigest,
+    );
+  if (evidence && evidenceReusable) {
+    const data = deepClone_ACU(evidence.data);
+    // 复用命中同样上报 span：命中路径直接 return，若不上报则「整轮冷回放被跳过」
+    // 在生产中完全不可观测，无法验证快路径是否真的生效，也无法回答收益问题。
+    const reuseMetrics = createReplayMetrics_ACU();
+    reuseMetrics.replayReuseCount = 1;
+    startRuntimePerformanceSpan_ACU('v2-replay', {
+      runId: options.performanceRunId,
+      parentSpanId: options.performanceParentSpanId,
+      settings: settings_ACU,
+      metrics: {
+        messageCount: Array.isArray(chat) ? chat.length : 0,
+        maxMessageIndex: options.maxMessageIndex ?? -1,
+      },
+    }).end({
+      success: true,
+      baseKind: evidence.baseKind,
+      sheetCount: Object.keys(data || {}).filter(key => key.startsWith('sheet_')).length,
+      replayReuseCount: 1,
+      replayReuseFallbackCount: 0,
+    });
+    return {
+      data,
+      baseKind: evidence.baseKind,
+      metrics: reuseMetrics,
+    };
+  }
   // 候选回放、bounded 验证和导入诊断必须保持纯函数性质；只有宿主当前聊天的
   // 首次真实加载才允许把 duplicate_row_id 升级为持久化过渡根。
   const mayCreateTransition = chat === getChatArray_ACU()
@@ -1971,6 +2160,11 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
   });
   try {
     const result = await loadTableStateFromFramesV2DetailedCore_ACU(chatArg, isolationKeyArg, options);
+    // 传入了 evidence 却走到这里 = 判定失配并回退冷回放（fail-open）。
+    // 首次调用（空 evidence 对象）同样计入失配，命中率才有分母意义。
+    if (evidence && !evidenceReusable && result?.metrics) {
+      result.metrics.replayReuseFallbackCount = 1;
+    }
     performanceSpan.end({
       success: result !== null,
       baseKind: result?.baseKind || 'none',
@@ -1982,13 +2176,36 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
         logEntryCount: result.metrics.logEntryCount,
         operationCount: result.metrics.operationCount,
         sqlOperationCount: result.metrics.sqlOperationCount,
+        columnRebindCount: result.metrics.columnRebindCount,
         tableAliasBuildCount: result.metrics.tableAliasBuildCount,
         columnAliasBuildCount: result.metrics.columnAliasBuildCount,
         aliasInvalidateCount: result.metrics.aliasInvalidateCount,
+        aliasCacheHitCount: result.metrics.aliasCacheHitCount,
         sqliteHydrateCount: result.metrics.sqliteHydrateCount,
         sqliteMaterializeCount: result.metrics.sqliteMaterializeCount,
+        replayReuseCount: result.metrics.replayReuseCount,
+        replayReuseFallbackCount: result.metrics.replayReuseFallbackCount,
       } : {}),
     });
+    // 阶段 E：只对满足严格条件的成功结果写 evidence（供后续同边界调用复用）。
+    // 副作用路径（updateRuntimeState:true、mayCreateTransition、结构性 repair、
+    // 非 full_checkpoint 基）一律不写，杜绝把带副作用的中间态当复用证据。
+    if (evidence
+      && result
+      && !options.updateRuntimeState
+      && result.baseKind === 'full_checkpoint'
+      && !result.compatibilityRepairs?.length
+      && !result.requiresCheckpointConvergence) {
+      evidence.data = deepClone_ACU(result.data);
+      evidence.chatIdentity = chat;
+      evidence.isolationKey = isolationKey;
+      evidence.maxMessageIndex = options.maxMessageIndex;
+      evidence.baseKind = result.baseKind;
+      evidence.compatibilityRepairs = null;
+      evidence.requiresCheckpointConvergence = false;
+      evidence.headRevisionDigest = currentHeadRevisionDigest;
+      evidence.createdAt = Date.now();
+    }
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

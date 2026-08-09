@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as sheetIdentity from '../../src/shared/sheet-identity';
 import {
+  buildSheetTableAliasMap_ACU,
   rebindSheetKeysThroughTableAliases_ACU,
   resolveHistoricalSheetKeyMigrations_ACU,
   resolveReadQuerySql_ACU,
@@ -204,6 +206,61 @@ describe('sql read resolver', () => {
     expect(columns.get('item_name')).toBe('wu_pin_ming_cheng');
     expect(columns.has('retired_column')).toBe(false);
     expect(columns.has('unsafe_legacy')).toBe(false);
+  });
+
+  it('阶段 D：惰性单表构建与整库构建对同一 physicalName 产出逐字节一致', () => {
+    // 多表 target：只有 sheet_a 被 sql_sheet_batch 命中（lazy 只构建它）。
+    // 关键等价性前提：无物理名冲突时，单表构建与整库构建对同一 physicalName
+    // 的 aliases/conflicts/sourceByAlias/conflictCandidates 完全一致。
+    const target = {
+      mate: { type: 'acu', version: 1 },
+      sheet_a: {
+        uid: 'inventory_a', name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, quantity INTEGER);' },
+        content: [['row_id', '物品名称', '数量']],
+      },
+      sheet_b: {
+        uid: 'inventory_b', name: '任务表',
+        sourceData: { ddl: 'CREATE TABLE quests (row_id INTEGER PRIMARY KEY, title TEXT);' },
+        content: [['row_id', '标题']],
+      },
+    } as any;
+    const supplemental = {
+      mate: { type: 'acu', version: 1 },
+      sheet_a: {
+        uid: 'inventory_a', name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, quantity INTEGER);' },
+        content: [['row_id', '物品名称', '数量']],
+      },
+      sheet_b: {
+        uid: 'inventory_b', name: '任务表',
+        sourceData: { ddl: 'CREATE TABLE quests (row_id INTEGER PRIMARY KEY, title TEXT);' },
+        content: [['row_id', '标题']],
+      },
+    } as any;
+
+    // 整库构建（旧路径，replay 阶段 B 行为）。
+    const fullResult = buildSheetColumnAliasMap_ACU(target, {
+      supplementalSources: [supplemental],
+      skipInvalidSupplementalSources: true,
+    });
+    // 惰性单表构建（阶段 D 路径）：只构建 sheet_a。
+    const lazyResult = buildSheetColumnAliasMap_ACU(target, {
+      supplementalSources: [supplemental],
+      skipInvalidSupplementalSources: true,
+      targetSheetKeys: new Set(['sheet_a']),
+    });
+
+    const physicalName = sheetIdentity.resolvePhysicalTableNames_ACU(target).get('sheet_a')!;
+    // 惰性只包含命中表，整库包含全部表。
+    expect(lazyResult.aliases.has(physicalName)).toBe(true);
+    expect([...lazyResult.aliases.keys()].sort()).toEqual([physicalName]);
+    // 命中表的结果逐字节一致。
+    expect(lazyResult.aliases.get(physicalName)).toEqual(fullResult.aliases.get(physicalName));
+    expect([...(lazyResult.conflicts.get(physicalName) || [])].sort())
+      .toEqual([...(fullResult.conflicts.get(physicalName) || [])].sort());
+    expect(lazyResult.sourceByAlias.get(physicalName)).toEqual(fullResult.sourceByAlias.get(physicalName));
+    expect(lazyResult.conflictCandidates.get(physicalName)).toEqual(fullResult.conflictCandidates.get(physicalName));
   });
 
   it('target-first registry：多个 supplemental 对同一别名给出不同目标时删除映射并保留候选证据', () => {
@@ -608,3 +665,65 @@ describe('sql read resolver', () => {
       .toEqual([]);
   });
 });
+
+  it('阶段 C：preResolved 物理名 Map 与旧路径产出逐字节一致，且全表只解析一次', () => {
+    // 场景：多表、中文名、短 key、显示名含空白/大小写差异——覆盖 resolve 的
+    // 排序、拼音 slug、去重、冲突仲裁全路径。
+    const data = {
+      sheet_bei_bao_wu_pin_biao: {
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);' },
+      },
+      sheet_ji_yao_biao: {
+        name: '纪要表',
+        sourceData: { ddl: 'CREATE TABLE minutes (row_id INTEGER PRIMARY KEY, body TEXT);' },
+      },
+      sheet_ren_wu: {
+        name: '任务',
+        sourceData: { ddl: 'CREATE TABLE quests (row_id INTEGER PRIMARY KEY);' },
+      },
+      sheet_zhu_jue: {
+        name: '主角',
+        sourceData: { ddl: 'CREATE TABLE protagonist (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+
+    // 旧路径：逐 sheet 调 getPhysicalTableNameForSheet_ACU（内部每 sheet 全表解析）。
+    const oldResult = buildSheetTableAliasMap_ACU([data], { includeExtendedAliases: true });
+
+    // 新路径：一次 resolve 后复用 Map。
+    const resolved = sheetIdentity.resolvePhysicalTableNames_ACU(data);
+    const newResult = buildSheetTableAliasMap_ACU([data], {
+      includeExtendedAliases: true,
+      preResolvedPhysicalNames: [resolved],
+    });
+
+    expect(newResult.aliases.size).toBe(oldResult.aliases.size);
+    for (const [alias, physicalName] of oldResult.aliases) {
+      expect(newResult.aliases.get(alias)).toBe(physicalName);
+    }
+    for (const [alias, physicalName] of newResult.aliases) {
+      expect(oldResult.aliases.get(alias)).toBe(physicalName);
+    }
+    expect([...newResult.conflicts]).toEqual([...oldResult.conflicts]);
+  });
+
+  it('阶段 C：buildSheetColumnAliasMap_ACU 内部 target 物理名只解析一次', () => {
+    const data = {
+      sheet_bei_bao_wu_pin_biao: { name: '背包物品表', content: [['row_id', 'name']] },
+      sheet_ji_yao_biao: { name: '纪要表', content: [['row_id', 'body']] },
+      sheet_ren_wu: { name: '任务', content: [['row_id', 'title']] },
+      sheet_zhu_jue: { name: '主角', content: [['row_id', 'line']] },
+    } as any;
+    const spy = vi.spyOn(sheetIdentity, 'resolvePhysicalTableNames_ACU');
+    try {
+      // 4 张表、两处 per-sheet 循环：旧实现每 sheet 全表重解析（8 次以上），
+      // 单次解析后整个构建只调一次 resolve。
+      const result = buildSheetColumnAliasMap_ACU(data);
+      expect(result.aliases.size).toBeGreaterThan(0);
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+

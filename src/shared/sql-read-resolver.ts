@@ -1,6 +1,6 @@
 import type { TableDataObject_ACU } from './models/table-data';
 import { parseDDLColumnInfos_ACU, parseDDLTableName } from './ddl-utils';
-import { canonicalizeDisplayName_ACU, getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from './sheet-identity';
+import { canonicalizeDisplayName_ACU, getPhysicalTableNameFromResolvedMap_ACU, resolvePhysicalTableNames_ACU } from './sheet-identity';
 import { resolveEffectiveDDL } from '../data/sqlite/schema-mapper';
 import { rebindSqlReadIdentifiers_ACU } from './sql-mutation-table-rebind';
 import { mapSqlColumnIdentifiers_ACU } from './sql-identifier-mapper';
@@ -82,18 +82,37 @@ function addAlias_ACU(aliases: Map<string, string>, conflicts: Set<string>, alia
 /** Builds the shared, conflict-safe table alias registry used by SQL readers and writers. */
 export function buildSheetTableAliasMap_ACU(
   sources: Iterable<TableDataObject_ACU | Record<string, unknown> | null | undefined>,
-  options: { includeExtendedAliases?: boolean; skipInvalidSources?: boolean } = {},
+  options: {
+    includeExtendedAliases?: boolean;
+    skipInvalidSources?: boolean;
+    /**
+     * Caller-supplied pre-resolved physical-name maps (one entry per source,
+     * indexed by iteration order). When present, the corresponding source is
+     * NOT re-resolved: each sheetKey is read straight out of the map. This lets
+     * hot loops (replay registry build) resolve the whole table data once per
+     * epoch instead of once per sheet. Absent entries fall back to resolving
+     * the source inline, so existing callers keep identical behavior.
+     */
+    preResolvedPhysicalNames?: Iterable<ReadonlyMap<string, string> | null | undefined>;
+  } = {},
 ): SheetAliasMapResult_ACU {
   const aliases = new Map<string, string>();
   const conflicts = new Set<string>();
+  const preResolved = options.preResolvedPhysicalNames ? [...options.preResolvedPhysicalNames] : [];
+  let sourceIndex = 0;
   for (const source of sources) {
     if (!source || typeof source !== 'object') continue;
     let physicalNames: Map<string, string>;
-    try {
-      physicalNames = resolvePhysicalTableNames_ACU(source);
-    } catch (error) {
-      if (options.skipInvalidSources) continue;
-      throw error;
+    const pre = preResolved[sourceIndex];
+    if (pre) {
+      physicalNames = pre as Map<string, string>;
+    } else {
+      try {
+        physicalNames = resolvePhysicalTableNames_ACU(source);
+      } catch (error) {
+        if (options.skipInvalidSources) continue;
+        throw error;
+      }
     }
     for (const [sheetKey, physicalName] of physicalNames) {
       const sheet = (source as Record<string, any>)[sheetKey];
@@ -104,6 +123,7 @@ export function buildSheetTableAliasMap_ACU(
       }
       sourceAliases.forEach(alias => addAlias_ACU(aliases, conflicts, alias, physicalName));
     }
+    sourceIndex += 1;
   }
   return { aliases, conflicts };
 }
@@ -280,12 +300,23 @@ export function buildSheetColumnAliasMap_ACU(
   options: {
     supplementalSources?: Iterable<TableDataObject_ACU | Record<string, unknown> | null | undefined>;
     skipInvalidSupplementalSources?: boolean;
+    /**
+     * 只构建这些 sheetKey 的列别名（其余 sheet 不参与 target 注册、也不进入
+     * targetSheetByCanonicalName 索引）。replay 惰性 registry 用它把整库构建
+     * 收敛为「每 epoch 只构建被 sql_sheet_batch 命中的表」。不传 = 全量构建
+     * （与旧行为完全一致）。物理名冲突仍由 resolvePhysicalTableNames_ACU
+     * fail-loud 抛错（与全量路径同语义）。
+     */
+    targetSheetKeys?: ReadonlySet<string>;
   } = {},
 ): SheetColumnAliasMapResult_ACU {
   const aliases = new Map<string, Map<string, string>>();
   const conflicts = new Map<string, Set<string>>();
   const sourceByAlias = new Map<string, Map<string, SheetColumnAliasEvidence_ACU>>();
   const conflictCandidates = new Map<string, Map<string, SheetColumnAliasConflictCandidate_ACU[]>>();
+  const wantsSheetKey = (sheetKey: string): boolean => (
+    !options.targetSheetKeys || options.targetSheetKeys.has(sheetKey)
+  );
   const recordConflictCandidate = (
     columnConflictCandidates: Map<string, SheetColumnAliasConflictCandidate_ACU[]>,
     aliasKey: string,
@@ -330,12 +361,17 @@ export function buildSheetColumnAliasMap_ACU(
   if (!targetData || typeof targetData !== 'object') {
     return { aliases, conflicts, sourceByAlias, conflictCandidates };
   }
+  // 单次解析 target 物理名：per-sheet 循环全部查 Map，不再每 sheet 全表重解析
+  // （O(S^2) pinyin slug 计算）。抛错传播语义与旧 per-sheet 首次调用一致
+  // （冲突 fail-loud，绝不静默改名）。
+  const targetPhysicalNames = resolvePhysicalTableNames_ACU(targetData as TableDataObject_ACU);
 
   // ── 目标 schema 注册：current physical / display / fallback slug ──
   for (const [sheetKey, value] of Object.entries(targetData)) {
     if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object') continue;
+    if (!wantsSheetKey(sheetKey)) continue;
     const sheet = value as any;
-    const physicalName = getPhysicalTableNameForSheet_ACU(targetData as TableDataObject_ACU, sheetKey);
+    const physicalName = getPhysicalTableNameFromResolvedMap_ACU(targetPhysicalNames, sheetKey);
     const columns = aliases.get(physicalName) || new Map<string, string>();
     const tableConflicts = conflicts.get(physicalName) || new Set<string>();
     const tableConflictCandidates = conflictCandidates.get(physicalName) || new Map<string, SheetColumnAliasConflictCandidate_ACU[]>();
@@ -371,11 +407,12 @@ export function buildSheetColumnAliasMap_ACU(
   const targetSheetByCanonicalName = new Map<string, { sheetKey: string; physicalName: string }>();
   for (const [sheetKey, value] of Object.entries(targetData)) {
     if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object') continue;
+    if (!wantsSheetKey(sheetKey)) continue;
     const sheet = value as any;
     const canonicalName = canonicalizeDisplayName_ACU(sheet?.name);
     if (!canonicalName) continue;
     if (targetSheetByCanonicalName.has(canonicalName)) continue;
-    targetSheetByCanonicalName.set(canonicalName, { sheetKey, physicalName: getPhysicalTableNameForSheet_ACU(targetData as TableDataObject_ACU, sheetKey) });
+    targetSheetByCanonicalName.set(canonicalName, { sheetKey, physicalName: getPhysicalTableNameFromResolvedMap_ACU(targetPhysicalNames, sheetKey) });
   }
   for (const rawSupplement of options.supplementalSources || []) {
     if (!rawSupplement || typeof rawSupplement !== 'object') continue;

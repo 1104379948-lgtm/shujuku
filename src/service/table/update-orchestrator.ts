@@ -684,6 +684,7 @@ function mergeGuideStructureIntoBaseData_ACU(data: Record<string, any>): Record<
 async function loadV2ReplayMergeBase_ACU(
     batchNumber: number,
     options: { maxMessageIndex?: number } = {},
+    replayEvidence?: import('./v2-replay-session').V2ReplayEvidence_ACU | null,
 ): Promise<{ data: Record<string, any> | null; attempted: boolean; failed?: string }> {
     const chat = getChatArray_ACU();
     if (!Array.isArray(chat) || chat.length === 0) return { data: null, attempted: false };
@@ -701,6 +702,7 @@ async function loadV2ReplayMergeBase_ACU(
             updateRuntimeState: false,
             allowTemporaryTemplateBaseline: true,
             throwOnRecoveryRequired: true,
+            ...(replayEvidence ? { replayEvidence } : {}),
         });
         if (hasStructuralReplayCompatibilityRepairs_ACU(replayResult?.compatibilityRepairs)) {
             const affectedSheetKeys = [...new Set((replayResult.compatibilityRepairs || []).map(item => item.sheetKey))];
@@ -741,11 +743,12 @@ function buildGuideOrTemplateMergeBase_ACU(batchNumber: number): { data: Record<
 export async function buildBatchMergeBase_ACU(
     batchNumber: number,
     options: { maxMessageIndex?: number } = {},
+    replayEvidence?: import('./v2-replay-session').V2ReplayEvidence_ACU | null,
 ): Promise<{ data: Record<string, any> | null; error: string | null }> {
     try {
         const hasBoundedScope = Number.isInteger(options.maxMessageIndex);
         if (hasBoundedScope) {
-            const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options);
+            const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options, replayEvidence);
             if (v2ReplayResult.data) return { data: v2ReplayResult.data, error: null };
             if (v2ReplayResult.failed) {
                 // 回放坏了：绝不能退化为空基底去填表，否则 AI 会按空表生成 INSERT，
@@ -770,7 +773,7 @@ export async function buildBatchMergeBase_ACU(
             return { data: mergeGuideStructureIntoBaseData_ACU(runtimeData), error: null };
         }
 
-        const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options);
+        const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options, replayEvidence);
         if (v2ReplayResult.data) return { data: v2ReplayResult.data, error: null };
         if (v2ReplayResult.failed) {
             return {
@@ -1862,6 +1865,16 @@ async function processGroupedRuntimeChunkCore_ACU(
         const maxBucketRetries = Math.max(1, Number(settings_ACU.tableMaxRetries) || 3);
         let retryUnifiedError: string | null = null;
         let bucketSucceeded = false;
+        // 阶段 G1：bucket 重试循环外持有 request-scoped replay evidence。
+        // 同 bucket 的各次 attempt 共享同一 boundary（mergeBaseMaxMessageIndex），
+        // 因此重试可复用首次冷 replay 结果；bucket 提交写入新 chat entry 后
+        // headRevision digest 变化，evidence 自然失效（fail-open 回退冷 replay）。
+        // 传空对象而非 null：replay 只在冷回放成功后原地写回 evidence，传 null 会被
+        // loadV2ReplayMergeBase_ACU 的条件展开丢掉，重试将永远冷回放（接线失效）。
+        // 不允许重试（maxBucketRetries === 1）时必须传 null：此时循环体最多执行一次，
+        // evidence 绝无被读机会，而 replay 仍会为写回多付一次全表 deepClone —— 纯亏。
+        const replayEvidence: import('./v2-replay-session').V2ReplayEvidence_ACU | null =
+            maxBucketRetries > 1 ? ({} as import('./v2-replay-session').V2ReplayEvidence_ACU) : null;
 
         for (let bucketAttempt = 1; bucketAttempt <= maxBucketRetries; bucketAttempt++) {
             if (isStopped()) {
@@ -1887,7 +1900,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                 bucketFirstMessageIndex - 1,
             );
             const baseResult: { data: Record<string, any> | null; error: string | null } =
-                await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
+                await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex }, replayEvidence);
             if (!baseResult.data) {
                 bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
                 firstError = firstError || baseResult.error || '无法构建合并基底，操作已终止。';
@@ -2938,6 +2951,10 @@ export async function processUpdatesBatch_ACU(
         const chatHistory = getChatArray_ACU();
         const isAutoUpdateMode = mode && mode.startsWith('auto');
         const isSilentMode = !!(isAutoUpdateMode && settings_ACU.toastMuteEnabled);
+        // 此处刻意不接 replayEvidence：本循环每批 maxMessageIndex = firstMessageIndexOfBatch - 1
+        // 严格递增，evidence 复用要求 boundary 完全相同（v2-replay-session.ts），命中率恒为 0，
+        // 而 replay 仍会为写回 evidence 多付一次全表深克隆 —— 纯亏。跨批复用属阶段 G2
+        // run-scoped session 语义（需从已提交 snapshot 增量前进），不能用同 boundary evidence 冒充。
 
         for (let i = 0; i < batches.length; i++) {
             const batchIndices = batches[i];
