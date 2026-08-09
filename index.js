@@ -7436,7 +7436,11 @@ $CONTENT
         // v2-replay 纯数值安全指标（阶段 A）：只允许有限整数计数，绝不记录 SQL 文本、
         // 表名、角色内容、单元格、DDL 原文或聊天标识。
         'sqlOperationCount', 'tableAliasBuildCount', 'columnAliasBuildCount',
-        'columnRebindCount', 'aliasInvalidateCount', 'sqliteHydrateCount', 'sqliteMaterializeCount',
+        'columnRebindCount', 'aliasInvalidateCount', 'aliasCacheHitCount',
+        'sqliteHydrateCount', 'sqliteMaterializeCount',
+        'replayReuseCount', 'replayReuseFallbackCount',
+        'replayShareCount',
+        'yieldCount',
     ]);
     let nextSpanId_ACU = 1;
     let recentSpans_ACU = [];
@@ -39495,6 +39499,52 @@ $CONTENT
         return digest;
     }
 
+    /**
+     * 阶段 G2：in-flight replay 去重（只对并发/紧邻的相同纯只读调用生效）。
+     *
+     * 聊天加载、worldbook 处理、可视化刷新等路径可能在同一生命周期内紧邻触发
+     * 对同一 chat + isolationKey + boundary 的全量 replay。若每次调用都重建
+     * SQLite runtime 并从 checkpoint 全量回放，同一份 canonical 数据被重复计算。
+     *
+     * key 由「影响 replay 结果的全部 options 字段」构成：chat 引用、isolationKey、
+     * maxMessageIndex、allowTemporaryTemplateBaseline、compatibilityMode、
+     * enableAliasContext。缺任一字段都会导致共享错误结果（例如临时基线 vs null、
+     * 冷/热 alias metrics 不同）。
+     *
+     * 排除的调用：updateRuntimeState:true（副作用路径改写 schedule，不可共享）、
+     * captureBoundaries/captureSink（阶段 H 多边界捕获，各自消费 sink）、
+     * replayEvidence（自带 evidence 复用语义）、signal/yieldBudgetMs（取消与调度
+     * 是调用方私有意图，共享会丢失取消语义与独立让出）。
+     *
+     * 生命周期：Promise settle（resolve/reject）后立即删除，只合并并发窗口内的
+     * 重复调用，不缓存历史结果（与计划「有界 in-flight」一致，无跨调用泄漏）。
+     */
+    const inflightV2Replays_ACU = new Map();
+    function buildInflightReplayKey_ACU(chat, isolationKey, options) {
+        if (options.updateRuntimeState)
+            return null;
+        if (Array.isArray(options.captureBoundaries) && options.captureBoundaries.length > 0)
+            return null;
+        if (options.replayEvidence)
+            return null;
+        if (options.signal)
+            return null;
+        if (Number(options.yieldBudgetMs) > 0)
+            return null;
+        return [
+            'chat-ref',
+            // chat 引用（数组对象身份）。同一数组内容原地变化时引用仍相同，但调用方
+            // 若在两次调用间原地 mutate chat（fill run 每批提交），in-flight 窗口内
+            // 引用相同而内容不同——由调用方保证 fill 提交不在并发 replay 窗口内发生
+            // （commit lock 内串行），否则此处只合并同一时刻的请求，语义安全。
+            String(chat),
+            'iso', isolationKey,
+            'max', options.maxMessageIndex ?? 'latest',
+            'tpl', options.allowTemporaryTemplateBaseline ? 1 : 0,
+            'compat', options.compatibilityMode ?? 'default',
+            'alias', options.enableAliasContext === false ? 0 : 1,
+        ].join('|');
+    }
     function hasStructuralReplayCompatibilityRepairs_ACU(repairs) {
         return Boolean(repairs?.some(repair => repair.severity !== 'provisional'));
     }
@@ -39528,6 +39578,8 @@ $CONTENT
             sqliteMaterializeCount: 0,
             replayReuseCount: 0,
             replayReuseFallbackCount: 0,
+            replayShareCount: 0,
+            yieldCount: 0,
         };
     }
     function createReplayAliasContext_ACU(metrics) {
@@ -41116,6 +41168,19 @@ $CONTENT
         let headerOnlyTemplateFingerprint = '';
         runtime.syncBridge = new SyncBridge(runtime.engine);
         const metrics = createReplayMetrics_ACU();
+        // 阶段 H：多 boundary 前向捕获状态。captureBoundarySet 是待捕获的 boundary
+        // 集合（递增），capturedBoundaries 收集已捕获快照。仅当调用方传入
+        // captureBoundaries 且当前是只读路径时才初始化；否则为空 Set/Map，捕获逻辑
+        // 零开销（has/delete 对空 Set 恒 false）。
+        //
+        // 捕获结果写入调用方传入的 captureSink（外层多 boundary API 借此读回各 boundary
+        // 快照）；未传则用内部临时 Map，快照随本次调用结束丢弃（等价于无消费方，零
+        // 额外成本）。主结果不携带捕获 Map，避免在 result 上引入与现有契约不符的新字段。
+        const captureBoundarySet = new Set(options.updateRuntimeState === false
+            ? (Array.isArray(options.captureBoundaries) ? options.captureBoundaries : [])
+            : []);
+        const capturedBoundaries = options.captureSink
+            ?? new Map();
         try {
             // 阶段 B2：单次回放调用内复用的 alias registry 上下文。仅在此调用内
             // 存活（不写模块全局/跨请求复用），默认安全启用（options.enableAliasContext
@@ -41142,10 +41207,33 @@ $CONTENT
                     throw new V2ReplayAbortedError_ACU();
                 }
             };
+            // 阶段 I：受控主线程让步。只在只读路径（updateRuntimeState:false）生效；
+            // 只在 frame/entry 边界调用（replay state 完整、未处于单条 SQLite batch 或
+            // 事务半执行状态）。基于时间预算：自上次让出起累计处理超过 yieldBudgetMs 才
+            // 真正让出一次，未超时零开销（不产生额外宏任务）。metrics.yieldCount 记录
+            // 实际让出次数，供「是否过度调度」观测。
+            const yieldBudgetMs = options.updateRuntimeState === false
+                ? (Number(options.yieldBudgetMs) > 0 ? Number(options.yieldBudgetMs) : 0)
+                : 0;
+            let lastYieldAt = Date.now();
+            const yieldIfBudgetExceeded_ACU = async () => {
+                if (yieldBudgetMs <= 0)
+                    return;
+                const now = Date.now();
+                if (now - lastYieldAt < yieldBudgetMs)
+                    return;
+                // 让出事件循环：setTimeout(0) 允许挂起的输入/渲染/其它任务先跑。
+                // 恢复后由调用点（frame/entry 边界）的 throwIfReplayAborted_ACU 复查
+                // signal——取消在 yield 窗口内到达时，下一个边界立即抛出。
+                await new Promise(resolve => setTimeout(resolve, 0));
+                lastYieldAt = Date.now();
+                metrics.yieldCount += 1;
+            };
             for (const ref of frameRefs) {
                 if (ref.messageIndex < replayStartMessageIndex)
                     continue;
                 throwIfReplayAborted_ACU();
+                await yieldIfBudgetExceeded_ACU();
                 metrics.frameCount += 1;
                 const frameArtifactsAfterCutoff = !transitionRef
                     || isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint);
@@ -41182,6 +41270,9 @@ $CONTENT
                     // 取消检查放在 try 之前：try 的 catch 会把异常包装成「应用日志失败」并上报
                     // logError_ACU，取消若落进去就会被误判为回放故障。
                     throwIfReplayAborted_ACU();
+                    // entry 粒度让出：entry 数通常远大于 frame 数，大 fixture 下仅 frame 边界
+                    // 让出不足以维持响应性；此处与取消检查同点（state 完整、未在 SQL 半执行态）。
+                    await yieldIfBudgetExceeded_ACU();
                     try {
                         await applyDueIntroductions(entry.seq);
                         if (Array.isArray(entry.operations) && entry.operations.length > 0) {
@@ -41266,9 +41357,41 @@ $CONTENT
                     }
                 }
                 await applyDueIntroductions(Number.POSITIVE_INFINITY);
+                // 阶段 H：多 boundary 前向捕获。命中 captureBoundaries 的消息索引在
+                // 该 frame 处理完毕（state 完整、SQLite 已 materialize）后捕获一次快照。
+                // 仅只读路径（updateRuntimeState:false）允许：中间 materialize 不会破坏
+                // schedule replay（只读路径本就不写 schedule），且捕获的是该 boundary 的
+                // canonical 完整状态。同起算 checkpoint 语义下，此快照与「单独 replay 到
+                // 该 boundary」完全一致。
+                if (captureBoundarySet.size > 0 && captureBoundarySet.has(ref.messageIndex)) {
+                    if (options.updateRuntimeState !== false) {
+                        throw new Error('[V2 Replay] captureBoundaries 仅在 updateRuntimeState:false 的只读路径下允许。');
+                    }
+                    // captureBoundaries 非空时 capturedBoundaries 恒为实际容器（传入的
+                    // captureSink 或内部临时 Map），此处直接写入。快照携带该 boundary 的
+                    // baseKind 与 repair 状态：外层 API 须据此校验（任一 boundary 依赖 repair
+                    // 即整体失败，不得返回不完整快照）。metrics 为该 boundary 捕获时的累计值
+                    // 浅拷贝（不共享同一引用，外层可安全持有各快照）。
+                    await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+                    const snapshotBaseKind = baseKind;
+                    const snapshotRepairs = compatibilityRepairs.length > 0 ? [...compatibilityRepairs] : undefined;
+                    capturedBoundaries.set(ref.messageIndex, {
+                        data: deepClone_ACU$3(state),
+                        baseKind: snapshotBaseKind,
+                        metrics: { ...metrics },
+                        capturedBoundary: ref.messageIndex,
+                        ...(snapshotRepairs ? { compatibilityRepairs: snapshotRepairs } : {}),
+                        ...(snapshotRepairs ? { requiresCheckpointConvergence: true } : {}),
+                    });
+                    captureBoundarySet.delete(ref.messageIndex);
+                }
             }
             // replay 结束：SQLite 仍为权威状态时最后导出一次并 dispose，保持单 Database 峰值。
             await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+            // 阶段 H：捕获全部命中后，主结果 data 以最终 state 为准（与单边界语义一致）；
+            // capturedBoundaries 由调用方通过 loadTableStatesAtBoundariesFromFramesV2Detailed_ACU
+            // 读取。若捕获列表非空（部分 boundary 未命中——例如 boundary 早于起算 checkpoint
+            // 或超出 frameRefs 范围），按失败处理：调用方应回退逐次冷 replay。
             return {
                 data: state,
                 baseKind,
@@ -41291,8 +41414,15 @@ $CONTENT
         const currentHeadRevisionDigest = computeReplayHeadRevisionDigest_ACU(chat, isolationKey);
         // updateRuntimeState:true 时不得复用（需副作用）；此处证据仅由 false 路径写入，
         // 命中必然为 false，但防御性再确认一次。
+        // 阶段 H：captureBoundaries 非空（多 boundary 前向捕获）时禁止 evidence 复用与
+        // 写入——捕获路径必须真实跑完 core 才能把各 boundary 快照写入 captureSink，
+        // 命中 evidence 直接 return 会绕过 core 导致 sink 为空（外层误判全部未命中而
+        // 回退冷 replay）；且 capture 最终态（maxMessageIndex:undefined）若被写成
+        // evidence，会命中普通加载的复用校验、污染语义。捕获路径与 evidence 严格互斥。
+        const captureMode = Array.isArray(options.captureBoundaries) && options.captureBoundaries.length > 0;
         const evidenceReusable = !!evidence
             && !options.updateRuntimeState
+            && !captureMode
             && validateV2ReplayEvidenceFresh_ACU(evidence, chat, isolationKey, { maxMessageIndex: options.maxMessageIndex }, currentHeadRevisionDigest);
         if (evidence && evidenceReusable) {
             const data = deepClone_ACU$3(evidence.data);
@@ -41321,6 +41451,46 @@ $CONTENT
                 metrics: reuseMetrics,
             };
         }
+        // 阶段 G2：in-flight 去重（evidence 未命中后、core 调用前）。
+        // 同 key 的并发/紧邻纯只读调用共享一次全量 replay：第一个调用方启动 core，
+        // 后续调用方 await 同一 promise。共享结果深克隆 data（不共享引用，保持纯函数
+        // 性质），metrics 标记 replayShareCount=1 以区分 evidence 复用（replayReuseCount）。
+        // 仅合并并发窗口内的重复调用：promise settle 后从 Map 删除，不缓存历史。
+        const inflightKey = buildInflightReplayKey_ACU(chat, isolationKey, options);
+        if (inflightKey) {
+            const existing = inflightV2Replays_ACU.get(inflightKey);
+            if (existing) {
+                try {
+                    const shared = await existing;
+                    if (!shared)
+                        return null;
+                    const sharedMetrics = createReplayMetrics_ACU();
+                    sharedMetrics.replayShareCount = 1;
+                    startRuntimePerformanceSpan_ACU('v2-replay', {
+                        runId: options.performanceRunId,
+                        parentSpanId: options.performanceParentSpanId,
+                        settings: settings_ACU,
+                        metrics: {
+                            messageCount: Array.isArray(chat) ? chat.length : 0,
+                            maxMessageIndex: options.maxMessageIndex ?? -1,
+                        },
+                    }).end({
+                        success: true,
+                        baseKind: shared.baseKind,
+                        sheetCount: Object.keys(shared.data || {}).filter(key => key.startsWith('sheet_')).length,
+                        replayShareCount: 1,
+                    });
+                    return {
+                        data: deepClone_ACU$3(shared.data),
+                        baseKind: shared.baseKind,
+                        metrics: sharedMetrics,
+                    };
+                }
+                finally {
+                    // 等待方不负责清理：清理由启动方在 settle 后执行（见下方 finally）。
+                }
+            }
+        }
         // 候选回放、bounded 验证和导入诊断必须保持纯函数性质；只有宿主当前聊天的
         // 首次真实加载才允许把 duplicate_row_id 升级为持久化过渡根。
         const mayCreateTransition = chat === getChatArray_ACU()
@@ -41335,7 +41505,35 @@ $CONTENT
             },
         });
         try {
-            const result = await loadTableStateFromFramesV2DetailedCore_ACU(chatArg, isolationKeyArg, options);
+            // 阶段 G2：in-flight 启动方。若 key 存在（且此前未被并发方占用），把 core 调用
+            // 包成共享 promise 存入 Map，让同 key 的并发调用等待同一结果；settle 后清理。
+            // 共享 promise 必须包含 duplicate_row_id 恢复逻辑（等待方不应拿到原始失败），
+            // 因此把「core 调用 + 恢复」整体包入，任何路径 settle 后删除。
+            const inflightStarted = inflightKey
+                ? (() => {
+                    const sharedPromise = (async () => {
+                        try {
+                            return await loadTableStateFromFramesV2DetailedCore_ACU(chatArg, isolationKeyArg, options);
+                        }
+                        catch (error) {
+                            const message = error instanceof Error ? error.message : String(error);
+                            if (mayCreateTransition && message.includes('duplicate_row_id')) {
+                                await createSpv79TransitionCheckpointForDuplicateRowId_ACU(chat, isolationKey);
+                                return await loadTableStateFromFramesV2DetailedCore_ACU(chat, isolationKey, options);
+                            }
+                            throw error;
+                        }
+                        finally {
+                            inflightV2Replays_ACU.delete(inflightKey);
+                        }
+                    })();
+                    inflightV2Replays_ACU.set(inflightKey, sharedPromise);
+                    return sharedPromise;
+                })()
+                : null;
+            const result = inflightStarted
+                ? await inflightStarted
+                : await loadTableStateFromFramesV2DetailedCore_ACU(chatArg, isolationKeyArg, options);
             // 传入了 evidence 却走到这里 = 判定失配并回退冷回放（fail-open）。
             // 首次调用（空 evidence 对象）同样计入失配，命中率才有分母意义。
             if (evidence && !evidenceReusable && result?.metrics) {
@@ -41361,6 +41559,7 @@ $CONTENT
                     sqliteMaterializeCount: result.metrics.sqliteMaterializeCount,
                     replayReuseCount: result.metrics.replayReuseCount,
                     replayReuseFallbackCount: result.metrics.replayReuseFallbackCount,
+                    yieldCount: result.metrics.yieldCount,
                 } : {}),
             });
             // 阶段 E：只对满足严格条件的成功结果写 evidence（供后续同边界调用复用）。
@@ -41369,6 +41568,7 @@ $CONTENT
             if (evidence
                 && result
                 && !options.updateRuntimeState
+                && !captureMode
                 && result.baseKind === 'full_checkpoint'
                 && !result.compatibilityRepairs?.length
                 && !result.requiresCheckpointConvergence) {
@@ -41386,7 +41586,9 @@ $CONTENT
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            if (mayCreateTransition && message.includes('duplicate_row_id')) {
+            // duplicate_row_id 恢复已在共享 promise 内处理（启动方与等待方一致拿到恢复结果）。
+            // 非 in-flight 路径（inflightKey 为 null）的恢复仍由外层处理：保持与既有语义一致。
+            if (!inflightKey && mayCreateTransition && message.includes('duplicate_row_id')) {
                 try {
                     await createSpv79TransitionCheckpointForDuplicateRowId_ACU(chat, isolationKey);
                     const recovered = await loadTableStateFromFramesV2DetailedCore_ACU(chat, isolationKey, options);
@@ -41401,6 +41603,104 @@ $CONTENT
             performanceSpan.end({ success: false });
             throw error;
         }
+    }
+    /**
+     * 阶段 H：多 boundary 一次前向 replay（简化版）。
+     *
+     * 对同一 candidateChat/isolationKey 上的多个递增 boundary 捕获 canonical 快照。
+     * 仅当**所有 boundary 共享同一起算 full checkpoint**（从各自 frameRefs 反向查找
+     * 的最后一个 full checkpoint 完全相同）时走前向捕获：从该 checkpoint 起算、沿
+     * frame 顺序推进，在每个命中 boundary 处 materialize 并深克隆快照。此语义与
+     * 「分别冷 replay 到每个 boundary」完全一致（同一 state/aliasContext/runtime
+     * 生命周期，alias registry 推导不丢），但 frame 扫描与 SQL 执行只发生一次。
+     *
+     * 任一起算 checkpoint 不同（跨 checkpoint 段）时回退**逐次冷 replay**（与当前
+     * 行为完全一致），不做部分前向捕获——避免在共享前缀不完整时产生错误快照。
+     *
+     * 仅支持 updateRuntimeState:false（只读路径）；副作用路径拒绝多 boundary 捕获。
+     * 任一 boundary 的 replay 失败（baseKind 非 full_checkpoint / 依赖 repair /
+     * 抛错）时整体失败并抛出，调用方保持原有逐边界校验语义。
+     *
+     * @returns Map<boundary, TableReplayResultV2_ACU>，key 严格递增，每个结果的
+     *   capturedBoundary 标记对应 boundary。
+     */
+    async function loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, boundaries, options = {}) {
+        const chat = chatArg || getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0)
+            return new Map();
+        if (options.updateRuntimeState !== false) {
+            throw new Error('[V2 Replay] loadTableStatesAtBoundariesFromFramesV2Detailed_ACU 仅支持 updateRuntimeState:false 只读路径。');
+        }
+        if (!Array.isArray(boundaries) || boundaries.length === 0)
+            return new Map();
+        const isolationKey = isolationKeyArg ?? getCurrentIsolationKey_ACU();
+        // 注意 boundary 语义：maxMessageIndex 是「处理 messageIndex ≤ boundary 的所有
+        // 帧」的上界，而非「boundary 处必须有帧」。聊天末尾可能是无 storage frame 的
+        // 消息（例如末尾 AI 楼层未落盘），boundary=chat.length-1 依然合法：replay 到
+        // 不晚于它的最后一个帧。因此**不做**越界拒绝——超出最大帧的 boundary 等价于
+        // 不设上限（处理全量），与既有 maxMessageIndex 语义完全一致。
+        const allFrameRefs = getV2FrameRefs_ACU(chat, isolationKey);
+        // 每个 boundary 的起算 checkpoint：该 boundary 的 frameRefs 中最后一个 full checkpoint。
+        // 全部相同才允许前向捕获；否则回退逐次冷 replay。
+        const roots = new Map();
+        for (const boundary of boundaries) {
+            const frameRefs = allFrameRefs
+                .filter(ref => ref.messageIndex <= boundary);
+            const checkpointRef = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+            roots.set(boundary, checkpointRef?.messageIndex ?? null);
+        }
+        const firstRoot = roots.values().next().value;
+        const allShareRoot = [...roots.values()].every(root => root === firstRoot && root !== null);
+        if (allShareRoot) {
+            // 前向捕获：单次 replay，captureBoundaries 驱动中间快照。
+            const sorted = [...boundaries].sort((a, b) => a - b);
+            // 调用方传入的可写容器：core 在捕获时写入，此处读回各 boundary 快照。
+            // 若不传容器，core 使用内部临时 Map（结果随调用结束丢弃），本函数将读不到
+            // 中间快照——因此必须显式传入，杜绝「静默只返回最终态」的错误语义。
+            const captureSink = new Map();
+            const result = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                ...options,
+                updateRuntimeState: false,
+                captureBoundaries: sorted,
+                captureSink,
+            });
+            if (!result || result.baseKind !== 'full_checkpoint') {
+                throw new Error('[V2 Replay] 多 boundary 前向捕获未建立正式 full checkpoint 基底。');
+            }
+            // 主结果只反映最终 boundary 的 state；各 boundary 快照从 sink 读回。校验：
+            // 1) 每个 boundary 都命中（sink 覆盖全部传入值）——部分未命中说明该 boundary
+            //    早于起算 checkpoint 或超出 frameRefs 范围，返回不完整 Map 会误导调用方；
+            // 2) 任一快照依赖 repair 或非 full_checkpoint 基——拒绝返回不完整快照。
+            // 任一校验失败都回退逐次冷 replay（与既有逐边界语义一致，保证正确性优先）。
+            const missing = sorted.filter(boundary => !captureSink.has(boundary));
+            const invalid = [...captureSink.entries()].filter(([, snap]) => snap.baseKind !== 'full_checkpoint'
+                || snap.compatibilityRepairs?.length
+                || snap.requiresCheckpointConvergence);
+            if (missing.length === 0 && invalid.length === 0) {
+                const results = new Map();
+                for (const boundary of sorted)
+                    results.set(boundary, captureSink.get(boundary));
+                return results;
+            }
+            // 覆盖不全或有 repair：回退逐次冷 replay（下方共用回退路径）。
+        }
+        // 回退路径：逐次冷 replay（与既有逐边界语义完全一致）。
+        const results = new Map();
+        for (const boundary of [...boundaries].sort((a, b) => a - b)) {
+            const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                ...options,
+                updateRuntimeState: false,
+                maxMessageIndex: boundary,
+            });
+            if (!replay || replay.baseKind !== 'full_checkpoint') {
+                throw new Error(`[V2 Replay] 多 boundary 回退 replay 未建立正式基底：boundary=${boundary}。`);
+            }
+            if (replay.compatibilityRepairs?.length || replay.requiresCheckpointConvergence) {
+                throw new Error(`[V2 Replay] 多 boundary 回退 replay 依赖兼容修复：boundary=${boundary}。`);
+            }
+            results.set(boundary, { ...replay, capturedBoundary: boundary });
+        }
+        return results;
     }
     async function loadTableStateFromFramesV2_ACU(chatArg, isolationKeyArg, options = {}) {
         const result = await loadTableStateFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, options);
@@ -42089,12 +42389,10 @@ $CONTENT
             originalMessage.TavernDB_ACU_IsolatedData = originalContainer;
             // 5. 候选聊天验证：首 bucket 前、原 full 边界、聊天末端。
             try {
-                for (const boundary of [rangeStartMessageIndex, originalFullCheckpointIndex - 1, candidateChat.length - 1]) {
-                    const replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
-                        maxMessageIndex: boundary,
-                        updateRuntimeState: false,
-                        compatibilityMode: 'disabled',
-                    });
+                // 阶段 H：三个 boundary 共享同一起算根时一次前向捕获；跨根/越界时
+                // 内部回退逐次冷 replay 或抛错。校验语义与逐边界完全一致（下方循环不变）。
+                const boundaryStates = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(candidateChat, isolationKey, [rangeStartMessageIndex, originalFullCheckpointIndex - 1, candidateChat.length - 1], { updateRuntimeState: false, compatibilityMode: 'disabled' });
+                for (const [boundary, replay] of boundaryStates) {
                     if (!replay || replay.baseKind !== 'full_checkpoint') {
                         return { ok: false, error: `provisional bridge 候选 replay 未建立正式基底：boundary=${boundary}。`, diagnosticCode: 'bridge_replay_mismatch' };
                     }
@@ -42275,12 +42573,9 @@ $CONTENT
             }
             // 5. 候选 replay 验证：原 full 边界与聊天末端。
             try {
-                for (const boundary of [bridge.originalFullCheckpointIndex, candidateChat.length - 1]) {
-                    const verifyReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
-                        maxMessageIndex: boundary,
-                        updateRuntimeState: false,
-                        compatibilityMode: 'disabled',
-                    });
+                // 阶段 H：双边界一次前向捕获（同根）或回退逐次冷 replay，校验语义不变。
+                const boundaryStates = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(candidateChat, isolationKey, [bridge.originalFullCheckpointIndex, candidateChat.length - 1], { updateRuntimeState: false, compatibilityMode: 'disabled' });
+                for (const [boundary, verifyReplay] of boundaryStates) {
                     if (!verifyReplay || verifyReplay.baseKind !== 'full_checkpoint' || !verifyReplay.data) {
                         return { ok: false, error: `bridge finalize 候选 replay 未建立正式基底：boundary=${boundary}。`, diagnosticCode: 'bridge_replay_mismatch' };
                     }
@@ -91224,12 +91519,9 @@ $CONTENT
             candidateOriginalMessage.TavernDB_ACU_IsolatedData = candidateContainer;
             // 5. 候选 replay 验证：原 full 边界与聊天末端双边界。
             try {
-                for (const boundary of [options.originalFullIndex, candidateChat.length - 1]) {
-                    const verifyReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
-                        maxMessageIndex: boundary,
-                        updateRuntimeState: false,
-                        compatibilityMode: 'disabled',
-                    });
+                // 阶段 H：双边界一次前向捕获（同根）或回退逐次冷 replay，校验语义不变。
+                const boundaryStates = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(candidateChat, isolationKey, [options.originalFullIndex, candidateChat.length - 1], { updateRuntimeState: false, compatibilityMode: 'disabled' });
+                for (const [boundary, verifyReplay] of boundaryStates) {
                     if (!verifyReplay || verifyReplay.baseKind !== 'full_checkpoint' || !verifyReplay.data) {
                         return { ok: false, error: `boundary commit 候选 replay 未建立正式基底：boundary=${boundary}。`, diagnosticCode: 'boundary_replay_mismatch' };
                     }
@@ -133028,7 +133320,44 @@ Expected function or array of functions, received type ${typeof value}.`
             });
             pending.committed = result;
             try {
-                const canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
+                // 阶段 F：post-save 不再无条件整链 replay。persist 已在事务内完成
+                // afterData 与边界 replay 的 fingerprint 校验（见 storage-frame-v2-persist.ts），
+                // 且可视化保存只产生 row 级操作、无 schedule 事件，因此 afterData 就是
+                // 保存后真实 replay 的 canonical。直接 hydrate afterData（source=post_save_replay，
+                // 与既有 envelope 语义一致），失败才回退冷 replay 刷新。
+                let canonicalData;
+                if (isSqliteMode() && result.afterData) {
+                    const envelope = createCanonicalSnapshotEnvelope_ACU({
+                        data: result.afterData,
+                        chatIdentity: String(currentChatFileIdentifier_ACU || ''),
+                        isolationKey,
+                        storageMode: 'sqlite',
+                        lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+                        source: 'post_save_replay',
+                    });
+                    if (envelope) {
+                        const hydrated = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+                        if (hydrated.ok) {
+                            canonicalData = result.afterData;
+                        }
+                        else if (hydrated.failureCode === 'stale_load_discarded') {
+                            // 身份已漂移：afterData 不再是当前 chat/isolation 的 canonical，
+                            // 回退冷 reload（其内部重新 replay），交还既有冷路径语义。
+                            await reloadStorageProvider();
+                        }
+                        else {
+                            // provider_fallback / provider_load_failed：hydrate 已按 fallback
+                            // 语义回退 native，runtime 数据以 afterData 为准，可安全返回。
+                            logDebug_ACU(`[Visualizer] afterData snapshot hydrate 未就绪（${hydrated.failureCode || 'unknown'}），SQLite provider 已按 fallback 语义处理。`);
+                            canonicalData = result.afterData;
+                        }
+                    }
+                }
+                if (canonicalData === undefined) {
+                    // afterData 不可用（native 模式 / envelope 为空 / hydrate 未产生 canonical）
+                    // 时回退既有整链 replay 刷新，保持与阶段 E 相同的冷路径语义。
+                    canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
+                }
                 const payload = { insertedRowIds: result.insertedRowIds, ...(canonicalData ? { canonicalData } : {}) };
                 return Object.keys(result.insertedRowIds).length > 0
                     ? { success: true, changed: true, ...payload }
