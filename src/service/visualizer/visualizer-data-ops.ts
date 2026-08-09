@@ -393,7 +393,42 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
         });
         pending.committed = result;
         try {
-            const canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
+            // 阶段 F：post-save 不再无条件整链 replay。persist 已在事务内完成
+            // afterData 与边界 replay 的 fingerprint 校验（见 storage-frame-v2-persist.ts），
+            // 且可视化保存只产生 row 级操作、无 schedule 事件，因此 afterData 就是
+            // 保存后真实 replay 的 canonical。直接 hydrate afterData（source=post_save_replay，
+            // 与既有 envelope 语义一致），失败才回退冷 replay 刷新。
+            let canonicalData: any;
+            if (isSqliteMode() && result.afterData) {
+                const envelope = createCanonicalSnapshotEnvelope_ACU({
+                    data: result.afterData,
+                    chatIdentity: String(currentChatFileIdentifier_ACU || ''),
+                    isolationKey,
+                    storageMode: 'sqlite',
+                    lifecycleEpoch: getRuntimeLifecycleEpoch_ACU(),
+                    source: 'post_save_replay',
+                });
+                if (envelope) {
+                    const hydrated = await hydrateStorageProviderFromSnapshot_ACU(envelope);
+                    if (hydrated.ok) {
+                        canonicalData = result.afterData;
+                    } else if (hydrated.failureCode === 'stale_load_discarded') {
+                        // 身份已漂移：afterData 不再是当前 chat/isolation 的 canonical，
+                        // 回退冷 reload（其内部重新 replay），交还既有冷路径语义。
+                        await reloadStorageProvider();
+                    } else {
+                        // provider_fallback / provider_load_failed：hydrate 已按 fallback
+                        // 语义回退 native，runtime 数据以 afterData 为准，可安全返回。
+                        logDebug_ACU(`[Visualizer] afterData snapshot hydrate 未就绪（${hydrated.failureCode || 'unknown'}），SQLite provider 已按 fallback 语义处理。`);
+                        canonicalData = result.afterData;
+                    }
+                }
+            }
+            if (canonicalData === undefined) {
+                // afterData 不可用（native 模式 / envelope 为空 / hydrate 未产生 canonical）
+                // 时回退既有整链 replay 刷新，保持与阶段 E 相同的冷路径语义。
+                canonicalData = await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
+            }
             const payload = { insertedRowIds: result.insertedRowIds, ...(canonicalData ? { canonicalData } : {}) };
             return Object.keys(result.insertedRowIds).length > 0
                 ? { success: true, changed: true, ...payload }

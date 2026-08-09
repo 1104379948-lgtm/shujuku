@@ -352,5 +352,63 @@ describe('visualizer-data-ops V2 replay save', () => {
       expect(second).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '2' } });
       expect(mocks.reload).toHaveBeenCalledTimes(1);
     });
+
+  describe('阶段 F：post-save 复用 afterData hydrate，不再整链 replay', () => {
+    it('sqlite 首次保存：保存前 replay 一次，post-save 直接 hydrate afterData 不再 replay', async () => {
+      mocks.sqlite = true;
+      const draft = state();
+      draft.tempData.sheet_a.content.push(['__acu_vis_tmp_row_x', 'new-a']);
+      recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_x');
+      mocks.replay.mockClear();
+      mocks.hydrate.mockClear();
+
+      const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+      expect(result.success).toBe(true);
+      // 保存前 base load 一次；post-save 不再整链 replay（直接 hydrate afterData）。
+      expect(mocks.replay).toHaveBeenCalledTimes(1);
+      // hydrate 收到的是 afterData（source=post_save_replay）。
+      expect(mocks.hydrate).toHaveBeenCalledTimes(1);
+      const envelope = mocks.hydrate.mock.calls[0][0];
+      expect(envelope.source).toBe('post_save_replay');
+      expect(envelope.data).toEqual(draft.pendingDataOps.committed.afterData);
+      expect(result.canonicalData).toEqual(draft.pendingDataOps.committed.afterData);
+    });
+
+    it('sqlite post-save hydrate 失败（provider_fallback）时按 fallback 语义返回 afterData，不回退冷 replay', async () => {
+      mocks.sqlite = true;
+      const draft = state();
+      draft.tempData.sheet_a.content.push(['__acu_vis_tmp_row_x', 'new-a']);
+      recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_x');
+      // 首次保存的 post-save hydrate 失败：回退 refreshVisualizerRuntimeFromReplay_ACU。
+      mocks.hydrate.mockReset().mockResolvedValue({ ok: false, degraded: true, failureCode: 'provider_fallback', error: 'boom' });
+      mocks.replay.mockClear();
+
+      const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+      expect(result.success).toBe(true);
+      // provider_fallback 语义（table-storage-strategy.ts）：SQLite hydrate 失败已回退
+      // native，runtime 数据以 afterData 为准，可安全返回——不触发冷 replay。
+      expect(mocks.replay).toHaveBeenCalledTimes(1);
+      expect(result.canonicalData).toEqual(draft.pendingDataOps.committed.afterData);
+    });
+
+    it('native 模式 post-save 回退既有整链 replay 刷新（不 hydrate）', async () => {
+      mocks.sqlite = false;
+      const draft = state();
+      draft.tempData.sheet_a.content.push(['__acu_vis_tmp_row_x', 'new-a']);
+      recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_x');
+      mocks.replay.mockClear();
+      mocks.hydrate.mockClear();
+
+      const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+      expect(result.success).toBe(true);
+      // 保存前 base load 1 次 + post-save 回退冷 replay 1 次 = 2 次（native 无 hydrate）。
+      expect(mocks.replay).toHaveBeenCalledTimes(2);
+      expect(mocks.hydrate).not.toHaveBeenCalled();
+    });
+  });
+
   });
 });
