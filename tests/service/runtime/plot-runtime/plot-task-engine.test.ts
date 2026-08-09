@@ -1310,7 +1310,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     mockGetLorebookEntriesStrict.mockResolvedValue({
       status: 'read_failed',
       source: 'plot_table_index',
-      validationPolicy: 'enumerate_all',
+      validationPolicy: 'validate_list',
       runId: 'table-index-run',
       entriesByBook: {},
       invalidBookNames: [],
@@ -1329,7 +1329,8 @@ describe('runPlotTasksRuntime_ACU', () => {
 
     expect(mockGetLorebookEntriesStrict).toHaveBeenCalledWith([], expect.objectContaining({
       source: 'plot_table_index',
-      validationPolicy: 'enumerate_all',
+      validationPolicy: 'validate_list',
+      notFoundPolicy: 'isolate_stale',
     }));
     expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
     expect(result.failedResults).toEqual([expect.objectContaining({
@@ -1343,7 +1344,7 @@ describe('runPlotTasksRuntime_ACU', () => {
         runId: expect.any(String),
         error: expect.objectContaining({
           category: 'strict_lorebook_read', status: 'read_failed',
-          source: 'plot_table_index', validationPolicy: 'enumerate_all',
+          source: 'plot_table_index', validationPolicy: 'validate_list',
           failedBookNames: ['剧情书'], errorCategories: ['unknown'],
         }),
       }),
@@ -2053,9 +2054,10 @@ describe('runPlotTasksRuntime_ACU', () => {
       }],
     }, '当前输入');
 
-    expect(mockGetLorebookEntriesStrict).toHaveBeenCalledWith([], expect.objectContaining({
+    expect(mockGetLorebookEntriesStrict).toHaveBeenCalledWith(['手动书'], expect.objectContaining({
       source: 'plot_table_index',
-      validationPolicy: 'enumerate_all',
+      validationPolicy: 'validate_list',
+      notFoundPolicy: 'isolate_stale',
     }));
     expect(mockBuildFinalPlotInjectionMessage).toHaveBeenCalledWith(
       expect.stringContaining('最终指令世界书内容'),

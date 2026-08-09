@@ -9,8 +9,13 @@ import type { TemplateScope_ACU } from '../../template/chat-scope';
 import type { SqlTableApplyScope_ACU } from '../../../shared/table-storage-provider';
 import { getUserName_ACU } from '../../../data/gateways/host-state-gateway';
 import { attachSeedRowsToCurrentDataFromGuide_ACU, ensureChatSheetGuideSeeded_ACU, getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU, filterSheetKeysByTemplateScope_ACU, projectSheetForTemplateScope_ACU, resolveTemplateScope_ACU } from '../../template/chat-scope';
-import { getCombinedWorldbookContent_ACU, getWorldBooks_ACU } from '../../worldbook/pipeline';
-import { isDatabaseGeneratedLorebookEntry_ACU, resolveGeneratedEntriesForTable_ACU } from '../../worldbook/worldbook-placeholder-classification';
+import { getCombinedWorldbookContent_ACU } from '../../worldbook/pipeline';
+import { isDatabaseGeneratedLorebookEntry_ACU, resolveGeneratedEntriesForTable_ACU, resolveUniqueTableExportIdentity_ACU } from '../../worldbook/worldbook-placeholder-classification';
+import { createLorebookReadContext_ACU, type LorebookReadContext_ACU } from '../../worldbook/read-context';
+import { buildTableCandidateScope_ACU, collectAsyncTableCandidateScope_ACU, resolveLorebookReadTargets_ACU } from '../../worldbook/read-scope';
+import { getCurrentWorldbookConfig_ACU } from '../../settings/settings-readers';
+import { getInjectionTargetLorebook_ACU } from '../../worldbook/injection-engine';
+import { getCurrentCharacterWorldbookBinding_ACU } from '../../../data/gateways/character-gateway';
 import { resolvePreTakeoverWorldbookSnapshot_ACU } from '../../agent/agent-worldbook-takeover';
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU } from '../../../shared/utils';
 import { applyContextTagFilters_ACU } from '../../runtime/helpers-remaining';
@@ -130,7 +135,7 @@ function resolvePromptRowWindow_ACU(
     messages: any[],
     updateMode = 'standard',
     targetSheetKeys: string[] | null = null,
-    options: { tableData?: any; excludeImportTaggedWorldbookEntries?: boolean; agentGreenlights?: any[]; isolationKey?: string; templateScope?: TemplateScope_ACU; sqlApplyScope?: SqlTableApplyScope_ACU; signal?: AbortSignal } = {},
+    options: { tableData?: any; excludeImportTaggedWorldbookEntries?: boolean; agentGreenlights?: any[]; isolationKey?: string; templateScope?: TemplateScope_ACU; sqlApplyScope?: SqlTableApplyScope_ACU; signal?: AbortSignal; worldbookReadContext?: LorebookReadContext_ACU } = {},
   ) {
     const sqlMode = isSqliteMode();
     const sourceTableData = await resolvePromptSourceTableData_ACU(options, sqlMode);
@@ -352,10 +357,44 @@ function resolvePromptRowWindow_ACU(
         entryStateSnapshot,
         entryStateSnapshotSignature,
     };
+    // 请求级世界书读取上下文：$4/$9、表名 resolver 与同 bucket 并发 job 共享物理读取。
+    // 未由上层传入时惰性创建；调用方负责 dispose（填表按 bucket attempt 管理生命周期）。
+    const ownedReadContext = options?.worldbookReadContext
+      ?? createLorebookReadContext_ACU({ source: 'form_fill', isActive: () => options?.signal?.aborted !== true });
+    const readContext = options?.worldbookReadContext ?? ownedReadContext;
+    const worldbookConfig = getCurrentWorldbookConfig_ACU();
+    const syncReadScopeNames = buildTableCandidateScope_ACU([
+      () => Array.isArray(worldbookConfig?.manualSelection) ? worldbookConfig.manualSelection : [],
+      () => {
+        const enabled = worldbookConfig?.enabledEntries;
+        return enabled && typeof enabled === 'object' ? Object.keys(enabled) : [];
+      },
+      () => Array.isArray(options?.agentGreenlights) ? options.agentGreenlights.map((g: any) => String(g?.bookName || '').trim()).filter(Boolean) : [],
+    ]);
+    const asyncReadScopeNames = await collectAsyncTableCandidateScope_ACU([
+      // 来源 4：当前数据注入目标世界书（内部已做宿主存在性验证，失败静默返回 null）
+      async () => {
+        const target = await getInjectionTargetLorebook_ACU();
+        return target ? [target] : [];
+      },
+      // 来源 5：角色模式下当前角色绑定的 primary/additional 世界书
+      async () => {
+        if (worldbookConfig?.source !== 'character') return [];
+        const binding = await getCurrentCharacterWorldbookBinding_ACU();
+        return binding?.orderedNames || [];
+      },
+    ]);
+    const readScopeNames = [...syncReadScopeNames, ...asyncReadScopeNames];
     const [worldbookContent, worldbookDatabaseExcludedContent] = await Promise.all([
-        getCombinedWorldbookContent_ACU(worldbookScanText, worldbookOptions),
         getCombinedWorldbookContent_ACU(worldbookScanText, {
             ...worldbookOptions,
+            readContext,
+            entriesByBook: await buildSharedEntriesByBook_ACU(readContext, readScopeNames),
+        }),
+        getCombinedWorldbookContent_ACU(worldbookScanText, {
+            ...worldbookOptions,
+            readContext,
+            entriesByBook: await buildSharedEntriesByBook_ACU(readContext, readScopeNames),
             excludeEntry: isDatabaseGeneratedLorebookEntry_ACU,
         }),
     ]);
@@ -363,20 +402,36 @@ function resolvePromptRowWindow_ACU(
         const normalizedTableName = String(tableName || '').trim();
         if (!normalizedTableName) return null;
         try {
-            const worldbooks = await getWorldBooks_ACU();
-            const entries = worldbooks.flatMap((worldbook: any) => (Array.isArray(worldbook?.entries) ? worldbook.entries : [])
-                .map((entry: any) => ({ ...entry, bookName: String(worldbook?.name || '').trim() })));
-            const scopedEntries = resolveGeneratedEntriesForTable_ACU(entries, normalizedTableName, workingTableData);
+            const identity = resolveUniqueTableExportIdentity_ACU(normalizedTableName, workingTableData);
+            if (!identity) {
+                logDebug_ACU('[Worldbook] 表名占位符观测', {
+                    phase: 'table_token',
+                    tokenCount: 1,
+                    validIdentityCount: 0,
+                    candidateBookCount: 0,
+                });
+                return null;
+            }
+            // 候选作用域：只读取本次配置显式涉及的书，绝不为了找生成条目扫全库。
+            const scopedEntries = await resolveCandidateScopeEntriesForTable_ACU(
+                readContext,
+                readScopeNames,
+                normalizedTableName,
+                workingTableData,
+            );
             if (scopedEntries.length === 0) return null;
             const scopedKeys = new Set(scopedEntries.map((entry: any) => `${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`));
             const content = await getCombinedWorldbookContent_ACU(worldbookScanText, {
                 ...worldbookOptions,
+                readContext,
+                entriesByBook: await buildSharedEntriesByBook_ACU(readContext, readScopeNames),
                 includeGeneratedEntries: true,
                 entryScope: (entry: any) => scopedKeys.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`),
             });
             return `<worldbook_context>\n${content}\n</worldbook_context>`;
         } catch (error) {
-            logWarn_ACU(`[Worldbook] 无法解析填表表名占位符 "${normalizedTableName}"，保留原 token。`, error);
+            if (String((error as any)?.message || '').startsWith('StrictLorebookRead:')) throw error;
+            logWarn_ACU(`[Worldbook] 无法解析填表表名占位符 "${normalizedTableName}"，保留原 token。`, { phase: 'table_token', error: { category: 'read_failed' } });
             return null;
         }
     };
@@ -607,6 +662,8 @@ export function formatTableForSqliteMode(
         logWarn_ACU(`[SQLite prompt] 已忽略表 ${table.name || sheetKey} 的 sendRowsSqlTemplate：隐藏 physical columns 时无法证明自定义 SQL 不会泄露隐藏数据。`);
     }
 
+
+
     // 行数限制逻辑（与原生模式一致）
     const rowWindow = resolvePromptRowWindow_ACU(table, effectiveAllRows, options.flightModeEnabled === true);
     const { rowsToProcess, startIndex } = rowWindow;
@@ -625,4 +682,49 @@ export function formatTableForSqliteMode(
     text += '\n';
 
     return text;
+}
+
+
+/**
+ * 在请求级读取上下文中解析候选作用域内唯一 hostName 的条目，返回 { requestedName: entries } 映射。
+ * 只读取本次配置显式涉及的书；同一 hostName 由多个逻辑名指向时只物理读取一次（readContext 去重）。
+ */
+async function buildSharedEntriesByBook_ACU(
+  readContext: LorebookReadContext_ACU | undefined,
+  scopeNames: string[],
+): Promise<Record<string, any[]>> {
+  const targets = await resolveLorebookReadTargets_ACU(readContext, scopeNames);
+  const entriesByBook: Record<string, any[]> = {};
+  await Promise.all(targets.map(async target => {
+    if (!target.hostName) return;
+    const entries = await readContext?.readBookEntries(target.hostName) ?? [];
+    entriesByBook[target.requestedName] = entries;
+  }));
+  return entriesByBook;
+}
+
+/**
+ * 在候选作用域内解析表名对应的生成条目。
+ * 只读取候选书，绝不为了找生成条目扫全库。
+ */
+async function resolveCandidateScopeEntriesForTable_ACU(
+  readContext: LorebookReadContext_ACU | undefined,
+  scopeNames: string[],
+  tableName: string,
+  tableData: Record<string, any>,
+): Promise<Record<string, any>[]> {
+  const targets = await resolveLorebookReadTargets_ACU(readContext, scopeNames);
+  logDebug_ACU('[Worldbook] 表名占位符观测', {
+    phase: 'table_token',
+    tokenCount: 1,
+    validIdentityCount: 1,
+    candidateBookCount: targets.filter(target => !!target.hostName).length,
+  });
+  const allEntries: Record<string, any>[] = [];
+  await Promise.all(targets.map(async target => {
+    if (!target.hostName) return;
+    const entries = await readContext?.readBookEntries(target.hostName) ?? [];
+    entries.forEach((entry: any) => allEntries.push({ ...entry, bookName: target.hostName }));
+  }));
+  return resolveGeneratedEntriesForTable_ACU(allEntries, tableName, tableData);
 }

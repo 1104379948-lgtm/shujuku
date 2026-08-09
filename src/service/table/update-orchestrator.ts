@@ -32,6 +32,7 @@ import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
+import { createLorebookReadContext_ACU, type LorebookReadContext_ACU } from '../worldbook/read-context';
 
 import { applyTableDelta_ACU, isDeltaTagData_ACU } from './table-delta';
 /**
@@ -824,6 +825,7 @@ export async function collectGroupFillResponse_ACU(
         onProgress?: (event: CardUpdateProgressEvent) => void;
         maxRetriesOverride?: number;
         respectGlobalStop?: boolean;
+        worldbookReadContext?: LorebookReadContext_ACU;
     } = {}
 ): Promise<GroupFillResponse_ACU> {
     const effectiveAbortController = abortController || new AbortController();
@@ -851,6 +853,7 @@ export async function collectGroupFillResponse_ACU(
             templateScope: job.templateScope,
             sqlApplyScope: job.sqlApplyScope,
             signal: effectiveAbortController.signal,
+            worldbookReadContext: options.worldbookReadContext,
         });
     } catch (error: any) {
         prepareSpan.end({ success: false });
@@ -1999,6 +2002,18 @@ async function processGroupedRuntimeChunkCore_ACU(
                 break;
             }
 
+            // 请求级世界书读取上下文：一个 bucket attempt 一个 context，
+            // 同 bucket sibling jobs 与格式重试共享物理读取；bucket 完成后 dispose，
+            // 下一 bucket 新建以便看到前一 bucket 提交后同步到世界书的新内容。
+            const bucketReadContext = createLorebookReadContext_ACU({
+                source: 'form_fill_bucket',
+                isActive: () => !isStopped(),
+                isAborted: () => isStopped(),
+            });
+            const disposeBucketReadContext = () => {
+                try { bucketReadContext.dispose(); } catch { /* dispose 幂等 */ }
+            };
+            try {
             const collectFeedback = retryUnifiedError ? { lastUnifiedError: retryUnifiedError } : undefined;
             const settledResponses = await Promise.allSettled(jobs.map(job => collectGroupFillResponse_ACU(
                     job,
@@ -2007,6 +2022,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                     {
                         onProgress: event => emitBucketProgress(bucketIndex, event),
                         respectGlobalStop: options.respectGlobalStop,
+                        worldbookReadContext: bucketReadContext,
                     },
                 )));
             let responses: GroupFillResponse_ACU[] = [];
@@ -2054,6 +2070,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                         {
                             onProgress: event => emitBucketProgress(bucketIndex, event),
                             respectGlobalStop: options.respectGlobalStop,
+                            worldbookReadContext: bucketReadContext,
                         },
                     )));
                     for (let i = 0; i < retrySettled.length; i++) {
@@ -2142,6 +2159,9 @@ async function processGroupedRuntimeChunkCore_ACU(
                     maxRetries: maxBucketRetries,
                     message: sanitizeRetryFeedback_ACU(retryUnifiedError, 50),
                 });
+            }
+            } finally {
+                disposeBucketReadContext();
             }
         }
 
@@ -2455,8 +2475,9 @@ export async function executeCardUpdateCore_ACU(
         let lastSqlError: string | null = null;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            const attemptReadContext = createLorebookReadContext_ACU({ source: 'form_fill_legacy', isActive: () => !effectiveAbortController?.signal.aborted, isAborted: () => effectiveAbortController?.signal.aborted === true });
             try {
-                const rawBaseSnapshot = getRuntimeTableDataSnapshot_ACU(progressContext?.batchBaseSnapshot || null) || {};
+                let rawBaseSnapshot: Record<string, any> = getRuntimeTableDataSnapshot_ACU(progressContext?.batchBaseSnapshot || null) || {};
                 const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(
                     buildWriteSetForSheetKeys_ACU(targetSheetKeys, rawBaseSnapshot),
                     { chatKey: executionScope.chatKey, isolationKey: executionScope.isolationKey },
@@ -2482,7 +2503,7 @@ export async function executeCardUpdateCore_ACU(
                     currentJob,
                     { lastSqlError },
                     effectiveAbortController,
-                    { onProgress: emitProgress, maxRetriesOverride: 1 },
+                    { onProgress: emitProgress, maxRetriesOverride: 1, worldbookReadContext: attemptReadContext },
                 );
 
                 if (collectResult.aborted) {
@@ -2802,6 +2823,13 @@ export async function executeCardUpdateCore_ACU(
                     continue;
                 } else {
                     return { success: false, modifiedKeys: [], error: `填表在 ${maxRetries} 次尝试后仍失败: ${safeError}`, errorCategory };
+                }
+            }
+            finally {
+                try {
+                    attemptReadContext.dispose();
+                } catch {
+                    // 清理失败不应影响主流程结果
                 }
             }
         }

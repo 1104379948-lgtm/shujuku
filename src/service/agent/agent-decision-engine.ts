@@ -1,8 +1,8 @@
 import type { AgentWorldbookControl_ACU } from '../../shared/models/agent-worldbook-model';
 import { stripAgentTakeoverMetaBlockStrict_ACU } from '../../shared/agent-worldbook-comment';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
-import { getLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
-import { createStrictLorebookReadError_ACU, getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
+import type { StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
+import { getAgentRuntimeLorebookEntries_ACU } from './agent-worldbook-runtime-read';
 import { normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU, logWarn_ACU } from '../../shared/utils';
 import { estimateTextTk_ACU, normalizeTkBudgetNumber_ACU } from '../../shared/token-estimate';
 import { callAIWithPreset_ACU } from '../ai/api-call';
@@ -217,26 +217,11 @@ function buildFallbackWorldbookSummaryText_ACU(entry: Record<string, any>, comme
   return { description, triggerWhen };
 }
 
-async function getAgentRuntimeLorebookEntries_ACU(
-  bookName: string,
-  readContext?: StrictLorebookReadContext_ACU,
-): Promise<any[]> {
-  if (!readContext) return getLorebookEntries_ACU(bookName);
-  const result = await getLorebookEntriesStrict_ACU([bookName], {
-    source: 'agent_runtime',
-    validationPolicy: 'trusted_direct',
-    runId: readContext.runId,
-    context: readContext,
-  });
-  if (result.status !== 'success') throw createStrictLorebookReadError_ACU(result);
-  return result.entriesByBook[bookName] || [];
-}
-
 async function collectWorldbookSummariesFromSnapshot_ACU(
   contextSettings: ReturnType<typeof normalizeAgentContextSettings_ACU>,
   readContext?: StrictLorebookReadContext_ACU,
 ): Promise<{ summaries: AgentWorldbookSummary_ACU[]; allowedKeys: Set<string> }> {
-  const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
+  const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readContext);
   const summaries: AgentWorldbookSummary_ACU[] = [];
   const allowedKeys = new Set<string>();
 

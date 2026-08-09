@@ -37,6 +37,7 @@ const {
 }));
 
 vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
+  listLorebooks_ACU: vi.fn(async () => []),
   getCurrentCharacterWorldbookBinding_ACU: mockGetCurrentCharacterWorldbookBinding,
   getCharLorebooks_ACU: mockGetCharLorebooks,
   isLorebookNotFoundError_ACU: mockIsLorebookNotFoundError,
@@ -57,6 +58,8 @@ vi.mock('../../../src/service/worldbook/pipeline', () => ({
   createStrictLorebookReadError_ACU: mockCreateStrictLorebookReadError,
   getLorebookEntriesStrict_ACU: mockGetLorebookEntriesStrict,
 }));
+
+import { createLorebookReadContext_ACU } from '../../../src/service/worldbook/read-context';
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({ settings_ACU: mockSettings }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ saveSettings_ACU: mockSaveSettings }));
@@ -223,7 +226,8 @@ describe('agent worldbook config/state meta', () => {
         failedBookNames: [],
       };
     });
-    const readContext = { runId: 'ghost-worldbook-regression', bookEntriesPromises: new Map() };
+    // 用真实请求级 context：config 扫描与 skill-meta 读同一批书，物理读取由 context 去重为 2 次。
+    const readContext = createLorebookReadContext_ACU({ source: 'test_ghost_worldbook' });
 
     const result = await resolveAgentWorldbookFilterAvailability_ACU(readContext);
 
@@ -232,13 +236,15 @@ describe('agent worldbook config/state meta', () => {
       reason: 'available',
       bookNames: ['主世界书', '有效附加书'],
     });
-    expect(mockGetLorebookEntriesStrict).toHaveBeenCalledTimes(2);
-    expect(mockGetLorebookEntriesStrict.mock.calls.map(call => call[0])).toEqual([
-      ['主世界书'],
-      ['有效附加书'],
-    ]);
+    // 新语义（T7-3）：availability 的 config 扫描与 skill-meta 都使用同一 context；
+    // 真实 context 按 hostName 去重物理读取。mock 不做去重，因此这里断言
+    // 去重后的书集合（而非调用次数），保证不出现 bootstrap 之外的幽灵书。
+    const strictBookCallSets = mockGetLorebookEntriesStrict.mock.calls.map(call => call[0]);
+    expect([...new Set(strictBookCallSets.flat())]).toEqual(['主世界书', '有效附加书']);
+    expect(strictBookCallSets.flat()).not.toContain('幽灵书');
+    expect(strictBookCallSets.flat()).not.toContain('旧主书');
     expect(mockGetLorebookEntriesStrict).toHaveBeenCalledWith(['主世界书'], expect.objectContaining({
-      source: 'agent_runtime', validationPolicy: 'trusted_direct', runId: 'ghost-worldbook-regression', context: readContext,
+      source: 'agent_runtime', validationPolicy: 'trusted_direct', context: readContext,
     }));
     expect(mockGetLorebookEntriesStrict).toHaveBeenCalledWith(['有效附加书'], expect.any(Object));
     expect(mockGetCharLorebooks).not.toHaveBeenCalled();

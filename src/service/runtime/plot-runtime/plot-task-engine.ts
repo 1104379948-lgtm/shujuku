@@ -265,13 +265,24 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     ): Promise<string | null> => {
       const normalizedTableName = String(tableName || '').trim();
       const tableData = currentJsonTableData_ACU;
-      if (!isUniqueCurrentTableName(normalizedTableName, tableData)) return null;
+      const validIdentity = isUniqueCurrentTableName(normalizedTableName, tableData);
+      if (!validIdentity) {
+        logDebug_ACU('[剧情推进][世界书] 表名占位符观测', { phase: 'table_token', tokenCount: 1, validIdentityCount: 0, candidateBookCount: 0, indexBuildCount: readContext?.tableIndexBuildCount ?? 0 });
+        return null;
+      }
       try {
         if (!readContext) throw new Error('StrictLorebookRead:missing_context');
         const [index, scopedKeys] = await Promise.all([
           readContext.tableWorldbookIndexPromise,
           readContext.getTableWorldbookScopedKeys(normalizedTableName, tableData),
         ]);
+        logDebug_ACU('[剧情推进][世界书] 表名占位符观测', {
+          phase: 'table_token',
+          tokenCount: 1,
+          validIdentityCount: 1,
+          candidateBookCount: Object.keys(index?.entriesByBook || {}).length,
+          indexBuildCount: readContext?.tableIndexBuildCount ?? 0,
+        });
         if (scopedKeys.size === 0) return '';
         const content = await getWorldbookContentForPlot_ACU(plotSettings, userMessage, extraBaseText, {
           ...worldbookOptions,
@@ -753,8 +764,20 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     }
 
     const worldbookReadContext = createPlotWorldbookReadContext_ACU(
-      () => resolveCharacterLorebookNamesStable_ACU(),
-      abortController_ACU?.signal,
+      {
+        resolveCharacterLorebookNames: () => resolveCharacterLorebookNamesStable_ACU(),
+        // 表名占位符候选作用域：与剧情世界书实际来源一致（manual 选择或角色绑定），
+        // 避免为解析 {{表名}} 隐式枚举全部世界书。
+        resolveTableCandidates: async () => {
+          const plotCfg = plotSettings?.plotWorldbookConfig;
+          const worldbookSource = plotCfg?.source || plotSettings?.worldbookSource || 'character';
+          if (worldbookSource === 'manual') {
+            return Array.isArray(plotCfg?.manualSelection) ? plotCfg.manualSelection : (plotSettings?.selectedWorldbooks || []);
+          }
+          return resolveCharacterLorebookNamesStable_ACU();
+        },
+        signal: abortController_ACU?.signal,
+      },
     );
     try {
       const sharedContext: Record<string, any> = await buildPlotSharedContext_ACU(plotSettings, userMessage, {

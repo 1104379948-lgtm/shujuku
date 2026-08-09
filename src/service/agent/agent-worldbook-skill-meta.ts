@@ -5,7 +5,8 @@ import type {
   WorldbookSkillMetaUpdatedBy_ACU,
 } from '../../shared/models/agent-worldbook-model';
 import { getLorebookEntries_ACU, setLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
-import { createStrictLorebookReadError_ACU, getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
+import type { StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
+import { getAgentRuntimeLorebookEntries_ACU } from './agent-worldbook-runtime-read';
 export type { WorldbookSkillMeta_ACU, WorldbookSkillMetaUpdatedBy_ACU } from '../../shared/models/agent-worldbook-model';
 import {
   readAgentWorldbookControlFromWorldbooks_ACU,
@@ -218,21 +219,6 @@ export async function getWorldbookEntrySkillMeta_ACU(
   return buildWorldbookSkillMetaReadResult_ACU(bookName, entry);
 }
 
-async function getAgentRuntimeLorebookEntries_ACU(
-  bookName: string,
-  readContext?: StrictLorebookReadContext_ACU,
-): Promise<any[]> {
-  if (!readContext) return getLorebookEntries_ACU(bookName);
-  const result = await getLorebookEntriesStrict_ACU([bookName], {
-    source: 'agent_runtime',
-    validationPolicy: 'trusted_direct',
-    runId: readContext.runId,
-    context: readContext,
-  });
-  if (result.status !== 'success') throw createStrictLorebookReadError_ACU(result);
-  return result.entriesByBook[bookName] || [];
-}
-
 export async function listWorldbookSkillMetas_ACU(
   bookNames: string[] = [],
   readContext?: StrictLorebookReadContext_ACU,
@@ -280,8 +266,8 @@ export async function clearWorldbookSkillMetaBlocks_ACU(
 export async function resolveAgentWorldbookFilterAvailability_ACU(
   readContext?: StrictLorebookReadContext_ACU,
 ): Promise<AgentWorldbookFilterAvailability_ACU> {
-  const config = await readAgentWorldbookControlFromWorldbooks_ACU();
-  const bookNames = await resolveAgentWorldbookScopeBookNames_ACU();
+  const config = await readAgentWorldbookControlFromWorldbooks_ACU(readContext);
+  const bookNames = await resolveAgentWorldbookScopeBookNames_ACU(undefined, readContext);
   const skillMetas = bookNames.length > 0 ? await listWorldbookSkillMetas_ACU(bookNames, readContext) : [];
   const base = {
     configuredMode: config.control.mode,

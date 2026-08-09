@@ -2,6 +2,8 @@ import type {
   AgentWorldbookControlSnapshot_ACU,
   AgentWorldbookControlSnapshotEntry_ACU,
 } from '../../shared/models/agent-worldbook-model';
+import type { StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
+import { getAgentRuntimeLorebookEntries_ACU } from './agent-worldbook-runtime-read';
 import {
   deleteLorebookEntries_ACU,
   getLorebookEntries_ACU,
@@ -446,17 +448,18 @@ async function readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(
   resolvedBookNames: string[],
   selectionSignature: string,
   initialRevision: number,
+  readContext?: StrictLorebookReadContext_ACU,
 ): Promise<AgentWorldbookControlSnapshot_ACU> {
-  const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature);
+  const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { readContext });
   setAgentWorldbookSnapshotStateIfRevision_ACU(initialRevision, snapshot);
   return snapshot;
 }
 
-export async function refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(): Promise<AgentWorldbookControlSnapshot_ACU> {
+export async function refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readContext?: StrictLorebookReadContext_ACU): Promise<AgentWorldbookControlSnapshot_ACU> {
   const initialRevision = getAgentWorldbookSnapshotRevision_ACU();
-  const resolvedBookNames = await resolveTakeoverBookNames_ACU();
+  const resolvedBookNames = await resolveTakeoverBookNames_ACU(readContext);
   const selectionSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
-  return readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, selectionSignature, initialRevision);
+  return readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, selectionSignature, initialRevision, readContext);
 }
 
 /** 为普通剧情与填表读取解析持久化接管前视图；expectedSignature 独立于返回快照，防止快照自签名。 */
@@ -517,9 +520,9 @@ async function backfillMissingTakeoverMeta_ACU(snapshot: AgentWorldbookControlSn
 async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(
   resolvedBookNames: string[],
   selectionSignature: string,
-  options: { backfillMissingMeta?: boolean } = {},
+  options: { backfillMissingMeta?: boolean; readContext?: StrictLorebookReadContext_ACU } = {},
 ): Promise<AgentWorldbookControlSnapshot_ACU> {
-  const state = await readAgentWorldbookStateFromWorldbooks_ACU();
+  const state = await readAgentWorldbookStateFromWorldbooks_ACU(options.readContext);
   const activeStateSnapshot = state.snapshot.active === true && state.snapshot.selectionSignature === selectionSignature
     ? state.snapshot
     : null;
@@ -527,7 +530,7 @@ async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(
   const snapshotBooks: Record<string, AgentWorldbookControlSnapshotEntry_ACU[]> = {};
   let createdAt = 0;
   for (const bookName of resolvedBookNames) {
-    const entries = await getLorebookEntries_ACU(bookName);
+    const entries = await getAgentRuntimeLorebookEntries_ACU(bookName, options.readContext);
     const bookSnapshot: AgentWorldbookControlSnapshotEntry_ACU[] = [];
     for (const entry of entries || []) {
       if (!hasValidWorldbookUid_ACU(entry?.uid)) continue;
@@ -595,8 +598,8 @@ export function isWorldbookTakeoverActive_ACU(): boolean {
   return getPlotAgentWorldbookSnapshot_ACU().active === true;
 }
 
-async function resolveTakeoverBookNames_ACU(): Promise<string[]> {
-  return normalizeBookNamesForTakeover_ACU(await resolveAgentWorldbookScopeBookNames_ACU());
+async function resolveTakeoverBookNames_ACU(readContext?: StrictLorebookReadContext_ACU): Promise<string[]> {
+  return normalizeBookNamesForTakeover_ACU(await resolveAgentWorldbookScopeBookNames_ACU(undefined, readContext));
 }
 
 function buildSnapshotEntry_ACU(entry: Record<string, any>): AgentWorldbookControlSnapshotEntry_ACU | null {

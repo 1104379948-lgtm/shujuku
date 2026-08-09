@@ -46,8 +46,31 @@ vi.mock('../../../src/shared/utils', () => ({
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get manualExtraHint_ACU() { return ''; },
+  get currentChatFileIdentifier_ACU() { return null; },
   get currentJsonTableData_ACU() { return mockCurrentJsonTableData; },
   get settings_ACU() { return mockSettings; },
+}));
+
+// 请求级读取上下文底层依赖世界书网关；测试统一 mock 网关以隔离宿主 API。
+const mockLorebookList = vi.fn<() => Promise<any[]>>(async () => []);
+const mockLorebookEntries = vi.fn<(...args: any[]) => Promise<any[]>>(async () => []);
+vi.mock('../../../src/data/gateways/worldbook-gateway', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/data/gateways/worldbook-gateway')>();
+  return {
+    ...actual,
+    listLorebooks_ACU: (...args: any[]) => mockLorebookList(...args),
+    getLorebookEntries_ACU: (...args: any[]) => mockLorebookEntries(...args),
+  };
+});
+
+const mockInjectionTargetLorebook = vi.fn<() => Promise<string | null>>(async () => null);
+vi.mock('../../../src/service/worldbook/injection-engine', () => ({
+  getInjectionTargetLorebook_ACU: (...args: any[]) => mockInjectionTargetLorebook(...args),
+}));
+
+const mockCharacterBinding = vi.fn<() => Promise<any>>(async () => ({ primary: null, additional: [], orderedNames: [] }));
+vi.mock('../../../src/data/gateways/character-gateway', () => ({
+  getCurrentCharacterWorldbookBinding_ACU: (...args: any[]) => mockCharacterBinding(...args),
 }));
 
 vi.mock('../../../src/data/gateways/host-state-gateway', () => ({
@@ -117,6 +140,10 @@ describe('formatTableForSqliteMode', () => {
       tableContextExtractRules: '',
       tableContextExcludeRules: '',
     };
+    mockLorebookList.mockResolvedValue([]);
+    mockLorebookEntries.mockResolvedValue([]);
+    mockInjectionTargetLorebook.mockResolvedValue(null);
+    mockCharacterBinding.mockResolvedValue({ primary: null, additional: [], orderedNames: [] });
     mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
   });
 
@@ -703,17 +730,25 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
   });
 
   it('返回 $9 世界书内容与请求内表名 resolver', async () => {
+    // 候选作用域契约（§3.2）：生成条目只在候选来源（manualSelection / enabledEntries /
+    // Agent greenlight / 注入目标 / 角色绑定）内的书中可解析。书 A 需显式进入候选。
+    mockSettings.characterSettings = {
+      default: { worldbookConfig: { source: 'manual', manualSelection: ['书A'], enabledEntries: {}, injectionTarget: '' } },
+    };
+    mockLorebookList.mockResolvedValue([{ name: '书A' }]);
+    mockLorebookEntries.mockImplementation(async (hostName: string) => {
+      if (hostName === '书A') {
+        return [
+          { uid: 7, comment: 'TavernDB-ACU-CustomExport-关系档案', content: '关系正文' },
+          { uid: 8, comment: 'TavernDB-ACU-CustomExport-其他档案', content: '其他正文' },
+        ];
+      }
+      return [];
+    });
     vi.mocked(getCombinedWorldbookContent_ACU)
       .mockResolvedValueOnce('普通世界书')
       .mockResolvedValueOnce('排除内部后的世界书')
       .mockResolvedValueOnce('关系正文');
-    mockGetWorldBooks.mockResolvedValue([{
-      name: '书A',
-      entries: [
-        { uid: 7, comment: 'TavernDB-ACU-CustomExport-关系档案', content: '关系正文' },
-        { uid: 8, comment: 'TavernDB-ACU-CustomExport-其他档案', content: '其他正文' },
-      ],
-    }]);
     const result = await prepareAIInput_ACU([], 'standard', null, {
       tableData: {
         sheet_0: {

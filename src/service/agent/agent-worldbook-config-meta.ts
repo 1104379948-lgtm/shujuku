@@ -28,6 +28,8 @@ import {
   restoreAgentWorldbookSnapshotEntries_ACU,
   rollbackAgentWorldbookSnapshotRestore_ACU,
 } from './agent-worldbook-snapshot-restore';
+import type { StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
+import { getAgentRuntimeLorebookEntries_ACU } from './agent-worldbook-runtime-read';
 import { settings_ACU } from '../runtime/state-manager';
 import {
   normalizeAgentContextSettings_ACU,
@@ -513,8 +515,8 @@ async function resolveAgentWorldbookScopeBookNamesFromScope_ACU(scope: AgentWorl
   return binding.orderedNames.slice();
 }
 
-export async function resolveAgentWorldbookScopeBookNames_ACU(scope?: AgentWorldbookScope_ACU): Promise<string[]> {
-  const resolvedScope = scope || (await readAgentWorldbookStateFromWorldbooks_ACU()).control.worldbookScope;
+export async function resolveAgentWorldbookScopeBookNames_ACU(scope?: AgentWorldbookScope_ACU, readContext?: StrictLorebookReadContext_ACU): Promise<string[]> {
+  const resolvedScope = scope || (await readAgentWorldbookStateFromWorldbooks_ACU(readContext)).control.worldbookScope;
   return resolveAgentWorldbookScopeBookNamesFromScope_ACU(resolvedScope);
 }
 
@@ -547,14 +549,14 @@ function getLegacyAgentWorldbookControl_ACU(): AgentWorldbookControl_ACU | null 
   return normalizeAgentWorldbookControlForCardConfig_ACU(legacy);
 }
 
-async function readWorldbookConfigEntry_ACU(bookName: string): Promise<{
+async function readWorldbookConfigEntry_ACU(bookName: string, readContext?: StrictLorebookReadContext_ACU): Promise<{
   bookName: string;
   entry: any | null;
   duplicateCount: number;
   control: AgentWorldbookControl_ACU | null;
   snapshot: AgentWorldbookControlSnapshot_ACU | null;
 }> {
-  const entries = await getLorebookEntries_ACU(bookName);
+  const entries = await getAgentRuntimeLorebookEntries_ACU(bookName, readContext);
   const result = findAgentStateEntry_ACU(entries, bookName);
   if (!result.entry || !result.meta) return { bookName, entry: null, duplicateCount: result.duplicateCount, control: null, snapshot: null };
   return {
@@ -566,7 +568,7 @@ async function readWorldbookConfigEntry_ACU(bookName: string): Promise<{
   };
 }
 
-export async function readAgentWorldbookStateFromWorldbooks_ACU(): Promise<AgentWorldbookStateReadResult_ACU> {
+export async function readAgentWorldbookStateFromWorldbooks_ACU(readContext?: StrictLorebookReadContext_ACU): Promise<AgentWorldbookStateReadResult_ACU> {
   const scanBookNames = await resolveAgentWorldbookBootstrapBookNames_ACU();
   const defaultScope = getLegacyAgentWorldbookScope_ACU();
   const writableBookName = await resolveAgentWorldbookHostBookForScope_ACU(defaultScope);
@@ -574,7 +576,7 @@ export async function readAgentWorldbookStateFromWorldbooks_ACU(): Promise<Agent
   for (const bookName of scanBookNames) {
     let result: Awaited<ReturnType<typeof readWorldbookConfigEntry_ACU>>;
     try {
-      result = await readWorldbookConfigEntry_ACU(bookName);
+      result = await readWorldbookConfigEntry_ACU(bookName, readContext);
     } catch (error) {
       if (isLorebookNotFoundError_ACU(error)) continue;
       throw error;
@@ -615,8 +617,8 @@ export async function readAgentWorldbookStateFromWorldbooks_ACU(): Promise<Agent
   };
 }
 
-export async function readAgentWorldbookControlFromWorldbooks_ACU(): Promise<AgentWorldbookControlReadResult_ACU> {
-  const state = await readAgentWorldbookStateFromWorldbooks_ACU();
+export async function readAgentWorldbookControlFromWorldbooks_ACU(readContext?: StrictLorebookReadContext_ACU): Promise<AgentWorldbookControlReadResult_ACU> {
+  const state = await readAgentWorldbookStateFromWorldbooks_ACU(readContext);
   return {
     control: state.control,
     source: state.source,

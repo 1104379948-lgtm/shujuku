@@ -9,6 +9,8 @@ import { getChatSheetGuideDataForIsolationKey_ACU, getSortedSheetKeys_ACU, mater
 import { getImportBatchPrefix_ACU, getImportStablePrefix_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { isEntryBlocked_ACU } from '../../shared/utils';
+import { classifyLorebookReadError_ACU } from '../../shared/lorebook-read-error';
+import { resolveLorebookReadTargets_ACU } from './read-scope';
 import { consumeLastMergeQuarantinedSheetKeys_ACU, consumeLastMergeWarnings_ACU, formatJsonToReadable_ACU, maybeLiftWorldbookSuppression_ACU, mergeAllIndependentTables_ACU, shouldSuppressWorldbookInjection_ACU } from '../runtime/helpers-remaining';
 import { normalizeCanonicalTableRows_ACU, repairLegacyAutoMergedRowTails_ACU } from '../../shared/canonical-row-normalizer';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
@@ -806,6 +808,8 @@ export interface StrictLorebookReadOptions_ACU {
   validationPolicy: LorebookValidationPolicy_ACU;
   runId: string;
   context?: StrictLorebookReadContext_ACU;
+  /** table candidate read 的 not-found 处理：fail 阻断读取；isolate_stale 只隔离该候选书。 */
+  notFoundPolicy?: 'fail' | 'isolate_stale';
 }
 
 export interface StrictLorebookReadResult_ACU {
@@ -907,14 +911,8 @@ function getStrictLorebookContextStatus_ACU(context: StrictLorebookReadContext_A
 }
 
 function classifyStrictLorebookReadError_ACU(error: any): StrictLorebookReadErrorCategory_ACU {
-  const message = String(error?.message || error || '');
-  const namesExplicitlyMissingLorebook = /\b(?:worldbook|lorebook)\b(?:\s+['"`][^'"`\r\n]+['"`])?\s+(?:not found|does not exist)\b/i.test(message)
-    || /\b(?:could not find|cannot find|can't find)\s+(?:the\s+)?(?:worldbook|lorebook)\b/i.test(message)
-    || /世界书\s*(?:[“"'`][^”"'`\r\n]+[”"'`])?\s*(?:未能找到|找不到|不存在)/.test(message)
-    || /(?:未能找到|找不到)\s*世界书/.test(message);
-  return namesExplicitlyMissingLorebook
-    ? 'lorebook_not_found'
-    : 'unknown';
+  // abort 已由 context 状态机/调用方处理；此处只关心书级 not-found，其余一律 unknown。
+  return classifyLorebookReadError_ACU(error) === 'lorebook_not_found' ? 'lorebook_not_found' : 'unknown';
 }
 
 async function readStrictLorebookBook_ACU(bookName: string, context?: StrictLorebookReadContext_ACU): Promise<StrictLorebookBookReadResult_ACU> {
@@ -977,7 +975,15 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
       }));
       baseResult.invalidBookNames = resolvedNames.filter(item => !item.resolved).map(item => item.requested);
       requestedBookNames = [...new Set(resolvedNames.map(item => item.resolved).filter((name): name is string => !!name))];
-      if (baseResult.invalidBookNames.length > 0) return { ...baseResult, status: 'invalid_selection' };
+      if (baseResult.invalidBookNames.length > 0) {
+        if (options.notFoundPolicy === 'isolate_stale') {
+          // 候选作用域：catalog 阶段不在列表的书直接隔离（记入 stale），继续读取其余候选。
+          baseResult.staleBookNames.push(...baseResult.invalidBookNames);
+          baseResult.invalidBookNames = [];
+        } else {
+          return { ...baseResult, status: 'invalid_selection' };
+        }
+      }
     } catch {
       const failureStatus = getStrictLorebookContextStatus_ACU(options.context);
       return { ...baseResult, status: failureStatus || 'read_failed' };
@@ -992,7 +998,8 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
   if (finalStatus === 'scope_changed' || reads.some(read => read.status === 'scope_changed')) {
     return { ...baseResult, status: 'scope_changed' };
   }
-  const canIsolateStaleTableIndexBook = options.source === 'plot_table_index' && options.validationPolicy === 'enumerate_all';
+  // 候选作用域读取：not-found 处理由显式 policy 决定，不再硬编码为 enumerate_all 特例。
+  const canIsolateStaleTableIndexBook = options.notFoundPolicy === 'isolate_stale';
   for (const read of reads) {
     if (read.status === 'success') {
       baseResult.entriesByBook[read.bookName] = cloneLorebookEntriesForRead_ACU(read.entries, read.bookName);
@@ -1217,9 +1224,21 @@ export   async function collectCombinedWorldbookEntriesByStrategy_ACU(options: a
       }
 
       const providedEntriesMap = options?.entriesByBook;
-      const entriesMap: any = providedEntriesMap && typeof providedEntriesMap === 'object'
+      let entriesMap: any = providedEntriesMap && typeof providedEntriesMap === 'object'
         ? providedEntriesMap
-        : await getLorebookEntriesByNames_ACU(bookNames);
+        : null;
+      if (!entriesMap && options?.readContext) {
+        // 请求级上下文：只读取候选作用域内的书，物理读取由 context 去重与限流。
+        const targets = await resolveLorebookReadTargets_ACU(options.readContext, bookNames);
+        entriesMap = {};
+        await Promise.all(targets.map(async (target) => {
+          if (!target.hostName) return;
+          entriesMap[target.requestedName] = await options.readContext.readBookEntries(target.hostName);
+        }));
+      }
+      if (!entriesMap) {
+        entriesMap = await getLorebookEntriesByNames_ACU(bookNames);
+      }
       let allEntries: any[] = [];
       let placeholderOriginalIndex = 0;
       for (const bookName of bookNames) {
@@ -1416,6 +1435,8 @@ export   async function getCombinedWorldbookContent_ACU(initialScanTextOverride 
         return await buildCombinedWorldbookContentByStrategy_ACU({
             logPrefix: '[Worldbook]',
             bookNames,
+            entriesByBook: options?.entriesByBook,
+            readContext: options?.readContext,
             formatEntry: (entry: any) => String(entry?.content || '').trim(),
             baseScanText: (typeof initialScanTextOverride === 'string' && initialScanTextOverride.trim()) ? initialScanTextOverride : '',
             fallbackScanText: allChatMessages_ACU.map(message => message.message).join('\n'),

@@ -712,7 +712,7 @@ describe('getLorebookEntriesStrict_ACU', () => {
     });
 
     const result = await getLorebookEntriesStrict_ACU([], {
-      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-ghost',
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-ghost', notFoundPolicy: 'isolate_stale',
     });
 
     expect(result.status).toBe('success');
@@ -730,7 +730,7 @@ describe('getLorebookEntriesStrict_ACU', () => {
     });
 
     const result = await getLorebookEntriesStrict_ACU([], {
-      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-chinese-ghost',
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-chinese-ghost', notFoundPolicy: 'isolate_stale',
     });
 
     expect(result.status).toBe('success');
@@ -746,7 +746,7 @@ describe('getLorebookEntriesStrict_ACU', () => {
     });
 
     const result = await getLorebookEntriesStrict_ACU([], {
-      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-all-ghosts',
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-all-ghosts', notFoundPolicy: 'isolate_stale',
     });
 
     expect(result.status).toBe('success');
@@ -978,7 +978,7 @@ describe('getLorebookEntriesStrict_ACU', () => {
       relation_sheet: { name: '关系档案', exportConfig: { entryName: '关系档案' } },
       item_sheet: { name: '道具档案', exportConfig: { entryName: '道具档案' } },
     };
-    const context = createPlotWorldbookReadContext_ACU(async () => []);
+    const context = createPlotWorldbookReadContext_ACU({ resolveCharacterLorebookNames: async () => ['书A', '书B'] });
 
     const [index, relationKeys, itemKeys, repeatedRelationKeys] = await Promise.all([
       context.tableWorldbookIndexPromise,
@@ -997,12 +997,35 @@ describe('getLorebookEntriesStrict_ACU', () => {
     expect(repeatedRelationKeys).toBe(relationKeys);
   });
 
+  it('T8-2 表名 resolver 观测：候选 index 懒建一次，多 token 复用（indexBuildCount=1）', async () => {
+    mockListLorebooks.mockResolvedValue(['书A', '书B']);
+    mockGwGetLorebookEntries.mockImplementation(async (bookName: string) => (
+      bookName === '书A'
+        ? [{ uid: 1, comment: 'TavernDB-ACU-CustomExport-关系档案' }]
+        : [{ uid: 2, comment: 'TavernDB-ACU-CustomExport-道具档案' }]
+    ));
+    const tableData = {
+      relation_sheet: { name: '关系档案', exportConfig: { entryName: '关系档案' } },
+      item_sheet: { name: '道具档案', exportConfig: { entryName: '道具档案' } },
+    };
+    const context = createPlotWorldbookReadContext_ACU({ resolveCharacterLorebookNames: async () => ['书A', '书B'] });
+
+    expect(context.tableIndexBuildCount).toBe(0);
+    await context.tableWorldbookIndexPromise;
+    expect(context.tableIndexBuildCount).toBe(1);
+    await context.getTableWorldbookScopedKeys('关系档案', tableData);
+    await context.getTableWorldbookScopedKeys('道具档案', tableData);
+    // 懒建语义：index 只构建一次，多个 token 复用；物理读取仍只发生一次/书。
+    expect(context.tableIndexBuildCount).toBe(1);
+    expect(mockGwGetLorebookEntries).toHaveBeenCalledTimes(2);
+  });
+
   it('真实 Plot context 按 tableData 对象和 run 隔离表 scope 与 gateway 读取', async () => {
     mockListLorebooks.mockResolvedValue(['书A']);
     mockGwGetLorebookEntries.mockResolvedValue([{ uid: 1, comment: 'TavernDB-ACU-CustomExport-关系档案' }]);
     const firstTableData = { relation_sheet: { name: '关系档案', exportConfig: { entryName: '关系档案' } } };
     const secondTableData = { relation_sheet: { name: '关系档案', exportConfig: { entryName: '关系档案-另一配置' } } };
-    const firstContext = createPlotWorldbookReadContext_ACU(async () => []);
+    const firstContext = createPlotWorldbookReadContext_ACU({ resolveCharacterLorebookNames: async () => ['书A'] });
 
     const firstKeys = await firstContext.getTableWorldbookScopedKeys('关系档案', firstTableData);
     const secondKeys = await firstContext.getTableWorldbookScopedKeys('关系档案', secondTableData);
@@ -1013,7 +1036,7 @@ describe('getLorebookEntriesStrict_ACU', () => {
     expect(mockGwGetLorebookEntries).toHaveBeenCalledTimes(1);
 
     firstContext.dispose();
-    const secondContext = createPlotWorldbookReadContext_ACU(async () => []);
+    const secondContext = createPlotWorldbookReadContext_ACU({ resolveCharacterLorebookNames: async () => ['书A'] });
     const secondRunKeys = await secondContext.getTableWorldbookScopedKeys('关系档案', firstTableData);
 
     expect(secondRunKeys).toEqual(new Set(['书A\u00001']));
@@ -1032,7 +1055,7 @@ describe('getLorebookEntriesStrict_ACU', () => {
       markGatewayStarted?.();
       releaseEntries = () => resolve([{ uid: 1, content: '不得泄漏' }]);
     }));
-    const context = createPlotWorldbookReadContext_ACU(async () => []);
+    const context = createPlotWorldbookReadContext_ACU({ resolveCharacterLorebookNames: async () => ['书A'] });
     const indexPromise = context.tableWorldbookIndexPromise;
     await gatewayStarted;
     context.dispose();

@@ -38,8 +38,31 @@ const mockGetCurrentFlightModeState = vi.fn(() => ({ enabled: false, hiddenRowId
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get manualExtraHint_ACU() { return ''; },
+  get currentChatFileIdentifier_ACU() { return null; },
   get currentJsonTableData_ACU() { return mockCurrentJsonTableData; },
   get settings_ACU() { return mockSettings; },
+}));
+
+// 请求级读取上下文底层依赖世界书网关；测试统一 mock 网关以隔离宿主 API。
+const mockLorebookList = vi.fn<() => Promise<any[]>>(async () => []);
+const mockLorebookEntries = vi.fn<(...args: any[]) => Promise<any[]>>(async () => []);
+vi.mock('../../../src/data/gateways/worldbook-gateway', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/data/gateways/worldbook-gateway')>();
+  return {
+    ...actual,
+    listLorebooks_ACU: (...args: any[]) => mockLorebookList(...args),
+    getLorebookEntries_ACU: (...args: any[]) => mockLorebookEntries(...args),
+  };
+});
+
+const mockInjectionTargetLorebook = vi.fn<() => Promise<string | null>>(async () => null);
+vi.mock('../../../src/service/worldbook/injection-engine', () => ({
+  getInjectionTargetLorebook_ACU: (...args: any[]) => mockInjectionTargetLorebook(...args),
+}));
+
+const mockCharacterBinding = vi.fn<() => Promise<any>>(async () => ({ primary: null, additional: [], orderedNames: [] }));
+vi.mock('../../../src/data/gateways/character-gateway', () => ({
+  getCurrentCharacterWorldbookBinding_ACU: (...args: any[]) => mockCharacterBinding(...args),
 }));
 
 vi.mock('../../../src/data/gateways/host-state-gateway', () => ({
@@ -104,6 +127,10 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
       tableContextExtractRules: '',
       tableContextExcludeRules: '',
     };
+    mockLorebookList.mockResolvedValue([]);
+    mockLorebookEntries.mockResolvedValue([]);
+    mockInjectionTargetLorebook.mockResolvedValue(null);
+    mockCharacterBinding.mockResolvedValue({ primary: null, additional: [], orderedNames: [] });
     mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
   });
 

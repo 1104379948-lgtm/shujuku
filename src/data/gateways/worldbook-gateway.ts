@@ -10,6 +10,7 @@
 import { TavernHelper_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
 import { getCharLorebooks_ACU, getCurrentCharacterWorldbookBinding_ACU } from './character-gateway';
 import { logWarn_ACU } from '../../shared/utils';
+import { classifyLorebookReadError_ACU } from '../../shared/lorebook-read-error';
 
 // ═══ 可用性检查 ═══
 
@@ -29,7 +30,10 @@ export function isWorldbookEntryUpdateApiAvailable_ACU(): boolean {
 
 // ═══ 条目 CRUD ═══
 
-const LOREBOOK_NAME_IGNORABLE_CHARS_ACU = /[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
+// 不可见格式字符：零宽/方向控制/连接符/BOM + 变体选择器（U+FE00–U+FE0F）
+// 与补充变体选择器（U+E0100–U+E01EF，UTF-16 下为 \uDB40\uDD00–\uDB40\uDDEF）。
+const LOREBOOK_NAME_IGNORABLE_CHARS_ACU =
+  /[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF\uFE00-\uFE0F]|\uDB40[\uDD00-\uDDEF]/g;
 
 /**
  * 仅用于世界书名称比对，不可替代宿主保存的原始名称。
@@ -152,14 +156,7 @@ export async function getLorebookEntries_ACU(bookName: string): Promise<any[]> {
 }
 
 export function isLorebookNotFoundError_ACU(error: unknown): boolean {
-    if (!error || (error as any)?.name === 'AbortError' || (error as any)?.message === 'TaskAbortedByUser') {
-        return false;
-    }
-    const message = String((error as any)?.message || error || '');
-    return /\b(?:worldbook|lorebook)\b(?:\s+['"`][^'"`\r\n]+['"`])?\s+(?:not found|does not exist)\b/i.test(message)
-        || /\b(?:could not find|cannot find|can't find)\s+(?:the\s+)?(?:worldbook|lorebook)\b/i.test(message)
-        || /世界书\s*(?:[“"'`][^”"'`\r\n]+[”"'`])?\s*(?:未能找到|找不到|不存在)/.test(message)
-        || /(?:未能找到|找不到)\s*世界书/.test(message);
+    return classifyLorebookReadError_ACU(error) === 'lorebook_not_found';
 }
 
 /**

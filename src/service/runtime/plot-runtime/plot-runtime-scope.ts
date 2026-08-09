@@ -1,5 +1,6 @@
 import { getCurrentCharacterId_ACU } from '../../../data/gateways/host-state-gateway';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../state-manager';
+import { classifyLorebookReadError_ACU } from '../../../shared/lorebook-read-error';
 
 export interface PlotRuntimeScope_ACU {
   chatId: string | null;
@@ -47,9 +48,7 @@ export function normalizeLorebookNames_ACU(raw: any): string[] {
 }
 
 export function isTransientLorebookNotFoundError_ACU(error: any): boolean {
-  if (!error || error?.name === 'AbortError') return false;
-  const message = String(error?.message || error).toLowerCase();
-  return /(?:未能找到|找不到|不存在).{0,24}(?:世界书|worldbook|lorebook)|(?:worldbook|lorebook).{0,24}(?:not found|does not exist|missing)/i.test(message);
+  return classifyLorebookReadError_ACU(error) === 'lorebook_not_found';
 }
 
 export function summarizePlotRuntimeScope_ACU(scope: PlotRuntimeScope_ACU) {
