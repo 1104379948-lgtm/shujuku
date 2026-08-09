@@ -492,7 +492,12 @@ export interface TableMigrationAuditBackupV1_ACU {
   supersededV2Frames?: Array<{
     messageIndex: number;
     isolationKey: string;
-    storageFrame: TableStorageFrameV2_ACU;
+    /** 畸形 frame 无法满足 V2 结构契约，按 unknown 原样保存以保证可回退。 */
+    storageFrame: TableStorageFrameV2_ACU | unknown;
+    /** 该槽携带 V2 历史证据但结构非法。 */
+    malformed?: boolean;
+    /** 移除前的 _acu_storage_version 原值。 */
+    storageVersionMarker?: unknown;
   }>;
 }
 

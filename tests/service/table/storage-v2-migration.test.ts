@@ -703,7 +703,9 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
     expect(mockChatRef.value).toEqual(before);
   });
 
-  it('存在畸形 V2 历史标记时禁止绕过 mixed 检查并清理 legacy', async () => {
+  // logEntries 损坏时日志区域不可枚举：无法排除「只在 operation 中出现过的表」，
+  // 静态扫描 fail-closed（计划 §3.1 第 4 条 / §6 风险首条 / §9），继续阻塞。
+  it('存在畸形 V2 历史标记（logEntries 损坏）时禁止绕过 mixed 检查并清理 legacy', async () => {
     const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'legacy 铁剑']]) } as any;
     mockChatRef.value = [
       {
@@ -796,6 +798,286 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
     expect(result).toEqual(expect.objectContaining({ migrated: false, error: expect.stringContaining('host write failed') }));
     expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
     expect(mockChatRef.value).toEqual(before);
+  });
+
+
+  describe('V2 不可读时以 legacy 为权威源重建（T8 矩阵）', () => {
+    // 「V2 不可读但表清单可静态枚举」的形态：无 full checkpoint（anchor=null →
+    // replay 不可用 → 走重建分支），perSheetCheckpoints 合法（清单可完整枚举 →
+    // 不触发 fail-closed），logEntries 为空数组。
+    //
+    // 不能用 logEntries:'broken'：日志不可枚举时静态扫描按计划 §3.1/§6/§9
+    // fail-closed，必然继续阻塞（见上方 A2 阻塞用例）。
+    const unreadableEnumerableFrame = (v2Data: any) => ({
+      version: 2,
+      headRevision: 'checkpoint:no-full-anchor',
+      perSheetCheckpoints: {
+        sheet_0: { kind: 'sheet_full', createdAt: 1, reason: 'init', sheetKey: 'sheet_0', data: v2Data.sheet_0 },
+      },
+      logEntries: [],
+    });
+
+    it('A1：legacy + 仅 _acu_storage_version:2 无 storageFrame 时重建成功且畸形槽已归档移除', async () => {
+      const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', '铁剑']]) } as any;
+      const beforeProjection = getBusinessDataProjection_ACU(data);
+      mockChatRef.value = [
+        { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2 } } },
+        { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+
+      const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+      expect(result.migrated).toBe(true);
+      expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+      expect(mockChatRef.value[0].TavernDB_ACU_IsolatedData?.['']?.storageFrame).toBeUndefined();
+      const targetTag = mockChatRef.value[1].TavernDB_ACU_IsolatedData[''];
+      expect(targetTag.storageFrame.checkpoint.reason).toBe('migration');
+      expect(getBusinessDataProjection_ACU(targetTag.storageFrame.checkpoint.data)).toEqual(beforeProjection);
+      const replayedData = await loadTableStateFromFramesV2_ACU(mockChatRef.value, '', { updateRuntimeState: false });
+      expect(getBusinessDataProjection_ACU(replayedData)).toEqual(beforeProjection);
+      expect(targetTag.migrationAuditBackup.supersededV2Frames).toEqual([
+        expect.objectContaining({ messageIndex: 0, isolationKey: '', malformed: true }),
+      ]);
+    });
+
+    it('A3：legacy + 有 frame 无 full checkpoint（missing_with_artifacts）时重建成功且 artifacts 全部归档', async () => {
+      const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', '铁剑']]) } as any;
+      const beforeProjection = getBusinessDataProjection_ACU(data);
+      mockChatRef.value = [
+        {
+          is_user: false,
+          TavernDB_ACU_IsolatedData: {
+            '': {
+              _acu_storage_version: 2,
+              storageFrame: {
+                version: 2,
+                headRevision: 'checkpoint:no-full',
+                perSheetCheckpoints: {
+                  sheet_0: { kind: 'sheet_full', createdAt: 1, reason: 'init', sheetKey: 'sheet_0', data: data.sheet_0 },
+                },
+                logEntries: [],
+              },
+            },
+          },
+        },
+        { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+
+      const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+      expect(result.migrated).toBe(true);
+      const targetTag = mockChatRef.value[1].TavernDB_ACU_IsolatedData[''];
+      expect(targetTag.storageFrame.checkpoint.reason).toBe('migration');
+      expect(getBusinessDataProjection_ACU(targetTag.storageFrame.checkpoint.data)).toEqual(beforeProjection);
+      expect(targetTag.migrationAuditBackup.supersededV2Frames).toEqual([
+        expect.objectContaining({ messageIndex: 0, isolationKey: '', storageFrame: expect.objectContaining({ version: 2, headRevision: 'checkpoint:no-full' }) }),
+      ]);
+    });
+
+    it('A4：legacy + anchor 存在但 replay 抛错时重建成功', async () => {
+      const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', '铁剑']]) } as any;
+      const beforeProjection = getBusinessDataProjection_ACU(data);
+      mockChatRef.value = [
+        {
+          is_user: false,
+          TavernDB_ACU_IsolatedData: {
+            '': {
+              _acu_storage_version: 2,
+              storageFrame: {
+                version: 2,
+                headRevision: 'checkpoint:replay-crash',
+                checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_0: { ...data.sheet_0, content: [['row_id', '名称'], ['9', 'V2 损坏行']] } } },
+                logEntries: [{ seq: 1, entryId: 'e1', createdAt: 1, source: 'manual', targetMessageIndex: 0, aiFloor: 1, operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['x'] }] }],
+              },
+            },
+          },
+        },
+        { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+
+      const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+      expect(result.migrated).toBe(true);
+      const targetTag = mockChatRef.value[1].TavernDB_ACU_IsolatedData[''];
+      expect(targetTag.storageFrame.checkpoint.reason).toBe('migration');
+      expect(getBusinessDataProjection_ACU(targetTag.storageFrame.checkpoint.data)).toEqual(beforeProjection);
+    });
+
+    it('B1：静态扫描发现 V2 有 legacy 中不存在的表时继续阻塞且零写入', async () => {
+      const data = { sheet_0: sheet('背包') } as any;
+      mockChatRef.value = [
+        {
+          is_user: false,
+          TavernDB_ACU_IsolatedData: {
+            '': {
+              _acu_storage_version: 2,
+              storageFrame: { version: 2, headRevision: 'h', checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_0: data.sheet_0, sheet_v2_only: data.sheet_0 } }, logEntries: [] },
+            },
+          },
+        },
+        { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+      const before = structuredClone(mockChatRef.value);
+
+      const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+      expect(result.migrated).toBe(false);
+      expect(result.error).toContain('automatic migration remains blocked');
+      expect(mockSaveChatToHost).not.toHaveBeenCalled();
+      expect(mockChatRef.value).toEqual(before);
+    });
+
+    it('B2：静态扫描命中无法解码区域时继续阻塞', async () => {
+      const data = { sheet_0: sheet('背包') } as any;
+      mockChatRef.value = [
+        {
+          is_user: false,
+          TavernDB_ACU_IsolatedData: {
+            '': {
+              _acu_storage_version: 2,
+              storageFrame: { version: 2, headRevision: 'h', checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: 'not-an-object' }, logEntries: [] },
+            },
+          },
+        },
+        { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+      const before = structuredClone(mockChatRef.value);
+
+      const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+      expect(result.migrated).toBe(false);
+      expect(result.error).toContain('automatic migration remains blocked');
+      expect(mockSaveChatToHost).not.toHaveBeenCalled();
+      expect(mockChatRef.value).toEqual(before);
+    });
+
+    it('B5：V2 有合法 provenance 时继续阻塞（不得覆盖已证明继承 legacy 的 V2）', async () => {
+      const data = { sheet_0: sheet('背包') } as any;
+      mockChatRef.value = [
+        {
+          is_user: false,
+          TavernDB_ACU_IsolatedData: {
+            '': {
+              _acu_storage_version: 2,
+              storageFrame: {
+                version: 2,
+                headRevision: 'checkpoint:with-provenance',
+                checkpoint: {
+                  kind: 'full', createdAt: 1, reason: 'migration', data,
+                  migrationProvenance: {
+                    version: 1,
+                    legacyDataFingerprint: getTableDataFingerprint_ACU(data),
+                    legacySourceMessageIndices: [0], legacySourceAiFloors: [1],
+                    legacyLastChangedAiFloorBySheet: { sheet_0: 1 },
+                    targetMessageIndex: 0, targetAiFloor: 1, isolationKey: '', migratedAt: 1,
+                  },
+                },
+                logEntries: [],
+              },
+            },
+          },
+        },
+        { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+      const before = structuredClone(mockChatRef.value);
+
+      const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+      expect(result.migrated).toBe(false);
+      expect(result.error).toContain('automatic migration remains blocked');
+      expect(mockSaveChatToHost).not.toHaveBeenCalled();
+      expect(mockChatRef.value).toEqual(before);
+    });
+
+    it('B7：V2 静态表名归一化存在多对一歧义时继续阻塞', async () => {
+      const data = { sheet_0: sheet('背包') } as any;
+      mockChatRef.value = [
+        {
+          is_user: false,
+          TavernDB_ACU_IsolatedData: {
+            '': {
+              _acu_storage_version: 2,
+              storageFrame: { version: 2, headRevision: 'h', checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: { ...data.sheet_0, name: '背包' }, sheet_b: { ...data.sheet_0, name: '背包' } } }, logEntries: [] },
+            },
+          },
+        },
+        { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+      const before = structuredClone(mockChatRef.value);
+
+      const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+      expect(result.migrated).toBe(false);
+      expect(result.error).toContain('automatic migration remains blocked');
+      expect(mockSaveChatToHost).not.toHaveBeenCalled();
+      expect(mockChatRef.value).toEqual(before);
+    });
+
+    it('幂等：重建成功后重复加载不再调用 migration 且不重复写入', async () => {
+      const data = { sheet_0: sheet('背包') } as any;
+      mockChatRef.value = [
+        { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: unreadableEnumerableFrame(data) } } },
+        { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+
+      const first = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+      expect(first.migrated).toBe(true);
+      expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+      const checkpointData = structuredClone(mockChatRef.value[1].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data);
+
+      mockSaveChatToHost.mockClear();
+      const reopened = await migrateLegacyStorageToV2OnLoad_ACU({ data: checkpointData, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+      expect(reopened).toEqual({ migrated: false });
+      expect(mockSaveChatToHost).not.toHaveBeenCalled();
+      expect(resolveTableStorageStrategy_ACU(mockChatRef.value, '', { enabled: false, code: '' })).toEqual({ mode: 'v2' });
+    });
+
+    it('A5：多 isolationKey 时只影响目标槽，其他槽字节等价', async () => {
+      const data = { sheet_0: sheet('背包') } as any;
+      const otherTag = { _acu_storage_version: 1, independentData: { sheet_9: data.sheet_0 }, modifiedKeys: ['sheet_9'], updateGroupKeys: [] };
+      mockChatRef.value = [
+        {
+          is_user: false,
+          TavernDB_ACU_IsolatedData: {
+            'tag-a': { _acu_storage_version: 2, storageFrame: unreadableEnumerableFrame(data) },
+            'tag-b': structuredClone(otherTag),
+          },
+        },
+        { is_user: false, TavernDB_ACU_Identity: 'tag-a', TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+      const otherBefore = structuredClone(mockChatRef.value[0].TavernDB_ACU_IsolatedData['tag-b']);
+
+      const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: 'tag-a', isolationConfig: { enabled: true, code: 'tag-a' } });
+
+      expect(result.migrated).toBe(true);
+      expect(mockChatRef.value[0].TavernDB_ACU_IsolatedData['tag-b']).toEqual(otherBefore);
+      expect(mockChatRef.value[0].TavernDB_ACU_IsolatedData['tag-a']?.storageFrame).toBeUndefined();
+      expect(mockChatRef.value[1].TavernDB_ACU_IsolatedData['tag-a'].storageFrame.checkpoint.reason).toBe('migration');
+    });
+
+    it('归档完整性：移除集合与归档集合逐项对应', async () => {
+      const data = { sheet_0: sheet('背包') } as any;
+      mockChatRef.value = [
+        { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: unreadableEnumerableFrame(data) } } },
+        { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: unreadableEnumerableFrame(data) } } },
+        { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+      ];
+
+      const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+      expect(result.migrated).toBe(true);
+      const backup = mockChatRef.value[2].TavernDB_ACU_IsolatedData[''].migrationAuditBackup;
+      expect(backup.supersededV2Frames).toHaveLength(2);
+      expect(backup.supersededV2Frames.map((f: any) => f.messageIndex)).toEqual([0, 1]);
+      // 全部被移除的 V2 槽在 backup 中可逐项还原
+      for (const frame of backup.supersededV2Frames) {
+        expect(frame.storageFrame).toBeDefined();
+        expect(frame.isolationKey).toBe('');
+      }
+      expect(mockChatRef.value[0].TavernDB_ACU_IsolatedData?.['']?.storageFrame).toBeUndefined();
+      expect(mockChatRef.value[1].TavernDB_ACU_IsolatedData?.['']?.storageFrame).toBeUndefined();
+    });
   });
 
 });

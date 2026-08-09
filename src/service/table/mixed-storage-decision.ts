@@ -19,6 +19,12 @@ export type MixedStorageDecisionKind_ACU =
 export type MixedStorageDecisionAction_ACU = 'keep_v2' | 'commit_merge_candidate' | 'download_snapshots' | 'noop';
 export type MixedStorageDecisionDiagnosticCode_ACU =
   | 'v2_replay_unavailable'
+  | 'v2_anchor_missing_without_artifacts'
+  | 'v2_anchor_missing_with_artifacts'
+  | 'v2_replay_failed'
+  | 'v2_slot_malformed'
+  | 'v2_static_sheets_not_covered_by_legacy'
+  | 'v2_static_scan_undecodable'
   | 'v2_requires_checkpoint_convergence'
   | 'legacy_requires_confirmation'
   | 'scope_isolation_mismatch'
@@ -234,7 +240,21 @@ export async function evaluateMixedStorageDecision_ACU(
     && initialChatIdentifier === String(currentChatFileIdentifier_ACU || '').trim()
     && options.isolationKey === getCurrentIsolationKey_ACU();
   if (!scopeMatches) diagnostics.push('scope_isolation_mismatch');
-  if (evidence.v2.replay.status !== 'success') diagnostics.push('v2_replay_unavailable');
+  // 细化子因：区分 anchor 缺失形态与 replay 具体失败原因（T7）
+  if (evidence.v2.replay.status !== 'success') {
+    diagnostics.push('v2_replay_unavailable');
+    if (evidence.v2.anchor.status === 'missing_without_artifacts') {
+      diagnostics.push('v2_anchor_missing_without_artifacts');
+    } else if (evidence.v2.anchor.status === 'missing_with_artifacts') {
+      diagnostics.push('v2_anchor_missing_with_artifacts');
+    } else if (evidence.v2.replay.status === 'failed') {
+      diagnostics.push('v2_replay_failed');
+    }
+  }
+  if (evidence.v2.frames.some(frame => frame.logEntryCount === 0 && frame.perSheetCheckpointKeys.length === 0
+    && evidence.v2.anchor.messageIndex === null)) {
+    diagnostics.push('v2_slot_malformed');
+  }
   if (evidence.v2.replay.requiresCheckpointConvergence || evidence.v2.replay.compatibilityRepairs?.length) diagnostics.push('v2_requires_checkpoint_convergence');
   if (legacyAudit.status === 'unrecoverable' || legacyRepair.requiresConfirmation) diagnostics.push('legacy_requires_confirmation');
   if (evidence.comparison.fingerprintsEqual === true) diagnostics.push('legacy_v2_fingerprints_equal');

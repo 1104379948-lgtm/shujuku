@@ -46599,6 +46599,191 @@ $CONTENT
             comparison: { fingerprintsComparable, fingerprintsEqual: fingerprintsComparable ? candidateFingerprint === replay.fingerprint : null },
         };
     }
+    const SHEET_OPERATION_KINDS_WITH_SHEET_KEY_ACU = new Set([
+        'sql_sheet_batch',
+        'sheet_replace',
+        'meta_update',
+        'sheet_schema_migrate',
+        'row_upsert',
+        'row_delete',
+    ]);
+    function addSheetIdentitiesFromContainer_ACU(container, sheetKeys, sheetKeyToName) {
+        if (container === undefined || container === null)
+            return true;
+        if (!container || typeof container !== 'object' || Array.isArray(container))
+            return false;
+        for (const key of Object.keys(container)) {
+            if (key.startsWith('sheet_'))
+                sheetKeys.add(key);
+            const value = container[key];
+            if (value && typeof value === 'object' && !Array.isArray(value) && typeof value.name === 'string') {
+                const name = value.name;
+                if (name.trim())
+                    sheetKeyToName[key] = name;
+            }
+        }
+        return true;
+    }
+    function collectSheetKeysFromLogEntry_ACU(entry, sheetKeys, sheetKeyToName) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+            return false;
+        const raw = entry;
+        // patches[].sheetKey
+        if (raw.patches !== undefined) {
+            if (!Array.isArray(raw.patches))
+                return false;
+            for (const patch of raw.patches) {
+                if (!patch || typeof patch !== 'object' || Array.isArray(patch))
+                    return false;
+                const patchKey = patch.sheetKey;
+                if (typeof patchKey === 'string' && patchKey.startsWith('sheet_'))
+                    sheetKeys.add(patchKey);
+                const patchName = patch.sheet
+                    ? patch.sheet?.name
+                    : undefined;
+                if (typeof patchName === 'string' && patchName.trim() && typeof patchKey === 'string')
+                    sheetKeyToName[patchKey] = patchName;
+            }
+        }
+        // operations[]：带 sheetKey 的 operation，或 data_replace.data 的键
+        if (raw.operations !== undefined) {
+            if (!Array.isArray(raw.operations))
+                return false;
+            for (const operation of raw.operations) {
+                if (!operation || typeof operation !== 'object' || Array.isArray(operation))
+                    return false;
+                const op = operation;
+                if (op.kind === 'data_replace') {
+                    if (!addSheetIdentitiesFromContainer_ACU(op.data, sheetKeys, sheetKeyToName))
+                        return false;
+                }
+                else if (typeof op.kind === 'string' && SHEET_OPERATION_KINDS_WITH_SHEET_KEY_ACU.has(op.kind)) {
+                    const opKey = op.sheetKey;
+                    if (typeof opKey === 'string' && opKey.startsWith('sheet_'))
+                        sheetKeys.add(opKey);
+                    const opName = op.sheet
+                        ? op.sheet?.name
+                        : undefined;
+                    if (typeof opName === 'string' && opName.trim() && typeof opKey === 'string')
+                        sheetKeyToName[opKey] = opName;
+                }
+            }
+        }
+        return true;
+    }
+    /**
+     * 从原始 tagData 静态枚举 V2 侧全部 sheet key，不执行任何 operation、不调 replay。
+     *
+     * 判定入口用宽判定 hasV2TableHistoryEvidence_ACU（含畸形槽），不用 isV2TagData_ACU。
+     * 语义契约：sheetKeys 是「V2 侧至少曾经出现过的表」的上界估计。宁可多报（拒绝重建），
+     * 不可少报（覆盖丢数据）。任何无法静态解码的区域记入 malformedSlots 并使
+     * hasUndecodableRegion=true（不抛错）。纯函数，不修改输入。
+     */
+    function collectV2SheetKeyEvidenceStatically_ACU(chat, isolationKey) {
+        const sheetKeys = new Set();
+        const sheetNames = new Set();
+        const sheetKeyToName = {};
+        const malformedSlots = [];
+        let hasUndecodableRegion = false;
+        const messages = Array.isArray(chat) ? chat : [];
+        messages.forEach((message, messageIndex) => {
+            if (!message || message.is_user)
+                return;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (!hasV2TableHistoryEvidence_ACU(tagData))
+                return;
+            const frame = tagData?.storageFrame;
+            if (!frame || typeof frame !== 'object' || Array.isArray(frame)) {
+                // 仅版本标记残留（无 storageFrame）：没有任何表清单需要覆盖，legacy 全权重建。
+                // 不视为 undecodable（无清单即无覆盖风险），记 malformed 供归档诊断。
+                malformedSlots.push({ messageIndex, reason: 'storageFrame 缺失或非对象' });
+                return;
+            }
+            // 语义（计划 §3.1 第 4 条 / §6 风险表首条 / §9 自我复查三处一致）：
+            // 表清单必须可完整枚举，任何枚举路径失败一律 undecodable → 上层拒绝重建。
+            //
+            // 为什么 logEntries 非数组也必须 fail-closed：日志区域可能存在只由 operation
+            // 引入的表（data_replace.data 的键、sheet_replace / sql_sheet_batch 的 sheetKey）。
+            // checkpoint.data 只能证明「这些表存在」，不能证明「没有别的表」。放行等于用
+            // 数据安全换通过率。
+            //
+            // malformed 只用于「键已确定拿到、仅单表内容不可读」的局部损坏，它不影响
+            // 清单完整性，仅作归档诊断。
+            let undecodable = false;
+            let malformed = false;
+            // checkpoint.data
+            if (frame.checkpoint !== undefined) {
+                if (!frame.checkpoint || typeof frame.checkpoint !== 'object' || Array.isArray(frame.checkpoint)) {
+                    undecodable = true;
+                }
+                else if (!addSheetIdentitiesFromContainer_ACU(frame.checkpoint.data, sheetKeys, sheetKeyToName)) {
+                    undecodable = true;
+                }
+            }
+            // perSheetCheckpoints：键即 sheetKey；sheet_full.data 是单表 Sheet_ACU（不是
+            // sheet_ 容器），因此 key 取自容器键与 sheetKey 字段，显示名取自 data.name。
+            if (frame.perSheetCheckpoints !== undefined) {
+                if (!frame.perSheetCheckpoints || typeof frame.perSheetCheckpoints !== 'object' || Array.isArray(frame.perSheetCheckpoints)) {
+                    // 容器不可枚举 → 无法证明其中有哪些表 → fail-closed。
+                    undecodable = true;
+                }
+                else {
+                    for (const [key, sheetCheckpoint] of Object.entries(frame.perSheetCheckpoints)) {
+                        if (key.startsWith('sheet_'))
+                            sheetKeys.add(key);
+                        if (!sheetCheckpoint || typeof sheetCheckpoint !== 'object' || Array.isArray(sheetCheckpoint)) {
+                            // 键已拿到，仅单表内容不可读：不影响清单完整性。
+                            malformed = true;
+                            continue;
+                        }
+                        const checkpointRecord = sheetCheckpoint;
+                        const declaredSheetKey = checkpointRecord.sheetKey;
+                        if (typeof declaredSheetKey === 'string' && declaredSheetKey.startsWith('sheet_'))
+                            sheetKeys.add(declaredSheetKey);
+                        const sheetName = checkpointRecord.data?.name;
+                        if (typeof sheetName === 'string' && sheetName.trim()) {
+                            const targetKey = typeof declaredSheetKey === 'string' && declaredSheetKey ? declaredSheetKey : key;
+                            sheetKeyToName[targetKey] = sheetName;
+                        }
+                    }
+                }
+            }
+            // logEntries
+            if (frame.logEntries !== undefined) {
+                if (!Array.isArray(frame.logEntries)) {
+                    // 日志不可枚举：无法排除只在 operation 中出现过的表 → fail-closed。
+                    undecodable = true;
+                }
+                else {
+                    for (const entry of frame.logEntries) {
+                        if (!collectSheetKeysFromLogEntry_ACU(entry, sheetKeys, sheetKeyToName)) {
+                            undecodable = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (undecodable) {
+                hasUndecodableRegion = true;
+                malformedSlots.push({ messageIndex, reason: 'V2 frame 结构非法或包含无法解码区域' });
+            }
+            else if (malformed) {
+                malformedSlots.push({ messageIndex, reason: 'V2 frame 局部内容不可读但表清单可枚举' });
+            }
+        });
+        // 汇总静态可见显示名（全部槽扫描完成后统一收敛）。
+        for (const name of Object.values(sheetKeyToName)) {
+            if (name && name.trim())
+                sheetNames.add(name);
+        }
+        return {
+            sheetKeys: [...sheetKeys].sort((a, b) => a.localeCompare(b)),
+            sheetNames: [...sheetNames].sort((a, b) => a.localeCompare(b)),
+            sheetKeyToName,
+            hasUndecodableRegion,
+            malformedSlots,
+        };
+    }
 
     function clone_ACU$6(value) { return JSON.parse(JSON.stringify(value)); }
     function scopeError_ACU(decision) {
@@ -46987,8 +47172,23 @@ $CONTENT
             && options.isolationKey === getCurrentIsolationKey_ACU();
         if (!scopeMatches)
             diagnostics.push('scope_isolation_mismatch');
-        if (evidence.v2.replay.status !== 'success')
+        // 细化子因：区分 anchor 缺失形态与 replay 具体失败原因（T7）
+        if (evidence.v2.replay.status !== 'success') {
             diagnostics.push('v2_replay_unavailable');
+            if (evidence.v2.anchor.status === 'missing_without_artifacts') {
+                diagnostics.push('v2_anchor_missing_without_artifacts');
+            }
+            else if (evidence.v2.anchor.status === 'missing_with_artifacts') {
+                diagnostics.push('v2_anchor_missing_with_artifacts');
+            }
+            else if (evidence.v2.replay.status === 'failed') {
+                diagnostics.push('v2_replay_failed');
+            }
+        }
+        if (evidence.v2.frames.some(frame => frame.logEntryCount === 0 && frame.perSheetCheckpointKeys.length === 0
+            && evidence.v2.anchor.messageIndex === null)) {
+            diagnostics.push('v2_slot_malformed');
+        }
         if (evidence.v2.replay.requiresCheckpointConvergence || evidence.v2.replay.compatibilityRepairs?.length)
             diagnostics.push('v2_requires_checkpoint_convergence');
         if (legacyAudit.status === 'unrecoverable' || legacyRepair.requiresConfirmation)
@@ -47185,6 +47385,10 @@ $CONTENT
             diagnosticCodes: Object.freeze([...decision.diagnosticCodes]),
             allowedActions: Object.freeze([...decision.allowedActions]),
             createdAt: decision.createdAt,
+            anchorStatus: decision.evidence?.v2?.anchor?.status ?? 'missing_without_artifacts',
+            replayStatus: decision.evidence?.v2?.replay?.status ?? 'unavailable',
+            // 决策层不透出静态扫描结果（evidence 不含）；由注册方补充。
+            staticSheetKeyCount: 0,
         });
     }
     function requireCurrentDecision_ACU(decisionId) {
@@ -47199,11 +47403,15 @@ $CONTENT
         }
         return registered;
     }
-    function registerMixedStorageDecision_ACU(decision, isolationConfig) {
+    function registerMixedStorageDecision_ACU(decision, isolationConfig, staticSheetKeyCount) {
         const frozenDecision = freezeDecisionSnapshot_ACU(decision);
         decisions_ACU.set(frozenDecision.decisionId, { decision: frozenDecision, isolationConfig: Object.freeze({ ...isolationConfig }) });
         activeDecisionId_ACU = decision.decisionId;
-        return summaryOf_ACU(frozenDecision);
+        const summary = summaryOf_ACU(frozenDecision);
+        return Object.freeze({
+            ...summary,
+            staticSheetKeyCount: Number.isInteger(staticSheetKeyCount) && staticSheetKeyCount > 0 ? staticSheetKeyCount : 0,
+        });
     }
     function getActiveMixedStorageDecisionSummary_ACU() {
         if (!activeDecisionId_ACU)
@@ -47428,6 +47636,92 @@ $CONTENT
             return false;
         return latestLegacySourceIndex !== undefined && latestLegacySourceIndex >= anchorIndex;
     }
+    /**
+     * V2 侧完全不可读时，判断能否以 legacy 为权威源重建单一 V2。
+     *
+     * 与 canSupersedeUpgradeResidualV2_ACU 的分工：
+     * - 后者处理「V2 可读但只是升级残留」（有 anchor、replay 成功）；
+     * - 本函数处理「V2 不可读」（无 anchor 或 replay 失败/不可用）。
+     * 两者互斥，不得同时放行。
+     */
+    function canRebuildFromLegacyWhenV2Unreadable_ACU(decision, staticEvidence, legacyCandidateData, legacyAudit, legacyRepair) {
+        // 1. 必须确实不可读。可读的走原有路径，不抢。
+        if (decision.evidence.v2.replay.status === 'success')
+            return false;
+        // 2. 有合法 provenance 说明 V2 已继承 legacy 并可能有后继，绝不覆盖。
+        if (decision.evidence.v2.provenance.validation?.valid === true)
+            return false;
+        // 3. legacy 必须可无损使用。
+        if (legacyAudit.status !== 'clean' && legacyAudit.status !== 'repairable')
+            return false;
+        if (legacyRepair.requiresConfirmation)
+            return false;
+        // 4. legacy 必须非空，否则重建等于清库。
+        const legacySheetKeys = new Set(sheetKeysOfData_ACU(legacyCandidateData));
+        if (legacySheetKeys.size === 0)
+            return false;
+        // 5. 表身份归一化：以静态 sheetNames 为目标命名空间做一次归一化尝试。
+        //    先按规范显示名把 legacy 侧历史随机 key 迁移到 V2 静态命名空间，
+        //    再比对覆盖。resolveHistoricalSheetKeyMigrations_ACU 在歧义时跳过（不迁移），
+        //    归一化后仍未覆盖的 key 会落进下方拒绝分支（B7）。
+        //    注意：replay 不可用，无法获得 V2 的完整 data 形状，因此只能以静态
+        //    sheetKeyToName 构造一个"V2 静态命名空间"用于比对，覆盖判定退化为：
+        //    - 每个 V2 静态 sheetKey 要么直接命中 legacy key，要么其规范名唯一对应一个 legacy key。
+        const v2NameToKey = new Map();
+        for (const [sheetKey, name] of Object.entries(staticEvidence.sheetKeyToName)) {
+            if (!name || !name.trim())
+                continue;
+            const canonical = String(name).trim().toLocaleLowerCase();
+            const existing = v2NameToKey.get(canonical);
+            if (existing && existing !== sheetKey) {
+                // V2 静态命名空间中同一规范名对应多个 sheet key：多对一歧义，直接拒绝（B7）。
+                return false;
+            }
+            v2NameToKey.set(canonical, sheetKey);
+        }
+        const legacyNameToKey = new Map();
+        for (const sheetKey of legacySheetKeys) {
+            const sheet = legacyCandidateData[sheetKey];
+            const name = sheet?.name;
+            if (typeof name !== 'string' || !name.trim())
+                continue;
+            const canonical = String(name).trim().toLocaleLowerCase();
+            const existing = legacyNameToKey.get(canonical);
+            if (existing && existing !== sheetKey) {
+                // legacy 侧同一规范名对应多个 key：目标命名空间本身歧义，直接拒绝。
+                return false;
+            }
+            legacyNameToKey.set(canonical, sheetKey);
+        }
+        for (const [sheetKey, name] of Object.entries(staticEvidence.sheetKeyToName)) {
+            if (!name || !name.trim())
+                continue;
+            const canonical = String(name).trim().toLocaleLowerCase();
+            const legacyKey = legacyNameToKey.get(canonical);
+            if (!legacyKey) {
+                // V2 静态表在 legacy 中没有同名表：无法证明该表身份与 legacy 对应，拒绝。
+                return false;
+            }
+        }
+        // 覆盖判定：V2 静态 sheetKey 必须能被 legacy key 集合覆盖（含规范名归一化后）。
+        for (const v2Key of staticEvidence.sheetKeys) {
+            if (legacySheetKeys.has(v2Key))
+                continue;
+            const name = staticEvidence.sheetKeyToName[v2Key];
+            if (!name || !name.trim()) {
+                // 无显示名可归一化且 key 未命中 legacy：无法证明覆盖，拒绝。
+                return false;
+            }
+            const canonical = String(name).trim().toLocaleLowerCase();
+            const legacyKey = legacyNameToKey.get(canonical);
+            if (!legacyKey || !legacySheetKeys.has(legacyKey))
+                return false;
+        }
+        // 6. 存在无法静态解码的区域时，无法证明表清单完整 → 拒绝。
+        if (staticEvidence.hasUndecodableRegion)
+            return false;
+        return true;
+    }
     function normalizeLegacyCandidateToV2Namespace_ACU(data, replayedV2Data) {
         if (!replayedV2Data)
             return { data, migrations: new Map() };
@@ -47459,9 +47753,24 @@ $CONTENT
             if (!message || message.is_user)
                 return;
             const tagData = readIsolatedTagData_ACU(message, isolationKey);
-            if (!isV2TagData_ACU(tagData))
+            // 证据判定：畸形槽（结构非法但携带 V2 历史证据）也必须归档，否则清理后
+            // 失去回退源，且下次打开仍会命中 mixed 分支（见计划 §2.3 坑二）。
+            if (!hasV2TableHistoryEvidence_ACU(tagData))
                 return;
-            result.push({ messageIndex, isolationKey, storageFrame: deepClone_ACU(tagData.storageFrame) });
+            const malformed = !isV2TagData_ACU(tagData);
+            // 无 storageFrame（仅版本标记残留）时归档整个 tagData，保证可还原；
+            // 有 storageFrame 时归档 frame 原样深拷贝，不做任何结构修正。
+            const storageFrame = tagData?.storageFrame === undefined
+                ? deepClone_ACU(tagData)
+                : deepClone_ACU(tagData?.storageFrame);
+            result.push({
+                messageIndex,
+                isolationKey,
+                storageFrame,
+                ...(malformed ? { malformed: true } : {}),
+                // 版本标记本身也是证据，移除后需可还原
+                ...(tagData?._acu_storage_version !== undefined ? { storageVersionMarker: tagData._acu_storage_version } : {}),
+            });
         });
         return result;
     }
@@ -47471,10 +47780,12 @@ $CONTENT
                 continue;
             const isolatedData = cloneIsolatedData_ACU(message);
             const tagData = isolatedData?.[isolationKey];
-            if (!isV2TagData_ACU(tagData))
+            if (!hasV2TableHistoryEvidence_ACU(tagData))
                 continue;
             delete tagData.storageFrame;
             delete tagData._acu_storage_version;
+            // 槽内若只剩向量 metadata，则保留该 metadata，不得连带删除
+            // summaryVectorIndexState / summaryVectorIndexManifest / vectorMemoryState
             if (Object.keys(tagData).length === 0)
                 delete isolatedData[isolationKey];
             if (Object.keys(isolatedData).length === 0)
@@ -47539,6 +47850,7 @@ $CONTENT
         const sourceEvidenceBeforeNormalization = collectLegacyMigrationSourceEvidence_ACU(chat, options.isolationKey, options.isolationConfig, candidateData, { maxMessageIndex: target.index });
         let mixedDecision;
         let keyMigrations = new Map();
+        let canRebuild = false;
         let supersededV2Frames = [];
         const hasV2History = chat.some(message => !message?.is_user
             && hasV2TableHistoryEvidence_ACU(readIsolatedTagData_ACU(message, options.isolationKey)));
@@ -47555,8 +47867,21 @@ $CONTENT
             if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'equivalent_projection_verified' && mixedDecision.kind !== 'v2_successor_verified') {
                 const sourceIndices = sourceEvidenceBeforeNormalization.sourceMessageIndices;
                 const latestLegacySourceIndex = sourceIndices.length > 0 ? sourceIndices[sourceIndices.length - 1] : undefined;
-                if (!canSupersedeUpgradeResidualV2_ACU(mixedDecision, latestLegacySourceIndex, candidateData)) {
-                    registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
+                const staticEvidence = collectV2SheetKeyEvidenceStatically_ACU(chat, options.isolationKey);
+                // 坑一修复（计划 §2.3）：replay 不可用时，v2ReplayContainsSheetsMissingFromLegacyCandidate_ACU
+                // 会因 replayedV2Data 缺失而误放行（return false）。必须用不依赖 replay 的静态扫描
+                // 叠加守卫：静态清单必须被 legacy 完全覆盖且无 undecodable 区域，否则 canSupersede 不成立。
+                const replayUsable = mixedDecision.evidence.v2.replay.status === 'success';
+                const staticCoverageOk = staticEvidence.sheetKeys.every(key => sheetKeysOfData_ACU(candidateData).includes(key))
+                    && !staticEvidence.hasUndecodableRegion;
+                const canSupersede = canSupersedeUpgradeResidualV2_ACU(mixedDecision, latestLegacySourceIndex, candidateData)
+                    && (replayUsable || staticCoverageOk);
+                // T4 重建分支：V2 完全不可读时以 legacy 为权威源重建。仅当 canSupersede 放行失败时
+                // 才评估，两者互斥，不得同时放行（见 canRebuildFromLegacyWhenV2Unreadable_ACU 注释）。
+                canRebuild = !canSupersede && staticEvidence !== null
+                    && canRebuildFromLegacyWhenV2Unreadable_ACU(mixedDecision, staticEvidence, candidateData, audit, repair);
+                if (!canSupersede && !canRebuild) {
+                    registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig, staticEvidence?.sheetKeys.length);
                     return {
                         migrated: false,
                         mixedDecision,
@@ -47564,6 +47889,22 @@ $CONTENT
                     };
                 }
                 supersededV2Frames = collectSupersededV2Frames_ACU(chat, options.isolationKey);
+                if (canRebuild) {
+                    // 以静态扫描的 V2 sheetKey 命名空间为目标做历史 key 归一化（replay 不可用，
+                    // 无法依赖 replay.data）。歧义 key 已在 canRebuildFromLegacyWhenV2Unreadable_ACU
+                    // 中被拒绝，这里只做确定性迁移。
+                    const staticV2Namespace = Object.fromEntries(staticEvidence.sheetKeys.map(key => {
+                        const name = staticEvidence.sheetKeyToName[key];
+                        const sheet = name ? { name } : {};
+                        return [key, sheet];
+                    }));
+                    const staticNormalized = normalizeLegacyCandidateToV2Namespace_ACU(candidateData, staticV2Namespace);
+                    if (staticNormalized.migrations.size > 0) {
+                        candidateData = staticNormalized.data;
+                        keyMigrations = staticNormalized.migrations;
+                    }
+                    logDebug_ACU(`[V2 Migration] V2 不可读，以 legacy 为权威源重建：isolationKey=[${options.isolationKey || '无标签'}], archivedFrames=${supersededV2Frames.length}, staticSheets=${staticEvidence.sheetKeys.length}`);
+                }
             }
             else {
                 const commit = await commitMixedStorageDecision_ACU({
@@ -47668,6 +48009,20 @@ $CONTENT
             return { migrated: false, error: `legacy migration save failed: ${error instanceof Error ? error.message : String(error)}` };
         }
         logDebug_ACU(`[V2 Migration] legacy-v1 migrated to V2 checkpoint: messageIndex=${target.index}, skipUpdateFloors=${skipUpdateFloors}, isolationKey=[${options.isolationKey || '无标签'}], sheets=${sheetKeys.length}`);
+        // T6 收口后置校验：重建路径成功且宿主已持久化后，验证新 checkpoint 可被正常 replay。
+        // 失败时宿主已落盘、backup 已保留，不得谎称已回滚（committed-postcondition 语义）。
+        if (canRebuild) {
+            const verifyReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, options.isolationKey, {
+                updateRuntimeState: false,
+            });
+            if (!verifyReplay) {
+                return {
+                    migrated: false,
+                    mixedDecision,
+                    error: 'legacy 重建已保存但后置 replay 校验失败：请重新加载当前聊天并核对数据（迁移备份已保留）',
+                };
+            }
+        }
         return { migrated: true, messageIndex: target.index, data: candidateData, ...(mixedDecision ? { mixedDecision } : {}) };
     }
 
@@ -145863,8 +146218,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-26302572] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-26302572] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-26302572] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-26302572] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-26302572] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-26302572] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-26302572] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-26302572] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-26302572] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-26302572] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-26302572] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-26302572] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-26302572] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-26302572] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-26302572] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-26302572] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-26302572] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-26302572],\n.acu-v2-data-mgmt-page__command-grid[data-v-26302572] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-26302572] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-26302572] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-26302572] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-26302572] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-26302572] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-26302572] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-26302572] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-26302572] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-26302572] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-26302572] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-26302572] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-26302572] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-26302572] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-26302572] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-26302572] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-26302572] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-26302572] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-26302572");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_26302572_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-3eb473ba] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-3eb473ba] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-3eb473ba] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-3eb473ba] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-3eb473ba] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-3eb473ba] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-3eb473ba] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-3eb473ba] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-3eb473ba] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-3eb473ba] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-3eb473ba] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-3eb473ba] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-3eb473ba] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-3eb473ba] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-3eb473ba] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-3eb473ba],\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-3eb473ba] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-3eb473ba] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-3eb473ba] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-3eb473ba] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-3eb473ba] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3eb473ba] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3eb473ba] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3eb473ba] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-3eb473ba] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-3eb473ba] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-3eb473ba] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3eb473ba] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-3eb473ba] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-3eb473ba");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_3eb473ba_lang = null;
 
     const _hoisted_1$g = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$f = { class: "acu-v2-data-mgmt-page__panel-stack" };
@@ -146196,6 +146551,17 @@ Expected function or array of functions, received type ${typeof value}.`
     							{ key: 0 },
     							[createTextVNode(
     								" 诊断：" + toDisplayString($setup.flow.mixedStorageDecision.value.diagnosticCodes.join("、")) + "。 ",
+    								1
+    								/* TEXT */
+    							)],
+    							64
+    							/* STABLE_FRAGMENT */
+    						)) : createCommentVNode("v-if", true),
+    						$setup.flow.mixedStorageDecision.value.anchorStatus || $setup.flow.mixedStorageDecision.value.replayStatus ? (openBlock(), createElementBlock(
+    							Fragment,
+    							{ key: 1 },
+    							[createTextVNode(
+    								" 锚点：" + toDisplayString($setup.flow.mixedStorageDecision.value.anchorStatus) + "；回放：" + toDisplayString($setup.flow.mixedStorageDecision.value.replayStatus) + "； 静态表数：" + toDisplayString($setup.flow.mixedStorageDecision.value.staticSheetKeyCount) + "。 ",
     								1
     								/* TEXT */
     							)],
@@ -146630,7 +146996,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		_: 1
     	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-26302572"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-3eb473ba"]]);
 
     var _sfc_main$f = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',

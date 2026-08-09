@@ -10,7 +10,7 @@ import {
 } from '../../data/repositories/chat-message-data-repo';
 import { validateMigrationProvenanceV1_ACU } from '../../shared/canonical-checkpoint-validator';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
-import { isV2TagData_ACU } from './storage-strategy-resolver';
+import { hasV2TableHistoryEvidence_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
 import type { TableMigrationProvenanceV1_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { loadTableStateFromFramesV2Detailed_ACU, type TableReplayCompatibilityRepairV2_ACU } from './storage-frame-v2-replay';
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
@@ -384,5 +384,204 @@ export async function collectMixedStorageEvidence_ACU(
       provenance,
     },
     comparison: { fingerprintsComparable, fingerprintsEqual: fingerprintsComparable ? candidateFingerprint === replay.fingerprint : null },
+  };
+}
+
+
+export interface V2StaticSheetEvidence_ACU {
+  /** V2 侧静态可见的全部 sheet key（升序去重）。 */
+  sheetKeys: string[];
+  /** V2 侧静态可见的显示名（sheet.name），供表身份归一化比对使用。 */
+  sheetNames: string[];
+  /** sheetKey → 静态可见的显示名；用于按规范名做历史 key 迁移后再比对覆盖。 */
+  sheetKeyToName: Record<string, string>;
+  /** 存在无法静态解码的区域（畸形 frame、非法 checkpoint.data 等）。 */
+  hasUndecodableRegion: boolean;
+  /** 携带 V2 历史证据但结构非法的槽位坐标，供归档与诊断使用。 */
+  malformedSlots: Array<{ messageIndex: number; reason: string }>;
+}
+
+const SHEET_OPERATION_KINDS_WITH_SHEET_KEY_ACU = new Set([
+  'sql_sheet_batch',
+  'sheet_replace',
+  'meta_update',
+  'sheet_schema_migrate',
+  'row_upsert',
+  'row_delete',
+]);
+
+function addSheetIdentitiesFromContainer_ACU(
+  container: unknown,
+  sheetKeys: Set<string>,
+  sheetKeyToName: Record<string, string>,
+): boolean {
+  if (container === undefined || container === null) return true;
+  if (!container || typeof container !== 'object' || Array.isArray(container)) return false;
+  for (const key of Object.keys(container as Record<string, unknown>)) {
+    if (key.startsWith('sheet_')) sheetKeys.add(key);
+    const value = (container as Record<string, unknown>)[key];
+    if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as any).name === 'string') {
+      const name = (value as any).name as string;
+      if (name.trim()) sheetKeyToName[key] = name;
+    }
+  }
+  return true;
+}
+
+function collectSheetKeysFromLogEntry_ACU(
+  entry: unknown,
+  sheetKeys: Set<string>,
+  sheetKeyToName: Record<string, string>,
+): boolean {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+  const raw = entry as Record<string, unknown>;
+
+  // patches[].sheetKey
+  if (raw.patches !== undefined) {
+    if (!Array.isArray(raw.patches)) return false;
+    for (const patch of raw.patches) {
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return false;
+      const patchKey = (patch as Record<string, unknown>).sheetKey;
+      if (typeof patchKey === 'string' && patchKey.startsWith('sheet_')) sheetKeys.add(patchKey);
+      const patchName = (patch as Record<string, unknown>).sheet
+        ? ((patch as Record<string, unknown>).sheet as any)?.name
+        : undefined;
+      if (typeof patchName === 'string' && patchName.trim() && typeof patchKey === 'string') sheetKeyToName[patchKey] = patchName;
+    }
+  }
+
+  // operations[]：带 sheetKey 的 operation，或 data_replace.data 的键
+  if (raw.operations !== undefined) {
+    if (!Array.isArray(raw.operations)) return false;
+    for (const operation of raw.operations) {
+      if (!operation || typeof operation !== 'object' || Array.isArray(operation)) return false;
+      const op = operation as Record<string, unknown>;
+      if (op.kind === 'data_replace') {
+        if (!addSheetIdentitiesFromContainer_ACU(op.data, sheetKeys, sheetKeyToName)) return false;
+      } else if (typeof op.kind === 'string' && SHEET_OPERATION_KINDS_WITH_SHEET_KEY_ACU.has(op.kind)) {
+        const opKey = op.sheetKey;
+        if (typeof opKey === 'string' && opKey.startsWith('sheet_')) sheetKeys.add(opKey);
+        const opName = (op as Record<string, unknown>).sheet
+          ? ((op as Record<string, unknown>).sheet as any)?.name
+          : undefined;
+        if (typeof opName === 'string' && opName.trim() && typeof opKey === 'string') sheetKeyToName[opKey] = opName;
+      }
+    }
+  }
+
+  return true;
+}
+
+/**
+ * 从原始 tagData 静态枚举 V2 侧全部 sheet key，不执行任何 operation、不调 replay。
+ *
+ * 判定入口用宽判定 hasV2TableHistoryEvidence_ACU（含畸形槽），不用 isV2TagData_ACU。
+ * 语义契约：sheetKeys 是「V2 侧至少曾经出现过的表」的上界估计。宁可多报（拒绝重建），
+ * 不可少报（覆盖丢数据）。任何无法静态解码的区域记入 malformedSlots 并使
+ * hasUndecodableRegion=true（不抛错）。纯函数，不修改输入。
+ */
+export function collectV2SheetKeyEvidenceStatically_ACU(
+  chat: readonly any[],
+  isolationKey: string,
+): V2StaticSheetEvidence_ACU {
+  const sheetKeys = new Set<string>();
+  const sheetNames = new Set<string>();
+  const sheetKeyToName: Record<string, string> = {};
+  const malformedSlots: Array<{ messageIndex: number; reason: string }> = [];
+  let hasUndecodableRegion = false;
+
+  const messages = Array.isArray(chat) ? chat : [];
+  messages.forEach((message, messageIndex) => {
+    if (!message || message.is_user) return;
+    const tagData = readIsolatedTagData_ACU(message, isolationKey) as any;
+    if (!hasV2TableHistoryEvidence_ACU(tagData)) return;
+
+    const frame = tagData?.storageFrame;
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame)) {
+      // 仅版本标记残留（无 storageFrame）：没有任何表清单需要覆盖，legacy 全权重建。
+      // 不视为 undecodable（无清单即无覆盖风险），记 malformed 供归档诊断。
+      malformedSlots.push({ messageIndex, reason: 'storageFrame 缺失或非对象' });
+      return;
+    }
+
+    // 语义（计划 §3.1 第 4 条 / §6 风险表首条 / §9 自我复查三处一致）：
+    // 表清单必须可完整枚举，任何枚举路径失败一律 undecodable → 上层拒绝重建。
+    //
+    // 为什么 logEntries 非数组也必须 fail-closed：日志区域可能存在只由 operation
+    // 引入的表（data_replace.data 的键、sheet_replace / sql_sheet_batch 的 sheetKey）。
+    // checkpoint.data 只能证明「这些表存在」，不能证明「没有别的表」。放行等于用
+    // 数据安全换通过率。
+    //
+    // malformed 只用于「键已确定拿到、仅单表内容不可读」的局部损坏，它不影响
+    // 清单完整性，仅作归档诊断。
+    let undecodable = false;
+    let malformed = false;
+    // checkpoint.data
+    if (frame.checkpoint !== undefined) {
+      if (!frame.checkpoint || typeof frame.checkpoint !== 'object' || Array.isArray(frame.checkpoint)) {
+        undecodable = true;
+      } else if (!addSheetIdentitiesFromContainer_ACU((frame.checkpoint as Record<string, unknown>).data, sheetKeys, sheetKeyToName)) {
+        undecodable = true;
+      }
+    }
+    // perSheetCheckpoints：键即 sheetKey；sheet_full.data 是单表 Sheet_ACU（不是
+    // sheet_ 容器），因此 key 取自容器键与 sheetKey 字段，显示名取自 data.name。
+    if (frame.perSheetCheckpoints !== undefined) {
+      if (!frame.perSheetCheckpoints || typeof frame.perSheetCheckpoints !== 'object' || Array.isArray(frame.perSheetCheckpoints)) {
+        // 容器不可枚举 → 无法证明其中有哪些表 → fail-closed。
+        undecodable = true;
+      } else {
+        for (const [key, sheetCheckpoint] of Object.entries(frame.perSheetCheckpoints as Record<string, unknown>)) {
+          if (key.startsWith('sheet_')) sheetKeys.add(key);
+          if (!sheetCheckpoint || typeof sheetCheckpoint !== 'object' || Array.isArray(sheetCheckpoint)) {
+            // 键已拿到，仅单表内容不可读：不影响清单完整性。
+            malformed = true;
+            continue;
+          }
+          const checkpointRecord = sheetCheckpoint as Record<string, unknown>;
+          const declaredSheetKey = checkpointRecord.sheetKey;
+          if (typeof declaredSheetKey === 'string' && declaredSheetKey.startsWith('sheet_')) sheetKeys.add(declaredSheetKey);
+          const sheetName = (checkpointRecord.data as Record<string, unknown> | undefined)?.name;
+          if (typeof sheetName === 'string' && sheetName.trim()) {
+            const targetKey = typeof declaredSheetKey === 'string' && declaredSheetKey ? declaredSheetKey : key;
+            sheetKeyToName[targetKey] = sheetName;
+          }
+        }
+      }
+    }
+    // logEntries
+    if (frame.logEntries !== undefined) {
+      if (!Array.isArray(frame.logEntries)) {
+        // 日志不可枚举：无法排除只在 operation 中出现过的表 → fail-closed。
+        undecodable = true;
+      } else {
+        for (const entry of frame.logEntries) {
+          if (!collectSheetKeysFromLogEntry_ACU(entry, sheetKeys, sheetKeyToName)) {
+            undecodable = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (undecodable) {
+      hasUndecodableRegion = true;
+      malformedSlots.push({ messageIndex, reason: 'V2 frame 结构非法或包含无法解码区域' });
+    } else if (malformed) {
+      malformedSlots.push({ messageIndex, reason: 'V2 frame 局部内容不可读但表清单可枚举' });
+    }
+  });
+
+  // 汇总静态可见显示名（全部槽扫描完成后统一收敛）。
+  for (const name of Object.values(sheetKeyToName)) {
+    if (name && name.trim()) sheetNames.add(name);
+  }
+
+  return {
+    sheetKeys: [...sheetKeys].sort((a, b) => a.localeCompare(b)),
+    sheetNames: [...sheetNames].sort((a, b) => a.localeCompare(b)),
+    sheetKeyToName,
+    hasUndecodableRegion,
+    malformedSlots,
   };
 }

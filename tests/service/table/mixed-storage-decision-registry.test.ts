@@ -57,6 +57,9 @@ describe('mixed-storage-decision-registry', () => {
       diagnosticCodes: ['merge_candidate_available'],
       allowedActions: ['noop', 'download_snapshots', 'commit_merge_candidate'],
       createdAt: 1,
+      anchorStatus: 'missing_without_artifacts',
+      replayStatus: 'unavailable',
+      staticSheetKeyCount: 0,
     });
     await expect(commitRegisteredMixedStorageDecision_ACU(item.decisionId, 'commit_merge_candidate')).resolves.toEqual({ status: 'committed', decisionId: item.decisionId });
     expect(mocks.commit).toHaveBeenCalledWith({

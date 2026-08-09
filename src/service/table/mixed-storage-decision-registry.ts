@@ -11,6 +11,12 @@ export interface MixedStorageDecisionSummary_ACU {
   diagnosticCodes: readonly MixedStorageDecisionDiagnosticCode_ACU[];
   allowedActions: readonly MixedStorageDecisionAction_ACU[];
   createdAt: number;
+  /** anchor 状态：anchored / missing_with_artifacts / missing_without_artifacts。 */
+  anchorStatus: 'anchored' | 'missing_with_artifacts' | 'missing_without_artifacts';
+  /** replay 状态：not_present / unavailable / success / failed。 */
+  replayStatus: 'not_present' | 'unavailable' | 'success' | 'failed';
+  /** V2 静态可见的 sheet key 数量（仅诊断透出，不含业务数据）。 */
+  staticSheetKeyCount: number;
 }
 
 interface RegisteredMixedStorageDecision_ACU {
@@ -53,6 +59,10 @@ function summaryOf_ACU(decision: MixedStorageDecision_ACU): MixedStorageDecision
     diagnosticCodes: Object.freeze([...decision.diagnosticCodes]),
     allowedActions: Object.freeze([...decision.allowedActions]),
     createdAt: decision.createdAt,
+    anchorStatus: decision.evidence?.v2?.anchor?.status ?? 'missing_without_artifacts',
+    replayStatus: decision.evidence?.v2?.replay?.status ?? 'unavailable',
+    // 决策层不透出静态扫描结果（evidence 不含）；由注册方补充。
+    staticSheetKeyCount: 0,
   });
 }
 
@@ -70,11 +80,16 @@ function requireCurrentDecision_ACU(decisionId: string): RegisteredMixedStorageD
 export function registerMixedStorageDecision_ACU(
   decision: MixedStorageDecision_ACU,
   isolationConfig: Readonly<IsolationConfig_ACU>,
+  staticSheetKeyCount?: number,
 ): MixedStorageDecisionSummary_ACU {
   const frozenDecision = freezeDecisionSnapshot_ACU(decision);
   decisions_ACU.set(frozenDecision.decisionId, { decision: frozenDecision, isolationConfig: Object.freeze({ ...isolationConfig }) });
   activeDecisionId_ACU = decision.decisionId;
-  return summaryOf_ACU(frozenDecision);
+  const summary = summaryOf_ACU(frozenDecision);
+  return Object.freeze({
+    ...summary,
+    staticSheetKeyCount: Number.isInteger(staticSheetKeyCount) && staticSheetKeyCount! > 0 ? staticSheetKeyCount! : 0,
+  });
 }
 
 export function getActiveMixedStorageDecisionSummary_ACU(): MixedStorageDecisionSummary_ACU | null {

@@ -162,6 +162,10 @@
               <template v-if="flow.mixedStorageDecision.value.diagnosticCodes.length">
                 诊断：{{ flow.mixedStorageDecision.value.diagnosticCodes.join('、') }}。
               </template>
+              <template v-if="flow.mixedStorageDecision.value.anchorStatus || flow.mixedStorageDecision.value.replayStatus">
+                锚点：{{ flow.mixedStorageDecision.value.anchorStatus }}；回放：{{ flow.mixedStorageDecision.value.replayStatus }}；
+                静态表数：{{ flow.mixedStorageDecision.value.staticSheetKeyCount }}。
+              </template>
               可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。
             </p>
             <div class="acu-v2-data-mgmt-page__checkpoint-actions">

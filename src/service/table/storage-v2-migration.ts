@@ -11,9 +11,11 @@ import type { TableCheckpointScheduleSummaryV2_ACU, TableMigrationAuditBackupV1_
 import { commitMixedStorageDecision_ACU } from './mixed-storage-commit';
 import { evaluateMixedStorageDecision_ACU, type MixedStorageDecision_ACU } from './mixed-storage-decision';
 import { registerMixedStorageDecision_ACU } from './mixed-storage-decision-registry';
+import { collectV2SheetKeyEvidenceStatically_ACU, type V2StaticSheetEvidence_ACU } from './mixed-storage-evidence';
 import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder';
-import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
-import { repairTableDataFromAudit_ACU } from './table-data-repair';
+import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU, type UpgradeAuditResult_ACU } from './table-data-upgrade-audit';
+import { repairTableDataFromAudit_ACU, type RepairResult_ACU } from './table-data-repair';
+import { loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 
 export interface LegacyToV2MigrationOptions_ACU {
   data: Record<string, any> | null;
@@ -264,6 +266,94 @@ function canSupersedeUpgradeResidualV2_ACU(decision: MixedStorageDecision_ACU, l
   return latestLegacySourceIndex !== undefined && latestLegacySourceIndex >= anchorIndex;
 }
 
+/**
+ * V2 侧完全不可读时，判断能否以 legacy 为权威源重建单一 V2。
+ *
+ * 与 canSupersedeUpgradeResidualV2_ACU 的分工：
+ * - 后者处理「V2 可读但只是升级残留」（有 anchor、replay 成功）；
+ * - 本函数处理「V2 不可读」（无 anchor 或 replay 失败/不可用）。
+ * 两者互斥，不得同时放行。
+ */
+function canRebuildFromLegacyWhenV2Unreadable_ACU(
+  decision: MixedStorageDecision_ACU,
+  staticEvidence: V2StaticSheetEvidence_ACU,
+  legacyCandidateData: TableDataObject_ACU,
+  legacyAudit: UpgradeAuditResult_ACU,
+  legacyRepair: RepairResult_ACU,
+): boolean {
+  // 1. 必须确实不可读。可读的走原有路径，不抢。
+  if (decision.evidence.v2.replay.status === 'success') return false;
+
+  // 2. 有合法 provenance 说明 V2 已继承 legacy 并可能有后继，绝不覆盖。
+  if (decision.evidence.v2.provenance.validation?.valid === true) return false;
+
+  // 3. legacy 必须可无损使用。
+  if (legacyAudit.status !== 'clean' && legacyAudit.status !== 'repairable') return false;
+  if (legacyRepair.requiresConfirmation) return false;
+
+  // 4. legacy 必须非空，否则重建等于清库。
+  const legacySheetKeys = new Set(sheetKeysOfData_ACU(legacyCandidateData));
+  if (legacySheetKeys.size === 0) return false;
+
+  // 5. 表身份归一化：以静态 sheetNames 为目标命名空间做一次归一化尝试。
+  //    先按规范显示名把 legacy 侧历史随机 key 迁移到 V2 静态命名空间，
+  //    再比对覆盖。resolveHistoricalSheetKeyMigrations_ACU 在歧义时跳过（不迁移），
+  //    归一化后仍未覆盖的 key 会落进下方拒绝分支（B7）。
+  //    注意：replay 不可用，无法获得 V2 的完整 data 形状，因此只能以静态
+  //    sheetKeyToName 构造一个"V2 静态命名空间"用于比对，覆盖判定退化为：
+  //    - 每个 V2 静态 sheetKey 要么直接命中 legacy key，要么其规范名唯一对应一个 legacy key。
+  const v2NameToKey = new Map<string, string>();
+  for (const [sheetKey, name] of Object.entries(staticEvidence.sheetKeyToName)) {
+    if (!name || !name.trim()) continue;
+    const canonical = String(name).trim().toLocaleLowerCase();
+    const existing = v2NameToKey.get(canonical);
+    if (existing && existing !== sheetKey) {
+      // V2 静态命名空间中同一规范名对应多个 sheet key：多对一歧义，直接拒绝（B7）。
+      return false;
+    }
+    v2NameToKey.set(canonical, sheetKey);
+  }
+  const legacyNameToKey = new Map<string, string>();
+  for (const sheetKey of legacySheetKeys) {
+    const sheet = (legacyCandidateData as Record<string, any>)[sheetKey];
+    const name = sheet?.name;
+    if (typeof name !== 'string' || !name.trim()) continue;
+    const canonical = String(name).trim().toLocaleLowerCase();
+    const existing = legacyNameToKey.get(canonical);
+    if (existing && existing !== sheetKey) {
+      // legacy 侧同一规范名对应多个 key：目标命名空间本身歧义，直接拒绝。
+      return false;
+    }
+    legacyNameToKey.set(canonical, sheetKey);
+  }
+  for (const [sheetKey, name] of Object.entries(staticEvidence.sheetKeyToName)) {
+    if (!name || !name.trim()) continue;
+    const canonical = String(name).trim().toLocaleLowerCase();
+    const legacyKey = legacyNameToKey.get(canonical);
+    if (!legacyKey) {
+      // V2 静态表在 legacy 中没有同名表：无法证明该表身份与 legacy 对应，拒绝。
+      return false;
+    }
+  }
+  // 覆盖判定：V2 静态 sheetKey 必须能被 legacy key 集合覆盖（含规范名归一化后）。
+  for (const v2Key of staticEvidence.sheetKeys) {
+    if (legacySheetKeys.has(v2Key)) continue;
+    const name = staticEvidence.sheetKeyToName[v2Key];
+    if (!name || !name.trim()) {
+      // 无显示名可归一化且 key 未命中 legacy：无法证明覆盖，拒绝。
+      return false;
+    }
+    const canonical = String(name).trim().toLocaleLowerCase();
+    const legacyKey = legacyNameToKey.get(canonical);
+    if (!legacyKey || !legacySheetKeys.has(legacyKey)) return false;
+  }
+
+  // 6. 存在无法静态解码的区域时，无法证明表清单完整 → 拒绝。
+  if (staticEvidence.hasUndecodableRegion) return false;
+
+  return true;
+}
+
 function normalizeLegacyCandidateToV2Namespace_ACU(
   data: TableDataObject_ACU,
   replayedV2Data: TableDataObject_ACU | undefined,
@@ -298,8 +388,23 @@ function collectSupersededV2Frames_ACU(chat: any[], isolationKey: string): NonNu
   chat.forEach((message, messageIndex) => {
     if (!message || message.is_user) return;
     const tagData = readIsolatedTagData_ACU(message, isolationKey) as any;
-    if (!isV2TagData_ACU(tagData)) return;
-    result.push({ messageIndex, isolationKey, storageFrame: deepClone_ACU(tagData.storageFrame) });
+    // 证据判定：畸形槽（结构非法但携带 V2 历史证据）也必须归档，否则清理后
+    // 失去回退源，且下次打开仍会命中 mixed 分支（见计划 §2.3 坑二）。
+    if (!hasV2TableHistoryEvidence_ACU(tagData)) return;
+    const malformed = !isV2TagData_ACU(tagData);
+    // 无 storageFrame（仅版本标记残留）时归档整个 tagData，保证可还原；
+    // 有 storageFrame 时归档 frame 原样深拷贝，不做任何结构修正。
+    const storageFrame = tagData?.storageFrame === undefined
+      ? deepClone_ACU(tagData)
+      : deepClone_ACU(tagData?.storageFrame);
+    result.push({
+      messageIndex,
+      isolationKey,
+      storageFrame,
+      ...(malformed ? { malformed: true } : {}),
+      // 版本标记本身也是证据，移除后需可还原
+      ...(tagData?._acu_storage_version !== undefined ? { storageVersionMarker: tagData._acu_storage_version } : {}),
+    });
   });
   return result;
 }
@@ -309,9 +414,11 @@ function removeSupersededV2Frames_ACU(chat: any[], isolationKey: string): void {
     if (!message || message.is_user) continue;
     const isolatedData = cloneIsolatedData_ACU(message) as Record<string, any>;
     const tagData = isolatedData?.[isolationKey];
-    if (!isV2TagData_ACU(tagData)) continue;
+    if (!hasV2TableHistoryEvidence_ACU(tagData)) continue;
     delete tagData.storageFrame;
     delete tagData._acu_storage_version;
+    // 槽内若只剩向量 metadata，则保留该 metadata，不得连带删除
+    // summaryVectorIndexState / summaryVectorIndexManifest / vectorMemoryState
     if (Object.keys(tagData).length === 0) delete isolatedData[isolationKey];
     if (Object.keys(isolatedData).length === 0) delete message.TavernDB_ACU_IsolatedData;
     else message.TavernDB_ACU_IsolatedData = isolatedData;
@@ -395,6 +502,7 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
   );
   let mixedDecision: MixedStorageDecision_ACU | undefined;
   let keyMigrations = new Map<string, string>();
+  let canRebuild = false;
   let supersededV2Frames: NonNullable<TableMigrationAuditBackupV1_ACU['supersededV2Frames']> = [];
   const hasV2History = chat.some(message => !message?.is_user
     && hasV2TableHistoryEvidence_ACU(readIsolatedTagData_ACU(message, options.isolationKey)));
@@ -411,8 +519,21 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
     if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'equivalent_projection_verified' && mixedDecision.kind !== 'v2_successor_verified') {
       const sourceIndices = sourceEvidenceBeforeNormalization.sourceMessageIndices;
       const latestLegacySourceIndex = sourceIndices.length > 0 ? sourceIndices[sourceIndices.length - 1] : undefined;
-      if (!canSupersedeUpgradeResidualV2_ACU(mixedDecision, latestLegacySourceIndex, candidateData)) {
-        registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
+      const staticEvidence = collectV2SheetKeyEvidenceStatically_ACU(chat, options.isolationKey);
+      // 坑一修复（计划 §2.3）：replay 不可用时，v2ReplayContainsSheetsMissingFromLegacyCandidate_ACU
+      // 会因 replayedV2Data 缺失而误放行（return false）。必须用不依赖 replay 的静态扫描
+      // 叠加守卫：静态清单必须被 legacy 完全覆盖且无 undecodable 区域，否则 canSupersede 不成立。
+      const replayUsable = mixedDecision.evidence.v2.replay.status === 'success';
+      const staticCoverageOk = staticEvidence.sheetKeys.every(key => sheetKeysOfData_ACU(candidateData).includes(key))
+        && !staticEvidence.hasUndecodableRegion;
+      const canSupersede = canSupersedeUpgradeResidualV2_ACU(mixedDecision, latestLegacySourceIndex, candidateData)
+        && (replayUsable || staticCoverageOk);
+      // T4 重建分支：V2 完全不可读时以 legacy 为权威源重建。仅当 canSupersede 放行失败时
+      // 才评估，两者互斥，不得同时放行（见 canRebuildFromLegacyWhenV2Unreadable_ACU 注释）。
+      canRebuild = !canSupersede && staticEvidence !== null
+        && canRebuildFromLegacyWhenV2Unreadable_ACU(mixedDecision, staticEvidence, candidateData, audit, repair);
+      if (!canSupersede && !canRebuild) {
+        registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig, staticEvidence?.sheetKeys.length);
         return {
           migrated: false,
           mixedDecision,
@@ -420,6 +541,24 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
         };
       }
       supersededV2Frames = collectSupersededV2Frames_ACU(chat, options.isolationKey);
+      if (canRebuild) {
+        // 以静态扫描的 V2 sheetKey 命名空间为目标做历史 key 归一化（replay 不可用，
+        // 无法依赖 replay.data）。歧义 key 已在 canRebuildFromLegacyWhenV2Unreadable_ACU
+        // 中被拒绝，这里只做确定性迁移。
+        const staticV2Namespace = Object.fromEntries(
+          staticEvidence!.sheetKeys.map(key => {
+            const name = staticEvidence!.sheetKeyToName[key];
+            const sheet = name ? { name } : {};
+            return [key, sheet];
+          }),
+        ) as TableDataObject_ACU;
+        const staticNormalized = normalizeLegacyCandidateToV2Namespace_ACU(candidateData, staticV2Namespace);
+        if (staticNormalized.migrations.size > 0) {
+          candidateData = staticNormalized.data;
+          keyMigrations = staticNormalized.migrations;
+        }
+        logDebug_ACU(`[V2 Migration] V2 不可读，以 legacy 为权威源重建：isolationKey=[${options.isolationKey || '无标签'}], archivedFrames=${supersededV2Frames.length}, staticSheets=${staticEvidence!.sheetKeys.length}`);
+      }
     } else {
       const commit = await commitMixedStorageDecision_ACU({
         decision: mixedDecision,
@@ -526,6 +665,21 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
     return { migrated: false, error: `legacy migration save failed: ${error instanceof Error ? error.message : String(error)}` };
   }
   logDebug_ACU(`[V2 Migration] legacy-v1 migrated to V2 checkpoint: messageIndex=${target.index}, skipUpdateFloors=${skipUpdateFloors}, isolationKey=[${options.isolationKey || '无标签'}], sheets=${sheetKeys.length}`);
+
+  // T6 收口后置校验：重建路径成功且宿主已持久化后，验证新 checkpoint 可被正常 replay。
+  // 失败时宿主已落盘、backup 已保留，不得谎称已回滚（committed-postcondition 语义）。
+  if (canRebuild) {
+    const verifyReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, options.isolationKey, {
+      updateRuntimeState: false,
+    });
+    if (!verifyReplay) {
+      return {
+        migrated: false,
+        mixedDecision,
+        error: 'legacy 重建已保存但后置 replay 校验失败：请重新加载当前聊天并核对数据（迁移备份已保留）',
+      };
+    }
+  }
 
   return { migrated: true, messageIndex: target.index, data: candidateData, ...(mixedDecision ? { mixedDecision } : {}) };
 }
