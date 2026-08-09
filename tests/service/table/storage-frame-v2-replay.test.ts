@@ -5152,6 +5152,8 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
       // 未传 evidence：既不命中复用，也不计入失配。
       replayReuseCount: 0,
       replayReuseFallbackCount: 0,
+      // 未传 yieldBudgetMs：不让出事件循环。
+      yieldCount: 0,
     });
   });
 
@@ -5197,6 +5199,8 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
       sqliteMaterializeCount: 0,
       replayReuseCount: 0,
       replayReuseFallbackCount: 0,
+      // 未传 yieldBudgetMs：不让出事件循环。
+      yieldCount: 0,
     });
   });
 
@@ -5491,6 +5495,42 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     });
     expect(result?.data.sheet_a.content).toEqual([['row_id', 'value'], ['1', 'x'], ['2', 'y']]);
   });
+
+  it('阶段 I：yieldBudgetMs 让出事件循环且结果与基线一致（yieldCount > 0）', async () => {
+    // 长历史 fixture：entry 数量足以在 1ms 预算下触发多次让出。
+    const { chat } = buildLongHistoryFixture_ACU();
+
+    // 基线：不让出。
+    const baseline = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      enableAliasContext: false,
+    });
+    // yield 预算 1ms：只要累计处理超过 1ms 就让出，长 fixture 必然触发。
+    const yielded = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      enableAliasContext: false,
+      yieldBudgetMs: 1,
+    });
+
+    expect(yielded?.data).toEqual(baseline?.data);
+    expect(yielded?.baseKind).toBe(baseline?.baseKind);
+    expect(yielded?.metrics?.yieldCount).toBeGreaterThan(0);
+    // 基线不传预算：yieldCount 恒为 0（零开销，不产生额外宏任务）。
+    expect(baseline?.metrics?.yieldCount).toBe(0);
+  });
+
+  it('阶段 I：updateRuntimeState:true（副作用路径）即使传 yieldBudgetMs 也不让出', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+
+    const result = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: true,
+      yieldBudgetMs: 1,
+    });
+
+    // 副作用路径禁止 yield：中途让出会引入重入窗口，改写全局 schedule state。
+    expect(result?.metrics?.yieldCount).toBe(0);
+  });
+
 
 
 

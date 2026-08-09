@@ -123,6 +123,18 @@ export interface LoadTableStateFromFramesV2Options_ACU {
    * 「回放真的失败」，并且不得让被取消的旧结果覆盖新聊天状态。
    */
   signal?: AbortSignal;
+  /**
+   * 阶段 I：受控主线程让步预算（毫秒，可选）。
+   *
+   * 仅在 `updateRuntimeState === false` 时生效：副作用路径（replayEventForState_ACU /
+   * replayCheckpointSchedule_ACU）改写全局 schedule state，中途让出会引入重入窗口，
+   * 比不让出更危险，因此不接受 yield。
+   *
+   * 语义：自上次让出起累计处理超过该预算后，在 frame/entry 边界（replay state 完整、
+   * 未处于单条 SQLite batch 或事务半执行状态）让出事件循环一次。建议 8～16ms；
+   * 未传 = 不让出（与基线行为完全一致）。恢复后由同一边界的取消检查复查 signal。
+   */
+  yieldBudgetMs?: number;
 }
 
 /**
@@ -165,6 +177,8 @@ export interface TableReplayMetricsV2_ACU {
   replayReuseCount: number;
   /** 传入了 evidence 但判定失配、回退冷回放的次数。单次调用最多 1。 */
   replayReuseFallbackCount: number;
+  /** 阶段 I：本调用实际让出事件循环的次数（时间预算耗尽才 +1）。 */
+  yieldCount: number;
 }
 
 export function createReplayMetrics_ACU(): TableReplayMetricsV2_ACU {
@@ -182,6 +196,7 @@ export function createReplayMetrics_ACU(): TableReplayMetricsV2_ACU {
     sqliteMaterializeCount: 0,
     replayReuseCount: 0,
     replayReuseFallbackCount: 0,
+    yieldCount: 0,
   };
 }
 
@@ -1945,9 +1960,30 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
         throw new V2ReplayAbortedError_ACU();
       }
     };
+    // 阶段 I：受控主线程让步。只在只读路径（updateRuntimeState:false）生效；
+    // 只在 frame/entry 边界调用（replay state 完整、未处于单条 SQLite batch 或
+    // 事务半执行状态）。基于时间预算：自上次让出起累计处理超过 yieldBudgetMs 才
+    // 真正让出一次，未超时零开销（不产生额外宏任务）。metrics.yieldCount 记录
+    // 实际让出次数，供「是否过度调度」观测。
+    const yieldBudgetMs = options.updateRuntimeState === false
+      ? (Number(options.yieldBudgetMs) > 0 ? Number(options.yieldBudgetMs) : 0)
+      : 0;
+    let lastYieldAt = Date.now();
+    const yieldIfBudgetExceeded_ACU = async (): Promise<void> => {
+      if (yieldBudgetMs <= 0) return;
+      const now = Date.now();
+      if (now - lastYieldAt < yieldBudgetMs) return;
+      // 让出事件循环：setTimeout(0) 允许挂起的输入/渲染/其它任务先跑。
+      // 恢复后由调用点（frame/entry 边界）的 throwIfReplayAborted_ACU 复查
+      // signal——取消在 yield 窗口内到达时，下一个边界立即抛出。
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      lastYieldAt = Date.now();
+      metrics.yieldCount += 1;
+    };
     for (const ref of frameRefs) {
       if (ref.messageIndex < replayStartMessageIndex) continue;
       throwIfReplayAborted_ACU();
+      await yieldIfBudgetExceeded_ACU();
       metrics.frameCount += 1;
       const frameArtifactsAfterCutoff = !transitionRef
         || isFrameArtifactAfterSpv79TransitionCutoff_ACU(ref.messageIndex, transitionRef.checkpoint);
@@ -1987,6 +2023,9 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
         // 取消检查放在 try 之前：try 的 catch 会把异常包装成「应用日志失败」并上报
         // logError_ACU，取消若落进去就会被误判为回放故障。
         throwIfReplayAborted_ACU();
+        // entry 粒度让出：entry 数通常远大于 frame 数，大 fixture 下仅 frame 边界
+        // 让出不足以维持响应性；此处与取消检查同点（state 完整、未在 SQL 半执行态）。
+        await yieldIfBudgetExceeded_ACU();
         try {
           await applyDueIntroductions(entry.seq);
           if (Array.isArray(entry.operations) && entry.operations.length > 0) {
@@ -2185,6 +2224,7 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
         sqliteMaterializeCount: result.metrics.sqliteMaterializeCount,
         replayReuseCount: result.metrics.replayReuseCount,
         replayReuseFallbackCount: result.metrics.replayReuseFallbackCount,
+        yieldCount: result.metrics.yieldCount,
       } : {}),
     });
     // 阶段 E：只对满足严格条件的成功结果写 evidence（供后续同边界调用复用）。
