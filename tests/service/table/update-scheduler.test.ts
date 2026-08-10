@@ -791,6 +791,60 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(result.failedGroups).toBe(1);
   });
 
+  it('staging 组缺少任何 staging/grouped runner 时不降级到 processUpdates，返回稳定失败', async () => {
+    const plan = {
+      tablesToUpdate: [],
+      updateGroups: {
+        'stage_a': {
+          indices: [1], batchSize: 2, groupId: 0,
+          sheetKeys: ['sheet_0'], sheetNames: ['表A'],
+          requiresBoundaryStaging: true,
+        },
+      },
+      boundary: { fullCheckpointIndices: [3], requiresBoundaryStaging: true },
+    };
+    const mockProcess = vi.fn().mockResolvedValue(true);
+    const ops = makeOps({ processUpdates: mockProcess });
+
+    const result = await executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops);
+
+    expect(mockProcess).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.failedGroups).toBe(1);
+    expect(result.totalGroups).toBe(1);
+    expect(result.errors).toEqual([expect.stringContaining('staging_runner_unavailable')]);
+  });
+
+  it('normal 组缺 grouped runner 时可降级到 processUpdates，但 staging 组缺 runner 仍必须失败', async () => {
+    const plan = {
+      tablesToUpdate: [],
+      updateGroups: {
+        'normal_a': {
+          indices: [1], batchSize: 2, groupId: 0,
+          sheetKeys: ['sheet_0'], sheetNames: ['表A'],
+          requiresBoundaryStaging: false,
+        },
+        'stage_b': {
+          indices: [2], batchSize: 2, groupId: 1,
+          sheetKeys: ['sheet_1'], sheetNames: ['表B'],
+          requiresBoundaryStaging: true,
+        },
+      },
+      boundary: { fullCheckpointIndices: [3], requiresBoundaryStaging: true },
+    };
+    const mockProcess = vi.fn().mockResolvedValue(true);
+    const ops = makeOps({ processUpdates: mockProcess });
+
+    const result = await executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops);
+
+    // normal 组走 legacy processUpdates；staging 组不降级，整体失败
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(false);
+    expect(result.failedGroups).toBe(1);
+    expect(result.errors).toEqual([expect.stringContaining('staging_runner_unavailable')]);
+  });
+
+
   it('setAutoUpdating 被正确调用', async () => {
     const plan = {
       tablesToUpdate: [],

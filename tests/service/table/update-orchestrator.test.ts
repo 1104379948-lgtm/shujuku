@@ -3272,6 +3272,145 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// executeCardUpdateCore_ACU — V2 replay-root 准入（spv8.9）
+// ═══════════════════════════════════════════════════════════════
+describe('executeCardUpdateCore_ACU — V2 replay-root 准入', () => {
+  beforeEach(async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { disposeStorageProvider } = await import('../../../src/service/table/table-storage-strategy');
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+    disposeStorageProvider();
+    vi.clearAllMocks();
+    mockParseAndApplyTableEdits.mockReset();
+    mockParseAndApplyTableEditsToData.mockReset();
+    mockApplySqlEditsToTableDataSnapshot.mockReset();
+    mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
+    mockGetHiddenChronicleRowIdsAfterBigSummaryInsert.mockReset().mockReturnValue(null);
+    mockStageFlightModeHiddenRowIds.mockReset().mockReturnValue(null);
+    mockWasStopped = false;
+    mockSettings = {
+      ...mockSettings,
+      tableMaxRetries: 3,
+      autoUpdateTokenThreshold: 0,
+      importPromptExcludeImportedWorldbookEntries: true,
+    };
+    mockCurrentJsonTableData = { sheet_0: { name: '测试表', content: [['row_id'], ['1']] } };
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 0 });
+    mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
+    mockShouldRotateBoundaryCheckpoint.mockReturnValue(false);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    mockSaveIndependentTable.mockResolvedValue({ saved: true });
+  });
+
+  // 构造带 V2 full checkpoint 的聊天：index 24 是 full checkpoint（replay 根）。
+  // 直接 import 真实 collectV2FullCheckpointIndices_ACU，验证准入按真实 persist 判定。
+  function withFullCheckpointAt24(): any[] {
+    // index 24 为 AI 楼层，携带真实 V2 full checkpoint 隔离标签（isolationKey=''）。
+    // TavernDB_ACU_IsolatedData 结构与 chat-message-data-repo 的读取约定一致。
+    return Array.from({ length: 25 }, (_, i) => {
+      const message: any = { is_user: i % 2 === 0, mes: `楼层${i}` };
+      if (i === 24) {
+        message.TavernDB_ACU_IsolatedData = {
+          '': {
+            storageFrame: {
+              version: 2,
+              headRevision: 'rev-24',
+              checkpoint: { kind: 'full', reason: 'auto_update', data: {} },
+              logEntries: [],
+            },
+            _acu_storage_version: 2,
+          },
+        };
+      }
+      return message;
+    });
+  }
+
+  it('target 等于 replay root 时放行并正常完成', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { collectV2FullCheckpointIndices_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const chat = withFullCheckpointAt24();
+    expect(collectV2FullCheckpointIndices_ACU(chat, '')).toEqual([24]);
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      24, false, 'auto_standard', false,
+      ['sheet_0'], null, new AbortController()
+    );
+
+    expect(result.success, result.error).toBe(true);
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+  });
+
+  it('target 早于 replay root 时在 AI 前被结构化阻断（AI/commit/frame 全为 0）', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const chat = withFullCheckpointAt24();
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      23, false, 'auto_standard', false,
+      ['sheet_0'], null, new AbortController()
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.diagnosticCode).toBe('write_target_before_replay_root');
+    expect(result.diagnostic?.executionPath).toBe('legacy_auto');
+    expect(result.diagnostic?.targetMessageIndex).toBe(23);
+    expect(result.diagnostic?.latestReplayRootIndex).toBe(24);
+    expect(mockPrepareAIInput).not.toHaveBeenCalled();
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockSaveIndependentTable).not.toHaveBeenCalled();
+  });
+
+  it('普通 legacy 路径不享受 provisional bridge 例外（target<root 即使有 active bridge 仍阻断）', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const chat = withFullCheckpointAt24();
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+
+    // 即使存在 active provisional bridge，普通 legacy 自动入口（不传任何豁免参数）
+    // 也必须被结构化阻断——bridge 例外只存在于已有 catch-up/staging 专用路径。
+    const { readActiveProvisionalBridge_ACU } = await import('../../../src/service/table/manual-catch-up-provisional-bridge');
+    vi.mocked(readActiveProvisionalBridge_ACU).mockReturnValue({
+      runId: 'bridge-1',
+      anchorMessageIndex: 20,
+      originalFullCheckpointIndex: 24,
+    } as any);
+
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      23, false, 'auto_standard', false,
+      ['sheet_0'], null, new AbortController()
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.diagnosticCode).toBe('write_target_before_replay_root');
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+  });
+
+  it('无 full checkpoint 时放行（无 replay 根，不阻断）', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const chat = [{ is_user: false, mes: 'AI回复' }, { is_user: true, mes: '用户' }];
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      0, false, 'auto_standard', false,
+      ['sheet_0'], null, new AbortController()
+    );
+
+    expect(result.success, result.error).toBe(true);
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════════════
 // 表级 API 预设覆盖决议（orchestrateManualUpdate_ACU）
 // ═══════════════════════════════════════════════════════════════
 describe('orchestrateManualUpdate_ACU — 表级 API 预设覆盖', () => {

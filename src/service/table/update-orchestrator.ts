@@ -115,6 +115,13 @@ export interface CardUpdateResult {
     error?: string;
     errorCategory?: TableUpdateCommitErrorCategory_ACU;
     aborted?: boolean;
+    /**
+     * 面向 UI/恢复诊断的稳定失败分类；不得解析 error 文案。
+     * 与 ManualUpdateResult.diagnosticCode 同一套治理约定。
+     */
+    diagnosticCode?: WriteTargetAdmissionDiagnosticCode_ACU;
+    /** 稳定结构化诊断上下文（与 diagnosticCode 成对出现）。 */
+    diagnostic?: WriteTargetAdmissionDiagnostic_ACU;
 }
 
 /** processUpdatesBatch 的返回值 */
@@ -122,6 +129,29 @@ export interface BatchUpdateResult {
     success: boolean;
     failedBatch?: number;
     error?: string;
+    /** 稳定失败分类，供 UI 与日志按 code 判断，不解析 error 文案。 */
+    diagnosticCode?: WriteTargetAdmissionDiagnosticCode_ACU;
+    /** 稳定结构化诊断上下文（与 diagnosticCode 成对出现）。 */
+    diagnostic?: WriteTargetAdmissionDiagnostic_ACU;
+}
+
+/** 写目标回放根准入诊断码（稳定契约，禁止改字符串值）。 */
+export type WriteTargetAdmissionDiagnosticCode_ACU =
+    | 'write_target_before_replay_root'
+    | 'staging_runner_unavailable';
+
+/** 写目标回放根准入的稳定结构化诊断字段。 */
+export interface WriteTargetAdmissionDiagnostic_ACU {
+    /** 准入发生时所在的执行路径。 */
+    executionPath: 'legacy_auto' | 'grouped_auto' | 'manual' | 'import';
+    /** 本次写目标楼层。 */
+    targetMessageIndex: number;
+    /** 最新 V2 full checkpoint（replay 根）楼层；无根时为 -1。 */
+    latestReplayRootIndex: number;
+    /** 分组 id（自动 grouped/staging 路径），非分组路径为 0。 */
+    groupId?: number;
+    /** 是否需要边界 staging（跨 replay 根）。 */
+    requiresBoundaryStaging?: boolean;
 }
 
 /** orchestrateManualUpdate 的返回值 */
@@ -2456,7 +2486,11 @@ export async function executeCardUpdateCore_ACU(
     requestOptions: Record<string, any> | null,
     abortController: AbortController | null = new AbortController(),
     progressContext: BatchUpdateProgressContext | null = null,
-    onProgress?: (event: CardUpdateProgressEvent) => void
+    onProgress?: (event: CardUpdateProgressEvent) => void,
+    admissionContext?: {
+        /** 跳过写目标回放根准入（import/内部合法路径显式声明，不得由普通自动入口使用）。 */
+        skipWriteTargetAdmission?: boolean;
+    },
 ): Promise<CardUpdateResult> {
     // 向后兼容：历史调用可能把 onProgress 作为第9参传入
     if (typeof progressContext === 'function' && !onProgress) {
@@ -2484,8 +2518,40 @@ export async function executeCardUpdateCore_ACU(
     let modifiedKeys: string[] = [];
     const maxRetries = settings_ACU.tableMaxRetries || 3;
     const executionScope = captureFillExecutionScope_ACU();
+    const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
+        chat: getChatArray_ACU() || [],
+        isolationKey: executionScope.isolationKey,
+        targetMessageIndex: saveTargetIndex,
+    });
 
     try {
+        // V2 replay-root 准入（spv8.9）：任何写目标早于最新 full checkpoint 的
+        // 自动/legacy 填表必须在 AI 调用（collectGroupFillResponse_ACU →
+        // prepareAIInput/callCustomOpenAI）之前被结构化阻断，否则 AI 先消耗 token，
+        // 写入阶段才被 persist 层 fail-fast。import 模式只生成候选不写聊天 frame，
+        // 不受写目标回放根约束；provisional bridge（manual catch-up）例外由
+        // manualCatchUpRunId 匹配 active bridge 放行。
+        if (writeTargetAdmission.allow === false) {
+            // 仅普通自动/legacy 路径受写目标回放根约束；import 只生成候选不写聊天 frame，
+            // skipWriteTargetAdmission 由内部合法路径显式声明（不得被普通自动入口使用）。
+            if (!isImportMode && !admissionContext?.skipWriteTargetAdmission) {
+            // allow===false 分支必然携带 reason/targetMessageIndex/latestFullCheckpointIndex；
+            // 联合类型收窄因 reason?: never 失效，此处显式取窄成员。
+            const admissionFailure = writeTargetAdmission as { allow: false; reason: string; targetMessageIndex: number; latestFullCheckpointIndex: number };
+            const diagnostic: WriteTargetAdmissionDiagnostic_ACU = {
+                executionPath: 'legacy_auto',
+                targetMessageIndex: saveTargetIndex,
+                latestReplayRootIndex: admissionFailure.latestFullCheckpointIndex,
+            };
+            return {
+                success: false,
+                modifiedKeys: [],
+                error: admissionFailure.reason,
+                diagnosticCode: 'write_target_before_replay_root',
+                diagnostic,
+            };
+            }
+        }
         let lastSqlError: string | null = null;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -3039,7 +3105,13 @@ export async function processUpdatesBatch_ACU(
             );
 
             if (!result.success) {
-                return { success: false, failedBatch: batchNumber, error: result.error || `批处理在第 ${batchNumber} 批时失败或被终止。` };
+                return {
+                    success: false,
+                    failedBatch: batchNumber,
+                    error: result.error || `批处理在第 ${batchNumber} 批时失败或被终止。`,
+                    ...(result.diagnosticCode ? { diagnosticCode: result.diagnosticCode } : {}),
+                    ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
+                };
             }
         }
 

@@ -90163,7 +90163,12 @@ $CONTENT
                     });
                 }
             }
-            // staging 组：使用共享 staging runner（orchestrator 提供），降级为普通分组。
+            // staging 组：使用共享 staging runner（orchestrator 提供）。
+            // spv8.9 硬化：跨 replay 根（requiresBoundaryStaging）的组绝不允许降级到普通
+            // processUpdates —— 那会让写目标早于最新 full checkpoint 的 bucket 在 AI 消耗
+            // token 后才被 persist 层 fail-fast，违背「AI 前准入」目标。无任何可用 runner 时
+            // 必须把 staging 组记为稳定失败（staging_runner_unavailable），而不是退回普通执行。
+            // 调用方（presentation）负责为 staging 提供 processStagingGroupedUpdates 接线。
             for (let start = 0; start < stagingGroupKeys.length; start += maxConcurrentGroups) {
                 const chunkKeys = stagingGroupKeys.slice(start, start + maxConcurrentGroups);
                 const stagingRunner = ops.processStagingGroupedUpdates || ops.processGroupedUpdates;
@@ -90171,35 +90176,10 @@ $CONTENT
                     await executeGroupChunk(chunkKeys, stagingRunner);
                 }
                 else {
-                    // 无 staging runner（旧调用方未接线）：跨根组退回普通执行，
-                    // 由 persist 层 root-before-target 闸门阻止写目标早于 full 的 bucket。
-                    const groupPromises = chunkKeys.map(key => (async () => {
-                        const group = updateGroups[key];
-                        const success = await ops.processUpdates(group.indices, 'auto_independent', {
-                            targetSheetKeys: group.sheetKeys,
-                            batchSize: group.batchSize,
-                            requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
-                        });
-                        return { key, success, sheetNames: group.sheetNames };
-                    })());
-                    const results = await Promise.allSettled(groupPromises);
-                    results.forEach((result, idx) => {
-                        if (result.status === 'rejected') {
-                            failedGroupKeys.push(chunkKeys[idx]);
-                            pushGroupError_ACU(chunkKeys[idx], result.reason || '分组更新异常退出。');
-                            return;
-                        }
-                        const rawResult = result.value?.success;
-                        const groupSucceeded = typeof rawResult === 'object' && rawResult !== null && 'success' in rawResult
-                            ? rawResult.success !== false
-                            : !!rawResult;
-                        if (!groupSucceeded) {
-                            failedGroupKeys.push(chunkKeys[idx]);
-                            const error = rawResult && typeof rawResult === 'object' && 'error' in rawResult
-                                ? rawResult.error
-                                : '分组更新失败，未返回具体错误。';
-                            pushGroupError_ACU(chunkKeys[idx], error);
-                        }
+                    // 无 staging/grouped runner：结构化失败，绝不用 legacy processUpdates 兜底。
+                    chunkKeys.forEach(key => {
+                        failedGroupKeys.push(key);
+                        pushGroupError_ACU(key, 'staging_runner_unavailable：跨 replay 根的分组缺少 staging runner，已阻止本次填表。');
                     });
                 }
             }
@@ -90245,6 +90225,7 @@ $CONTENT
             catch (e) {
                 logWarn_ACU('清理旧层数据失败:', e);
             }
+            const runnerUnavailableGroupKeys = stagingGroupKeys.filter(key => failedGroupKeys.includes(key));
             const result = {
                 success: failedGroupKeys.length === 0,
                 failedGroups: failedGroupKeys.length,
@@ -90252,6 +90233,16 @@ $CONTENT
                 errors: failedGroupErrors,
                 autoMergeTriggered,
                 autoMergeSuccess,
+                ...(runnerUnavailableGroupKeys.length > 0
+                    ? {
+                        diagnosticCode: 'staging_runner_unavailable',
+                        diagnostic: {
+                            stagingGroupKeys: runnerUnavailableGroupKeys,
+                            requiresBoundaryStaging: true,
+                            aiStarted: false,
+                        },
+                    }
+                    : {}),
             };
             performanceSpan.end({ success: result.success, failedGroupCount: result.failedGroups });
             return result;
@@ -94760,7 +94751,7 @@ $CONTENT
      * 纯业务逻辑，不驱动 UI。通过可选的 onProgress 回调传递纯数据进度事件。
      * presentation 层根据返回值和进度事件自行决定 UI 操作。
      */
-    async function executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, isImportMode, updateMode, isSilentMode, targetSheetKeys, requestOptions, abortController = new AbortController(), progressContext = null, onProgress) {
+    async function executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, isImportMode, updateMode, isSilentMode, targetSheetKeys, requestOptions, abortController = new AbortController(), progressContext = null, onProgress, admissionContext) {
         // 向后兼容：历史调用可能把 onProgress 作为第9参传入
         if (typeof progressContext === 'function' && !onProgress) {
             onProgress = progressContext;
@@ -94786,7 +94777,39 @@ $CONTENT
         let modifiedKeys = [];
         const maxRetries = settings_ACU.tableMaxRetries || 3;
         const executionScope = captureFillExecutionScope_ACU();
+        const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
+            chat: getChatArray_ACU() || [],
+            isolationKey: executionScope.isolationKey,
+            targetMessageIndex: saveTargetIndex,
+        });
         try {
+            // V2 replay-root 准入（spv8.9）：任何写目标早于最新 full checkpoint 的
+            // 自动/legacy 填表必须在 AI 调用（collectGroupFillResponse_ACU →
+            // prepareAIInput/callCustomOpenAI）之前被结构化阻断，否则 AI 先消耗 token，
+            // 写入阶段才被 persist 层 fail-fast。import 模式只生成候选不写聊天 frame，
+            // 不受写目标回放根约束；provisional bridge（manual catch-up）例外由
+            // manualCatchUpRunId 匹配 active bridge 放行。
+            if (writeTargetAdmission.allow === false) {
+                // 仅普通自动/legacy 路径受写目标回放根约束；import 只生成候选不写聊天 frame，
+                // skipWriteTargetAdmission 由内部合法路径显式声明（不得被普通自动入口使用）。
+                if (!isImportMode && !admissionContext?.skipWriteTargetAdmission) {
+                    // allow===false 分支必然携带 reason/targetMessageIndex/latestFullCheckpointIndex；
+                    // 联合类型收窄因 reason?: never 失效，此处显式取窄成员。
+                    const admissionFailure = writeTargetAdmission;
+                    const diagnostic = {
+                        executionPath: 'legacy_auto',
+                        targetMessageIndex: saveTargetIndex,
+                        latestReplayRootIndex: admissionFailure.latestFullCheckpointIndex,
+                    };
+                    return {
+                        success: false,
+                        modifiedKeys: [],
+                        error: admissionFailure.reason,
+                        diagnosticCode: 'write_target_before_replay_root',
+                        diagnostic,
+                    };
+                }
+            }
             let lastSqlError = null;
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
                 const attemptReadContext = createLorebookReadContext_ACU({ source: 'form_fill_legacy', isActive: () => !effectiveAbortController?.signal.aborted, isAborted: () => effectiveAbortController?.signal.aborted === true });
@@ -95254,7 +95277,13 @@ $CONTENT
                     batchBaseSnapshot: JSON.parse(JSON.stringify(mergedBatchData)),
                 });
                 if (!result.success) {
-                    return { success: false, failedBatch: batchNumber, error: result.error || `批处理在第 ${batchNumber} 批时失败或被终止。` };
+                    return {
+                        success: false,
+                        failedBatch: batchNumber,
+                        error: result.error || `批处理在第 ${batchNumber} 批时失败或被终止。`,
+                        ...(result.diagnosticCode ? { diagnosticCode: result.diagnosticCode } : {}),
+                        ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
+                    };
                 }
             }
             return { success: true };
@@ -96870,25 +96899,31 @@ $CONTENT
                                     },
                                 });
                             },
-                            processStagingGroupedUpdates: (groups, mode, options) => {
-                                // 跨 full checkpoint 边界组：共享 staging runner（pre 段 stage_only、
-                                // 边界原子汇合、post 段普通持久化）。boundary 元数据来自计划构建层。
-                                const upstreamProgress = options?.onProgress;
-                                return executeAutoFillStagingGroups_ACU(groups, mode, {
-                                    ...options,
-                                    boundary: {
-                                        fullCheckpointIndices: plan.boundary?.fullCheckpointIndices || [],
-                                        requiresBoundaryStaging: plan.boundary?.requiresBoundaryStaging || false,
-                                    },
-                                    abortController: autoGroupedAbortController,
-                                    onProgress: event => {
-                                        upstreamProgress?.(event);
-                                        handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
-                                    },
-                                });
-                            },
                         }
                         : {}),
+                    // spv8.9：跨 replay 根（requiresBoundaryStaging）的组必须走 staging runner，
+                    // 与 SQLite/non-SQLite 的 normal 组选择无关。SQLite 下 normal 组继续走
+                    // legacy processUpdates_ACU，但跨根 staging 组必须有可用的 staging runner，
+                    // 否则 scheduler 会以 staging_runner_unavailable 稳定失败（不再降级到
+                    // processUpdates —— 那会让写目标早于 full checkpoint 的 bucket 在 AI 消耗
+                    // token 后才被 persist 层 fail-fast）。
+                    processStagingGroupedUpdates: (groups, mode, options) => {
+                        // 跨 full checkpoint 边界组：共享 staging runner（pre 段 stage_only、
+                        // 边界原子汇合、post 段普通持久化）。boundary 元数据来自计划构建层。
+                        const upstreamProgress = options?.onProgress;
+                        return executeAutoFillStagingGroups_ACU(groups, mode, {
+                            ...options,
+                            boundary: {
+                                fullCheckpointIndices: plan.boundary?.fullCheckpointIndices || [],
+                                requiresBoundaryStaging: plan.boundary?.requiresBoundaryStaging || false,
+                            },
+                            abortController: autoGroupedAbortController,
+                            onProgress: event => {
+                                upstreamProgress?.(event);
+                                handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
+                            },
+                        });
+                    },
                     refreshData: () => refreshRuntimeDataAndNotifyAfterAutoUpdate_ACU(),
                     loadAllChatMessages: () => loadAllChatMessages_ACU(),
                     purgeOldLayerData: () => purgeOldLayerData_ACU(),

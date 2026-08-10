@@ -240,25 +240,31 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
                                 },
                             });
                         },
-                        processStagingGroupedUpdates: (groups, mode, options) => {
-                            // 跨 full checkpoint 边界组：共享 staging runner（pre 段 stage_only、
-                            // 边界原子汇合、post 段普通持久化）。boundary 元数据来自计划构建层。
-                            const upstreamProgress = options?.onProgress;
-                            return executeAutoFillStagingGroups_ACU(groups, mode, {
-                                ...options,
-                                boundary: {
-                                    fullCheckpointIndices: plan.boundary?.fullCheckpointIndices || [],
-                                    requiresBoundaryStaging: plan.boundary?.requiresBoundaryStaging || false,
-                                },
-                                abortController: autoGroupedAbortController,
-                                onProgress: event => {
-                                    upstreamProgress?.(event);
-                                    handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
-                                },
-                            });
-                        },
                     }
                     : {}),
+                // spv8.9：跨 replay 根（requiresBoundaryStaging）的组必须走 staging runner，
+                // 与 SQLite/non-SQLite 的 normal 组选择无关。SQLite 下 normal 组继续走
+                // legacy processUpdates_ACU，但跨根 staging 组必须有可用的 staging runner，
+                // 否则 scheduler 会以 staging_runner_unavailable 稳定失败（不再降级到
+                // processUpdates —— 那会让写目标早于 full checkpoint 的 bucket 在 AI 消耗
+                // token 后才被 persist 层 fail-fast）。
+                processStagingGroupedUpdates: (groups, mode, options) => {
+                    // 跨 full checkpoint 边界组：共享 staging runner（pre 段 stage_only、
+                    // 边界原子汇合、post 段普通持久化）。boundary 元数据来自计划构建层。
+                    const upstreamProgress = options?.onProgress;
+                    return executeAutoFillStagingGroups_ACU(groups, mode, {
+                        ...options,
+                        boundary: {
+                            fullCheckpointIndices: plan.boundary?.fullCheckpointIndices || [],
+                            requiresBoundaryStaging: plan.boundary?.requiresBoundaryStaging || false,
+                        },
+                        abortController: autoGroupedAbortController,
+                        onProgress: event => {
+                            upstreamProgress?.(event);
+                            handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
+                        },
+                    });
+                },
                 refreshData: () => refreshRuntimeDataAndNotifyAfterAutoUpdate_ACU(),
                 loadAllChatMessages: () => loadAllChatMessages_ACU(),
                 purgeOldLayerData: () => purgeOldLayerData_ACU(),

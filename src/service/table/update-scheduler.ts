@@ -258,6 +258,10 @@ export interface AutoUpdateResult {
     failedGroups: number;
     totalGroups: number;
     errors?: string[];
+    /** 稳定失败分类（spv8.9）：staging 组无可用 runner 时为 'staging_runner_unavailable'。 */
+    diagnosticCode?: 'staging_runner_unavailable';
+    /** 稳定结构化诊断字段：标记因缺少 staging runner 而失败的组 key；不含聊天内容。 */
+    diagnostic?: { stagingGroupKeys: string[]; requiresBoundaryStaging: boolean; aiStarted: false };
     autoMergeTriggered?: boolean;
     autoMergeSuccess?: boolean;
 }
@@ -390,42 +394,22 @@ export async function executeAutoUpdatePlan_ACU(
         }
     }
 
-    // staging 组：使用共享 staging runner（orchestrator 提供），降级为普通分组。
+    // staging 组：使用共享 staging runner（orchestrator 提供）。
+    // spv8.9 硬化：跨 replay 根（requiresBoundaryStaging）的组绝不允许降级到普通
+    // processUpdates —— 那会让写目标早于最新 full checkpoint 的 bucket 在 AI 消耗
+    // token 后才被 persist 层 fail-fast，违背「AI 前准入」目标。无任何可用 runner 时
+    // 必须把 staging 组记为稳定失败（staging_runner_unavailable），而不是退回普通执行。
+    // 调用方（presentation）负责为 staging 提供 processStagingGroupedUpdates 接线。
     for (let start = 0; start < stagingGroupKeys.length; start += maxConcurrentGroups) {
         const chunkKeys = stagingGroupKeys.slice(start, start + maxConcurrentGroups);
         const stagingRunner = ops.processStagingGroupedUpdates || ops.processGroupedUpdates;
         if (stagingRunner) {
             await executeGroupChunk(chunkKeys, stagingRunner);
         } else {
-            // 无 staging runner（旧调用方未接线）：跨根组退回普通执行，
-            // 由 persist 层 root-before-target 闸门阻止写目标早于 full 的 bucket。
-            const groupPromises = chunkKeys.map(key => (async () => {
-                const group = updateGroups[key];
-                const success = await ops.processUpdates(group.indices, 'auto_independent', {
-                    targetSheetKeys: group.sheetKeys,
-                    batchSize: group.batchSize,
-                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
-                });
-                return { key, success, sheetNames: group.sheetNames };
-            })());
-            const results = await Promise.allSettled(groupPromises);
-            results.forEach((result, idx) =>{
-                if (result.status === 'rejected') {
-                    failedGroupKeys.push(chunkKeys[idx]);
-                    pushGroupError_ACU(chunkKeys[idx], result.reason || '分组更新异常退出。');
-                    return;
-                }
-                const rawResult = result.value?.success;
-                const groupSucceeded = typeof rawResult === 'object' && rawResult !== null && 'success' in rawResult
-                    ? (rawResult as { success?: boolean }).success !== false
-                    : !!rawResult;
-                if (!groupSucceeded) {
-                    failedGroupKeys.push(chunkKeys[idx]);
-                    const error = rawResult && typeof rawResult === 'object' && 'error' in rawResult
-                        ? (rawResult as { error?: unknown }).error
-                        : '分组更新失败，未返回具体错误。';
-                    pushGroupError_ACU(chunkKeys[idx], error);
-                }
+            // 无 staging/grouped runner：结构化失败，绝不用 legacy processUpdates 兜底。
+            chunkKeys.forEach(key => {
+                failedGroupKeys.push(key);
+                pushGroupError_ACU(key, 'staging_runner_unavailable：跨 replay 根的分组缺少 staging runner，已阻止本次填表。');
             });
         }
     }
@@ -475,6 +459,7 @@ export async function executeAutoUpdatePlan_ACU(
         logWarn_ACU('清理旧层数据失败:', e);
     }
 
+    const runnerUnavailableGroupKeys = stagingGroupKeys.filter(key => failedGroupKeys.includes(key));
     const result = {
         success: failedGroupKeys.length === 0,
         failedGroups: failedGroupKeys.length,
@@ -482,6 +467,16 @@ export async function executeAutoUpdatePlan_ACU(
         errors: failedGroupErrors,
         autoMergeTriggered,
         autoMergeSuccess,
+        ...(runnerUnavailableGroupKeys.length > 0
+            ? {
+                diagnosticCode: 'staging_runner_unavailable' as const,
+                diagnostic: {
+                    stagingGroupKeys: runnerUnavailableGroupKeys,
+                    requiresBoundaryStaging: true,
+                    aiStarted: false as const,
+                },
+            }
+            : {}),
     };
     performanceSpan.end({ success: result.success, failedGroupCount: result.failedGroups });
     return result;
