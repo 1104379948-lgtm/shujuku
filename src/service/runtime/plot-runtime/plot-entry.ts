@@ -19,6 +19,16 @@ const PLOT_RUNTIME_BUILD_VERSION_ACU = (globalThis as any).__ACU_BUILD_VERSION__
  * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
  */
 function isTaskAbortedError_ACU(error: unknown): boolean {
+  // PlotStageError 的 cause 已由 clearFinalGenerationGreenlights 透传安全摘要；
+  // category='aborted' 必须恢复为取消语义，不伪装成普通预检失败。
+  if (isPlotStageError_ACU(error)) {
+    const cause = (error as { cause?: unknown }).cause;
+    if (cause && typeof cause === 'object') {
+      const category = (cause as { category?: unknown }).category;
+      if (category === 'aborted') return true;
+    }
+    return false;
+  }
   if (error && typeof error === 'object') {
     const name = (error as { name?: unknown }).name;
     if (name === 'AbortError') return true;

@@ -1,4 +1,9 @@
-export type LorebookReadErrorCategory_ACU = 'aborted' | 'lorebook_not_found' | 'unknown';
+export type LorebookReadErrorCategory_ACU =
+  | 'aborted'
+  | 'scope_changed'
+  | 'lorebook_not_found'
+  | 'api_unavailable'
+  | 'unknown';
 
 function getLorebookReadErrorMessage_ACU(error: unknown): string {
   if (error && typeof error === 'object' && 'message' in error) {
@@ -8,6 +13,30 @@ function getLorebookReadErrorMessage_ACU(error: unknown): string {
 }
 
 export function classifyLorebookReadError_ACU(error: unknown): LorebookReadErrorCategory_ACU {
+  // 1. strict 结构优先：真实 readContext 路径的 StrictLorebookReadError 是唯一真实载体，
+  //    其 message 固定为 `StrictLorebookRead:<status>`，message 匹配必然失效。
+  if (isStrictLorebookReadError_ACU(error)) {
+    const strict = error as {
+      status?: unknown;
+      failedBooks?: Array<{ errorCategory?: unknown }>;
+    };
+    if (strict.status === 'aborted') return 'aborted';
+    if (strict.status === 'scope_changed') return 'scope_changed';
+    if (strict.status === 'read_failed') {
+      const failedBooks = Array.isArray(strict.failedBooks) ? strict.failedBooks : [];
+      // 仅当全部书级失败都是 not-found 时才隔离；mixed/unknown 必须失败关闭。
+      if (failedBooks.length > 0 && failedBooks.every(failure => failure?.errorCategory === 'lorebook_not_found')) {
+        return 'lorebook_not_found';
+      }
+    }
+    return 'unknown';
+  }
+
+  // 2. 命名 host API 缺失错误：required gateway 的唯一失败形态。
+  if (error && typeof error === 'object' && (error as { name?: unknown }).name === 'WorldbookHostApiUnavailableError_ACU') {
+    return 'api_unavailable';
+  }
+
   const candidate = error as { name?: unknown; message?: unknown } | null | undefined;
   const message = getLorebookReadErrorMessage_ACU(error);
   if (candidate?.name === 'AbortError' || message === 'TaskAbortedByUser') return 'aborted';
@@ -60,7 +89,73 @@ export function isStrictLorebookReadError_ACU(error: unknown): boolean {
 /**
  * 安全摘要：只输出白名单结构化字段，绝不复制 message/stack。
  * 供 plot runtime 顶层与日志使用；pipeline 内可委托本实现避免双份漂移。
+
+/**
+ * 统一运行时错误安全摘要：
+ * - strict 错误 → strict 白名单摘要；
+ * - 命名 host API 不可用 → 只输出 operation；
+ * - 已安全摘要对象 → 原样规范化透传（防止阶段摘要二次压缩为 unknown）；
+ * - 其余 → 安全分类。
+ * 任何分支都不复制原始 message/stack/宿主正文。
  */
+export function summarizeLorebookRuntimeError_ACU(error: unknown): Record<string, unknown> | null {
+  if (isStrictLorebookReadError_ACU(error)) {
+    return { category: 'strict_lorebook_read', ...summarizeStrictLorebookReadError_ACU(error) };
+  }
+  if (error && typeof error === 'object' && (error as { name?: unknown }).name === 'WorldbookHostApiUnavailableError_ACU') {
+    const candidate = error as { operation?: unknown };
+    return {
+      category: 'api_unavailable',
+      operation: typeof candidate.operation === 'string' ? candidate.operation : 'unknown',
+    };
+  }
+  if (error && typeof error === 'object') {
+    const candidate = error as { category?: unknown; phase?: unknown; subphase?: unknown; status?: unknown; source?: unknown; validationPolicy?: unknown; runId?: unknown; failedBookNames?: unknown; errorCategories?: unknown; staleBookNames?: unknown; invalidCount?: unknown; staleCount?: unknown; failedCount?: unknown };
+    if (typeof candidate.category === 'string' && candidate.category) {
+      return normalizeSafePreflightSummary_ACU(error);
+    }
+  }
+  return { category: classifyLorebookReadError_ACU(error) };
+}
+
+/**
+ * 规范化已安全摘要对象：只允许白名单字段，拒绝任意附加字段，避免日志注入。
+ * 用于阶段摘要透传（clearFinalGenerationGreenlights → plot-task-engine → plot-runtime-phase）。
+ */
+export function normalizeSafePreflightSummary_ACU(error: unknown): Record<string, unknown> {
+  const candidate = (error && typeof error === 'object' ? error : {}) as Record<string, unknown>;
+  const stringFields: Array<[string, unknown]> = [
+    ['category', candidate.category],
+    ['phase', candidate.phase],
+    ['subphase', candidate.subphase],
+    ['status', candidate.status],
+    ['source', candidate.source],
+    ['validationPolicy', candidate.validationPolicy],
+    ['runId', candidate.runId],
+    ['operation', candidate.operation],
+  ];
+  const numberFields: Array<[string, unknown]> = [
+    ['failedCount', candidate.failedCount],
+    ['invalidCount', candidate.invalidCount],
+    ['staleCount', candidate.staleCount],
+  ];
+  const arrayFields: Array<[string, unknown]> = [
+    ['failedBookNames', candidate.failedBookNames],
+    ['errorCategories', candidate.errorCategories],
+    ['staleBookNames', candidate.staleBookNames],
+  ];
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of stringFields) {
+    if (typeof value === 'string') normalized[key] = value;
+  }
+  for (const [key, value] of numberFields) {
+    if (typeof value === 'number' && Number.isFinite(value)) normalized[key] = value;
+  }
+  for (const [key, value] of arrayFields) {
+    if (Array.isArray(value) && value.every(item => typeof item === 'string')) normalized[key] = [...value];
+  }
+  return normalized;
+}
 export function summarizeStrictLorebookReadError_ACU(error: unknown) {
   if (!isStrictLorebookReadError_ACU(error)) return null;
   const candidate = error as {

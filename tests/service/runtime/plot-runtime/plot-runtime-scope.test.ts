@@ -63,3 +63,46 @@ describe('plot-runtime-scope', () => {
     expect(JSON.stringify(summary)).not.toContain(sensitiveText);
   });
 });
+
+  it('preflight 阶段错误摘要透传保留 phase/subphase/category 与 strict 白名单字段，不复制宿主正文/堆栈', () => {
+    const sensitiveText = '宿主的真实错误正文、用户输入、提示词、世界书正文'; // 不应出现在任何摘要中
+    const strictCause = Object.assign(new Error(`StrictLorebookRead:read_failed: ${sensitiveText}`), {
+      name: 'StrictLorebookReadError_ACU',
+      status: 'read_failed',
+      source: 'agent_runtime',
+      validationPolicy: 'trusted_direct',
+      runId: 'run-preflight-1',
+      failedBooks: [{ bookName: '世界书A', errorCategory: 'api_unavailable' }],
+      invalidBookNames: [],
+      staleBookNames: ['已删除世界书'],
+    });
+    const stageError = Object.assign(new Error('stage failed'), {
+      name: 'PlotStageError_ACU',
+      phase: 'clear_final_generation_greenlights',
+      cause: { category: 'strict_lorebook_read', status: 'read_failed', source: 'agent_runtime', validationPolicy: 'trusted_direct', runId: 'run-preflight-1', failedCount: 1, failedBookNames: ['世界书A'], errorCategories: ['api_unavailable'], staleCount: 1, staleBookNames: ['已删除世界书'] },
+    });
+
+    const summary = summarizePlotRuntimeError_ACU(stageError);
+    expect(summary).toEqual({
+      category: 'stage',
+      phase: 'clear_final_generation_greenlights',
+      cause: {
+        category: 'strict_lorebook_read',
+        status: 'read_failed',
+        source: 'agent_runtime',
+        validationPolicy: 'trusted_direct',
+        runId: 'run-preflight-1',
+        failedCount: 1,
+        failedBookNames: ['世界书A'],
+        errorCategories: ['api_unavailable'],
+        staleCount: 1,
+        staleBookNames: ['已删除世界书'],
+      },
+    });
+    // 白名单之外的任何字段（message/stack/宿主正文）一律不进摘要。
+    expect(JSON.stringify(summary)).not.toContain(sensitiveText);
+    expect(JSON.stringify(summary)).not.toContain('StrictLorebookRead:read_failed');
+    expect(JSON.stringify(summary)).not.toContain('stack');
+    expect(JSON.stringify(summary)).not.toContain('用户输入');
+  });
+

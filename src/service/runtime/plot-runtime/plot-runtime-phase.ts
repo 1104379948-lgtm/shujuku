@@ -5,7 +5,7 @@
  * 目标：让每次顶层异常都能安全标识具体阶段与错误类别，
  * 且日志/返回值只走白名单摘要，不泄露用户输入、提示词、世界书正文或堆栈正文。
  */
-import { isLorebookReadAbortedError_ACU, isStrictLorebookReadError_ACU, summarizeStrictLorebookReadError_ACU } from '../../../shared/lorebook-read-error';
+import { isLorebookReadAbortedError_ACU, isStrictLorebookReadError_ACU, normalizeSafePreflightSummary_ACU, summarizeLorebookRuntimeError_ACU, summarizeStrictLorebookReadError_ACU } from '../../../shared/lorebook-read-error';
 
 export type PlotRuntimePhase_ACU =
   | 'clear_final_generation_greenlights'
@@ -52,6 +52,11 @@ export function isPlotStageError_ACU(error: unknown): error is PlotStageError_AC
  * 阶段错误的 cause 安全摘要：只输出白名单类别，不复制 cause 的 message/stack。
  */
 export function summarizePlotStageErrorCause_ACU(cause: unknown) {
+  // 已安全摘要对象（clearFinalGenerationGreenlights 直接透传的 error）不得二次压缩为 unknown。
+  if (cause && typeof cause === 'object' && typeof (cause as { category?: unknown }).category === 'string') {
+    const normalized = normalizeSafePreflightSummary_ACU(cause);
+    if (Object.keys(normalized).length > 0) return normalized;
+  }
   if (isStrictLorebookReadError_ACU(cause)) {
     return { category: 'strict_lorebook_read', ...summarizeStrictLorebookReadError_ACU(cause) };
   }
@@ -60,6 +65,8 @@ export function summarizePlotStageErrorCause_ACU(cause: unknown) {
     const name = (cause as { name?: unknown }).name;
     if (typeof name === 'string' && name) return { category: 'known', name };
   }
+  const summarized = summarizeLorebookRuntimeError_ACU(cause);
+  if (summarized) return summarized;
   return { category: 'unknown' };
 }
 

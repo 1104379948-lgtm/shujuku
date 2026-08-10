@@ -26,12 +26,19 @@ const {
 
 vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
   getLorebookEntries_ACU: mockGetLorebookEntries,
+  getLorebookEntriesRequired_ACU: mockGetLorebookEntries,
   deleteLorebookEntries_ACU: vi.fn(async (bookName: string, uids: any[]) => {
     const uidSet = new Set((uids || []).map(uid => String(uid)));
     const entries = mockEntriesByBook.get(bookName) || [];
     mockEntriesByBook.set(bookName, entries.filter(entry => !uidSet.has(String(entry.uid))));
   }),
+  deleteLorebookEntriesRequired_ACU: vi.fn(async (bookName: string, uids: any[]) => {
+    const uidSet = new Set((uids || []).map(uid => String(uid)));
+    const entries = mockEntriesByBook.get(bookName) || [];
+    mockEntriesByBook.set(bookName, entries.filter(entry => !uidSet.has(String(entry.uid))));
+  }),
   setLorebookEntries_ACU: mockSetLorebookEntries,
+  setLorebookEntriesRequired_ACU: mockSetLorebookEntries,
 }));
 
 vi.mock('../../../src/data/storage/tavern-storage', () => ({
@@ -998,6 +1005,8 @@ describe('agent worldbook takeover native trigger suppression', () => {
 
   it('恢复会按 active snapshot 恢复原世界书条目状态并清理旧版本内部隐藏条目', async () => {
     mockEntriesByBook.set('角色A世界书', [
+
+
       { uid: 1, enabled: false, keys: ['钥匙A'], comment: '普通条目A', content: '内容A' },
       { uid: 'final-state', enabled: false, type: 'constant', keys: [], comment: AGENT_FINAL_GENERATION_GREENLIGHT_COMMENT_ACU, content: '{}' },
       { uid: 'snapshot-state', enabled: false, type: 'constant', keys: [], comment: AGENT_WORLDBOOK_SNAPSHOT_COMMENT_ACU, content: '{}' },
@@ -1682,4 +1691,116 @@ describe('agent worldbook takeover native trigger suppression', () => {
     expect(snapshotEntry()).toBeUndefined();
     expect(finalGenerationGreenlightEntry()).toBeUndefined();
   });
+
+/**
+ * T1 回归基线：真实 readContext + strict 包装路径。
+ * gateway 对 stale 书抛 Worldbook not found → getAgentRuntimeLorebookEntries_ACU 经 pipeline
+ * 包成 StrictLorebookReadError_ACU → clearFinalGenerationGreenlights_ACU 必须识别 strict 结构。
+ */
+describe('clearFinalGenerationGreenlights_ACU with strict readContext (T1 baseline)', () => {
+  function buildReadContext(runId = 'run-strict'): any {
+    return {
+      runId,
+      bookEntriesPromises: new Map(),
+      availableBookNamesPromise: Promise.resolve(['已删除世界书', '角色A世界书']),
+      isActive: () => true,
+      isAborted: () => false,
+    };
+  }
+
+  it('strict-wrapped not-found 被分类为 stale 而非 failed/unknown', async () => {
+    mockResolveBookNames.mockResolvedValue(['已删除世界书']);
+    mockGetLorebookEntries.mockImplementation(async (bookName: string) => {
+      throw new Error(`Worldbook not found: ${bookName}`);
+    });
+    mockStateSnapshot.current = { active: true, selectionSignature: buildWorldbookSelectionSignature_ACU(['已删除世界书']), createdAt: 1, books: {} };
+
+    const cleared = await clearFinalGenerationGreenlights_ACU(buildReadContext());
+
+    expect(cleared.status).toBe('isolated_stale');
+    expect(cleared.staleBookNames).toEqual(['已删除世界书']);
+    expect(cleared.error).toBeUndefined();
+  });
+
+  it('strict-wrapped stale + 有效书：有效书完成清绿灯，stale 只出现在 staleBookNames', async () => {
+    mockResolveBookNames.mockResolvedValue(['已删除世界书', '角色A世界书']);
+    mockGetLorebookEntries.mockImplementation(async (bookName: string) => {
+      if (bookName === '已删除世界书') throw new Error(`Worldbook not found: ${bookName}`);
+      return mockEntriesByBook.get(bookName) || [];
+    });
+    mockEntriesByBook.set('角色A世界书', [
+      { uid: 1, enabled: true, keys: ['钥匙A'], type: 'constant', comment: skillComment_ACU, content: '内容A' },
+      { uid: 'final-state', enabled: false, type: 'constant', keys: [], comment: AGENT_FINAL_GENERATION_GREENLIGHT_COMMENT_ACU, content: '{}' },
+    ]);
+    // 先建立只含有效书的 active snapshot（避免 takeover 读取 stale 书本身失败）
+    const selectionSignature = buildWorldbookSelectionSignature_ACU(['已删除世界书', '角色A世界书']);
+    const activeSnapshot = {
+      active: true,
+      selectionSignature,
+      createdAt: Date.now(),
+      books: { '角色A世界书': [{ uid: 1, previousEnabled: true, previousKeys: ['钥匙A'], previousType: 'selective', commentHash: 'hash:普通条目A' }] },
+    };
+    mockStateSnapshot.current = activeSnapshot;
+    setPlotAgentWorldbookSnapshot_ACU(activeSnapshot as any);
+    mockWriteAgentWorldbookState.mockImplementation(async () => ({ updated: true, bookName: '角色A世界书', snapshot: {}, control: {} }));
+    mockSetLorebookEntries.mockClear();
+
+    const cleared = await clearFinalGenerationGreenlights_ACU(buildReadContext());
+
+    expect(cleared.status).toBe('isolated_stale');
+    expect(cleared.staleBookNames).toEqual(['已删除世界书']);
+    expect(mockEntriesByBook.get('角色A世界书')?.find(entry => entry.uid === 1)).toMatchObject({ enabled: false, type: 'constant' });
+    expect(finalGenerationGreenlightEntry('角色A世界书')).toBeUndefined();
+  });
+
+  it('strict-wrapped 权限/契约错误 → failed，安全摘要含 subphase 且不含原始 message', async () => {
+    mockResolveBookNames.mockResolvedValue(['角色A世界书']);
+    mockGetLorebookEntries.mockImplementation(async () => {
+      throw new Error('Lorebook permission denied: secret-token');
+    });
+    mockStateSnapshot.current = { active: true, selectionSignature: buildWorldbookSelectionSignature_ACU(['角色A世界书']), createdAt: 1, books: { '角色A世界书': [{ uid: 1, previousEnabled: true, previousKeys: ['钥匙A'], previousType: 'selective', commentHash: 'hash:普通条目A' }] } };
+
+    const cleared = await clearFinalGenerationGreenlights_ACU(buildReadContext());
+
+    expect(cleared.status).toBe('failed');
+    expect(cleared.error).toBeDefined();
+    expect(cleared.error!.category).not.toBe('unknown');
+    expect(cleared.error!.subphase).toBeDefined();
+    expect(JSON.stringify(cleared.error)).not.toContain('secret-token');
+  });
+
+  it('全部候选 strict stale：返回 isolated_stale、patched 0，不调用 AI 链', async () => {
+    mockResolveBookNames.mockResolvedValue(['已删除世界书A', '已删除世界书B']);
+    mockGetLorebookEntries.mockImplementation(async (bookName: string) => {
+      throw new Error(`Worldbook not found: ${bookName}`);
+    });
+    mockStateSnapshot.current = { active: true, selectionSignature: buildWorldbookSelectionSignature_ACU(['已删除世界书A', '已删除世界书B']), createdAt: 1, books: {} };
+
+    const cleared = await clearFinalGenerationGreenlights_ACU(buildReadContext());
+
+    expect(cleared.status).toBe('isolated_stale');
+    expect(cleared.patched).toBe(0);
+    expect(cleared.staleBookNames).toEqual(['已删除世界书A', '已删除世界书B']);
+    expect(mockSetLorebookEntries).not.toHaveBeenCalled();
+  });
+
+  it('abort/scope_changed strict error 不得被分类为 unknown', async () => {
+    mockResolveBookNames.mockResolvedValue(['角色A世界书']);
+    mockGetLorebookEntries.mockImplementation(async () => []);
+    mockStateSnapshot.current = { active: true, selectionSignature: buildWorldbookSelectionSignature_ACU(['角色A世界书']), createdAt: 1, books: { '角色A世界书': [{ uid: 1, previousEnabled: true, previousKeys: ['钥匙A'], previousType: 'selective', commentHash: 'hash:普通条目A' }] } };
+
+    const abortedCtx = buildReadContext();
+    abortedCtx.isAborted = () => true;
+    const aborted = await clearFinalGenerationGreenlights_ACU(abortedCtx);
+    expect(aborted.status).toBe('failed');
+    expect(aborted.error!.category).toBe('aborted');
+
+    const scopeChangedCtx = buildReadContext();
+    scopeChangedCtx.isActive = () => false;
+    const scopeChanged = await clearFinalGenerationGreenlights_ACU(scopeChangedCtx);
+    expect(scopeChanged.status).toBe('failed');
+    expect(scopeChanged.error!.category).toBe('scope_changed');
+  });
+});
+
 });

@@ -161,6 +161,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
 vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
   isWorldbookApiAvailable_ACU: mockIsWorldbookApiAvailable,
   getLorebookEntries_ACU: mockGwGetLorebookEntries,
+  getLorebookEntriesRequired_ACU: mockGwGetLorebookEntries,
   setLorebookEntries_ACU: mockGwSetLorebookEntries,
   createLorebookEntries_ACU: mockGwCreateLorebookEntries,
   deleteLorebookEntries_ACU: mockGwDeleteLorebookEntries,

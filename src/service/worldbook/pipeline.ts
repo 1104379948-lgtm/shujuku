@@ -1,7 +1,7 @@
 import type { AgentWorldbookControlSnapshot_ACU, AgentWorldbookControlSnapshotEntry_ACU } from '../../shared/models/agent-worldbook-model';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { allChatMessages_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU, _set_allChatMessages_ACU} from '../runtime/state-manager';
-import { getLorebookEntries_ACU as gwGetLorebookEntries_ACU, setLorebookEntries_ACU as gwSetLorebookEntries_ACU, createLorebookEntries_ACU as gwCreateLorebookEntries_ACU, deleteLorebookEntries_ACU as gwDeleteLorebookEntries_ACU, listLorebooks_ACU, getWorldBooks_ACU as gwGetWorldBooks_ACU, isWorldbookApiAvailable_ACU, normalizeLorebookEntriesForRead_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
+import { getLorebookEntriesRequired_ACU as gwGetLorebookEntriesRequired_ACU, getLorebookEntries_ACU as gwGetLorebookEntries_ACU, setLorebookEntries_ACU as gwSetLorebookEntries_ACU, createLorebookEntries_ACU as gwCreateLorebookEntries_ACU, deleteLorebookEntries_ACU as gwDeleteLorebookEntries_ACU, listLorebooks_ACU, getWorldBooks_ACU as gwGetWorldBooks_ACU, isWorldbookApiAvailable_ACU, normalizeLorebookEntriesForRead_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
 import { getCharLorebooks_ACU, getChatMessages_ACU } from '../../data/gateways/character-gateway';
 import { getChatLength_ACU } from '../../data/gateways/chat-gateway';
 import { saveSettings_ACU } from '../settings/settings-service';
@@ -781,7 +781,7 @@ export   async function getWorldbookNames_ACU() {
 export type LorebookReadSource_ACU = 'plot_runtime' | 'plot_table_index' | 'agent_runtime' | 'ui' | 'global_enumeration' | 'manual_validation';
 export type LorebookValidationPolicy_ACU = 'trusted_direct' | 'validate_list' | 'enumerate_all';
 export type StrictLorebookReadStatus_ACU = 'success' | 'invalid_selection' | 'read_failed' | 'scope_changed' | 'aborted';
-export type StrictLorebookReadErrorCategory_ACU = 'lorebook_not_found' | 'unknown';
+export type StrictLorebookReadErrorCategory_ACU = 'lorebook_not_found' | 'api_unavailable' | 'unknown';
 
 export interface StrictLorebookFailure_ACU {
   bookName: string;
@@ -896,15 +896,18 @@ function getStrictLorebookContextStatus_ACU(context: StrictLorebookReadContext_A
 }
 
 function classifyStrictLorebookReadError_ACU(error: any): StrictLorebookReadErrorCategory_ACU {
-  // abort 已由 context 状态机/调用方处理；此处只关心书级 not-found，其余一律 unknown。
-  return classifyLorebookReadError_ACU(error) === 'lorebook_not_found' ? 'lorebook_not_found' : 'unknown';
+  const category = classifyLorebookReadError_ACU(error);
+  // abort/scope_changed 已由 context 状态机处理；此处只关心书级分类。
+  if (category === 'lorebook_not_found') return 'lorebook_not_found';
+  if (category === 'api_unavailable') return 'api_unavailable';
+  return 'unknown';
 }
 
 async function readStrictLorebookBook_ACU(bookName: string, context?: StrictLorebookReadContext_ACU): Promise<StrictLorebookBookReadResult_ACU> {
   const beforeStatus = getStrictLorebookContextStatus_ACU(context);
   if (beforeStatus) return { bookName, status: beforeStatus, entries: [] };
   try {
-    const entries = await gwGetLorebookEntries_ACU(bookName);
+    const entries = await gwGetLorebookEntriesRequired_ACU(bookName);
     const afterStatus = getStrictLorebookContextStatus_ACU(context);
     if (afterStatus) return { bookName, status: afterStatus, entries: [] };
     return { bookName, status: 'success', entries: cloneLorebookEntriesForRead_ACU(entries, bookName) };

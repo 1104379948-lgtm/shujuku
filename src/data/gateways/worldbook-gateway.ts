@@ -160,6 +160,75 @@ export function isLorebookNotFoundError_ACU(error: unknown): boolean {
 }
 
 /**
+ * 关键路径（strict/preflight）专用：宿主 API 缺失时必须失败关闭，不允许静默成功。
+ * 仅 strict pipeline 与清绿灯预检使用；不改变现有宽松 CRUD 语义。
+ */
+export class WorldbookHostApiUnavailableError_ACU extends Error {
+    readonly operation: 'get_entries' | 'set_entries' | 'delete_entries';
+    constructor(operation: 'get_entries' | 'set_entries' | 'delete_entries') {
+        super(`WorldbookHostApiUnavailable:${operation}`);
+        this.name = 'WorldbookHostApiUnavailableError_ACU';
+        this.operation = operation;
+    }
+}
+
+function requireTavernHelperApi_ACU(operation: 'get_entries' | 'set_entries' | 'delete_entries', method: 'getLorebookEntries' | 'setLorebookEntries' | 'deleteLorebookEntries'): void {
+    if (!TavernHelper_API_ACU || typeof TavernHelper_API_ACU[method] !== 'function') {
+        throw new WorldbookHostApiUnavailableError_ACU(operation);
+    }
+}
+
+/**
+ * required read：宿主 API 缺失抛命名错误；仍复用 Unicode/不可见字符真实名称恢复逻辑。
+ */
+export async function getLorebookEntriesRequired_ACU(bookName: string): Promise<any[]> {
+    requireTavernHelperApi_ACU('get_entries', 'getLorebookEntries');
+    try {
+        return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(bookName), bookName);
+    } catch (error) {
+        if (!isLorebookNotFoundError_ACU(error)) throw error;
+        let resolvedName: string | null = null;
+        try {
+            resolvedName = resolveLorebookNameFromList_ACU(bookName, await listLorebooks_ACU());
+        } catch {
+            // 名称恢复是补救路径；列表读取失败时必须保留原始宿主错误。
+        }
+        if (!resolvedName || resolvedName === bookName) throw error;
+        try {
+            return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(resolvedName), resolvedName);
+        } catch (retryError) {
+            try {
+                Object.defineProperties(error as object, {
+                    lorebookResolvedName: { value: resolvedName, configurable: true },
+                    lorebookRetryError: { value: retryError, configurable: true },
+                });
+            } catch {
+                logWarn_ACU('[WorldbookGateway] required 世界书真实名称重试失败，原始错误对象不可扩展。', {
+                    phase: 'retry_resolved_lorebook_name',
+                    requestedName: bookName,
+                    resolvedName,
+                    error: { category: 'read_failed' },
+                });
+            }
+            throw error;
+        }
+    }
+}
+
+/**
+ * required set/delete：宿主 API 缺失抛命名错误，不允许静默成功。
+ */
+export async function setLorebookEntriesRequired_ACU(bookName: string, entries: any[]): Promise<void> {
+    requireTavernHelperApi_ACU('set_entries', 'setLorebookEntries');
+    await TavernHelper_API_ACU.setLorebookEntries(bookName, entries);
+}
+
+export async function deleteLorebookEntriesRequired_ACU(bookName: string, uids: any[]): Promise<void> {
+    requireTavernHelperApi_ACU('delete_entries', 'deleteLorebookEntries');
+    await TavernHelper_API_ACU.deleteLorebookEntries(bookName, uids);
+}
+
+/**
  * 更新指定世界书中的条目
  * @param bookName 世界书名称
  * @param entries 要更新的条目数组（需包含 uid）

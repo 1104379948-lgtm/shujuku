@@ -1024,3 +1024,109 @@ describe('agent worldbook config/state meta', () => {
     expect(getAgentPromptTemplateDefaults_ACU()).toEqual(previous);
   });
 });
+
+  it('bootstrap 严格读取：候选书全部 not-found 时隔离为 stale 并继续（不落 unknown）', async () => {
+    mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
+      primary: '主世界书',
+      additional: ['有效书'],
+      orderedNames: ['主世界书', '有效书'],
+      apiSource: 'getCharWorldbookNames',
+    });
+    // mock 的 createStrict 必须产出可被 isStrictLorebookReadError_ACU 识别的结构，
+    // 否则 bootstrap 的 catch 无法把 not-found 隔离为 continue。
+    mockCreateStrictLorebookReadError.mockImplementation((result: any) => Object.assign(
+      new Error(`StrictLorebookRead:${result.status}`),
+      {
+        name: 'StrictLorebookReadError_ACU',
+        status: result.status,
+        source: result.source,
+        validationPolicy: result.validationPolicy,
+        runId: result.runId,
+        failedBooks: result.failedBooks,
+        invalidBookNames: result.invalidBookNames,
+        staleBookNames: result.staleBookNames,
+      },
+    ));
+    // 主世界书严格读取失败为 lorebook_not_found：隔离跳过；有效书成功：继续读取。
+    mockGetLorebookEntriesStrict.mockImplementation(async (bookNames: string[]) => {
+      if (bookNames[0] === '主世界书') {
+        return {
+          status: 'read_failed',
+          source: 'agent_runtime',
+          validationPolicy: 'trusted_direct',
+          runId: 'bootstrap-all-not-found',
+          requestedBookNames: bookNames,
+          resolvedBookNames: [],
+          entriesByBook: {},
+          invalidBookNames: [],
+          failedBookNames: bookNames,
+          failedBooks: bookNames.map(bookName => ({ bookName, errorCategory: 'lorebook_not_found' })),
+          staleBookNames: bookNames,
+        };
+      }
+      return {
+        status: 'success',
+        entriesByBook: Object.fromEntries(bookNames.map(bookName => [bookName, mockEntriesByBook.get(bookName) || []])),
+        invalidBookNames: [],
+        failedBookNames: [],
+      };
+    });
+    mockEntriesByBook.set('有效书', [configEntry({
+      version: 2,
+      kind: 'agent_worldbook_state',
+      updatedAt: 1,
+      control: { mode: 'agent', agentApiPreset: 'valid-book' },
+      snapshot: {},
+    })]);
+    // bootstrap catch 使用 isLorebookNotFoundError_ACU 判断隔离；
+    // mock 默认只认 message 含 'Worldbook not found'，必须按 strict 结构判断。
+    mockIsLorebookNotFoundError.mockImplementation((error: any) => {
+      if (error?.name === 'StrictLorebookReadError_ACU') {
+        return Array.isArray(error.failedBooks)
+          && error.failedBooks.length > 0
+          && error.failedBooks.every((failure: any) => failure?.errorCategory === 'lorebook_not_found');
+      }
+      return String(error?.message || error).includes('Worldbook not found');
+    });
+    const readContext = { runId: 'bootstrap-all-not-found', bookEntriesPromises: new Map() };
+
+    const result = await readAgentWorldbookStateFromWorldbooks_ACU(readContext as any);
+
+    // 主世界书 not-found 被隔离跳过，有效书仍被读到：不降级为空配置、不抛错。
+    expect(result.source).toBe('worldbook');
+    expect(result.bookName).toBe('有效书');
+    expect(result.control.agentApiPreset).toBe('valid-book');
+  });
+
+  it.each([
+    ['unknown', 'lorebook read failed for unknown reason'],
+    ['api_unavailable', 'api unavailable'],
+  ] as const)('bootstrap 严格读取：含 %s 的书级失败原样失败，不降级为空配置', async (category, hostMessage) => {
+    mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
+      primary: '主世界书',
+      additional: [],
+      orderedNames: ['主世界书'],
+      apiSource: 'getCharWorldbookNames',
+    });
+    const strictFailure = {
+      status: 'read_failed',
+      source: 'agent_runtime',
+      validationPolicy: 'trusted_direct',
+      runId: 'bootstrap-fail-closed',
+      requestedBookNames: ['主世界书'],
+      resolvedBookNames: [],
+      entriesByBook: {},
+      invalidBookNames: [],
+      failedBookNames: ['主世界书'],
+      failedBooks: [{ bookName: '主世界书', errorCategory: category }],
+      staleBookNames: [],
+    };
+    const strictError = new Error(hostMessage);
+    mockCreateStrictLorebookReadError.mockReturnValue(strictError);
+    mockGetLorebookEntriesStrict.mockResolvedValue(strictFailure);
+    const readContext = { runId: 'bootstrap-fail-closed', bookEntriesPromises: new Map() };
+
+    await expect(readAgentWorldbookStateFromWorldbooks_ACU(readContext as any)).rejects.toBe(strictError);
+    expect(mockCreateStrictLorebookReadError).toHaveBeenCalledWith(strictFailure);
+  });
+

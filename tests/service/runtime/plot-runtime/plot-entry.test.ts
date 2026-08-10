@@ -284,3 +284,18 @@ describe('runOptimizationLogic_ACU', () => {
     expect((runOptimizationLogic_ACU as any).__inFlight).toBe(false);
   });
 });
+
+  it('PlotStageError 的 cause.category=aborted 恢复为取消语义，不伪装成预检失败', async () => {
+    const stageError = Object.assign(new Error('stage failed'), {
+      name: 'PlotStageError_ACU',
+      phase: 'clear_final_generation_greenlights',
+      cause: { category: 'aborted', phase: 'clear_final_generation_greenlights' },
+    });
+    mockRunPlotTasks.mockRejectedValue(stageError);
+    const result = await runOptimizationLogic_ACU('继续');
+    expect(result.success).toBe(false);
+    expect(result.aborted).toBe(true);
+    expect(result.manual).toBe(true);
+    expect(result.errorType).toBeUndefined();
+  });
+

@@ -767,14 +767,10 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       _set_pendingFinalGenerationGreenlights_ACU([]);
       const clearGreenlightsOutcome = await clearFinalGenerationGreenlights_ACU(worldbookReadContext);
       if (clearGreenlightsOutcome.status === 'failed') {
-        throw new PlotStageError_ACU(
-          'clear_final_generation_greenlights',
-          'worldbook preflight failed',
-          {
-            category: clearGreenlightsOutcome.error?.category ?? 'unknown',
-            phase: 'clear_final_generation_greenlights',
-          },
-        );
+        // 直接把安全摘要对象作为 cause，避免二次压缩为 {category, phase} 丢失 subphase/strict 字段。
+        // category='aborted' 由 plot-entry 恢复为取消语义；其余错误失败关闭。
+        const cause = clearGreenlightsOutcome.error || { category: 'unknown', phase: 'clear_final_generation_greenlights' };
+        throw new PlotStageError_ACU('clear_final_generation_greenlights', 'worldbook preflight failed', cause);
       }
       if (clearGreenlightsOutcome.status === 'isolated_stale' && clearGreenlightsOutcome.staleBookNames.length > 0) {
         logWarn_ACU('[剧情推进] 部分世界书已失效（可能被删除/改名），已隔离，其余世界书继续工作。', {
