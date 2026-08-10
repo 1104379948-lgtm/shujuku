@@ -9,8 +9,24 @@ import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
 import { runPlotTasksRuntime_ACU } from './plot-task-engine';
 import { capturePlotRuntimeScope_ACU, summarizePlotRuntimeError_ACU, summarizePlotRuntimeScope_ACU } from './plot-runtime-scope';
 import { isFlightModeActive_ACU } from '../../flight-mode/flight-mode-state';
+import { isLorebookReadAbortedError_ACU } from '../../../shared/lorebook-read-error';
+import { isPlotStageError_ACU } from './plot-runtime-phase';
 
 const PLOT_RUNTIME_BUILD_VERSION_ACU = (globalThis as any).__ACU_BUILD_VERSION__ || 'unknown';
+
+/**
+ * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
+ * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
+ */
+function isTaskAbortedError_ACU(error: unknown): boolean {
+  if (error && typeof error === 'object') {
+    const name = (error as { name?: unknown }).name;
+    if (name === 'AbortError') return true;
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message === 'TaskAbortedByUser') return true;
+  }
+  return isLorebookReadAbortedError_ACU(error);
+}
 
   /**
    * 核心优化逻辑（纯 service 层：读数据→业务决策→写数据→构造返回值）。
@@ -104,11 +120,20 @@ const PLOT_RUNTIME_BUILD_VERSION_ACU = (globalThis as any).__ACU_BUILD_VERSION__
         hasPartialFailure: runtimeResult.failedResults.length > 0,
       };
     } catch (error) {
-      if (error.message === 'TaskAbortedByUser') {
+      if (isTaskAbortedError_ACU(error)) {
           return { success: false, aborted: true, manual: true, restoreText: originalUserInputForAbort_ACU };
       }
-      if (error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted')) {
-          return { success: false, aborted: true, manual: true, restoreText: originalUserInputForAbort_ACU };
+      if (isPlotStageError_ACU(error) && error.phase === 'clear_final_generation_greenlights') {
+        logError_ACU('[剧情推进] 世界书预检失败，本轮已停止。', {
+          phase: error.phase,
+          build: PLOT_RUNTIME_BUILD_VERSION_ACU,
+          error: summarizePlotRuntimeError_ACU(error),
+        });
+        return {
+          success: false,
+          errorType: 'worldbook_preflight_failure',
+          errorMessage: '剧情推进的世界书预检失败，请检查绑定/选择的世界书。',
+        };
       }
       logError_ACU('[剧情推进] 在核心优化逻辑中发生错误:', {
         phase: 'top_level',

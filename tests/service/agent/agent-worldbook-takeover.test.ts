@@ -902,7 +902,7 @@ describe('agent worldbook takeover native trigger suppression', () => {
 
     const cleared = await clearFinalGenerationGreenlights_ACU();
 
-    expect(cleared).toBe(2);
+    expect(cleared).toMatchObject({ status: 'cleared', patched: 2, staleBookNames: [] });
     expect(mockEntriesByBook.get('角色A世界书')?.find(entry => entry.uid === 1)).toMatchObject({ enabled: false, type: 'constant', keys: ['钥匙A'] });
     expect(finalGenerationGreenlightEntry()).toBeUndefined();
     expect(await readFinalGenerationGreenlights_ACU()).toEqual([]);
@@ -922,7 +922,8 @@ describe('agent worldbook takeover native trigger suppression', () => {
     const cleared = await clearFinalGenerationGreenlights_ACU();
 
     expect(readBack).toEqual([{ bookName: '角色A世界书', uid: 1 }]);
-    expect(cleared).toBeGreaterThanOrEqual(1);
+    expect(cleared).toMatchObject({ status: 'cleared', patched: expect.any(Number) });
+    expect(cleared.patched).toBeGreaterThanOrEqual(1);
     expect(mockEntriesByBook.get('角色A世界书')?.find(entry => entry.uid === 1)).toMatchObject({
       enabled: false,
       type: 'constant',
@@ -930,6 +931,45 @@ describe('agent worldbook takeover native trigger suppression', () => {
     });
     expect(await readFinalGenerationGreenlights_ACU()).toEqual([]);
   });
+
+  it('宿主存在已删除世界书引用时隔离 stale，其余有效世界书继续清理绿灯', async () => {
+    mockResolveBookNames.mockResolvedValue(['已删除世界书', '角色A世界书']);
+    mockGetLorebookEntries.mockImplementation(async (bookName: string) => {
+      if (bookName === '已删除世界书') throw new Error('Worldbook not found: 已删除世界书');
+      return mockEntriesByBook.get(bookName) || [];
+    });
+    mockEntriesByBook.set('角色A世界书', [
+      { uid: 1, enabled: true, keys: ['钥匙A'], type: 'selective', comment: skillComment_ACU, content: '内容A' },
+    ]);
+    // 预先建立有效书的 active snapshot（绕过 collectTakeoverCandidates 对 not-found 无隔离的既有行为）
+    setPlotAgentWorldbookSnapshot_ACU({
+      active: true,
+      selectionSignature: buildWorldbookSelectionSignature_ACU(['已删除世界书', '角色A世界书']),
+      createdAt: Date.now(),
+      books: { '角色A世界书': [{ uid: 1, previousEnabled: true, previousKeys: ['钥匙A'], previousType: 'selective', commentHash: 'hash:普通条目A' }] },
+    } as any);
+    mockWriteAgentWorldbookState.mockImplementation(async () => ({ updated: true, bookName: '角色A世界书', snapshot: {}, control: {} }));
+
+    const cleared = await clearFinalGenerationGreenlights_ACU();
+
+    expect(cleared.status).toBe('isolated_stale');
+    expect(cleared.staleBookNames).toEqual(['已删除世界书']);
+  });
+
+  it('全部候选世界书已删除时返回 isolated_stale 且不写任何内容', async () => {
+    mockResolveBookNames.mockResolvedValue(['已删除世界书A', '已删除世界书B']);
+    mockGetLorebookEntries.mockImplementation(async (bookName: string) => {
+      throw new Error(`Worldbook not found: ${bookName}`);
+    });
+    mockStateSnapshot.current = { active: true, selectionSignature: buildWorldbookSelectionSignature_ACU(['已删除世界书A', '已删除世界书B']), createdAt: 1, books: {} };
+
+    const cleared = await clearFinalGenerationGreenlights_ACU();
+
+    expect(cleared.status).toBe('isolated_stale');
+    expect(cleared.staleBookNames).toEqual(['已删除世界书A', '已删除世界书B']);
+    expect(mockSetLorebookEntries).not.toHaveBeenCalled();
+  });
+
 
   it('没有 active snapshot 时正文绿灯写入返回 false 且不修改真实条目', async () => {
     const written = await writeFinalGenerationGreenlights_ACU([{ bookName: '角色A世界书', uid: 1, reason: '正文需要' }]);

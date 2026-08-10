@@ -9,7 +9,7 @@ import { getChatSheetGuideDataForIsolationKey_ACU, getSortedSheetKeys_ACU, mater
 import { getImportBatchPrefix_ACU, getImportStablePrefix_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { isEntryBlocked_ACU } from '../../shared/utils';
-import { classifyLorebookReadError_ACU } from '../../shared/lorebook-read-error';
+import { classifyLorebookReadError_ACU, summarizeStrictLorebookReadError_ACU as sharedSummarizeStrictLorebookReadError_ACU } from '../../shared/lorebook-read-error';
 import { resolveLorebookReadTargets_ACU } from './read-scope';
 import { consumeLastMergeQuarantinedSheetKeys_ACU, consumeLastMergeWarnings_ACU, formatJsonToReadable_ACU, maybeLiftWorldbookSuppression_ACU, mergeAllIndependentTables_ACU, shouldSuppressWorldbookInjection_ACU } from '../runtime/helpers-remaining';
 import { normalizeCanonicalTableRows_ACU, repairLegacyAutoMergedRowTails_ACU } from '../../shared/canonical-row-normalizer';
@@ -864,22 +864,7 @@ export function isStrictLorebookReadError_ACU(error: unknown): error is StrictLo
 }
 
 export function summarizeStrictLorebookReadError_ACU(error: unknown) {
-  if (!isStrictLorebookReadError_ACU(error)) return null;
-  const failedBooks = error.failedBooks
-    .filter(failure => failure && typeof failure.bookName === 'string' && typeof failure.errorCategory === 'string')
-    .map(failure => ({ bookName: failure.bookName, errorCategory: failure.errorCategory }));
-  return {
-    category: 'strict_lorebook_read',
-    status: error.status,
-    source: error.source,
-    validationPolicy: error.validationPolicy,
-    runId: error.runId,
-    failedCount: failedBooks.length,
-    failedBookNames: failedBooks.map(failure => failure.bookName),
-    errorCategories: failedBooks.map(failure => failure.errorCategory),
-    invalidCount: error.invalidBookNames.length,
-    staleCount: error.staleBookNames.length,
-  };
+  return sharedSummarizeStrictLorebookReadError_ACU(error);
 }
 
 function normalizeRequestedLorebookNames_ACU(bookNames: unknown): string[] {

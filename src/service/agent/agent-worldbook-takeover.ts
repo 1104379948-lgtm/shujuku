@@ -11,6 +11,7 @@ import {
 } from '../../data/gateways/worldbook-gateway';
 import { persistTavernSettings_ACU } from '../../data/storage/tavern-storage';
 import { hashUserInput_ACU, logWarn_ACU } from '../../shared/utils';
+import { classifyLorebookReadError_ACU } from '../../shared/lorebook-read-error';
 import { buildAgentWorldbookSnapshotSelectionSignature_ACU } from '../../shared/agent-worldbook-snapshot';
 import {
   AGENT_TAKEOVER_META_END_ACU,
@@ -449,10 +450,28 @@ async function readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(
   selectionSignature: string,
   initialRevision: number,
   readContext?: StrictLorebookReadContext_ACU,
+  options: { onStaleBookNames?: (staleBookNames: string[]) => void } = {},
 ): Promise<AgentWorldbookControlSnapshot_ACU> {
-  const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { readContext });
+  const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { readContext, onStaleBookNames: options.onStaleBookNames });
   setAgentWorldbookSnapshotStateIfRevision_ACU(initialRevision, snapshot);
   return snapshot;
+}
+
+/** 内部：带 stale 收集的刷新，供清绿灯预检使用（公共 refresh 保持原签名不变）。 */
+async function refreshPlotAgentWorldbookSnapshotWithStale_ACU(
+  readContext?: StrictLorebookReadContext_ACU,
+): Promise<{ snapshot: AgentWorldbookControlSnapshot_ACU; staleBookNames: string[] }> {
+  const initialRevision = getAgentWorldbookSnapshotRevision_ACU();
+  const resolvedBookNames = await resolveTakeoverBookNames_ACU(readContext);
+  const selectionSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
+  let staleBookNames: string[] = [];
+  const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(
+    resolvedBookNames,
+    selectionSignature,
+    { readContext, onStaleBookNames: (stale) => { staleBookNames = stale; } },
+  );
+  setAgentWorldbookSnapshotStateIfRevision_ACU(initialRevision, snapshot);
+  return { snapshot, staleBookNames };
 }
 
 export async function refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readContext?: StrictLorebookReadContext_ACU): Promise<AgentWorldbookControlSnapshot_ACU> {
@@ -463,9 +482,9 @@ export async function refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readCo
 }
 
 /** 为普通剧情与填表读取解析持久化接管前视图；expectedSignature 独立于返回快照，防止快照自签名。 */
-export async function resolvePreTakeoverWorldbookSnapshot_ACU(): Promise<PreTakeoverWorldbookSnapshotResolution_ACU> {
+export async function resolvePreTakeoverWorldbookSnapshot_ACU(readContext?: StrictLorebookReadContext_ACU): Promise<PreTakeoverWorldbookSnapshotResolution_ACU> {
   const initialRevision = getAgentWorldbookSnapshotRevision_ACU();
-  const resolvedBookNames = await resolveTakeoverBookNames_ACU();
+  const resolvedBookNames = await resolveTakeoverBookNames_ACU(readContext);
   const expectedSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
   const existingPromise = preTakeoverSnapshotResolutionPromisesBySignature_ACU.get(expectedSignature);
   if (existingPromise) return existingPromise;
@@ -474,6 +493,7 @@ export async function resolvePreTakeoverWorldbookSnapshot_ACU(): Promise<PreTake
     resolvedBookNames,
     expectedSignature,
     initialRevision,
+    readContext,
   ).then(snapshot => ({ snapshot, expectedSignature }));
   preTakeoverSnapshotResolutionPromisesBySignature_ACU.set(expectedSignature, resolutionPromise);
   const clearResolutionPromise = () => {
@@ -520,7 +540,7 @@ async function backfillMissingTakeoverMeta_ACU(snapshot: AgentWorldbookControlSn
 async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(
   resolvedBookNames: string[],
   selectionSignature: string,
-  options: { backfillMissingMeta?: boolean; readContext?: StrictLorebookReadContext_ACU } = {},
+  options: { backfillMissingMeta?: boolean; readContext?: StrictLorebookReadContext_ACU; onStaleBookNames?: (staleBookNames: string[]) => void } = {},
 ): Promise<AgentWorldbookControlSnapshot_ACU> {
   const state = await readAgentWorldbookStateFromWorldbooks_ACU(options.readContext);
   const activeStateSnapshot = state.snapshot.active === true && state.snapshot.selectionSignature === selectionSignature
@@ -528,9 +548,19 @@ async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(
     : null;
 
   const snapshotBooks: Record<string, AgentWorldbookControlSnapshotEntry_ACU[]> = {};
+  const staleBookNames: string[] = [];
   let createdAt = 0;
   for (const bookName of resolvedBookNames) {
-    const entries = await getAgentRuntimeLorebookEntries_ACU(bookName, options.readContext);
+    let entries: any[];
+    try {
+      entries = await getAgentRuntimeLorebookEntries_ACU(bookName, options.readContext);
+    } catch (error) {
+      if (classifyLorebookReadError_ACU(error) === 'lorebook_not_found') {
+        staleBookNames.push(bookName);
+        continue;
+      }
+      throw error;
+    }
     const bookSnapshot: AgentWorldbookControlSnapshotEntry_ACU[] = [];
     for (const entry of entries || []) {
       if (!hasValidWorldbookUid_ACU(entry?.uid)) continue;
@@ -547,6 +577,13 @@ async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(
       createdAt = Math.max(createdAt, meta.createdAt || 0);
     }
     if (bookSnapshot.length > 0) snapshotBooks[bookName] = bookSnapshot;
+  }
+  if (staleBookNames.length > 0) {
+    logWarn_ACU('[Agent世界书] 接管扫描中隔离失效世界书引用（可能已删除/改名），其余世界书继续工作。', {
+      phase: 'read_pre_takeover_snapshot',
+      staleBookNames,
+    });
+    options.onStaleBookNames?.(staleBookNames);
   }
 
   if (Object.keys(snapshotBooks).length > 0) {
@@ -974,16 +1011,82 @@ export async function readFinalGenerationGreenlights_ACU(): Promise<AgentWorldbo
   return greenlights;
 }
 
-export async function clearFinalGenerationGreenlights_ACU(): Promise<number> {
-  const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
+export interface ClearFinalGenerationGreenlightsResult_ACU {
+  status: 'noop' | 'cleared' | 'isolated_stale' | 'failed';
+  patched: number;
+  staleBookNames: string[];
+  /** 仅 failed 时存在：安全分类，不携带宿主正文。 */
+  error?: { category: string; phase: string };
+}
+
+/**
+ * 清绿灯预检：
+ * - 无 active snapshot / 无待清理条目 → noop（不写世界书）；
+ * - 宿主列表中存在已删除/改名书（not-found）→ 记为 stale 并继续清理其他有效书；
+ * - 读取权限/宿主契约/写入失败 → failed（失败关闭，由调用方阻断 AI）。
+ * 不自动修改 manualSelection 或角色绑定，只记录安全诊断。
+ */
+export async function clearFinalGenerationGreenlights_ACU(
+  readContext?: StrictLorebookReadContext_ACU,
+): Promise<ClearFinalGenerationGreenlightsResult_ACU> {
+  const baseResult = { patched: 0, staleBookNames: [] as string[] };
+  let snapshot: Awaited<ReturnType<typeof refreshPlotAgentWorldbookSnapshotWithStale_ACU>>['snapshot'];
+  let staleFromRefresh: string[] = [];
+  try {
+    const refreshed = await refreshPlotAgentWorldbookSnapshotWithStale_ACU(readContext);
+    snapshot = refreshed.snapshot;
+    staleFromRefresh = refreshed.staleBookNames;
+  } catch (error) {
+    return {
+      ...baseResult,
+      status: 'failed',
+      error: { category: classifyLorebookReadError_ACU(error), phase: 'clear_final_generation_greenlights' },
+    };
+  }
   const snapshotUidSetByBook = buildSnapshotUidSetByBook_ACU(snapshot);
-  const patched = await patchSnapshotEntries_ACU(snapshotUidSetByBook, (_bookName, entry) => {
-    if (!isFinalGenerationBlueLightEntry_ACU(entry)) return null;
-    return { uid: entry.uid, enabled: false };
-  });
-  const resolvedBookNames = await resolveTakeoverBookNames_ACU();
-  const deletedLegacyEntries = await deleteInternalEntriesByComment_ACU(resolvedBookNames, AGENT_FINAL_GENERATION_GREENLIGHT_COMMENT_ACU);
-  return patched + deletedLegacyEntries;
+  if (snapshot.active !== true || snapshotUidSetByBook.size === 0) {
+    const noopStale = [...new Set([...staleFromRefresh])];
+    return {
+      ...baseResult,
+      status: noopStale.length > 0 ? 'isolated_stale' : 'noop',
+      staleBookNames: noopStale,
+    };
+  }
+
+  let patched = 0;
+  try {
+    patched = await patchSnapshotEntries_ACU(snapshotUidSetByBook, (_bookName, entry) => {
+      if (!isFinalGenerationBlueLightEntry_ACU(entry)) return null;
+      return { uid: entry.uid, enabled: false };
+    });
+  } catch (error) {
+    return {
+      ...baseResult,
+      status: 'failed',
+      error: { category: classifyLorebookReadError_ACU(error), phase: 'clear_final_generation_greenlights' },
+    };
+  }
+
+  let staleBookNames: string[] = [];
+  let deletedLegacyEntries = 0;
+  try {
+    const resolvedBookNames = await resolveTakeoverBookNames_ACU(readContext);
+    const deleted = await deleteInternalEntriesByComment_ACU(resolvedBookNames, AGENT_FINAL_GENERATION_GREENLIGHT_COMMENT_ACU);
+    deletedLegacyEntries = deleted;
+  } catch (error) {
+    return {
+      ...baseResult,
+      status: 'failed',
+      error: { category: classifyLorebookReadError_ACU(error), phase: 'clear_final_generation_greenlights' },
+    };
+  }
+
+  staleBookNames = [...new Set([...staleFromRefresh, ...staleBookNames])];
+  return {
+    status: staleBookNames.length > 0 ? 'isolated_stale' : 'cleared',
+    patched: patched + deletedLegacyEntries,
+    staleBookNames,
+  };
 }
 
 export async function takeoverWorldbookGreenlights_ACU(): Promise<AgentWorldbookTakeoverResult_ACU> {

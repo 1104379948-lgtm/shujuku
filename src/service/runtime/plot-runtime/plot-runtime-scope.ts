@@ -1,6 +1,7 @@
 import { getCurrentCharacterId_ACU } from '../../../data/gateways/host-state-gateway';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../state-manager';
-import { classifyLorebookReadError_ACU } from '../../../shared/lorebook-read-error';
+import { classifyLorebookReadError_ACU, isLorebookReadAbortedError_ACU, isStrictLorebookReadError_ACU, summarizeStrictLorebookReadError_ACU } from '../../../shared/lorebook-read-error';
+import { isPlotStageError_ACU, summarizePlotStageError_ACU } from './plot-runtime-phase';
 
 export interface PlotRuntimeScope_ACU {
   chatId: string | null;
@@ -61,10 +62,23 @@ export function summarizePlotRuntimeScope_ACU(scope: PlotRuntimeScope_ACU) {
 }
 
 export function summarizePlotRuntimeError_ACU(error: any) {
+  if (isStrictLorebookReadError_ACU(error)) {
+    return { category: 'strict_lorebook_read', ...summarizeStrictLorebookReadError_ACU(error) };
+  }
+  if (isPlotStageError_ACU(error)) {
+    return summarizePlotStageError_ACU(error);
+  }
+  if (isLorebookReadAbortedError_ACU(error)) {
+    return { category: 'aborted' };
+  }
   let category = 'unknown';
-  if (error?.name === 'AbortError') {
-    category = 'aborted';
-  } else if (isTransientLorebookNotFoundError_ACU(error)) {
+  if (error && typeof error === 'object' && typeof error.name === 'string') {
+    const name = error.name;
+    if (name === 'CharacterLorebookScopeChangedError_ACU' || name === 'CharacterWorldbookApiUnavailableError_ACU' || name === 'CharacterWorldbookBindingContractError_ACU') {
+      return { category: 'character_binding', name };
+    }
+  }
+  if (isTransientLorebookNotFoundError_ACU(error)) {
     category = 'lorebook_not_found';
   }
 

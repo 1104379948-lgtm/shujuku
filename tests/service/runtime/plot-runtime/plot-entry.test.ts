@@ -172,10 +172,91 @@ describe('runOptimizationLogic_ACU', () => {
       build: expect.any(String),
       initialScope: expect.objectContaining({ chatId: 'chat-1' }),
       errorScope: expect.objectContaining({ chatId: 'chat-1' }),
-      error: { category: 'unknown' },
+      error: expect.objectContaining({ category: expect.any(String) }),
     }));
     expect(JSON.stringify(mockLogError.mock.calls)).not.toContain(sensitiveText);
   });
+
+  it('非 Error 拒绝值（null）不导致 catch 内二次抛错', async () => {
+    mockRunPlotTasks.mockRejectedValue(null);
+    const result = await runOptimizationLogic_ACU('继续');
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('exception');
+    expect(mockPlanningGuard.inProgress).toBe(false);
+    expect((runOptimizationLogic_ACU as any).__inFlight).toBe(false);
+  });
+
+  it('非 Error 拒绝值（普通对象）同样安全返回 exception', async () => {
+    mockRunPlotTasks.mockRejectedValue({ reason: 'upstream dropped response' });
+    const result = await runOptimizationLogic_ACU('继续');
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('exception');
+    expect(mockPlanningGuard.inProgress).toBe(false);
+    expect((runOptimizationLogic_ACU as any).__inFlight).toBe(false);
+  });
+
+  it('取消判断使用精确分类：普通含 aborted 的错误不得误判为用户取消', async () => {
+    mockRunPlotTasks.mockRejectedValue(new Error('upstream request was aborted due to timeout'));
+    const result = await runOptimizationLogic_ACU('继续');
+    expect(result.success).toBe(false);
+    expect(result.aborted).toBeUndefined();
+    expect(result.errorType).toBe('exception');
+  });
+
+  it('strict 世界书读取错误在顶层被安全摘要且不含宿主正文', async () => {
+    const strictError = Object.assign(new Error('StrictLorebookRead:read_failed'), {
+      name: 'StrictLorebookReadError_ACU',
+      status: 'read_failed',
+      source: 'manual_validation',
+      validationPolicy: 'validate_list',
+      runId: 'run-1',
+      failedBooks: [{ bookName: '部落生活 - 2026.08@记录', errorCategory: 'lorebook_not_found' }],
+      invalidBookNames: [],
+      staleBookNames: [],
+    });
+    mockRunPlotTasks.mockRejectedValue(strictError);
+    const result = await runOptimizationLogic_ACU('继续');
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('exception');
+    expect(result.errorMessage).toBe('剧情规划大师在处理时发生错误。');
+    expect(JSON.stringify(mockLogError.mock.calls)).not.toContain('部落生活');
+    expect(JSON.stringify(mockLogError.mock.calls)).not.toContain('StrictLorebookRead:');
+  });
+
+  it('清绿灯预检阶段失败映射为 worldbook_preflight_failure，返回稳定消息且不含宿主正文', async () => {
+    const stageError = Object.assign(new Error('stage failed'), {
+      name: 'PlotStageError_ACU',
+      phase: 'clear_final_generation_greenlights',
+      cause: new Error('Lorebook permission denied'),
+    });
+    mockRunPlotTasks.mockRejectedValue(stageError);
+    const result = await runOptimizationLogic_ACU('继续');
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('worldbook_preflight_failure');
+    expect(result.errorMessage).toBe('剧情推进的世界书预检失败，请检查绑定/选择的世界书。');
+    expect(mockLogError).toHaveBeenCalledWith('[剧情推进] 世界书预检失败，本轮已停止。', expect.objectContaining({
+      phase: 'clear_final_generation_greenlights',
+    }));
+    expect(JSON.stringify(mockLogError.mock.calls)).not.toContain('Lorebook permission denied');
+  });
+
+  it('非预检阶段的阶段包装错误仍走 exception，日志保留 phase', async () => {
+    const stageError = Object.assign(new Error('stage failed'), {
+      name: 'PlotStageError_ACU',
+      phase: 'execute_tasks',
+      cause: new Error('task execution failed'),
+    });
+    mockRunPlotTasks.mockRejectedValue(stageError);
+    const result = await runOptimizationLogic_ACU('继续');
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe('exception');
+    expect(mockLogError).toHaveBeenCalledWith('[剧情推进] 在核心优化逻辑中发生错误:', expect.objectContaining({
+      phase: 'top_level',
+      error: expect.objectContaining({ category: expect.any(String) }),
+    }));
+    expect(JSON.stringify(mockLogError.mock.calls)).not.toContain('task execution failed');
+  });
+
 
   it('部分失败时 hasPartialFailure=true', async () => {
     mockRunPlotTasks.mockResolvedValue({

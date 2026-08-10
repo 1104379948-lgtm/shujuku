@@ -13,6 +13,7 @@ import { capturePlotRuntimeScope_ACU, isSamePlotRuntimeScope_ACU, isTransientLor
 import { buildCombinedWorldbookContentByStrategy_ACU, collectCombinedWorldbookEntriesByStrategy_ACU, createStrictLorebookReadError_ACU, formatCombinedWorldbookEntries_ACU, getLorebookEntriesStrict_ACU, isStrictLorebookReadError_ACU, summarizeStrictLorebookReadError_ACU, type StrictLorebookReadContext_ACU } from '../../worldbook/pipeline';
 import { createPlotWorldbookReadContext_ACU, type PlotWorldbookReadContext_ACU } from './plot-worldbook-read-context';
 import { isDatabaseGeneratedLorebookEntry_ACU, resolveGeneratedEntriesForTable_ACU } from '../../worldbook/worldbook-placeholder-classification';
+import { PlotStageError_ACU } from './plot-runtime-phase';
 import { escapeRegExp_ACU, hashUserInput_ACU, isEntryBlocked_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU } from '../../../shared/utils';
 import { ensurePlotTasksCompat_ACU, getPlotPromptContentByIdFromSettings_ACU, normalizePlotTask_ACU, normalizePlotTasks_ACU } from '../../plot/plot-logic';
 import { parseRandomTags_ACU, replaceRandomVariables_ACU, getLatestAIMessageContent_ACU, replaceDbSqlVariables } from '../template-vars';
@@ -746,23 +747,6 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       }
     }
 
-    _set_pendingFinalGenerationGreenlights_ACU([]);
-    await clearFinalGenerationGreenlights_ACU();
-
-    ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
-
-    let enabledTasks = getEnabledPlotTasks_ACU(plotSettings);
-    if (!enabledTasks.length) {
-      logWarn_ACU('[剧情推进] 当前没有可执行的启用任务。');
-      return {
-        finalMessage: null,
-        successfulResults: [],
-        failedResults: [],
-        aggregatedTags: new Map(),
-        enabledTaskCount: 0,
-      };
-    }
-
     const worldbookReadContext = createPlotWorldbookReadContext_ACU(
       {
         resolveCharacterLorebookNames: () => resolveCharacterLorebookNamesStable_ACU(),
@@ -780,6 +764,39 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       },
     );
     try {
+      _set_pendingFinalGenerationGreenlights_ACU([]);
+      const clearGreenlightsOutcome = await clearFinalGenerationGreenlights_ACU(worldbookReadContext);
+      if (clearGreenlightsOutcome.status === 'failed') {
+        throw new PlotStageError_ACU(
+          'clear_final_generation_greenlights',
+          'worldbook preflight failed',
+          {
+            category: clearGreenlightsOutcome.error?.category ?? 'unknown',
+            phase: 'clear_final_generation_greenlights',
+          },
+        );
+      }
+      if (clearGreenlightsOutcome.status === 'isolated_stale' && clearGreenlightsOutcome.staleBookNames.length > 0) {
+        logWarn_ACU('[剧情推进] 部分世界书已失效（可能被删除/改名），已隔离，其余世界书继续工作。', {
+          phase: 'clear_final_generation_greenlights',
+          staleBookNames: clearGreenlightsOutcome.staleBookNames,
+        });
+      }
+
+      ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
+
+      let enabledTasks = getEnabledPlotTasks_ACU(plotSettings);
+      if (!enabledTasks.length) {
+        logWarn_ACU('[剧情推进] 当前没有可执行的启用任务。');
+        return {
+          finalMessage: null,
+          successfulResults: [],
+          failedResults: [],
+          aggregatedTags: new Map(),
+          enabledTaskCount: 0,
+        };
+      }
+
       const sharedContext: Record<string, any> = await buildPlotSharedContext_ACU(plotSettings, userMessage, {
         inputForHash,
         hasExistingUserMessage,
@@ -1167,7 +1184,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       let entryStateSnapshotSignature = '';
       if (entryStateView === 'pre_takeover') {
         try {
-          const resolvedSnapshot = await resolvePreTakeoverWorldbookSnapshot_ACU();
+          const resolvedSnapshot = await resolvePreTakeoverWorldbookSnapshot_ACU(worldbookOptions.readContext);
           entryStateSnapshot = resolvedSnapshot.snapshot;
           entryStateSnapshotSignature = resolvedSnapshot.expectedSignature;
         } catch (error) {

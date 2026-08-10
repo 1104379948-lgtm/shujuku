@@ -4954,6 +4954,48 @@ $CONTENT
     function isLorebookReadNotFoundError_ACU(error) {
         return classifyLorebookReadError_ACU(error) === 'lorebook_not_found';
     }
+    /**
+     * 纯 duck-typing 的 StrictLorebookReadError 识别。
+     * 不 import pipeline，避免 plot-runtime-scope → pipeline → runtime 的循环依赖。
+     * 仅检查有限白名单字段，不读取 message/stack。
+     */
+    function isStrictLorebookReadError_ACU$1(error) {
+        if (!error || typeof error !== 'object')
+            return false;
+        const candidate = error;
+        return candidate.name === 'StrictLorebookReadError_ACU'
+            && typeof candidate.status === 'string'
+            && typeof candidate.source === 'string'
+            && typeof candidate.validationPolicy === 'string'
+            && typeof candidate.runId === 'string'
+            && Array.isArray(candidate.failedBooks)
+            && Array.isArray(candidate.invalidBookNames)
+            && Array.isArray(candidate.staleBookNames);
+    }
+    /**
+     * 安全摘要：只输出白名单结构化字段，绝不复制 message/stack。
+     * 供 plot runtime 顶层与日志使用；pipeline 内可委托本实现避免双份漂移。
+     */
+    function summarizeStrictLorebookReadError_ACU$1(error) {
+        if (!isStrictLorebookReadError_ACU$1(error))
+            return null;
+        const candidate = error;
+        const failedBooks = (Array.isArray(candidate.failedBooks) ? candidate.failedBooks : [])
+            .filter(failure => failure && typeof failure.bookName === 'string' && typeof failure.errorCategory === 'string')
+            .map(failure => ({ bookName: failure.bookName, errorCategory: failure.errorCategory }));
+        return {
+            category: 'strict_lorebook_read',
+            status: String(candidate.status ?? ''),
+            source: String(candidate.source ?? ''),
+            validationPolicy: String(candidate.validationPolicy ?? ''),
+            runId: String(candidate.runId ?? ''),
+            failedCount: failedBooks.length,
+            failedBookNames: failedBooks.map(failure => failure.bookName),
+            errorCategories: failedBooks.map(failure => failure.errorCategory),
+            invalidCount: Array.isArray(candidate.invalidBookNames) ? candidate.invalidBookNames.length : 0,
+            staleCount: Array.isArray(candidate.staleBookNames) ? candidate.staleBookNames.length : 0,
+        };
+    }
 
     /**
      * data/gateways/worldbook-gateway.ts — 世界书 CRUD 操作网关
@@ -61423,10 +61465,20 @@ $CONTENT
         preTakeoverSnapshotResolutionPromisesBySignature_ACU.clear();
     }
     const preTakeoverSnapshotResolutionPromisesBySignature_ACU = new Map();
-    async function readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, selectionSignature, initialRevision, readContext) {
-        const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { readContext });
+    async function readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, selectionSignature, initialRevision, readContext, options = {}) {
+        const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { readContext, onStaleBookNames: options.onStaleBookNames });
         setAgentWorldbookSnapshotStateIfRevision_ACU(initialRevision, snapshot);
         return snapshot;
+    }
+    /** 内部：带 stale 收集的刷新，供清绿灯预检使用（公共 refresh 保持原签名不变）。 */
+    async function refreshPlotAgentWorldbookSnapshotWithStale_ACU(readContext) {
+        const initialRevision = getAgentWorldbookSnapshotRevision_ACU();
+        const resolvedBookNames = await resolveTakeoverBookNames_ACU(readContext);
+        const selectionSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
+        let staleBookNames = [];
+        const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { readContext, onStaleBookNames: (stale) => { staleBookNames = stale; } });
+        setAgentWorldbookSnapshotStateIfRevision_ACU(initialRevision, snapshot);
+        return { snapshot, staleBookNames };
     }
     async function refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readContext) {
         const initialRevision = getAgentWorldbookSnapshotRevision_ACU();
@@ -61435,14 +61487,14 @@ $CONTENT
         return readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, selectionSignature, initialRevision, readContext);
     }
     /** 为普通剧情与填表读取解析持久化接管前视图；expectedSignature 独立于返回快照，防止快照自签名。 */
-    async function resolvePreTakeoverWorldbookSnapshot_ACU() {
+    async function resolvePreTakeoverWorldbookSnapshot_ACU(readContext) {
         const initialRevision = getAgentWorldbookSnapshotRevision_ACU();
-        const resolvedBookNames = await resolveTakeoverBookNames_ACU();
+        const resolvedBookNames = await resolveTakeoverBookNames_ACU(readContext);
         const expectedSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
         const existingPromise = preTakeoverSnapshotResolutionPromisesBySignature_ACU.get(expectedSignature);
         if (existingPromise)
             return existingPromise;
-        const resolutionPromise = readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, expectedSignature, initialRevision).then(snapshot => ({ snapshot, expectedSignature }));
+        const resolutionPromise = readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, expectedSignature, initialRevision, readContext).then(snapshot => ({ snapshot, expectedSignature }));
         preTakeoverSnapshotResolutionPromisesBySignature_ACU.set(expectedSignature, resolutionPromise);
         const clearResolutionPromise = () => {
             if (preTakeoverSnapshotResolutionPromisesBySignature_ACU.get(expectedSignature) === resolutionPromise) {
@@ -61489,9 +61541,20 @@ $CONTENT
             ? state.snapshot
             : null;
         const snapshotBooks = {};
+        const staleBookNames = [];
         let createdAt = 0;
         for (const bookName of resolvedBookNames) {
-            const entries = await getAgentRuntimeLorebookEntries_ACU(bookName, options.readContext);
+            let entries;
+            try {
+                entries = await getAgentRuntimeLorebookEntries_ACU(bookName, options.readContext);
+            }
+            catch (error) {
+                if (classifyLorebookReadError_ACU(error) === 'lorebook_not_found') {
+                    staleBookNames.push(bookName);
+                    continue;
+                }
+                throw error;
+            }
             const bookSnapshot = [];
             for (const entry of entries || []) {
                 if (!hasValidWorldbookUid_ACU(entry?.uid))
@@ -61511,6 +61574,13 @@ $CONTENT
             }
             if (bookSnapshot.length > 0)
                 snapshotBooks[bookName] = bookSnapshot;
+        }
+        if (staleBookNames.length > 0) {
+            logWarn_ACU('[Agent世界书] 接管扫描中隔离失效世界书引用（可能已删除/改名），其余世界书继续工作。', {
+                phase: 'read_pre_takeover_snapshot',
+                staleBookNames,
+            });
+            options.onStaleBookNames?.(staleBookNames);
         }
         if (Object.keys(snapshotBooks).length > 0) {
             const mergedBooks = mergeSnapshotBooks_ACU(activeStateSnapshot?.books || {}, snapshotBooks);
@@ -61903,17 +61973,73 @@ $CONTENT
         }
         return greenlights;
     }
-    async function clearFinalGenerationGreenlights_ACU() {
-        const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
+    /**
+     * 清绿灯预检：
+     * - 无 active snapshot / 无待清理条目 → noop（不写世界书）；
+     * - 宿主列表中存在已删除/改名书（not-found）→ 记为 stale 并继续清理其他有效书；
+     * - 读取权限/宿主契约/写入失败 → failed（失败关闭，由调用方阻断 AI）。
+     * 不自动修改 manualSelection 或角色绑定，只记录安全诊断。
+     */
+    async function clearFinalGenerationGreenlights_ACU(readContext) {
+        const baseResult = { patched: 0, staleBookNames: [] };
+        let snapshot;
+        let staleFromRefresh = [];
+        try {
+            const refreshed = await refreshPlotAgentWorldbookSnapshotWithStale_ACU(readContext);
+            snapshot = refreshed.snapshot;
+            staleFromRefresh = refreshed.staleBookNames;
+        }
+        catch (error) {
+            return {
+                ...baseResult,
+                status: 'failed',
+                error: { category: classifyLorebookReadError_ACU(error), phase: 'clear_final_generation_greenlights' },
+            };
+        }
         const snapshotUidSetByBook = buildSnapshotUidSetByBook_ACU(snapshot);
-        const patched = await patchSnapshotEntries_ACU(snapshotUidSetByBook, (_bookName, entry) => {
-            if (!isFinalGenerationBlueLightEntry_ACU(entry))
-                return null;
-            return { uid: entry.uid, enabled: false };
-        });
-        const resolvedBookNames = await resolveTakeoverBookNames_ACU();
-        const deletedLegacyEntries = await deleteInternalEntriesByComment_ACU(resolvedBookNames, AGENT_FINAL_GENERATION_GREENLIGHT_COMMENT_ACU);
-        return patched + deletedLegacyEntries;
+        if (snapshot.active !== true || snapshotUidSetByBook.size === 0) {
+            const noopStale = [...new Set([...staleFromRefresh])];
+            return {
+                ...baseResult,
+                status: noopStale.length > 0 ? 'isolated_stale' : 'noop',
+                staleBookNames: noopStale,
+            };
+        }
+        let patched = 0;
+        try {
+            patched = await patchSnapshotEntries_ACU(snapshotUidSetByBook, (_bookName, entry) => {
+                if (!isFinalGenerationBlueLightEntry_ACU(entry))
+                    return null;
+                return { uid: entry.uid, enabled: false };
+            });
+        }
+        catch (error) {
+            return {
+                ...baseResult,
+                status: 'failed',
+                error: { category: classifyLorebookReadError_ACU(error), phase: 'clear_final_generation_greenlights' },
+            };
+        }
+        let staleBookNames = [];
+        let deletedLegacyEntries = 0;
+        try {
+            const resolvedBookNames = await resolveTakeoverBookNames_ACU(readContext);
+            const deleted = await deleteInternalEntriesByComment_ACU(resolvedBookNames, AGENT_FINAL_GENERATION_GREENLIGHT_COMMENT_ACU);
+            deletedLegacyEntries = deleted;
+        }
+        catch (error) {
+            return {
+                ...baseResult,
+                status: 'failed',
+                error: { category: classifyLorebookReadError_ACU(error), phase: 'clear_final_generation_greenlights' },
+            };
+        }
+        staleBookNames = [...new Set([...staleFromRefresh, ...staleBookNames])];
+        return {
+            status: staleBookNames.length > 0 ? 'isolated_stale' : 'cleared',
+            patched: patched + deletedLegacyEntries,
+            staleBookNames,
+        };
     }
     async function takeoverWorldbookGreenlights_ACU() {
         const availability = await resolveAgentWorldbookFilterAvailability_ACU();
@@ -65959,6 +66085,70 @@ $CONTENT
         return await savePlotToLatestMessage_ACU(true, { syncOnly: true });
     }
 
+    /**
+     * service/runtime/plot-runtime/plot-runtime-phase.ts
+     * 剧情推进 — 阶段化错误模型
+     *
+     * 目标：让每次顶层异常都能安全标识具体阶段与错误类别，
+     * 且日志/返回值只走白名单摘要，不泄露用户输入、提示词、世界书正文或堆栈正文。
+     */
+    const PLOT_RUNTIME_PHASES_ACU = [
+        'clear_final_generation_greenlights',
+        'build_shared_context',
+        'resolve_agent_availability',
+        'execute_tasks',
+        'persist_plot',
+    ];
+    function isPlotRuntimePhase_ACU(value) {
+        return typeof value === 'string' && PLOT_RUNTIME_PHASES_ACU.includes(value);
+    }
+    /**
+     * 阶段错误包装器：保存 phase 与原始 cause，但任何日志/摘要都只输出白名单。
+     * message 用于编程内部分类（不在日志/UI 中直接呈现）。
+     */
+    class PlotStageError_ACU extends Error {
+        constructor(phase, message, cause) {
+            super(message);
+            this.name = 'PlotStageError_ACU';
+            this.phase = phase;
+            this.cause = cause;
+        }
+    }
+    function isPlotStageError_ACU(error) {
+        if (!error || typeof error !== 'object')
+            return false;
+        const candidate = error;
+        return candidate.name === 'PlotStageError_ACU' && isPlotRuntimePhase_ACU(candidate.phase);
+    }
+    /**
+     * 阶段错误的 cause 安全摘要：只输出白名单类别，不复制 cause 的 message/stack。
+     */
+    function summarizePlotStageErrorCause_ACU(cause) {
+        if (isStrictLorebookReadError_ACU$1(cause)) {
+            return { category: 'strict_lorebook_read', ...summarizeStrictLorebookReadError_ACU$1(cause) };
+        }
+        if (isLorebookReadAbortedError_ACU(cause))
+            return { category: 'aborted' };
+        if (cause && typeof cause === 'object') {
+            const name = cause.name;
+            if (typeof name === 'string' && name)
+                return { category: 'known', name };
+        }
+        return { category: 'unknown' };
+    }
+    /**
+     * 阶段错误安全摘要：只输出 phase + cause 摘要。
+     */
+    function summarizePlotStageError_ACU(error) {
+        if (!isPlotStageError_ACU(error))
+            return null;
+        return {
+            category: 'stage',
+            phase: error.phase,
+            cause: summarizePlotStageErrorCause_ACU(error.cause),
+        };
+    }
+
     function normalizeRequiredScopePart_ACU(value) {
         const normalized = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
         return normalized && normalized !== 'unknown_chat_init' ? normalized : null;
@@ -66006,11 +66196,23 @@ $CONTENT
         };
     }
     function summarizePlotRuntimeError_ACU(error) {
-        let category = 'unknown';
-        if (error?.name === 'AbortError') {
-            category = 'aborted';
+        if (isStrictLorebookReadError_ACU$1(error)) {
+            return { category: 'strict_lorebook_read', ...summarizeStrictLorebookReadError_ACU$1(error) };
         }
-        else if (isTransientLorebookNotFoundError_ACU(error)) {
+        if (isPlotStageError_ACU(error)) {
+            return summarizePlotStageError_ACU(error);
+        }
+        if (isLorebookReadAbortedError_ACU(error)) {
+            return { category: 'aborted' };
+        }
+        let category = 'unknown';
+        if (error && typeof error === 'object' && typeof error.name === 'string') {
+            const name = error.name;
+            if (name === 'CharacterLorebookScopeChangedError_ACU' || name === 'CharacterWorldbookApiUnavailableError_ACU' || name === 'CharacterWorldbookBindingContractError_ACU') {
+                return { category: 'character_binding', name };
+            }
+        }
+        if (isTransientLorebookNotFoundError_ACU(error)) {
             category = 'lorebook_not_found';
         }
         return {
@@ -67989,20 +68191,6 @@ $CONTENT
                 logWarn_ACU('[剧情推进] [Plot] flush 补写上一轮残留 pending 时发生异常，跳过:', error);
             }
         }
-        _set_pendingFinalGenerationGreenlights_ACU([]);
-        await clearFinalGenerationGreenlights_ACU();
-        ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
-        let enabledTasks = getEnabledPlotTasks_ACU(plotSettings);
-        if (!enabledTasks.length) {
-            logWarn_ACU('[剧情推进] 当前没有可执行的启用任务。');
-            return {
-                finalMessage: null,
-                successfulResults: [],
-                failedResults: [],
-                aggregatedTags: new Map(),
-                enabledTaskCount: 0,
-            };
-        }
         const worldbookReadContext = createPlotWorldbookReadContext_ACU({
             resolveCharacterLorebookNames: () => resolveCharacterLorebookNamesStable_ACU(),
             // 表名占位符候选作用域：与剧情世界书实际来源一致（manual 选择或角色绑定），
@@ -68018,6 +68206,32 @@ $CONTENT
             signal: abortController_ACU?.signal,
         });
         try {
+            _set_pendingFinalGenerationGreenlights_ACU([]);
+            const clearGreenlightsOutcome = await clearFinalGenerationGreenlights_ACU(worldbookReadContext);
+            if (clearGreenlightsOutcome.status === 'failed') {
+                throw new PlotStageError_ACU('clear_final_generation_greenlights', 'worldbook preflight failed', {
+                    category: clearGreenlightsOutcome.error?.category ?? 'unknown',
+                    phase: 'clear_final_generation_greenlights',
+                });
+            }
+            if (clearGreenlightsOutcome.status === 'isolated_stale' && clearGreenlightsOutcome.staleBookNames.length > 0) {
+                logWarn_ACU('[剧情推进] 部分世界书已失效（可能被删除/改名），已隔离，其余世界书继续工作。', {
+                    phase: 'clear_final_generation_greenlights',
+                    staleBookNames: clearGreenlightsOutcome.staleBookNames,
+                });
+            }
+            ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
+            let enabledTasks = getEnabledPlotTasks_ACU(plotSettings);
+            if (!enabledTasks.length) {
+                logWarn_ACU('[剧情推进] 当前没有可执行的启用任务。');
+                return {
+                    finalMessage: null,
+                    successfulResults: [],
+                    failedResults: [],
+                    aggregatedTags: new Map(),
+                    enabledTaskCount: 0,
+                };
+            }
             const sharedContext = await buildPlotSharedContext_ACU(plotSettings, userMessage, {
                 inputForHash,
                 hasExistingUserMessage,
@@ -68376,7 +68590,7 @@ $CONTENT
             let entryStateSnapshotSignature = '';
             if (entryStateView === 'pre_takeover') {
                 try {
-                    const resolvedSnapshot = await resolvePreTakeoverWorldbookSnapshot_ACU();
+                    const resolvedSnapshot = await resolvePreTakeoverWorldbookSnapshot_ACU(worldbookOptions.readContext);
                     entryStateSnapshot = resolvedSnapshot.snapshot;
                     entryStateSnapshotSignature = resolvedSnapshot.expectedSignature;
                 }
@@ -68620,6 +68834,21 @@ $CONTENT
      */
     const PLOT_RUNTIME_BUILD_VERSION_ACU = "1.1.0" || 'unknown';
     /**
+     * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
+     * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
+     */
+    function isTaskAbortedError_ACU(error) {
+        if (error && typeof error === 'object') {
+            const name = error.name;
+            if (name === 'AbortError')
+                return true;
+            const message = error.message;
+            if (typeof message === 'string' && message === 'TaskAbortedByUser')
+                return true;
+        }
+        return isLorebookReadAbortedError_ACU(error);
+    }
+    /**
      * 核心优化逻辑（纯 service 层：读数据→业务决策→写数据→构造返回值）。
      */
     async function runOptimizationLogic_ACU(userMessage, options = {}) {
@@ -68705,11 +68934,20 @@ $CONTENT
             };
         }
         catch (error) {
-            if (error.message === 'TaskAbortedByUser') {
+            if (isTaskAbortedError_ACU(error)) {
                 return { success: false, aborted: true, manual: true, restoreText: originalUserInputForAbort_ACU };
             }
-            if (error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted')) {
-                return { success: false, aborted: true, manual: true, restoreText: originalUserInputForAbort_ACU };
+            if (isPlotStageError_ACU(error) && error.phase === 'clear_final_generation_greenlights') {
+                logError_ACU('[剧情推进] 世界书预检失败，本轮已停止。', {
+                    phase: error.phase,
+                    build: PLOT_RUNTIME_BUILD_VERSION_ACU,
+                    error: summarizePlotRuntimeError_ACU(error),
+                });
+                return {
+                    success: false,
+                    errorType: 'worldbook_preflight_failure',
+                    errorMessage: '剧情推进的世界书预检失败，请检查绑定/选择的世界书。',
+                };
             }
             logError_ACU('[剧情推进] 在核心优化逻辑中发生错误:', {
                 phase: 'top_level',
@@ -70052,23 +70290,7 @@ $CONTENT
             && Array.isArray(candidate.staleBookNames);
     }
     function summarizeStrictLorebookReadError_ACU(error) {
-        if (!isStrictLorebookReadError_ACU(error))
-            return null;
-        const failedBooks = error.failedBooks
-            .filter(failure => failure && typeof failure.bookName === 'string' && typeof failure.errorCategory === 'string')
-            .map(failure => ({ bookName: failure.bookName, errorCategory: failure.errorCategory }));
-        return {
-            category: 'strict_lorebook_read',
-            status: error.status,
-            source: error.source,
-            validationPolicy: error.validationPolicy,
-            runId: error.runId,
-            failedCount: failedBooks.length,
-            failedBookNames: failedBooks.map(failure => failure.bookName),
-            errorCategories: failedBooks.map(failure => failure.errorCategory),
-            invalidCount: error.invalidBookNames.length,
-            staleCount: error.staleBookNames.length,
-        };
+        return summarizeStrictLorebookReadError_ACU$1(error);
     }
     function normalizeRequestedLorebookNames_ACU(bookNames) {
         return [...new Set((Array.isArray(bookNames) ? bookNames : [])
