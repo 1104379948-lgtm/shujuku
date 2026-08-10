@@ -224,8 +224,10 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
 
               // checkpoint / legacy 楼层：使用现有的 first-write-wins 逻辑
               const independentData = tagData.independentData || {};
-              const modifiedKeys = tagData.modifiedKeys || [];
-              const updateGroupKeys = tagData.updateGroupKeys || [];
+              // 防御历史畸形 tracking 值：契约要求 string[]，但早期坏数据可能写入
+              // `{}` 等 truthy 非数组；直接 `|| []` 无法兜底，会在下方 `.includes` 抛错。
+              const modifiedKeys = Array.isArray(tagData.modifiedKeys) ? tagData.modifiedKeys : [];
+              const updateGroupKeys = Array.isArray(tagData.updateGroupKeys) ? tagData.updateGroupKeys : [];
 
               Object.keys(independentData).forEach(storedSheetKey => {
                   // [新增] 只处理当前模板/指导表中存在的表格

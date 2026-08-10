@@ -1,9 +1,8 @@
 import {
-    cloneIsolatedData_ACU,
     readIsolatedTagData_ACU,
-    writeIsolatedTagData_ACU,
     writeMessageIdentity_ACU,
 } from '../../data/repositories/chat-message-data-repo';
+import { commitVectorMetadataPatch_ACU } from './summary-vector-index-chat-commit';
 import type {
     ChatSummaryVectorIndexChunk_ACU,
     ChatSummaryVectorIndexRow_ACU,
@@ -17,7 +16,6 @@ import {
 import { createEmbeddings_ACU, isVectorEmbeddingError_ACU } from '../../data/gateways/vector-embedding-gateway';
 import type { VectorEmbeddingResult_ACU } from '../../data/gateways/vector-embedding-gateway';
 import { buildVectorIndexSingleSnapshotV2FilePath_ACU } from '../../data/storage/vector-index-st-files-storage';
-import { saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { getChatArray_ACU } from '../chat/chat-service';
 import { getLatestAiMessageIndexFromChat_ACU } from '../table/table-history';
@@ -30,7 +28,6 @@ import {
     validateSummaryVectorIndexConfig_ACU,
 } from './vector-memory-config';
 import {
-    assignSummaryVectorIndexStateToTagData_ACU,
     getAggregatedSummaryVectorIndexSnapshot_ACU,
 } from './summary-vector-index-state-service';
 import {
@@ -163,7 +160,7 @@ async function persistPendingVectorIndexArchive_ACU(scopeKey: string): Promise<v
     }
     pendingVectorIndexArchives_ACU.delete(scopeKey);
     try {
-        logDebug_ACU(`[纪要向量索引] 防抖归档开始：scope=${scopeKey}, rows=${pending.finalRows.length}, chunks=${pending.finalChunks.length}`);
+        logDebug_ACU(`[纪要向量索引] 防抖归档开始：operation=persist_pending_archive, scope=${scopeKey}, changed=${pending.finalRows.length > 0 || pending.finalChunks.length > 0}`);
         await runSummaryVectorIndexScopeExclusive_ACU(scopeKey, async () => {
             const latestAggregatedSnapshot = await hydrateAggregatedSummaryVectorIndexSnapshot_ACU(getAggregatedSummaryVectorIndexSnapshot_ACU());
             await writeSummaryVectorIndexCheckpoint_ACU({
@@ -187,7 +184,7 @@ async function persistPendingVectorIndexArchive_ACU(scopeKey: string): Promise<v
             saveChatAfterWrite: true,
             });
         });
-        logDebug_ACU(`[纪要向量索引] 防抖归档完成：scope=${scopeKey}, rows=${pending.finalRows.length}, chunks=${pending.finalChunks.length}`);
+        logDebug_ACU(`[纪要向量索引] 防抖归档完成：operation=persist_pending_archive, scope=${scopeKey}, changed=true`);
     } catch (error) {
         logWarn_ACU('[纪要向量索引] 防抖归档失败:', error);
     }
@@ -296,28 +293,6 @@ function preflightVectorIndexSnapshotPath_ACU(parts: {
     } catch (error: any) {
         return { ok: false, error: String(error?.message || error || '快照路径长度超出宿主安全上限') };
     }
-}
-const SUMMARY_VECTOR_INDEX_PUBLISH_MUTATED_MESSAGE_FIELDS_ACU = [
-    'TavernDB_ACU_IsolatedData',
-    'TavernDB_ACU_Identity',
-    'TavernDB_ACU_IndependentData',
-    'TavernDB_ACU_ModifiedKeys',
-    'TavernDB_ACU_UpdateGroupKeys',
-    '_acu_remote_memory_snapshot_anchor',
-] as const;
-
-function captureSummaryVectorIndexPublishMessageState_ACU(message: any): Map<string, { exists: boolean; value: unknown }> {
-    return new Map(SUMMARY_VECTOR_INDEX_PUBLISH_MUTATED_MESSAGE_FIELDS_ACU.map((field) => [
-        field,
-        { exists: Object.prototype.hasOwnProperty.call(message, field), value: message[field] },
-    ]));
-}
-
-function restoreSummaryVectorIndexPublishMessageState_ACU(message: any, snapshot: Map<string, { exists: boolean; value: unknown }>): void {
-    snapshot.forEach(({ exists, value }, field) => {
-        if (exists) message[field] = value;
-        else delete message[field];
-    });
 }
 
 function normalizeText_ACU(value: any): string {
@@ -857,26 +832,9 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
         modifiedKeys: [],
         updateGroupKeys: [],
     };
-    const nextIsolatedData = cloneIsolatedData_ACU(message);
-    const existingStorageFrame = (existingTagData as any).storageFrame;
-    const existingTagDataIsV2 = !!existingStorageFrame;
-    const nextTagData = {
-        ...(existingTagDataIsV2
-            ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
-            : {
-                independentData: existingTagData.independentData || {},
-                modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-                updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-                ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
-                ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
-                ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
-            }),
-        ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-        ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-    } as any;
     let uploadedFiles: SummaryVectorIndexExternalFileRef_ACU[] = [];
     let publishedManifest: any = null;
-    let publishMessageState: Map<string, { exists: boolean; value: unknown }> | null = null;
+    let patchState: { summaryVectorIndexState: ChatSummaryVectorIndexState_ACU | null; summaryVectorIndexManifest: any } | null = null;
     if (nextState) {
         const previousManifest = existingTagData.summaryVectorIndexManifest || previousState?.manifest || null;
         const persisted = await persistSummaryVectorIndexSnapshot_ACU({
@@ -901,34 +859,36 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
         });
         uploadedFiles = persisted.uploadedFiles;
         publishedManifest = persisted.manifest;
-        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
-        logDebug_ACU(`[纪要向量索引] 已写入最新层内容寻址 manifest：rows=${persisted.manifest.rowCount}, chunks=${persisted.manifest.chunkCount}, chunkRefs=${persisted.manifest.contentAddressed?.chunkRefs?.length || 0}`);
+        patchState = { summaryVectorIndexState: persisted.state, summaryVectorIndexManifest: persisted.manifest };
+        logDebug_ACU(`[纪要向量索引] 已写入最新层内容寻址 manifest：operation=write_checkpoint, indexId=${persisted.manifest.indexId || ''}, revision=${persisted.manifest.storageIdentity?.revision ?? persisted.manifest.snapshot?.revision ?? ''}, changed=true`);
     } else {
-        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
+        patchState = { summaryVectorIndexState: null, summaryVectorIndexManifest: null };
     }
-    publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
     try {
-        nextIsolatedData[tagIsolationKey] = nextTagData;
-        message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-        writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
-        const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
-        if (anchorForMessage?.anchor) {
-            persistRemoteMemorySnapshotAnchorIfNeeded_ACU(message, anchorForMessage);
-        }
-        writeMessageIdentity_ACU(message, {
-            enabled: settings_ACU.dataIsolationEnabled,
-            code: settings_ACU.dataIsolationCode,
-        });
+        // generation fence 必须在最终 metadata mutation 前再次检查。
         if (options.expectedFlushScopeKey && options.expectedFlushGeneration != null) {
             await assertSummaryVectorFlushGenerationCurrent_ACU(
                 options.expectedFlushScopeKey,
                 options.expectedFlushGeneration,
             );
         }
-        await saveChatToHostStrict_ACU();
+        await commitVectorMetadataPatch_ACU(message, tagIsolationKey, {
+            summaryVectorIndexState: patchState.summaryVectorIndexState,
+            summaryVectorIndexManifest: patchState.summaryVectorIndexManifest,
+        }, {
+            additionalMutate: (targetMessage) => {
+                const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
+                if (anchorForMessage?.anchor) {
+                    persistRemoteMemorySnapshotAnchorIfNeeded_ACU(targetMessage, anchorForMessage);
+                }
+                writeMessageIdentity_ACU(targetMessage, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+            },
+        });
         await finalizeSummaryVectorIndexSnapshotPublication_ACU(uploadedFiles);
     } catch (error) {
-        restoreSummaryVectorIndexPublishMessageState_ACU(message, publishMessageState);
         abortSummaryVectorIndexSnapshotPublication_ACU(uploadedFiles);
         if (publishedManifest) {
             logSummaryVectorIndexIdentityEvent_ACU('warn', 'publish', 'orphan_retained', {
@@ -954,44 +914,29 @@ async function clearSummaryVectorIndexCheckpoint_ACU(params: {
     const manifest = existingTagData?.summaryVectorIndexManifest || existingTagData?.summaryVectorIndexState?.manifest || null;
     if (!existingTagData?.summaryVectorIndexState && !existingTagData?.summaryVectorIndexManifest) return !!manifest;
 
-    const nextIsolatedData = cloneIsolatedData_ACU(message);
-    const existingStorageFrame = (existingTagData as any).storageFrame;
-    const existingTagDataIsV2 = !!existingStorageFrame;
-    const nextTagData = {
-        ...(existingTagDataIsV2
-            ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
-            : {
-                independentData: existingTagData.independentData || {},
-                modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-                updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-                ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
-                ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
-                ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
-            }),
-        ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-        ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-    } as any;
-    assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
-    const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
     try {
+        // generation fence 必须在最终 metadata mutation 前再次检查。
         if (params.expectedFlushScopeKey && params.expectedFlushGeneration != null) {
             await assertSummaryVectorFlushGenerationCurrent_ACU(
                 params.expectedFlushScopeKey,
                 params.expectedFlushGeneration,
             );
         }
-        nextIsolatedData[isolationKey] = nextTagData;
-        message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-        writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
-        writeMessageIdentity_ACU(message, {
-            enabled: settings_ACU.dataIsolationEnabled,
-            code: settings_ACU.dataIsolationCode,
+        await commitVectorMetadataPatch_ACU(message, isolationKey, {
+            summaryVectorIndexState: null,
+            summaryVectorIndexManifest: null,
+        }, {
+            additionalMutate: (targetMessage) => {
+                writeMessageIdentity_ACU(targetMessage, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+            },
         });
-        await saveChatToHostStrict_ACU();
     } catch (error) {
-        restoreSummaryVectorIndexPublishMessageState_ACU(message, publishMessageState);
         throw error;
     }
+    // strict save 成功后才删除旧外置文件；失败时旧 pointer 与文件保持可达。
     if (manifest) {
         try {
             await deleteSummaryVectorIndexExternal_ACU(manifest);
@@ -1114,37 +1059,22 @@ export async function migrateLegacySummaryVectorIndexToContentAddressed_ACU(opti
         sourceMessageIndex: latestLayer.messageIndex,
     });
 
-    const nextIsolatedData = cloneIsolatedData_ACU(message);
-    const existingStorageFrame = (existingTagData as any).storageFrame;
-    const existingTagDataIsV2 = !!existingStorageFrame;
-    const nextTagData = {
-        ...(existingTagDataIsV2
-            ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
-            : {
-                independentData: existingTagData.independentData || {},
-                modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-                updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-                ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
-                ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
-                ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
-            }),
-        ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-        ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-    } as any;
-    assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
-    const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
     try {
-        nextIsolatedData[tagIsolationKey] = nextTagData;
-        message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-        writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
-        writeMessageIdentity_ACU(message, {
-            enabled: settings_ACU.dataIsolationEnabled,
-            code: settings_ACU.dataIsolationCode,
+        // CAS：expected indexId 必须仍为旧 manifest 的 indexId；CAS 冲突不得覆盖较新的 pointer。
+        await commitVectorMetadataPatch_ACU(message, tagIsolationKey, {
+            summaryVectorIndexState: persisted.state,
+            summaryVectorIndexManifest: persisted.manifest,
+        }, {
+            expectedIndexId: manifest.indexId,
+            additionalMutate: (targetMessage) => {
+                writeMessageIdentity_ACU(targetMessage, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+            },
         });
-        await saveChatToHostStrict_ACU();
         await finalizeSummaryVectorIndexSnapshotPublication_ACU(persisted.uploadedFiles);
     } catch (error) {
-        restoreSummaryVectorIndexPublishMessageState_ACU(message, publishMessageState);
         abortSummaryVectorIndexSnapshotPublication_ACU(persisted.uploadedFiles);
         logSummaryVectorIndexIdentityEvent_ACU('warn', 'publish', 'orphan_retained', {
             manifest: persisted.manifest,
@@ -1152,7 +1082,7 @@ export async function migrateLegacySummaryVectorIndexToContentAddressed_ACU(opti
         });
         throw error;
     }
-    logDebug_ACU(`[纪要向量索引] 已非破坏迁移旧 shard manifest 到内容寻址协议：old=${manifest.indexId}, new=${persisted.manifest.indexId}, rows=${persisted.manifest.rowCount}, chunks=${persisted.manifest.chunkCount}`);
+    logDebug_ACU(`[纪要向量索引] 已非破坏迁移旧 shard manifest 到内容寻址协议：operation=migrate_legacy_manifest, old=${manifest.indexId}, new=${persisted.manifest.indexId}, revision=${persisted.manifest.storageIdentity?.revision ?? persisted.manifest.snapshot?.revision ?? ''}, changed=true`);
     return buildResult_ACU({
         success: true,
         skipped: false,
@@ -1374,7 +1304,7 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         const rowsNeedingEmbedding = reusable.rowsNeedingEmbedding;
         const activeRowKeysUnchanged = areSummaryVectorActiveRowKeysSame_ACU(prepared.rows, existingState);
         const existingActiveRowCount = existingState?.manifest?.snapshot?.activeRowKeys?.length || existingState?.rows?.length || 0;
-        logDebug_ACU(`[纪要向量索引] 增量归档判定：prepared=${prepared.rows.length}, existingActive=${existingActiveRowCount}, reused=${reusable.reusableRows.length}, embedding=${rowsNeedingEmbedding.length}, activeRowsUnchanged=${activeRowKeysUnchanged}, skippedRows=${prepared.skippedRowCount}`);
+        logDebug_ACU(`[纪要向量索引] 增量归档判定：operation=incremental_archive_eval, scope=${selectedSummary.summaryKey}, indexId=${existingState?.manifest?.indexId || ''}, changed=${!activeRowKeysUnchanged || rowsNeedingEmbedding.length > 0 || prepared.skippedRowCount > 0}`);
         if (!options.force && rowsNeedingEmbedding.length === 0 && existingState?.manifest && activeRowKeysUnchanged) {
             logDebug_ACU('[纪要向量索引] 当前纪要表未发现新增、变更或删除条目，跳过重复覆盖上传。');
             return buildResult_ACU({
@@ -1506,7 +1436,7 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
                 expectedFlushGeneration: options.expectedFlushGeneration,
             });
             scheduleDebouncedVectorIndexPersist_ACU(scopeKey);
-            logDebug_ACU(`[纪要向量索引] 向量化完成，已存入待归档队列：scope=${scopeKey}, rows=${finalResult.rows.length}, chunks=${finalResult.chunks.length}`);
+            logDebug_ACU(`[纪要向量索引] 向量化完成，已存入待归档队列：operation=queue_archive, scope=${scopeKey}, changed=true`);
             return buildResult_ACU({
                 success: true,
                 skipped: false,

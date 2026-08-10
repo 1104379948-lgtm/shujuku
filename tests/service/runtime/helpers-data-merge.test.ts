@@ -430,6 +430,31 @@ describe('mergeAllIndependentTables_ACU', () => {
     expect(result!.sheet_0.content[1][1]).toBe('铁剑');
   });
 
+  // ═══ 畸形 tracking 字段防御（P3） ═══
+  it('新版槽 tracking 为畸形对象时不抛错，按未跟踪处理', async () => {
+    const mockChat = [
+      { is_user: false, mes: 'AI回复' },
+    ];
+    vi.mocked(getChatArray_ACU).mockReturnValue(mockChat);
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue({
+      independentData: {
+        sheet_0: {
+          name: '背包物品表',
+          content: [['row_id', '物品名称', '数量'], ['1', '铁剑', '3']],
+        },
+      },
+      // 历史坏数据：应为 string[]，实际写入 {}（truthy，`|| []` 无法兜底）
+      modifiedKeys: {} as any,
+      updateGroupKeys: {} as any,
+    });
+
+    const result = await mergeAllIndependentTables_ACU();
+    expect(result).not.toBeNull();
+    expect(result!.sheet_0).toBeDefined();
+    expect(result!.sheet_0.content[1][1]).toBe('铁剑');
+  });
+
+
   // ═══ 模板过滤 ═══
   it('不在当前模板中的表格被过滤', async () => {
     vi.mocked(getTemplateSheetKeys_ACU).mockReturnValue(['sheet_0']); // 只有 sheet_0 在模板中

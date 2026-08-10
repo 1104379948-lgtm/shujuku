@@ -30,9 +30,40 @@ vi.mock('../../../src/service/chat/chat-service', () => ({
   saveChatToHost_ACU: (...args: any[]) => h.save(...args),
   saveChatToHostStrict_ACU: (...args: any[]) => h.saveStrict(...args),
 }));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  saveChatToHost_ACU: (...args: any[]) => h.save(...args),
+  saveChatToHostStrict_ACU: (...args: any[]) => h.saveStrict(...args),
+}));
 vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   cloneIsolatedData_ACU: (message: any) => structuredClone(message.TavernDB_ACU_IsolatedData || {}),
   readIsolatedTagData_ACU: () => h.tagData,
+  readIsolatedDataContainer_ACU: (message: any) => {
+    if (!message || typeof message.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(message.TavernDB_ACU_IsolatedData)) return null;
+    return message.TavernDB_ACU_IsolatedData;
+  },
+  patchIsolatedTagMetadata_ACU: (message: any, isolationKey: string, patch: Record<string, any>, options?: { expectedIndexId?: string }) => {
+    if (!message) return { changed: false, tagData: null };
+    const container = message.TavernDB_ACU_IsolatedData && typeof message.TavernDB_ACU_IsolatedData === 'object'
+      ? message.TavernDB_ACU_IsolatedData
+      : {};
+    const current = container[isolationKey] || {};
+    if (options?.expectedIndexId != null) {
+      const currentId = current.summaryVectorIndexManifest?.indexId ?? current.summaryVectorIndexState?.manifest?.indexId ?? current.summaryVectorIndexState?.indexId;
+      if (String(currentId || '') !== String(options.expectedIndexId)) {
+        const error = new Error('ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU');
+        (error as any).code = 'ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU';
+        throw error;
+      }
+    }
+    const next = { ...current };
+    for (const [key, value] of Object.entries(patch || {})) {
+      if (value === undefined) continue;
+      if (value === null) delete next[key];
+      else next[key] = value;
+    }
+    message.TavernDB_ACU_IsolatedData = { ...container, [isolationKey]: next };
+    return { changed: true, tagData: next };
+  },
   writeIsolatedTagData_ACU: (...args: any[]) => h.write(...args),
 }));
 
@@ -64,7 +95,8 @@ describe('summary vector external snapshot recovery', () => {
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(true);
     expect(h.reads).toHaveBeenCalledWith('TavernDB_ACU_vector_v2_scope-chat-a-iso-a-summary_idx-1_write_snapshot');
     expect(h.validate).toHaveBeenCalledWith(expect.objectContaining({ indexId: 'idx-1' }), expect.anything(), expect.stringContaining('vector_v2_'));
-    expect(h.write).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({ summaryVectorIndexState: expect.objectContaining({ manifest: expect.objectContaining({ indexId: 'idx-1' }) }) }));
+    // 迁移后 metadata 经 patch 边界写入：断言 message 槽上 manifest 已恢复。
+    expect(h.chat[0].TavernDB_ACU_IsolatedData['iso-a'].summaryVectorIndexState.manifest.indexId).toBe('idx-1');
     expect(h.saveStrict).toHaveBeenCalledTimes(1);
     expect(h.save).not.toHaveBeenCalled();
   });
@@ -87,7 +119,8 @@ describe('summary vector external snapshot recovery', () => {
 
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(true);
 
-    expect(h.write).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({ summaryVectorIndexState: expect.objectContaining({ manifest: expect.objectContaining({ indexId: 'idx-new' }) }) }));
+    // 迁移后：断言 message 槽上恢复的是最新 revision 的 manifest。
+    expect(h.chat[0].TavernDB_ACU_IsolatedData['iso-a'].summaryVectorIndexState.manifest.indexId).toBe('idx-new');
   });
 
   it('拒绝同 scope 同 revision 的多个 published V2 候选，不能伪造 generation 顺序', async () => {
@@ -139,7 +172,8 @@ describe('summary vector external snapshot recovery', () => {
 
     expect(h.reads.mock.calls.map(([path]: [string]) => path).slice(0, 2)).toEqual(['named-summary', 'unnamed-summary']);
     expect(h.validate).toHaveBeenCalledTimes(1);
-    expect(h.write).toHaveBeenCalledTimes(1); expect(h.saveStrict).toHaveBeenCalledTimes(1);
+    expect(h.chat[0].TavernDB_ACU_IsolatedData['iso-a'].summaryVectorIndexState.manifest.indexId).toBe('idx-1');
+    expect(h.saveStrict).toHaveBeenCalledTimes(1);
   });
 
   it('在 V2 registry 没有可信快照时兼容恢复 legacy 路径', async () => {
@@ -150,7 +184,8 @@ describe('summary vector external snapshot recovery', () => {
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(true);
 
     expect(h.reads.mock.calls.map(([path]: [string]) => path)).toEqual(['named-summary', 'unnamed-summary', 'legacy-summary']);
-    expect(h.write).toHaveBeenCalledTimes(1); expect(h.saveStrict).toHaveBeenCalledTimes(1);
+    expect(h.chat[0].TavernDB_ACU_IsolatedData['iso-a'].summaryVectorIndexState.manifest.indexId).toBe('idx-1');
+    expect(h.saveStrict).toHaveBeenCalledTimes(1);
   });
 
   it('多个可信 legacy 快照候选并存时拒绝按路径顺序猜测恢复', async () => {

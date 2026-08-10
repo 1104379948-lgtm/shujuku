@@ -32,6 +32,35 @@ vi.mock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({ saveChatToHostStrict_ACU: (...a: any[]) => h.saveChatStrict(...a) }));
 vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   readIsolatedTagData_ACU: () => h.tagData,
+  readIsolatedDataContainer_ACU: (msg: any) => {
+    if (!msg || typeof msg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(msg.TavernDB_ACU_IsolatedData)) return null;
+    return msg.TavernDB_ACU_IsolatedData;
+  },
+  patchIsolatedTagMetadata_ACU: (msg: any, isolationKey: string, patch: Record<string, any>, options?: { expectedIndexId?: string }) => {
+    if (!msg) return { changed: false, tagData: null };
+    const container = msg.TavernDB_ACU_IsolatedData && typeof msg.TavernDB_ACU_IsolatedData === 'object'
+      ? msg.TavernDB_ACU_IsolatedData
+      : {};
+    const current = container[isolationKey] || {};
+    if (options?.expectedIndexId != null) {
+      const currentId = current.summaryVectorIndexManifest?.indexId ?? current.summaryVectorIndexState?.manifest?.indexId ?? current.summaryVectorIndexState?.indexId;
+      if (String(currentId || '') !== String(options.expectedIndexId)) {
+        const error = new Error('ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU');
+        (error as any).code = 'ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU';
+        throw error;
+      }
+    }
+    const next = { ...current };
+    for (const [key, value] of Object.entries(patch || {})) {
+      if (value === undefined) continue;
+      if (value === null) delete next[key];
+      else next[key] = value;
+    }
+    const nextContainer = { ...container, [isolationKey]: next };
+    msg.TavernDB_ACU_IsolatedData = nextContainer;
+    return { changed: true, tagData: next };
+  },
+  cloneIsolatedData_ACU: (msg: any) => JSON.parse(JSON.stringify(msg?.TavernDB_ACU_IsolatedData || {})),
   writeIsolatedTagData_ACU: (...a: any[]) => h.writeTagData(...a),
 }));
 vi.mock('../../../src/data/storage/vector-index-st-files-storage', () => ({
@@ -506,9 +535,8 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recover
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-newer', source: 'realign-test' });
 
     expect(h.readSnapshot).toHaveBeenCalledWith('v2-newer');
-    expect(h.writeTagData).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({
-      summaryVectorIndexState: expect.objectContaining({ manifest: expect.objectContaining({ indexId: 'idx-newer' }) }),
-    }));
+    // 迁移后：metadata 通过 patch 边界提交，断言 message 上指针已更新。
+    expect(h.chat[0].TavernDB_ACU_IsolatedData['iso-a'].summaryVectorIndexState.manifest.indexId).toBe('idx-newer');
     expect(h.saveChatStrict).toHaveBeenCalledTimes(1);
     expect(h.clearInvalid).not.toHaveBeenCalled();
     expect(result.reason).toBe('below_min_rows');
@@ -538,6 +566,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recover
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-save-failure', source: 'realign-test' });
 
     expect(h.saveChatStrict).toHaveBeenCalledTimes(1);
+    // commit helper 在 save 失败后回滚：消息回到原始字符串容器。
     expect(h.chat[0].TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
     expect(h.clearInvalid).toHaveBeenCalledTimes(1);
     expect(result.reason).toBe('external_vector_identity_invalid_rebuild_required');

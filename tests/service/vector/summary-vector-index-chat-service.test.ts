@@ -38,6 +38,7 @@ describe('deleteCurrentSummaryVectorIndexFromChat_ACU', () => {
     const saveChat = vi.fn(async () => undefined);
     const deleteHotByScope = vi.fn(async () => undefined);
     const clearFlushByScope = vi.fn(async () => undefined);
+    const saveStrict = vi.fn(async () => undefined);
     const cleanupUnreachable = vi.fn(async () => ({
       scannedRegisteredFileCount: 1,
       reachableFileCount: 0,
@@ -50,6 +51,10 @@ describe('deleteCurrentSummaryVectorIndexFromChat_ACU', () => {
     vi.doMock('../../../src/service/chat/chat-service', () => ({
       getChatArray_ACU: () => chat,
       saveChatToHost_ACU: saveChat,
+    }));
+    vi.doMock('../../../src/data/gateways/chat-gateway', () => ({
+      saveChatToHost_ACU: saveChat,
+      saveChatToHostStrict_ACU: saveStrict,
     }));
     vi.doMock('../../../src/service/runtime/state-manager', () => ({
       currentChatFileIdentifier_ACU: 'chat-data',
@@ -101,7 +106,7 @@ describe('deleteCurrentSummaryVectorIndexFromChat_ACU', () => {
       sourceTableKey: 'sheet_summary',
     };
     expect(changed).toBe(true);
-    expect(saveChat).toHaveBeenCalledTimes(1);
+    expect(saveStrict).toHaveBeenCalledTimes(1);
     expect(chat[0].TavernDB_ACU_IsolatedData.alpha.summaryVectorIndexState).toBeUndefined();
     expect(chat[0].TavernDB_ACU_IsolatedData.alpha.summaryVectorIndexManifest).toBeUndefined();
     expect(chat[0].TavernDB_ACU_IsolatedData.beta.summaryVectorIndexState.indexId).toBe('idx-beta');
@@ -130,6 +135,9 @@ describe('clearSummaryVectorIndexLayerFromChat_ACU', () => {
 
     vi.doMock('../../../src/service/chat/chat-service', () => ({
       getChatArray_ACU: () => chat,
+      saveChatToHost_ACU: vi.fn(),
+    }));
+    vi.doMock('../../../src/data/gateways/chat-gateway', () => ({
       saveChatToHost_ACU: vi.fn(),
       saveChatToHostStrict_ACU: saveStrict,
     }));
@@ -162,6 +170,9 @@ describe('clearSummaryVectorIndexLayerFromChat_ACU', () => {
     vi.doMock('../../../src/service/chat/chat-service', () => ({
       getChatArray_ACU: () => chat,
       saveChatToHost_ACU: vi.fn(),
+    }));
+    vi.doMock('../../../src/data/gateways/chat-gateway', () => ({
+      saveChatToHost_ACU: vi.fn(),
       saveChatToHostStrict_ACU: saveStrict,
     }));
     vi.doMock('../../../src/service/runtime/state-manager', () => ({ currentChatFileIdentifier_ACU: 'chat-data', currentJsonTableData_ACU: {} }));
@@ -185,6 +196,9 @@ describe('clearSummaryVectorIndexLayerFromChat_ACU', () => {
 
     vi.doMock('../../../src/service/chat/chat-service', () => ({
       getChatArray_ACU: () => chat,
+      saveChatToHost_ACU: vi.fn(),
+    }));
+    vi.doMock('../../../src/data/gateways/chat-gateway', () => ({
       saveChatToHost_ACU: vi.fn(),
       saveChatToHostStrict_ACU: vi.fn(async () => { throw saveError; }),
     }));

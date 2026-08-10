@@ -1426,3 +1426,195 @@ export function cloneIsolatedData_ACU(msg: any): IsolatedDataContainer_ACU {
     if (!container) return {};
     return safeClone(container);
 }
+
+
+// ════════════════════════════════════════════════════════════════
+// 向量 metadata patch 边界（V1/V2 表存储投影保留专用）
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * metadata patch 越权修改非批准字段时的稳定错误码。
+ *
+ * 与 LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU 不同：该错误表示调用方向 metadata
+ * patch API 传入（或试图修改）了表存储投影字段。这不是 V1 表写入，而是 API
+ * 契约违规，必须 fail-closed，不得降级为整槽写入，也不得调用宿主保存。
+ */
+export const ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU = 'ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU' as const;
+
+/**
+ * metadata patch 的预期条件冲突错误码。
+ *
+ * 表示调用方声明的 expected indexId / revision 与提交时真实槽不一致，
+ * 用于并发保护；不伪装成宿主保存失败。
+ */
+export const ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU = 'ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU' as const;
+
+/**
+ * metadata patch 批准字段白名单。
+ *
+ * 只允许修改向量 metadata 字段；表存储投影（storageFrame、independentData、
+ * incrementalData、modifiedKeys、updateGroupKeys、_acu_*）及未知扩展字段
+ * 一律不允许出现在 patch 中。新增批准字段必须先经过 contract 评审。
+ */
+export const ISOLATED_TAG_METADATA_PATCH_ALLOWLIST_ACU: readonly string[] = [
+    'summaryVectorIndexState',
+    'summaryVectorIndexManifest',
+] as const;
+
+/**
+ * 返回 tagData 中不属于批准白名单的字段清单（表投影 + 未知扩展字段）。
+ * vectorMemoryState 未列入白名单，因此也在此列（不允许 patch 修改）。
+ */
+function collectNonAllowlistedTagFields_ACU(tagData: Record<string, any>): string[] {
+    return Object.keys(tagData).filter((key) => !ISOLATED_TAG_METADATA_PATCH_ALLOWLIST_ACU.includes(key as any));
+}
+
+function isDeepEqualJson_ACU(left: unknown, right: unknown): boolean {
+    try {
+        return JSON.stringify(left) === JSON.stringify(right);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 校验候选 tagData 与当前槽的非白名单字段 key 集合一致。
+ *
+ * 这是 O(字段数) 的不变量检查而非深比较：候选由当前槽 clone 后仅 patch 白名单
+ * 字段构造，因此表投影值在构造上不可能改变；此处只防御未来误用（例如在 clone
+ * 后意外改动表字段引用），禁止对大型表做完整 JSON stringify 指纹。
+ */
+function hasEquivalentTableProjection_ACU(
+    currentTagData: Record<string, any> | null,
+    candidateTagData: Record<string, any>,
+): boolean {
+    const currentKeys = new Set(currentTagData ? collectNonAllowlistedTagFields_ACU(currentTagData) : []);
+    const candidateKeys = new Set(collectNonAllowlistedTagFields_ACU(candidateTagData));
+    if (currentKeys.size !== candidateKeys.size) return false;
+    for (const key of currentKeys) {
+        if (!candidateKeys.has(key)) return false;
+    }
+    return true;
+}
+
+/**
+ * 原子 metadata patch：只允许修改批准白名单字段，保留表存储投影逐字段不变。
+ *
+ * 约束：
+ * - 调用方只能传 patch（批准字段），不能传整份 tag snapshot。
+ * - 提交时从消息重新读取最新槽（不接收外部 I/O 前捕获的 stale snapshot）。
+ * - 全部校验在真实消息赋值前完成；失败时消息引用与值均不变。
+ * - patch 不携带表字段时通过投影等价校验，V1/V2 表数据原样保留。
+ * - patch 值语义固定：`undefined` 表示不修改该字段；`null` 表示删除该字段。
+ * - 不调用宿主保存（保存由上层事务负责）。
+ *
+ * @param msg 聊天消息对象
+ * @param isolationKey 隔离标签键名
+ * @param patch 批准字段的增量修改（仅白名单 key）
+ * @param options.expectedIndexId 可选 CAS 条件：当前槽必须存在该 indexId
+ * @returns { changed: boolean; tagData: IsolationTagData_ACU | null }
+ */
+export function patchIsolatedTagMetadata_ACU(
+    msg: any,
+    isolationKey: string,
+    patch: Partial<Pick<IsolationTagData_ACU, 'summaryVectorIndexState' | 'summaryVectorIndexManifest'>>,
+    options?: { expectedIndexId?: string },
+): { changed: boolean; tagData: IsolationTagData_ACU | null } {
+    if (!msg || !isolationKey) return { changed: false, tagData: null };
+    if (!isObjectRecord_ACU(patch)) {
+        const error = new Error(
+            `[metadata-patch] patch 必须是对象：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} isolationKey=${String(isolationKey)}`,
+        );
+        (error as any).code = ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU;
+        throw error;
+    }
+
+    // 1. 白名单校验：任何非批准 key 直接拒绝（赋值前，含 undefined 值 key）。
+    const patchKeys = Object.keys(patch);
+    const forbiddenKeys = patchKeys.filter((key) => !ISOLATED_TAG_METADATA_PATCH_ALLOWLIST_ACU.includes(key as any));
+    if (forbiddenKeys.length > 0) {
+        const error = new Error(
+            `[metadata-patch] 越权修改非批准字段：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} `
+            + `isolationKey=${String(isolationKey)} fields=${forbiddenKeys.join(',')}`,
+        );
+        (error as any).code = ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU;
+        throw error;
+    }
+    // 值为 undefined 的 key 表示不修改该字段。
+    const effectivePatchKeys = patchKeys.filter((key) => (patch as Record<string, any>)[key] !== undefined);
+
+    // 2. 提交时重新读取当前容器与槽（不信任调用方传入的 stale snapshot）。
+    const container = readIsolatedDataContainer_ACU(msg);
+    const currentTagData = (container && isObjectRecord_ACU(container[isolationKey])) ? container[isolationKey] : null;
+
+    // 3. CAS 条件：expectedIndexId 必须与当前槽 indexId 一致。
+    const expectedIndexId = options?.expectedIndexId;
+    if (expectedIndexId != null) {
+        const currentManifest = currentTagData?.summaryVectorIndexManifest || currentTagData?.summaryVectorIndexState?.manifest || null;
+        const currentIndexId = currentManifest?.indexId ?? currentTagData?.summaryVectorIndexState?.indexId;
+        if (String(currentIndexId || '') !== String(expectedIndexId)) {
+            const error = new Error(
+                `[metadata-patch] 预期 indexId 冲突：${ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU} `
+                + `isolationKey=${String(isolationKey)} expected=${String(expectedIndexId)} actual=${String(currentIndexId || '')}`,
+            );
+            (error as any).code = ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU;
+            throw error;
+        }
+    }
+
+    // 4. 构造候选：从当前槽 clone 后仅 patch 白名单字段；无槽时构造最小槽。
+    const baseTagData: Record<string, any> = currentTagData ? safeClone(currentTagData) : {};
+    const candidateTagData: Record<string, any> = { ...baseTagData };
+    for (const key of effectivePatchKeys) {
+        const value = (patch as Record<string, any>)[key];
+        if (value === null) {
+            delete candidateTagData[key];
+        } else {
+            candidateTagData[key] = value;
+        }
+    }
+
+    // 5. 投影等价校验：非白名单字段（表投影 + 未知字段）必须与当前槽逐字段一致。
+    if (currentTagData) {
+        if (!hasEquivalentTableProjection_ACU(currentTagData, candidateTagData)) {
+            const error = new Error(
+                `[metadata-patch] 表存储投影不得被 metadata patch 修改：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} `
+                + `isolationKey=${String(isolationKey)}`,
+            );
+            (error as any).code = ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU;
+            throw error;
+        }
+    } else {
+        // 无槽时：候选不得包含任何非白名单字段（最小 metadata-only 槽）。
+        const nonAllowlisted = collectNonAllowlistedTagFields_ACU(candidateTagData);
+        if (nonAllowlisted.length > 0) {
+            const error = new Error(
+                `[metadata-patch] 新槽不得携带表字段：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} `
+                + `isolationKey=${String(isolationKey)} fields=${nonAllowlisted.join(',')}`,
+            );
+            (error as any).code = ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU;
+            throw error;
+        }
+    }
+
+    // 6. no-op 检测：仅比较被 patch 的批准字段（不序列化表投影），
+    //    全部等价时不制造新容器、不赋值。
+    const patchedValuesEqual = effectivePatchKeys.every((key) => isDeepEqualJson_ACU(
+        currentTagData ? (currentTagData as Record<string, any>)[key] : undefined,
+        (candidateTagData as Record<string, any>)[key],
+    ));
+    if (currentTagData && patchedValuesEqual) return { changed: false, tagData: currentTagData };
+
+    // 7. 一次赋值：替换整槽（新槽或更新槽）。
+    //    必须构造新容器对象再整体赋值，禁止就地修改原容器：
+    //    上层事务快照保存的是容器字段引用，就地改槽会让快照引用指向
+    //    同一被污染对象，导致 strict save 失败时无法回滚对象容器
+    //    （字符串容器因替换成新对象不受影响）。浅拷贝容器 + 槽 clone，
+    //    不序列化表投影，符合性能约束。
+    const currentContainer = readIsolatedDataContainer_ACU(msg);
+    const nextContainer = isObjectRecord_ACU(currentContainer)
+        ? { ...currentContainer, [isolationKey]: candidateTagData }
+        : { [isolationKey]: candidateTagData };
+    msg.TavernDB_ACU_IsolatedData = nextContainer;
+    return { changed: true, tagData: candidateTagData as IsolationTagData_ACU };
+}

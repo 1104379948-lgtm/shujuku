@@ -1,6 +1,6 @@
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
-import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
-import { readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { commitVectorMetadataPatch_ACU } from './summary-vector-index-chat-commit';
 import { loadVectorIndexRegistry_ACU, readVectorIndexJsonFile_ACU } from '../../data/storage/vector-index-st-files-storage';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
@@ -17,7 +17,6 @@ import {
 } from '../worldbook/worldbook-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU, validateSummaryVectorIndexConfig_ACU } from './vector-memory-config';
 import {
-    assignSummaryVectorIndexStateToTagData_ACU,
     getLatestSummaryVectorIndexSnapshotState_ACU,
 } from './summary-vector-index-state-service';
 import {
@@ -557,18 +556,19 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
     const chat = getChatArray_ACU();
     const message = layer ? chat[layer.messageIndex] : null;
     if (!layer || !message) return null;
-    const nextTagData = { ...(readIsolatedTagData_ACU(message, layer.isolationKey) || layer.tagData || {}) } as any;
-    const previousIsolatedData = {
-        exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-        value: message.TavernDB_ACU_IsolatedData,
-    };
-    assignSummaryVectorIndexStateToTagData_ACU(nextTagData, alignedState, alignedManifest);
+    const previousManifest = readIsolatedTagData_ACU(message, layer.isolationKey)
+        ?.summaryVectorIndexManifest
+        || layer.tagData?.summaryVectorIndexManifest
+        || null;
+    const expectedIndexId = previousManifest?.indexId || (layer.tagData?.summaryVectorIndexState?.manifest?.indexId) || undefined;
     try {
-        writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
-        await saveChatToHostStrict_ACU();
+        await commitVectorMetadataPatch_ACU(message, layer.isolationKey, {
+            summaryVectorIndexState: alignedState,
+            summaryVectorIndexManifest: alignedManifest,
+        }, {
+            expectedIndexId,
+        });
     } catch (error) {
-        if (previousIsolatedData.exists) message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;
-        else delete message.TavernDB_ACU_IsolatedData;
         logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'strict_save_failed', { manifest: alignedManifest, path: snapshotPath, error });
         logWarn_ACU('[交火模式纪要索引] 磁盘 pointer 对齐严格保存失败，已回滚内存状态:', error);
         return null;

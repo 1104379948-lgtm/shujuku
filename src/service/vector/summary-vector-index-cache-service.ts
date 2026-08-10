@@ -150,7 +150,7 @@ export async function preloadSummaryVectorIndexCacheForCurrentChat_ACU(): Promis
         const chunks = await loadSummaryVectorIndexChunksFromManifest_ACU(manifest, {
             preferExternalFiles: true,
         });
-        logDebug_ACU(`[交火向量索引] 当前聊天向量缓存预热完成：indexId=${manifest.indexId}, chunks=${chunks.length}，已从外置文件恢复热缓存。`);
+        logDebug_ACU(`[交火向量索引] 当前聊天向量缓存预热完成：operation=prewarm_cache, indexId=${manifest.indexId}, revision=${manifest.storageIdentity?.revision ?? manifest.snapshot?.revision ?? ''}, changed=${chunks.length > 0}，已从外置文件恢复热缓存。`);
         return {
             success: true,
             skipped: false,

@@ -7499,6 +7499,168 @@ $CONTENT
             return {};
         return safeClone(container);
     }
+    // ════════════════════════════════════════════════════════════════
+    // 向量 metadata patch 边界（V1/V2 表存储投影保留专用）
+    // ════════════════════════════════════════════════════════════════
+    /**
+     * metadata patch 越权修改非批准字段时的稳定错误码。
+     *
+     * 与 LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU 不同：该错误表示调用方向 metadata
+     * patch API 传入（或试图修改）了表存储投影字段。这不是 V1 表写入，而是 API
+     * 契约违规，必须 fail-closed，不得降级为整槽写入，也不得调用宿主保存。
+     */
+    const ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU = 'ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU';
+    /**
+     * metadata patch 的预期条件冲突错误码。
+     *
+     * 表示调用方声明的 expected indexId / revision 与提交时真实槽不一致，
+     * 用于并发保护；不伪装成宿主保存失败。
+     */
+    const ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU = 'ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU';
+    /**
+     * metadata patch 批准字段白名单。
+     *
+     * 只允许修改向量 metadata 字段；表存储投影（storageFrame、independentData、
+     * incrementalData、modifiedKeys、updateGroupKeys、_acu_*）及未知扩展字段
+     * 一律不允许出现在 patch 中。新增批准字段必须先经过 contract 评审。
+     */
+    const ISOLATED_TAG_METADATA_PATCH_ALLOWLIST_ACU = [
+        'summaryVectorIndexState',
+        'summaryVectorIndexManifest',
+    ];
+    /**
+     * 返回 tagData 中不属于批准白名单的字段清单（表投影 + 未知扩展字段）。
+     * vectorMemoryState 未列入白名单，因此也在此列（不允许 patch 修改）。
+     */
+    function collectNonAllowlistedTagFields_ACU(tagData) {
+        return Object.keys(tagData).filter((key) => !ISOLATED_TAG_METADATA_PATCH_ALLOWLIST_ACU.includes(key));
+    }
+    function isDeepEqualJson_ACU(left, right) {
+        try {
+            return JSON.stringify(left) === JSON.stringify(right);
+        }
+        catch {
+            return false;
+        }
+    }
+    /**
+     * 校验候选 tagData 与当前槽的非白名单字段 key 集合一致。
+     *
+     * 这是 O(字段数) 的不变量检查而非深比较：候选由当前槽 clone 后仅 patch 白名单
+     * 字段构造，因此表投影值在构造上不可能改变；此处只防御未来误用（例如在 clone
+     * 后意外改动表字段引用），禁止对大型表做完整 JSON stringify 指纹。
+     */
+    function hasEquivalentTableProjection_ACU(currentTagData, candidateTagData) {
+        const currentKeys = new Set(currentTagData ? collectNonAllowlistedTagFields_ACU(currentTagData) : []);
+        const candidateKeys = new Set(collectNonAllowlistedTagFields_ACU(candidateTagData));
+        if (currentKeys.size !== candidateKeys.size)
+            return false;
+        for (const key of currentKeys) {
+            if (!candidateKeys.has(key))
+                return false;
+        }
+        return true;
+    }
+    /**
+     * 原子 metadata patch：只允许修改批准白名单字段，保留表存储投影逐字段不变。
+     *
+     * 约束：
+     * - 调用方只能传 patch（批准字段），不能传整份 tag snapshot。
+     * - 提交时从消息重新读取最新槽（不接收外部 I/O 前捕获的 stale snapshot）。
+     * - 全部校验在真实消息赋值前完成；失败时消息引用与值均不变。
+     * - patch 不携带表字段时通过投影等价校验，V1/V2 表数据原样保留。
+     * - patch 值语义固定：`undefined` 表示不修改该字段；`null` 表示删除该字段。
+     * - 不调用宿主保存（保存由上层事务负责）。
+     *
+     * @param msg 聊天消息对象
+     * @param isolationKey 隔离标签键名
+     * @param patch 批准字段的增量修改（仅白名单 key）
+     * @param options.expectedIndexId 可选 CAS 条件：当前槽必须存在该 indexId
+     * @returns { changed: boolean; tagData: IsolationTagData_ACU | null }
+     */
+    function patchIsolatedTagMetadata_ACU(msg, isolationKey, patch, options) {
+        if (!msg || !isolationKey)
+            return { changed: false, tagData: null };
+        if (!isObjectRecord_ACU$4(patch)) {
+            const error = new Error(`[metadata-patch] patch 必须是对象：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} isolationKey=${String(isolationKey)}`);
+            error.code = ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU;
+            throw error;
+        }
+        // 1. 白名单校验：任何非批准 key 直接拒绝（赋值前，含 undefined 值 key）。
+        const patchKeys = Object.keys(patch);
+        const forbiddenKeys = patchKeys.filter((key) => !ISOLATED_TAG_METADATA_PATCH_ALLOWLIST_ACU.includes(key));
+        if (forbiddenKeys.length > 0) {
+            const error = new Error(`[metadata-patch] 越权修改非批准字段：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} `
+                + `isolationKey=${String(isolationKey)} fields=${forbiddenKeys.join(',')}`);
+            error.code = ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU;
+            throw error;
+        }
+        // 值为 undefined 的 key 表示不修改该字段。
+        const effectivePatchKeys = patchKeys.filter((key) => patch[key] !== undefined);
+        // 2. 提交时重新读取当前容器与槽（不信任调用方传入的 stale snapshot）。
+        const container = readIsolatedDataContainer_ACU(msg);
+        const currentTagData = (container && isObjectRecord_ACU$4(container[isolationKey])) ? container[isolationKey] : null;
+        // 3. CAS 条件：expectedIndexId 必须与当前槽 indexId 一致。
+        const expectedIndexId = options?.expectedIndexId;
+        if (expectedIndexId != null) {
+            const currentManifest = currentTagData?.summaryVectorIndexManifest || currentTagData?.summaryVectorIndexState?.manifest || null;
+            const currentIndexId = currentManifest?.indexId ?? currentTagData?.summaryVectorIndexState?.indexId;
+            if (String(currentIndexId || '') !== String(expectedIndexId)) {
+                const error = new Error(`[metadata-patch] 预期 indexId 冲突：${ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU} `
+                    + `isolationKey=${String(isolationKey)} expected=${String(expectedIndexId)} actual=${String(currentIndexId || '')}`);
+                error.code = ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU;
+                throw error;
+            }
+        }
+        // 4. 构造候选：从当前槽 clone 后仅 patch 白名单字段；无槽时构造最小槽。
+        const baseTagData = currentTagData ? safeClone(currentTagData) : {};
+        const candidateTagData = { ...baseTagData };
+        for (const key of effectivePatchKeys) {
+            const value = patch[key];
+            if (value === null) {
+                delete candidateTagData[key];
+            }
+            else {
+                candidateTagData[key] = value;
+            }
+        }
+        // 5. 投影等价校验：非白名单字段（表投影 + 未知字段）必须与当前槽逐字段一致。
+        if (currentTagData) {
+            if (!hasEquivalentTableProjection_ACU(currentTagData, candidateTagData)) {
+                const error = new Error(`[metadata-patch] 表存储投影不得被 metadata patch 修改：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} `
+                    + `isolationKey=${String(isolationKey)}`);
+                error.code = ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU;
+                throw error;
+            }
+        }
+        else {
+            // 无槽时：候选不得包含任何非白名单字段（最小 metadata-only 槽）。
+            const nonAllowlisted = collectNonAllowlistedTagFields_ACU(candidateTagData);
+            if (nonAllowlisted.length > 0) {
+                const error = new Error(`[metadata-patch] 新槽不得携带表字段：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} `
+                    + `isolationKey=${String(isolationKey)} fields=${nonAllowlisted.join(',')}`);
+                error.code = ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU;
+                throw error;
+            }
+        }
+        // 6. no-op 检测：仅比较被 patch 的批准字段（不序列化表投影），
+        //    全部等价时不制造新容器、不赋值。
+        const patchedValuesEqual = effectivePatchKeys.every((key) => isDeepEqualJson_ACU(currentTagData ? currentTagData[key] : undefined, candidateTagData[key]));
+        if (currentTagData && patchedValuesEqual)
+            return { changed: false, tagData: currentTagData };
+        // 7. 一次赋值：替换整槽（新槽或更新槽）。
+        //    必须构造新容器对象再整体赋值，禁止就地修改原容器：
+        //    上层事务快照保存的是容器字段引用，就地改槽会让快照引用指向
+        //    同一被污染对象，导致 strict save 失败时无法回滚对象容器
+        //    （字符串容器因替换成新对象不受影响）。浅拷贝容器 + 槽 clone，
+        //    不序列化表投影，符合性能约束。
+        const currentContainer = readIsolatedDataContainer_ACU(msg);
+        const nextContainer = isObjectRecord_ACU$4(currentContainer)
+            ? { ...currentContainer, [isolationKey]: candidateTagData }
+            : { [isolationKey]: candidateTagData };
+        msg.TavernDB_ACU_IsolatedData = nextContainer;
+        return { changed: true, tagData: candidateTagData };
+    }
 
     function isObjectRecord_ACU$3(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -53526,8 +53688,10 @@ $CONTENT
                 }
                 // checkpoint / legacy 楼层：使用现有的 first-write-wins 逻辑
                 const independentData = tagData.independentData || {};
-                const modifiedKeys = tagData.modifiedKeys || [];
-                const updateGroupKeys = tagData.updateGroupKeys || [];
+                // 防御历史畸形 tracking 值：契约要求 string[]，但早期坏数据可能写入
+                // `{}` 等 truthy 非数组；直接 `|| []` 无法兜底，会在下方 `.includes` 抛错。
+                const modifiedKeys = Array.isArray(tagData.modifiedKeys) ? tagData.modifiedKeys : [];
+                const updateGroupKeys = Array.isArray(tagData.updateGroupKeys) ? tagData.updateGroupKeys : [];
                 Object.keys(independentData).forEach(storedSheetKey => {
                     // [新增] 只处理当前模板/指导表中存在的表格
                     if (!isSheetAllowedByGuide_ACU(storedSheetKey, independentData[storedSheetKey], hasSheetGuide ? sheetGuideData : null, templateSheetKeySet)) {
@@ -74650,7 +74814,7 @@ $CONTENT
             await registerVectorIndexFiles_ACU(uploadedFiles);
             // 聊天 pointer 由 archive service 在本函数返回后才持久化。此处若清理 previousManifest，
             // 宿主保存失败会让旧 pointer 指向已删除对象；历史快照改由显式删除和安全 GC 回收。
-            logDebug_ACU(`[交火向量索引] 已写入 rolling delta 快照：fold=${shouldFold ? 'yes' : 'no'} changedRows=${changedRowKeys.size}`);
+            logDebug_ACU(`[交火向量索引] 已写入 rolling delta 快照：operation=write_rolling_delta, indexId=${finalManifest?.indexId || ''}, revision=${finalManifest?.storageIdentity?.revision ?? finalManifest?.snapshot?.revision ?? ''}, fold=${shouldFold ? 'yes' : 'no'}, changed=true`);
             return { state, manifest: finalManifest, uploadedFiles };
         }
         catch (error) {
@@ -90122,6 +90286,127 @@ $CONTENT
         return undefined; // 不需要更新
     }
 
+    // ════════════════════════════════════════════════════════════════
+    // 向量 metadata 事务提交 helper（统一 patch + rollback + strict save 语义）
+    // ════════════════════════════════════════════════════════════════
+    /**
+     * 在提交时捕获消息上将被事务修改的字段（存在性 + 原值，保留字符串容器原格式）。
+     */
+    function captureVectorCommitMessageState_ACU(message, fields) {
+        return new Map(fields.map((field) => [
+            field,
+            { exists: Object.prototype.hasOwnProperty.call(message, field), value: message[field] },
+        ]));
+    }
+    /**
+     * 恢复消息字段到捕获状态；保留原值类型（含字符串形式的 isolated container）。
+     */
+    function restoreVectorCommitMessageState_ACU(message, snapshot) {
+        snapshot.forEach(({ exists, value }, field) => {
+            if (exists)
+                message[field] = value;
+            else
+                delete message[field];
+        });
+    }
+    /**
+     * 单消息向量 metadata 事务提交。
+     *
+     * 语义：
+     * - 通过仓储 metadata patch 边界提交，只允许修改批准字段；
+     * - 提交时从最新消息重新读取槽，支持 expectedIndexId CAS；
+     * - strict save 失败时回滚消息字段（存在性、值、类型）；
+     * - 返回 changed/no-op；不吞掉 programmer error。
+     *
+     * @param message 目标消息
+     * @param isolationKey 隔离标签键名
+     * @param patch 批准字段增量修改（undefined=不修改，null=删除）
+     * @param options.expectedIndexId 可选 CAS 条件
+     * @param options.additionalMutate 可选额外消息级 mutation（identity/anchor），在 patch 后、save 前执行，随事务回滚
+     * @returns changed 是否发生变化（false 表示 no-op 或消息为空）
+     */
+    async function commitVectorMetadataPatch_ACU(message, isolationKey, patch, options) {
+        if (!message)
+            return false;
+        const snapshot = captureVectorCommitMessageState_ACU(message, [
+            'TavernDB_ACU_IsolatedData',
+            'TavernDB_ACU_Identity',
+            'TavernDB_ACU_IndependentData',
+            'TavernDB_ACU_ModifiedKeys',
+            'TavernDB_ACU_UpdateGroupKeys',
+            '_acu_remote_memory_snapshot_anchor',
+        ]);
+        try {
+            const result = patchIsolatedTagMetadata_ACU(message, isolationKey, patch, {
+                expectedIndexId: options?.expectedIndexId,
+            });
+            if (!result.changed)
+                return false;
+            options?.additionalMutate?.(message);
+            await saveChatToHostStrict_ACU();
+            return true;
+        }
+        catch (error) {
+            restoreVectorCommitMessageState_ACU(message, snapshot);
+            throw error;
+        }
+    }
+    /**
+     * 批量向量 metadata 事务提交：逐消息执行内存 patch，全部成功后只 strict save 一次。
+     *
+     * 语义：
+     * - 每层通过仓储 metadata patch 边界提交，只允许修改批准字段；
+     * - 任一层 patch 失败、CAS 冲突或 strict save 失败时，回滚所有已修改消息的字段
+     *   （存在性、值、类型），不留下前半批成功、后半批失败的内存态；
+     * - 成功时只调用一次宿主严格保存；保存成功后才可继续外置文件清理。
+     *
+     * @param entries 待提交的消息列表（含 isolationKey 与 patch）
+     * @param options.additionalMutate 可选每层额外 mutation，在 patch 后执行，随事务回滚
+     * @returns 是否发生任何变化（false 表示全部 no-op 或空列表）
+     */
+    async function commitVectorMetadataPatchesBatch_ACU(entries, options) {
+        if (!Array.isArray(entries) || entries.length === 0)
+            return false;
+        // 先对全部消息捕获快照（batch 开始时）。
+        const snapshots = new Map();
+        for (const entry of entries) {
+            if (!entry.message)
+                continue;
+            snapshots.set(entry.message, captureVectorCommitMessageState_ACU(entry.message, [
+                'TavernDB_ACU_IsolatedData',
+                'TavernDB_ACU_Identity',
+                'TavernDB_ACU_IndependentData',
+                'TavernDB_ACU_ModifiedKeys',
+                'TavernDB_ACU_UpdateGroupKeys',
+                '_acu_remote_memory_snapshot_anchor',
+            ]));
+        }
+        const rollbackAll = () => {
+            snapshots.forEach((snapshot, message) => restoreVectorCommitMessageState_ACU(message, snapshot));
+        };
+        try {
+            let changed = false;
+            for (const entry of entries) {
+                if (!entry.message)
+                    continue;
+                const result = patchIsolatedTagMetadata_ACU(entry.message, entry.isolationKey, entry.patch, {
+                    expectedIndexId: entry.expectedIndexId,
+                });
+                if (result.changed)
+                    changed = true;
+                options?.additionalMutate?.(entry.message);
+            }
+            if (!changed)
+                return false;
+            await saveChatToHostStrict_ACU();
+            return true;
+        }
+        catch (error) {
+            rollbackAll();
+            throw error;
+        }
+    }
+
     class VectorEmbeddingError_ACU extends Error {
         constructor(options) {
             super(options.message);
@@ -90348,7 +90633,7 @@ $CONTENT
         }
         pendingVectorIndexArchives_ACU.delete(scopeKey);
         try {
-            logDebug_ACU(`[纪要向量索引] 防抖归档开始：scope=${scopeKey}, rows=${pending.finalRows.length}, chunks=${pending.finalChunks.length}`);
+            logDebug_ACU(`[纪要向量索引] 防抖归档开始：operation=persist_pending_archive, scope=${scopeKey}, changed=${pending.finalRows.length > 0 || pending.finalChunks.length > 0}`);
             await runSummaryVectorIndexScopeExclusive_ACU(scopeKey, async () => {
                 const latestAggregatedSnapshot = await hydrateAggregatedSummaryVectorIndexSnapshot_ACU(getAggregatedSummaryVectorIndexSnapshot_ACU());
                 await writeSummaryVectorIndexCheckpoint_ACU({
@@ -90372,7 +90657,7 @@ $CONTENT
                     saveChatAfterWrite: true,
                 });
             });
-            logDebug_ACU(`[纪要向量索引] 防抖归档完成：scope=${scopeKey}, rows=${pending.finalRows.length}, chunks=${pending.finalChunks.length}`);
+            logDebug_ACU(`[纪要向量索引] 防抖归档完成：operation=persist_pending_archive, scope=${scopeKey}, changed=true`);
         }
         catch (error) {
             logWarn_ACU('[纪要向量索引] 防抖归档失败:', error);
@@ -90464,28 +90749,6 @@ $CONTENT
         catch (error) {
             return { ok: false, error: String(error?.message || error || '快照路径长度超出宿主安全上限') };
         }
-    }
-    const SUMMARY_VECTOR_INDEX_PUBLISH_MUTATED_MESSAGE_FIELDS_ACU = [
-        'TavernDB_ACU_IsolatedData',
-        'TavernDB_ACU_Identity',
-        'TavernDB_ACU_IndependentData',
-        'TavernDB_ACU_ModifiedKeys',
-        'TavernDB_ACU_UpdateGroupKeys',
-        '_acu_remote_memory_snapshot_anchor',
-    ];
-    function captureSummaryVectorIndexPublishMessageState_ACU(message) {
-        return new Map(SUMMARY_VECTOR_INDEX_PUBLISH_MUTATED_MESSAGE_FIELDS_ACU.map((field) => [
-            field,
-            { exists: Object.prototype.hasOwnProperty.call(message, field), value: message[field] },
-        ]));
-    }
-    function restoreSummaryVectorIndexPublishMessageState_ACU(message, snapshot) {
-        snapshot.forEach(({ exists, value }, field) => {
-            if (exists)
-                message[field] = value;
-            else
-                delete message[field];
-        });
     }
     function normalizeText_ACU$1(value) {
         return String(value ?? '').trim();
@@ -90942,26 +91205,9 @@ $CONTENT
             modifiedKeys: [],
             updateGroupKeys: [],
         };
-        const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const existingStorageFrame = existingTagData.storageFrame;
-        const existingTagDataIsV2 = !!existingStorageFrame;
-        const nextTagData = {
-            ...(existingTagDataIsV2
-                ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
-                : {
-                    independentData: existingTagData.independentData || {},
-                    modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-                    updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-                    ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
-                    ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
-                    ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
-                }),
-            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-        };
         let uploadedFiles = [];
         let publishedManifest = null;
-        let publishMessageState = null;
+        let patchState = null;
         if (nextState) {
             const previousManifest = existingTagData.summaryVectorIndexManifest || previousState?.manifest || null;
             const persisted = await persistSummaryVectorIndexSnapshot_ACU({
@@ -90986,33 +91232,35 @@ $CONTENT
             });
             uploadedFiles = persisted.uploadedFiles;
             publishedManifest = persisted.manifest;
-            assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
-            logDebug_ACU(`[纪要向量索引] 已写入最新层内容寻址 manifest：rows=${persisted.manifest.rowCount}, chunks=${persisted.manifest.chunkCount}, chunkRefs=${persisted.manifest.contentAddressed?.chunkRefs?.length || 0}`);
+            patchState = { summaryVectorIndexState: persisted.state, summaryVectorIndexManifest: persisted.manifest };
+            logDebug_ACU(`[纪要向量索引] 已写入最新层内容寻址 manifest：operation=write_checkpoint, indexId=${persisted.manifest.indexId || ''}, revision=${persisted.manifest.storageIdentity?.revision ?? persisted.manifest.snapshot?.revision ?? ''}, changed=true`);
         }
         else {
-            assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
+            patchState = { summaryVectorIndexState: null, summaryVectorIndexManifest: null };
         }
-        publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
         try {
-            nextIsolatedData[tagIsolationKey] = nextTagData;
-            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-            writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
-            const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
-            if (anchorForMessage?.anchor) {
-                persistRemoteMemorySnapshotAnchorIfNeeded_ACU(message, anchorForMessage);
-            }
-            writeMessageIdentity_ACU(message, {
-                enabled: settings_ACU.dataIsolationEnabled,
-                code: settings_ACU.dataIsolationCode,
-            });
+            // generation fence 必须在最终 metadata mutation 前再次检查。
             if (options.expectedFlushScopeKey && options.expectedFlushGeneration != null) {
                 await assertSummaryVectorFlushGenerationCurrent_ACU(options.expectedFlushScopeKey, options.expectedFlushGeneration);
             }
-            await saveChatToHostStrict_ACU();
+            await commitVectorMetadataPatch_ACU(message, tagIsolationKey, {
+                summaryVectorIndexState: patchState.summaryVectorIndexState,
+                summaryVectorIndexManifest: patchState.summaryVectorIndexManifest,
+            }, {
+                additionalMutate: (targetMessage) => {
+                    const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
+                    if (anchorForMessage?.anchor) {
+                        persistRemoteMemorySnapshotAnchorIfNeeded_ACU(targetMessage, anchorForMessage);
+                    }
+                    writeMessageIdentity_ACU(targetMessage, {
+                        enabled: settings_ACU.dataIsolationEnabled,
+                        code: settings_ACU.dataIsolationCode,
+                    });
+                },
+            });
             await finalizeSummaryVectorIndexSnapshotPublication_ACU(uploadedFiles);
         }
         catch (error) {
-            restoreSummaryVectorIndexPublishMessageState_ACU(message, publishMessageState);
             abortSummaryVectorIndexSnapshotPublication_ACU(uploadedFiles);
             if (publishedManifest) {
                 logSummaryVectorIndexIdentityEvent_ACU('warn', 'publish', 'orphan_retained', {
@@ -91032,42 +91280,27 @@ $CONTENT
         const manifest = existingTagData?.summaryVectorIndexManifest || existingTagData?.summaryVectorIndexState?.manifest || null;
         if (!existingTagData?.summaryVectorIndexState && !existingTagData?.summaryVectorIndexManifest)
             return !!manifest;
-        const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const existingStorageFrame = existingTagData.storageFrame;
-        const existingTagDataIsV2 = !!existingStorageFrame;
-        const nextTagData = {
-            ...(existingTagDataIsV2
-                ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
-                : {
-                    independentData: existingTagData.independentData || {},
-                    modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-                    updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-                    ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
-                    ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
-                    ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
-                }),
-            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-        };
-        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
-        const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
         try {
+            // generation fence 必须在最终 metadata mutation 前再次检查。
             if (params.expectedFlushScopeKey && params.expectedFlushGeneration != null) {
                 await assertSummaryVectorFlushGenerationCurrent_ACU(params.expectedFlushScopeKey, params.expectedFlushGeneration);
             }
-            nextIsolatedData[isolationKey] = nextTagData;
-            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-            writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
-            writeMessageIdentity_ACU(message, {
-                enabled: settings_ACU.dataIsolationEnabled,
-                code: settings_ACU.dataIsolationCode,
+            await commitVectorMetadataPatch_ACU(message, isolationKey, {
+                summaryVectorIndexState: null,
+                summaryVectorIndexManifest: null,
+            }, {
+                additionalMutate: (targetMessage) => {
+                    writeMessageIdentity_ACU(targetMessage, {
+                        enabled: settings_ACU.dataIsolationEnabled,
+                        code: settings_ACU.dataIsolationCode,
+                    });
+                },
             });
-            await saveChatToHostStrict_ACU();
         }
         catch (error) {
-            restoreSummaryVectorIndexPublishMessageState_ACU(message, publishMessageState);
             throw error;
         }
+        // strict save 成功后才删除旧外置文件；失败时旧 pointer 与文件保持可达。
         if (manifest) {
             try {
                 await deleteSummaryVectorIndexExternal_ACU(manifest);
@@ -91184,38 +91417,23 @@ $CONTENT
             snapshotRevision: manifest.snapshot?.revision || 0,
             sourceMessageIndex: latestLayer.messageIndex,
         });
-        const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const existingStorageFrame = existingTagData.storageFrame;
-        const existingTagDataIsV2 = !!existingStorageFrame;
-        const nextTagData = {
-            ...(existingTagDataIsV2
-                ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
-                : {
-                    independentData: existingTagData.independentData || {},
-                    modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-                    updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-                    ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
-                    ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
-                    ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
-                }),
-            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-        };
-        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
-        const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
         try {
-            nextIsolatedData[tagIsolationKey] = nextTagData;
-            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-            writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
-            writeMessageIdentity_ACU(message, {
-                enabled: settings_ACU.dataIsolationEnabled,
-                code: settings_ACU.dataIsolationCode,
+            // CAS：expected indexId 必须仍为旧 manifest 的 indexId；CAS 冲突不得覆盖较新的 pointer。
+            await commitVectorMetadataPatch_ACU(message, tagIsolationKey, {
+                summaryVectorIndexState: persisted.state,
+                summaryVectorIndexManifest: persisted.manifest,
+            }, {
+                expectedIndexId: manifest.indexId,
+                additionalMutate: (targetMessage) => {
+                    writeMessageIdentity_ACU(targetMessage, {
+                        enabled: settings_ACU.dataIsolationEnabled,
+                        code: settings_ACU.dataIsolationCode,
+                    });
+                },
             });
-            await saveChatToHostStrict_ACU();
             await finalizeSummaryVectorIndexSnapshotPublication_ACU(persisted.uploadedFiles);
         }
         catch (error) {
-            restoreSummaryVectorIndexPublishMessageState_ACU(message, publishMessageState);
             abortSummaryVectorIndexSnapshotPublication_ACU(persisted.uploadedFiles);
             logSummaryVectorIndexIdentityEvent_ACU('warn', 'publish', 'orphan_retained', {
                 manifest: persisted.manifest,
@@ -91223,7 +91441,7 @@ $CONTENT
             });
             throw error;
         }
-        logDebug_ACU(`[纪要向量索引] 已非破坏迁移旧 shard manifest 到内容寻址协议：old=${manifest.indexId}, new=${persisted.manifest.indexId}, rows=${persisted.manifest.rowCount}, chunks=${persisted.manifest.chunkCount}`);
+        logDebug_ACU(`[纪要向量索引] 已非破坏迁移旧 shard manifest 到内容寻址协议：operation=migrate_legacy_manifest, old=${manifest.indexId}, new=${persisted.manifest.indexId}, revision=${persisted.manifest.storageIdentity?.revision ?? persisted.manifest.snapshot?.revision ?? ''}, changed=true`);
         return buildResult_ACU({
             success: true,
             skipped: false,
@@ -91434,7 +91652,7 @@ $CONTENT
             const rowsNeedingEmbedding = reusable.rowsNeedingEmbedding;
             const activeRowKeysUnchanged = areSummaryVectorActiveRowKeysSame_ACU(prepared.rows, existingState);
             const existingActiveRowCount = existingState?.manifest?.snapshot?.activeRowKeys?.length || existingState?.rows?.length || 0;
-            logDebug_ACU(`[纪要向量索引] 增量归档判定：prepared=${prepared.rows.length}, existingActive=${existingActiveRowCount}, reused=${reusable.reusableRows.length}, embedding=${rowsNeedingEmbedding.length}, activeRowsUnchanged=${activeRowKeysUnchanged}, skippedRows=${prepared.skippedRowCount}`);
+            logDebug_ACU(`[纪要向量索引] 增量归档判定：operation=incremental_archive_eval, scope=${selectedSummary.summaryKey}, indexId=${existingState?.manifest?.indexId || ''}, changed=${!activeRowKeysUnchanged || rowsNeedingEmbedding.length > 0 || prepared.skippedRowCount > 0}`);
             if (!options.force && rowsNeedingEmbedding.length === 0 && existingState?.manifest && activeRowKeysUnchanged) {
                 logDebug_ACU('[纪要向量索引] 当前纪要表未发现新增、变更或删除条目，跳过重复覆盖上传。');
                 return buildResult_ACU({
@@ -91562,7 +91780,7 @@ $CONTENT
                     expectedFlushGeneration: options.expectedFlushGeneration,
                 });
                 scheduleDebouncedVectorIndexPersist_ACU(scopeKey);
-                logDebug_ACU(`[纪要向量索引] 向量化完成，已存入待归档队列：scope=${scopeKey}, rows=${finalResult.rows.length}, chunks=${finalResult.chunks.length}`);
+                logDebug_ACU(`[纪要向量索引] 向量化完成，已存入待归档队列：operation=queue_archive, scope=${scopeKey}, changed=true`);
                 return buildResult_ACU({
                     success: true,
                     skipped: false,
@@ -100658,37 +100876,37 @@ $CONTENT
             const message = chat[targetIndex];
             if (readIsolatedTagData_ACU(message, isolationKey)?.summaryVectorIndexState?.manifest?.indexId)
                 return false;
-            const previousIsolatedData = {
-                exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-                value: message.TavernDB_ACU_IsolatedData,
-            };
-            const nextIsolatedData = cloneIsolatedData_ACU(message);
-            const tagData = nextIsolatedData[isolationKey] || { independentData: {}, modifiedKeys: {}, updateGroupKeys: {} };
             const rows = Array.isArray(blob.rows) ? blob.rows : [];
             const chunks = Array.isArray(blob.chunks) ? blob.chunks : [];
-            assignSummaryVectorIndexStateToTagData_ACU(tagData, {
-                manifest,
-                rows,
-                chunks,
-                rowCount: rows.filter((row) => row.status !== 'removed').length,
-                chunkCount: chunks.length,
+            const nextState = {
+                version: 1,
+                backend: 'st-files',
+                status: 'ready',
+                indexId: String(manifest.indexId),
                 snapshotMessageId: String(manifest.snapshotMessageId || message.mesId || ''),
                 sourceTableKey: String(manifest.sourceTableKey || sourceTableKey),
                 sourceTableName: String(manifest.sourceTableName || sourceTableKey),
                 indexedAt: String(manifest.indexedAt || new Date().toISOString()),
+                rowCount: rows.filter((row) => row.status !== 'removed').length,
+                chunkCount: chunks.length,
                 skippedRowCount: 0,
-            });
+                rows,
+                chunks: chunks.map((chunk) => ({
+                    ...chunk,
+                    vector: Array.isArray(chunk.vector) ? chunk.vector.map((item) => Number(item)).filter((item) => Number.isFinite(item)) : [],
+                })),
+                manifest: JSON.parse(JSON.stringify(manifest)),
+            };
             try {
-                message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-                writeIsolatedTagData_ACU(message, isolationKey, tagData);
-                await saveChatToHostStrict_ACU();
-                return true;
+                // CAS：目标槽当前必须不存在有效 indexId，防止外部读取期间已有新 pointer。
+                return await commitVectorMetadataPatch_ACU(message, isolationKey, {
+                    summaryVectorIndexState: nextState,
+                    summaryVectorIndexManifest: JSON.parse(JSON.stringify(manifest)),
+                }, {
+                    expectedIndexId: '',
+                });
             }
             catch (error) {
-                if (previousIsolatedData.exists)
-                    message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;
-                else
-                    delete message.TavernDB_ACU_IsolatedData;
                 logWarn_ACU('[交火模式纪要索引] 自动恢复持久化失败，已回滚写前 state:', error);
                 return false;
             }
@@ -100760,29 +100978,21 @@ $CONTENT
         const message = Array.isArray(chat) ? chat[params.messageIndex] : null;
         if (!message || message.is_user)
             return false;
-        const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const tagData = nextIsolatedData[params.isolationKey];
+        const tagData = readIsolatedTagData_ACU(message, params.isolationKey);
         if (!tagData || typeof tagData !== 'object')
             return false;
         const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
         if (!manifest || String(manifest.indexId || '') !== String(params.indexId || ''))
             return false;
-        const previousIsolatedData = {
-            exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-            value: message.TavernDB_ACU_IsolatedData,
-        };
-        assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
         try {
-            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-            writeIsolatedTagData_ACU(message, params.isolationKey, tagData);
-            await saveChatToHostStrict_ACU();
-            return true;
+            return await commitVectorMetadataPatch_ACU(message, params.isolationKey, {
+                summaryVectorIndexState: null,
+                summaryVectorIndexManifest: null,
+            }, {
+                expectedIndexId: params.indexId,
+            });
         }
         catch (error) {
-            if (previousIsolatedData.exists)
-                message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;
-            else
-                delete message.TavernDB_ACU_IsolatedData;
             throw error;
         }
     }
@@ -100790,7 +101000,7 @@ $CONTENT
         const snapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
         const chat = getChatArray_ACU();
         const scopeHints = new Map();
-        let changed = false;
+        const entries = [];
         if (snapshot?.layers?.length) {
             for (const layer of snapshot.layers) {
                 const message = chat[layer.messageIndex];
@@ -100808,14 +101018,15 @@ $CONTENT
                     };
                     scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
                 }
-                assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
-                writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
-                changed = true;
+                entries.push({
+                    message,
+                    isolationKey: layer.isolationKey,
+                    patch: { summaryVectorIndexState: null, summaryVectorIndexManifest: null },
+                    expectedIndexId: manifest?.indexId,
+                });
             }
         }
-        if (changed) {
-            await saveChatToHost_ACU();
-        }
+        const changed = await commitVectorMetadataPatchesBatch_ACU(entries);
         const scopeHintList = Array.from(scopeHints.values());
         for (const hint of scopeHintList) {
             await deleteSummaryVectorHotCacheByScope_ACU(hint);
@@ -100927,7 +101138,7 @@ $CONTENT
             const chunks = await loadSummaryVectorIndexChunksFromManifest_ACU(manifest, {
                 preferExternalFiles: true,
             });
-            logDebug_ACU(`[交火向量索引] 当前聊天向量缓存预热完成：indexId=${manifest.indexId}, chunks=${chunks.length}，已从外置文件恢复热缓存。`);
+            logDebug_ACU(`[交火向量索引] 当前聊天向量缓存预热完成：operation=prewarm_cache, indexId=${manifest.indexId}, revision=${manifest.storageIdentity?.revision ?? manifest.snapshot?.revision ?? ''}, changed=${chunks.length > 0}，已从外置文件恢复热缓存。`);
             return {
                 success: true,
                 skipped: false,
@@ -101618,21 +101829,20 @@ $CONTENT
         const message = layer ? chat[layer.messageIndex] : null;
         if (!layer || !message)
             return null;
-        const nextTagData = { ...(readIsolatedTagData_ACU(message, layer.isolationKey) || layer.tagData || {}) };
-        const previousIsolatedData = {
-            exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-            value: message.TavernDB_ACU_IsolatedData,
-        };
-        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, alignedState, alignedManifest);
+        const previousManifest = readIsolatedTagData_ACU(message, layer.isolationKey)
+            ?.summaryVectorIndexManifest
+            || layer.tagData?.summaryVectorIndexManifest
+            || null;
+        const expectedIndexId = previousManifest?.indexId || (layer.tagData?.summaryVectorIndexState?.manifest?.indexId) || undefined;
         try {
-            writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
-            await saveChatToHostStrict_ACU();
+            await commitVectorMetadataPatch_ACU(message, layer.isolationKey, {
+                summaryVectorIndexState: alignedState,
+                summaryVectorIndexManifest: alignedManifest,
+            }, {
+                expectedIndexId,
+            });
         }
         catch (error) {
-            if (previousIsolatedData.exists)
-                message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;
-            else
-                delete message.TavernDB_ACU_IsolatedData;
             logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'strict_save_failed', { manifest: alignedManifest, path: snapshotPath, error });
             logWarn_ACU('[交火模式纪要索引] 磁盘 pointer 对齐严格保存失败，已回滚内存状态:', error);
             return null;

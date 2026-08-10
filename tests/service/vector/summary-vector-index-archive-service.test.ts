@@ -119,6 +119,33 @@ vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () =
 vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   cloneIsolatedData_ACU: vi.fn((message: any) => JSON.parse(JSON.stringify(message?.TavernDB_ACU_IsolatedData || {}))),
   readIsolatedTagData_ACU: (...args: any[]) => mockReadIsolatedTagData(...args),
+  readIsolatedDataContainer_ACU: (message: any) => {
+    if (!message || typeof message.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(message.TavernDB_ACU_IsolatedData)) return null;
+    return message.TavernDB_ACU_IsolatedData;
+  },
+  patchIsolatedTagMetadata_ACU: (message: any, isolationKey: string, patch: Record<string, any>, options?: { expectedIndexId?: string }) => {
+    if (!message) return { changed: false, tagData: null };
+    const container = message.TavernDB_ACU_IsolatedData && typeof message.TavernDB_ACU_IsolatedData === 'object'
+      ? message.TavernDB_ACU_IsolatedData
+      : {};
+    const current = container[isolationKey] || {};
+    if (options?.expectedIndexId != null) {
+      const currentId = current.summaryVectorIndexManifest?.indexId ?? current.summaryVectorIndexState?.manifest?.indexId ?? current.summaryVectorIndexState?.indexId;
+      if (String(currentId || '') !== String(options.expectedIndexId)) {
+        const error = new Error('ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU');
+        (error as any).code = 'ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU';
+        throw error;
+      }
+    }
+    const next = { ...current };
+    for (const [key, value] of Object.entries(patch || {})) {
+      if (value === undefined) continue;
+      if (value === null) delete next[key];
+      else next[key] = value;
+    }
+    message.TavernDB_ACU_IsolatedData = { ...container, [isolationKey]: next };
+    return { changed: true, tagData: next };
+  },
   writeIsolatedTagData_ACU: (...args: any[]) => mockWriteIsolatedTagData(...args),
   writeMessageIdentity_ACU: vi.fn((message: any, isolationConfig: any) => {
     if (!message) return;
@@ -268,7 +295,8 @@ describe('summary-vector-index-archive-service pending 归档', () => {
       sourceTableKey: 'sheet_summary',
     }));
     expect(mockReadIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '');
-    expect(mockWriteIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '', expect.any(Object));
+    // 迁移后 metadata 经 patch 边界写入：断言 message 槽上 manifest 已存在。
+    expect(mockChat[0].TavernDB_ACU_IsolatedData[''].summaryVectorIndexManifest).toBeDefined();
   });
 
   it('拒绝未激活 isolation 的归档，不能将当前表数据写入其他 scope', async () => {
@@ -447,7 +475,6 @@ describe('summary-vector-index-archive-service pending 归档', () => {
 
     expect(mockPersistSummaryVectorIndexSnapshot).toHaveBeenCalledWith(expect.objectContaining({ isolationKey: 'default' }));
     expect(mockReadIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '');
-    expect(mockWriteIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '', expect.any(Object));
     expect(mockChat[0].TavernDB_ACU_IsolatedData[''].summaryVectorIndexManifest.indexId).toBe('idx-1');
     expect(mockChat[0].TavernDB_ACU_IsolatedData.default).toBeUndefined();
   });

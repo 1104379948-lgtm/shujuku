@@ -33,6 +33,9 @@ import {
   scanResidualFirstMessageScopeFields_ACU,
   MESSAGE_TABLE_FIELDS_ACU,
   FIRST_MESSAGE_SCOPE_GUIDE_FIELDS_ACU,
+  patchIsolatedTagMetadata_ACU,
+  ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU,
+  ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU,
 } from '../../../src/data/repositories/chat-message-data-repo';
 
 // ═══ 读取类 ═══
@@ -1839,5 +1842,202 @@ describe('cloneIsolatedData_ACU', () => {
     const msg = { TavernDB_ACU_IsolatedData: JSON.stringify(data) };
     const cloned = cloneIsolatedData_ACU(msg);
     expect(cloned).toEqual(data);
+  });
+});
+
+// ═══ metadata patch 边界（P1） ═══
+
+describe('patchIsolatedTagMetadata_ACU', () => {
+  const validState = (indexId = 'idx-1') => ({
+    version: 1,
+    backend: 'st-files',
+    status: 'ready',
+    indexId,
+    snapshotMessageId: 'msg-1',
+    sourceTableKey: 'summary',
+    sourceTableName: '纪要表',
+    indexedAt: '2025-01-01T00:00:00.000Z',
+    rowCount: 1,
+    chunkCount: 1,
+    skippedRowCount: 0,
+    rows: [],
+    manifest: { indexId },
+  });
+  const v1Slot = () => ({
+    independentData: { sheet_0: { name: '表A', content: [['row_id', 'c1']] } },
+    modifiedKeys: ['sheet_0'],
+    updateGroupKeys: [],
+    _acu_storage_version: 1,
+    _acu_base_state: 'base',
+  });
+  const v2Slot = () => ({
+    storageFrame: { version: 2, logEntries: [] },
+    _acu_storage_version: 2,
+    _acu_storage_mode: 'checkpoint',
+  });
+
+  it('null msg / 空 isolationKey 返回 no-op', () => {
+    expect(patchIsolatedTagMetadata_ACU(null, 'k', {})).toEqual({ changed: false, tagData: null });
+    expect(patchIsolatedTagMetadata_ACU({}, '', {})).toEqual({ changed: false, tagData: null });
+  });
+
+  it('无槽新消息：纯 metadata 写入成功，tracking 字段不存在且绝不为 {}', () => {
+    const msg: any = {};
+    const result = patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: validState('idx-new'),
+    });
+    expect(result.changed).toBe(true);
+    const tagData = msg.TavernDB_ACU_IsolatedData.tag1;
+    expect(tagData.summaryVectorIndexState.indexId).toBe('idx-new');
+    expect(tagData.modifiedKeys).toBeUndefined();
+    expect(tagData.updateGroupKeys).toBeUndefined();
+    expect(tagData).not.toHaveProperty('independentData');
+  });
+
+  it('已有纯 V1 槽追加 metadata 成功，表投影逐字段不变', () => {
+    const msg: any = { TavernDB_ACU_IsolatedData: { tag1: v1Slot() } };
+    const original = JSON.parse(JSON.stringify(msg.TavernDB_ACU_IsolatedData.tag1));
+    const result = patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: validState('idx-v1'),
+      summaryVectorIndexManifest: { indexId: 'idx-v1' },
+    });
+    expect(result.changed).toBe(true);
+    const tagData = msg.TavernDB_ACU_IsolatedData.tag1;
+    expect(tagData.independentData).toEqual(original.independentData);
+    expect(tagData.modifiedKeys).toEqual(original.modifiedKeys);
+    expect(tagData.updateGroupKeys).toEqual(original.updateGroupKeys);
+    expect(tagData._acu_storage_version).toBe(1);
+    expect(tagData._acu_base_state).toBe('base');
+    expect(tagData.summaryVectorIndexState.indexId).toBe('idx-v1');
+  });
+
+  it('已有合法 V2 storageFrame 追加 metadata 成功，frame 值不变', () => {
+    const msg: any = { TavernDB_ACU_IsolatedData: { tag1: v2Slot() } };
+    const originalFrame = JSON.parse(JSON.stringify(msg.TavernDB_ACU_IsolatedData.tag1.storageFrame));
+    const result = patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: validState('idx-v2'),
+    });
+    expect(result.changed).toBe(true);
+    const tagData = msg.TavernDB_ACU_IsolatedData.tag1;
+    expect(tagData.storageFrame).toEqual(originalFrame);
+    expect(tagData._acu_storage_version).toBe(2);
+  });
+
+  it('删除 metadata（null）后表投影原样保留', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: { ...v1Slot(), summaryVectorIndexState: validState('idx-keep') },
+      },
+    };
+    const result = patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: null,
+      summaryVectorIndexManifest: null,
+    });
+    expect(result.changed).toBe(true);
+    const tagData = msg.TavernDB_ACU_IsolatedData.tag1;
+    expect(tagData.summaryVectorIndexState).toBeUndefined();
+    expect(tagData.independentData.sheet_0.name).toBe('表A');
+    expect(tagData.modifiedKeys).toEqual(['sheet_0']);
+  });
+
+  it('未知扩展字段（非白名单）在 patch 时原样保留', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: { ...v1Slot(), customFutureField: { nested: 1 } },
+      },
+    };
+    const result = patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: validState('idx-ext'),
+    });
+    expect(result.changed).toBe(true);
+    expect(msg.TavernDB_ACU_IsolatedData.tag1.customFutureField).toEqual({ nested: 1 });
+  });
+
+  it('非白名单 key 在赋值前失败，消息不变', () => {
+    const msg: any = { TavernDB_ACU_IsolatedData: { tag1: v1Slot() } };
+    const before = JSON.parse(JSON.stringify(msg));
+    expect(() => patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      independentData: { sheet_9: { name: 'x' } } as any,
+    })).toThrowError(ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU);
+    expect(msg).toEqual(before);
+  });
+
+  it('vectorMemoryState 不在白名单：传它会越权失败', () => {
+    const msg: any = {};
+    expect(() => patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      vectorMemoryState: { any: 1 } as any,
+    })).toThrowError(ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU);
+    expect(msg).toEqual({});
+  });
+
+  it('expectedIndexId 不匹配时 CAS 冲突，消息不变', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: { ...v1Slot(), summaryVectorIndexState: validState('idx-existing') },
+      },
+    };
+    const before = JSON.parse(JSON.stringify(msg));
+    expect(() => patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: validState('idx-new'),
+    }, { expectedIndexId: 'idx-other' })).toThrowError(ISOLATED_TAG_METADATA_PATCH_CONFLICT_ACU);
+    expect(msg).toEqual(before);
+  });
+
+  it('expectedIndexId 匹配时成功提交', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: { ...v1Slot(), summaryVectorIndexState: validState('idx-existing') },
+      },
+    };
+    const result = patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: validState('idx-existing-new'),
+    }, { expectedIndexId: 'idx-existing' });
+    expect(result.changed).toBe(true);
+    expect(msg.TavernDB_ACU_IsolatedData.tag1.summaryVectorIndexState.indexId).toBe('idx-existing-new');
+  });
+
+  it('patch 为 null / 字符串等畸形值在赋值前失败', () => {
+    const msg: any = { TavernDB_ACU_IsolatedData: { tag1: v1Slot() } };
+    const before = JSON.parse(JSON.stringify(msg));
+    expect(() => patchIsolatedTagMetadata_ACU(msg, 'tag1', null as any)).toThrowError(ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU);
+    expect(() => patchIsolatedTagMetadata_ACU(msg, 'tag1', 'bad' as any)).toThrowError(ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU);
+    expect(msg).toEqual(before);
+  });
+
+  it('container 为字符串时从消息重新读取并提交', () => {
+    const msg: any = { TavernDB_ACU_IsolatedData: JSON.stringify({ tag1: v1Slot() }) };
+    const result = patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: validState('idx-str'),
+    });
+    expect(result.changed).toBe(true);
+    expect(msg.TavernDB_ACU_IsolatedData).toBeTruthy();
+    expect(msg.TavernDB_ACU_IsolatedData.tag1.summaryVectorIndexState.indexId).toBe('idx-str');
+  });
+
+  it('no-op：候选与当前槽等价时不制造新容器、不赋值', () => {
+    const slot: any = { ...v1Slot(), summaryVectorIndexState: validState('idx-noop') };
+    const msg: any = { TavernDB_ACU_IsolatedData: { tag1: slot } };
+    const containerRef = msg.TavernDB_ACU_IsolatedData;
+    const result = patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: validState('idx-noop'),
+    });
+    expect(result.changed).toBe(false);
+    expect(msg.TavernDB_ACU_IsolatedData).toBe(containerRef);
+  });
+
+  it('mixed 槽（V2 frame + V1 payload）只能原样保留投影，不得借 patch 覆盖', () => {
+    const mixed = {
+      ...v2Slot(),
+      independentData: { sheet_0: { name: '表A' } },
+    };
+    const msg: any = { TavernDB_ACU_IsolatedData: { tag1: mixed } };
+    const original = JSON.parse(JSON.stringify(msg.TavernDB_ACU_IsolatedData.tag1));
+    const result = patchIsolatedTagMetadata_ACU(msg, 'tag1', {
+      summaryVectorIndexState: validState('idx-mixed'),
+    });
+    expect(result.changed).toBe(true);
+    const tagData = msg.TavernDB_ACU_IsolatedData.tag1;
+    expect(tagData.storageFrame).toEqual(original.storageFrame);
+    expect(tagData.independentData).toEqual(original.independentData);
   });
 });

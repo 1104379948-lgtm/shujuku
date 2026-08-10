@@ -1454,7 +1454,7 @@ async function persistSummaryVectorIndexSnapshotAsRollingDelta_ACU(params: {
         await registerVectorIndexFiles_ACU(uploadedFiles);
         // 聊天 pointer 由 archive service 在本函数返回后才持久化。此处若清理 previousManifest，
         // 宿主保存失败会让旧 pointer 指向已删除对象；历史快照改由显式删除和安全 GC 回收。
-        logDebug_ACU(`[交火向量索引] 已写入 rolling delta 快照：fold=${shouldFold ? 'yes' : 'no'} changedRows=${changedRowKeys.size}`);
+        logDebug_ACU(`[交火向量索引] 已写入 rolling delta 快照：operation=write_rolling_delta, indexId=${finalManifest?.indexId || ''}, revision=${finalManifest?.storageIdentity?.revision ?? finalManifest?.snapshot?.revision ?? ''}, fold=${shouldFold ? 'yes' : 'no'}, changed=true`);
         return { state, manifest: finalManifest, uploadedFiles };
     } catch (error) {
         throw buildRollbackAwareError_ACU(error, await rollbackUploadedFiles_ACU(uploadedFiles));

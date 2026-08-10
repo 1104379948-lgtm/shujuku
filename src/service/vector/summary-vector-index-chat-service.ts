@@ -1,4 +1,6 @@
-import { cloneIsolatedData_ACU, readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { commitVectorMetadataPatch_ACU, commitVectorMetadataPatchesBatch_ACU } from './summary-vector-index-chat-commit';
+import type { ChatSummaryVectorIndexState_ACU } from './summary-vector-index-types';
 import {
     clearSummaryVectorFlushTasksByScope_ACU,
     deleteSummaryVectorHotCacheByScope_ACU,
@@ -12,10 +14,9 @@ import {
 } from '../../data/storage/vector-index-st-files-storage';
 import { getCurrentCharacterCardName_ACU } from '../../shared/template-preset-utils';
 import { isSummaryOrOutlineTable_ACU, logWarn_ACU } from '../../shared/utils';
-import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../chat/chat-service';
+import { getChatArray_ACU } from '../chat/chat-service';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import {
-    assignSummaryVectorIndexStateToTagData_ACU,
     getAggregatedSummaryVectorIndexSnapshot_ACU,
 } from './summary-vector-index-state-service';
 import {
@@ -81,34 +82,36 @@ export async function tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU(): Pr
 
         const message = chat[targetIndex];
         if (readIsolatedTagData_ACU(message, isolationKey)?.summaryVectorIndexState?.manifest?.indexId) return false;
-        const previousIsolatedData = {
-            exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-            value: message.TavernDB_ACU_IsolatedData,
-        };
-        const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const tagData = nextIsolatedData[isolationKey] || { independentData: {}, modifiedKeys: {}, updateGroupKeys: {} } as any;
         const rows = Array.isArray(blob.rows) ? blob.rows : [];
         const chunks = Array.isArray(blob.chunks) ? blob.chunks : [];
-        assignSummaryVectorIndexStateToTagData_ACU(tagData, {
-            manifest,
-            rows,
-            chunks,
-            rowCount: rows.filter((row: any) => row.status !== 'removed').length,
-            chunkCount: chunks.length,
+        const nextState: ChatSummaryVectorIndexState_ACU = {
+            version: 1,
+            backend: 'st-files',
+            status: 'ready',
+            indexId: String(manifest.indexId),
             snapshotMessageId: String(manifest.snapshotMessageId || message.mesId || ''),
             sourceTableKey: String(manifest.sourceTableKey || sourceTableKey),
             sourceTableName: String(manifest.sourceTableName || sourceTableKey),
             indexedAt: String(manifest.indexedAt || new Date().toISOString()),
+            rowCount: rows.filter((row: any) => row.status !== 'removed').length,
+            chunkCount: chunks.length,
             skippedRowCount: 0,
-        } as any);
+            rows,
+            chunks: chunks.map((chunk: any) => ({
+                ...chunk,
+                vector: Array.isArray(chunk.vector) ? chunk.vector.map((item: any) => Number(item)).filter((item: number) => Number.isFinite(item)) : [],
+            })),
+            manifest: JSON.parse(JSON.stringify(manifest)),
+        };
         try {
-            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-            writeIsolatedTagData_ACU(message, isolationKey, tagData);
-            await saveChatToHostStrict_ACU();
-            return true;
+            // CAS：目标槽当前必须不存在有效 indexId，防止外部读取期间已有新 pointer。
+            return await commitVectorMetadataPatch_ACU(message, isolationKey, {
+                summaryVectorIndexState: nextState,
+                summaryVectorIndexManifest: JSON.parse(JSON.stringify(manifest)),
+            }, {
+                expectedIndexId: '',
+            });
         } catch (error) {
-            if (previousIsolatedData.exists) message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;
-            else delete message.TavernDB_ACU_IsolatedData;
             logWarn_ACU('[交火模式纪要索引] 自动恢复持久化失败，已回滚写前 state:', error);
             return false;
         }
@@ -179,25 +182,19 @@ export async function clearSummaryVectorIndexLayerFromChat_ACU(params: {
     const message = Array.isArray(chat) ? chat[params.messageIndex] : null;
     if (!message || message.is_user) return false;
 
-    const nextIsolatedData = cloneIsolatedData_ACU(message);
-    const tagData = nextIsolatedData[params.isolationKey];
+    const tagData = readIsolatedTagData_ACU(message, params.isolationKey);
     if (!tagData || typeof tagData !== 'object') return false;
     const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
     if (!manifest || String(manifest.indexId || '') !== String(params.indexId || '')) return false;
 
-    const previousIsolatedData = {
-        exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
-        value: message.TavernDB_ACU_IsolatedData,
-    };
-    assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
     try {
-        message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-        writeIsolatedTagData_ACU(message, params.isolationKey, tagData);
-        await saveChatToHostStrict_ACU();
-        return true;
+        return await commitVectorMetadataPatch_ACU(message, params.isolationKey, {
+            summaryVectorIndexState: null,
+            summaryVectorIndexManifest: null,
+        }, {
+            expectedIndexId: params.indexId,
+        });
     } catch (error) {
-        if (previousIsolatedData.exists) message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;
-        else delete message.TavernDB_ACU_IsolatedData;
         throw error;
     }
 }
@@ -206,7 +203,12 @@ export async function deleteCurrentSummaryVectorIndexFromChat_ACU(): Promise<boo
     const snapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
     const chat = getChatArray_ACU();
     const scopeHints = new Map<string, { chatKey?: string; isolationKey: string; sourceTableKey: string }>();
-    let changed = false;
+    const entries: Array<{
+        message: any;
+        isolationKey: string;
+        patch: { summaryVectorIndexState: null; summaryVectorIndexManifest: null };
+        expectedIndexId?: string;
+    }> = [];
 
     if (snapshot?.layers?.length) {
         for (const layer of snapshot.layers) {
@@ -223,15 +225,16 @@ export async function deleteCurrentSummaryVectorIndexFromChat_ACU(): Promise<boo
                 };
                 scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
             }
-            assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
-            writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
-            changed = true;
+            entries.push({
+                message,
+                isolationKey: layer.isolationKey,
+                patch: { summaryVectorIndexState: null, summaryVectorIndexManifest: null },
+                expectedIndexId: manifest?.indexId,
+            });
         }
     }
 
-    if (changed) {
-        await saveChatToHost_ACU();
-    }
+    const changed = await commitVectorMetadataPatchesBatch_ACU(entries);
 
     const scopeHintList = Array.from(scopeHints.values());
     for (const hint of scopeHintList) {
