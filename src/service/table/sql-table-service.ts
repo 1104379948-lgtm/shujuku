@@ -42,7 +42,7 @@ import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_ACU, PhysicalTableNameCollisionError_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
-import { rebindSqlMutationTableReferences_ACU, rebindSqlMutationColumnsByTarget_ACU } from '../../shared/sql-mutation-table-rebind';
+import { rebindSqlMutationTableReferences_ACU, rebindSqlMutationColumnsByTarget_ACU, decodeSqlIdentifier_ACU } from '../../shared/sql-mutation-table-rebind';
 import { buildSheetTableAliasMap_ACU, buildSheetColumnAliasMap_ACU } from '../../shared/sql-read-resolver';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { extractBusinessKeyColumns_ACU } from '../template/template-data-preflight';
@@ -385,6 +385,8 @@ export function rebindSqlMutationIdentifiers_ACU(
     requireKnownTables?: boolean;
     /** 只构建这些 sheetKey 的列别名 registry（其余表不注册）。缺省 = 全量（旧行为）。 */
     targetSheetKeys?: ReadonlySet<string>;
+    /** 实时 AI 写路径 opt-in：INSERT/REPLACE 显式列清单命中 registry 未知列时抛 SQL_INSERT_UNKNOWN_COLUMN_ACU。 */
+    requireKnownInsertColumns?: boolean;
   } = {},
 ): string[] {
   // 有运行时目标 schema 时，表名只能由它（或调用方显式提供的补充源）判定。
@@ -412,6 +414,7 @@ export function rebindSqlMutationIdentifiers_ACU(
   }
   return rebindSqlMutationColumnsByTarget_ACU(tableRebound, columnAliases, {
     ambiguousColumns: ambiguousByTarget,
+    requireKnownInsertColumns: options.requireKnownInsertColumns,
     resolveAmbiguity: (targetTable, alias) => {
       const candidates = conflictCandidates.get(targetTable.toLowerCase())?.get(alias.toLowerCase());
       return candidates || [];
@@ -608,6 +611,177 @@ export class SqlRuntimeSnapshotError_ACU extends Error {
   }
 }
 
+interface SqlInsertColumnToken_ACU {
+  token: SqlMutationIdentifierToken_ACU;
+  /** 原始写法（含引号风格原样保留，供重建 SQL 时使用）。 */
+  raw: string;
+  /** 大小写不敏感规范化后的列名。 */
+  normalized: string;
+}
+
+interface SqlInsertColumnList_ACU {
+  columns: SqlInsertColumnToken_ACU[];
+  /** 列清单闭括号在原始语句中的位置（用于定位 VALUES）。 */
+  closingParenEnd: number;
+}
+/** INSERT 列清单中不允许出现的 SQL 关键字（fail-closed：宁可拒绝也不猜测）。 */
+const INSERT_COLUMN_KEYWORDS_ACU = new Set([
+  'SELECT', 'FROM', 'WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET',
+  'UNION', 'EXCEPT', 'INTERSECT', 'VALUES', 'SET', 'JOIN', 'ON', 'AS',
+  'WITH', 'RECURSIVE', 'DISTINCT', 'BY', 'AND', 'OR', 'NOT', 'IN', 'IS',
+  'NULL', 'LIKE', 'BETWEEN', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'ASC',
+  'DESC', 'COLLATE', 'USING', 'PRIMARY', 'KEY', 'UNIQUE', 'CHECK', 'DEFAULT',
+  'REFERENCES', 'FOREIGN', 'CONSTRAINT', 'INDEX', 'CREATE', 'TABLE', 'ALTER',
+  'DROP', 'INSERT', 'REPLACE', 'UPDATE', 'DELETE', 'INTO', 'RETURNING',
+  'WINDOW', 'OVER', 'PARTITION', 'ROW', 'ROWS', 'RANGE', 'CROSS', 'NATURAL',
+  'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER',
+]);
+
+/**
+ * 收集 statement[from,to) 区间内除空白与 SQL 注释之外的所有有效字符。
+ * 行注释/块注释被完整跳过（注释里的逗号/括号/标识符不作数），
+ * 用于校验列清单的合法分隔：首列前只能有一个 `(`，列间只能有一个 `,`。
+ */
+function collectSignificantCharsBetween_ACU(
+  statement: string,
+  from: number,
+  to: number,
+  context: string,
+): Array<{ char: string; index: number }> {
+  const found: Array<{ char: string; index: number }> = [];
+  let index = from;
+  while (index < to) {
+    const char = statement[index];
+    const next = statement[index + 1];
+    if (char === '-' && next === '-') {
+      index += 2;
+      while (index < to && statement[index] !== '\n' && statement[index] !== '\r') index += 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      const end = statement.indexOf('*/', index + 2);
+      if (end < 0 || end + 2 > to) throw new Error(`${context} 的 SQL 块注释未闭合或跨越边界，无法安全解析。`);
+      index = end + 2;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      index += 1;
+      continue;
+    }
+    found.push({ char, index });
+    index += 1;
+  }
+  return found;
+}
+
+
+/**
+ * 基于 tokenizer（天然跳过行注释/块注释/字符串）提取 INSERT 列清单。
+ *
+ * 只接受普通 `INSERT INTO target (identifier, ...)`：
+ * - 逐 token 校验，拒绝表达式、限定名、空项、重复列；
+ * - token 间隙必须是合法分隔（逗号或括号），列间缺失逗号即拒绝；
+ * - 注释位于列间/列后时被 tokenizer 跳过，不会残留在列项中（test31 根因 3.3）。
+ *
+ * @returns 规范列名（token 语义）、原始 token 范围、VALUES 起点。
+ * @throws 非法列清单（表达式/空项/重复列/未闭合注释）时 fail-closed。
+ */
+function extractSqlInsertColumns_ACU(
+  statement: string,
+  tokens: SqlMutationIdentifierToken_ACU[],
+  target: SqlMutationIdentifierToken_ACU,
+  context: string,
+): SqlInsertColumnList_ACU {
+  const targetIndex = tokens.indexOf(target);
+  if (targetIndex < 0) {
+    throw new Error(`${context} 无法定位目标表 token。`);
+  }
+  // 目标表后第一个 depth+1 的 token 即列清单首列。
+  let openIndex = -1;
+  for (let index = targetIndex + 1; index < tokens.length; index += 1) {
+    if (tokens[index].depth === target.depth + 1) {
+      openIndex = index;
+      break;
+    }
+    // 目标表后出现 depth 回落或 VALUES/SELECT 等终止词且未进入列清单 → 无显式列。
+    if (tokens[index].depth === target.depth) {
+      const upper = tokens[index].value.toUpperCase();
+      if (upper === 'VALUES' || upper === 'SELECT' || upper === 'DEFAULT') break;
+    }
+  }
+  if (openIndex < 0) {
+    // 无列清单：调用方（materialize）要求显式列，这里抛错保持 fail-closed。
+    throw new Error(`${context} 必须显式列出业务列，系统才能分配 row_id。`);
+  }
+
+  const columns: SqlInsertColumnToken_ACU[] = [];
+  let closingParenEnd = -1;
+  const seen = new Set<string>();
+  let cursor = openIndex;
+  let previousColumn: SqlInsertColumnToken_ACU | null = null;
+  while (cursor < tokens.length) {
+    const token = tokens[cursor];
+    if (token.depth < target.depth + 1) {
+      break;
+    }
+    if (token.depth > target.depth + 1) {
+      throw new Error(`${context} 的列清单包含表达式或限定名，无法安全解析。`);
+    }
+    if (token.depth === target.depth + 1) {
+      // 合法列 token：非关键字、非空、非重复；分隔由 token 间有效字符精确校验。
+      const isKeyword = token.quote === null && INSERT_COLUMN_KEYWORDS_ACU.has(token.value.toUpperCase());
+      if (isKeyword) {
+        throw new Error(`${context} 的列清单包含非法标识符「${token.value}」。`);
+      }
+      const normalized = decodeSqlIdentifier_ACU(token.value).toLowerCase();
+      if (!normalized || !/^[a-z_][a-z0-9_$]*$/i.test(normalized)) {
+        throw new Error(`${context} 的列名无法安全解析：「${token.value}」。`);
+      }
+      if (seen.has(normalized)) {
+        throw new Error(`${context} 的列名重复：「${token.value}」。`);
+      }
+      seen.add(normalized);
+      if (previousColumn === null) {
+        // 首列前必须恰好一个 `(`（注释/空白被跳过）。
+        const between = collectSignificantCharsBetween_ACU(statement, target.end, token.start, context);
+        if (between.length !== 1 || between[0].char !== '(') {
+          throw new Error(`${context} 的列清单必须以括号开头，无法安全解析。`);
+        }
+      } else if (token.commaBefore) {
+        // tokenizer 只记录「此 token 前有逗号」；`a,,b` 的连续逗号会被 Set 去重，
+        // commaBefore 仍为 true，必须用区段扫描确认 token 间恰好一个 `,`（拒绝空项）。
+        const between = collectSignificantCharsBetween_ACU(statement, previousColumn.token.end, token.start, context);
+        if (between.length !== 1 || between[0].char !== ',') {
+          throw new Error(`${context} 的列清单包含空项或多余逗号，无法安全解析。`);
+        }
+      } else {
+        throw new Error(`${context} 的列清单缺少逗号分隔，无法安全解析。`);
+      }
+      columns.push({
+        token,
+        raw: statement.slice(token.start, token.end),
+        normalized,
+      });
+      previousColumn = columns[columns.length - 1];
+    }
+    cursor += 1;
+  }
+
+  if (columns.length === 0) {
+    throw new Error(`${context} 的列清单为空，无法安全解析。`);
+  }
+  // 闭括号定位：最后一个列 token 之后第一个有效字符必须是 `)`（允许行/块注释与空白），
+  // 尾逗号（第一个有效字符为 `,`）直接拒绝；`--` 行注释会把同一行的 `)` 吞掉 → 抛未闭合。
+  const lastColumn = columns[columns.length - 1].token;
+  const afterLast = collectSignificantCharsBetween_ACU(statement, lastColumn.end, statement.length, context);
+  if (afterLast.length === 0 || afterLast[0].char !== ')') {
+    throw new Error(`${context} 的列清单括号未闭合，无法安全解析。`);
+  }
+  closingParenEnd = afterLast[0].index + 1;
+
+  return { columns, closingParenEnd };
+}
+
 /**
  * Makes ordinary AI-authored INSERT statements self-describing before execution and V2 logging.
  * SQLite REPLACE forms retain their native semantics and are persisted unchanged.
@@ -640,21 +814,23 @@ export function materializeSystemRowIdsForSqlInserts_ACU(
       }
       throw new Error(`AI INSERT 第 ${statementIndex + 1} 条必须显式列出业务列，系统才能分配 row_id。`);
     }
-    const columnsEnd = findSqlClosingParen_ACU(suffix, 0, `AI INSERT 第 ${statementIndex + 1} 条列清单`);
-    const inputColumns = splitTopLevelSqlList_ACU(suffix.slice(1, columnsEnd), `AI INSERT 第 ${statementIndex + 1} 条列清单`);
-    const normalizedColumns = inputColumns.map(column => column.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase());
-    if (normalizedColumns.some(column => !/^[a-z_][a-z0-9_$]*$/i.test(column))) {
-      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条的列名无法安全解析。`);
-    }
-    if (new Set(normalizedColumns).size !== normalizedColumns.length) {
-      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条的列名重复。`);
-    }
+    // [阶段 D] 统一为 token 语义：tokenizer 天然跳过列间/列后注释，杜绝注释残留在
+    // 列项中导致「列名无法安全解析」（test31 根因 3.3）。
+    const columnList = extractSqlInsertColumns_ACU(
+      statement,
+      tokens,
+      target,
+      `AI INSERT 第 ${statementIndex + 1} 条`,
+    );
+    const normalizedColumns = columnList.columns.map(column => column.normalized);
     const suppliedRowIdIndex = normalizedColumns.indexOf('row_id');
-    const businessColumns = inputColumns.filter((_, index) => index !== suppliedRowIdIndex);
+    const businessColumns = columnList.columns
+      .filter((_, index) => index !== suppliedRowIdIndex)
+      .map(column => column.raw);
     if (businessColumns.length === 0) {
       throw new Error(`AI INSERT 第 ${statementIndex + 1} 条剔除 row_id 后没有业务列，无法执行插入。`);
     }
-    const valuesText = suffix.slice(columnsEnd + 1).trim();
+    const valuesText = statement.slice(columnList.closingParenEnd).trim();
     if (!/^VALUES\b/i.test(valuesText)) {
       throw new Error(`AI INSERT 第 ${statementIndex + 1} 条只支持 VALUES 插入；不支持 INSERT SELECT。`);
     }
@@ -665,12 +841,13 @@ export function materializeSystemRowIdsForSqlInserts_ACU(
         throw new Error(`AI INSERT 第 ${statementIndex + 1} 条只支持括号包裹的 VALUES 行。`);
       }
       const values = splitTopLevelSqlList_ACU(tuple.slice(1, -1), `AI INSERT 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 个 VALUES`);
-      if (values.length !== inputColumns.length) {
+      if (values.length !== columnList.columns.length) {
         throw new Error(`AI INSERT 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 行的值数量与列数量不一致。`);
       }
       const businessValues = values.filter((_, index) => index !== suppliedRowIdIndex);
       return `(${allocateStableRowId_ACU(reservation)}, ${businessValues.join(', ')})`;
     });
+    // 重建 SQL：保留业务 VALUES 原文；显式 row_id 由系统重分配。
     return `${statement.slice(0, target.end)} (row_id, ${businessColumns.join(', ')}) VALUES ${materializedTuples.join(', ')}`;
   });
 }
@@ -1203,7 +1380,7 @@ export class SqlTableService implements ITableStorageProvider {
         normalizedStatements,
         (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
         scope?.templateData,
-        { requireKnownTables: Boolean(scope?.templateData) },
+        { requireKnownTables: Boolean(scope?.templateData), requireKnownInsertColumns: true },
       );
     });
     const userStatements = normalizedGroups.flat();
@@ -1800,7 +1977,7 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
       rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))),
       snapshotCopy,
       undefined,
-      { requireKnownTables },
+      { requireKnownTables, requireKnownInsertColumns: true },
     );
     const statements = materializeSystemRowIdsForSqlInserts_ACU(reboundStatements, snapshotCopy);
     await engine.init();

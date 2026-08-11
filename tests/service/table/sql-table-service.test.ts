@@ -778,6 +778,77 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
       snapshotTableData,
     )).toThrow('必须显式列出业务列');
   });
+
+  // ── 阶段 D：INSERT 列清单 token 级解析（test31 根因 3.3 注释残留）──
+  // tokenizer 天然跳过行注释/块注释/字符串；列间/列后注释不得残留在列项中。
+  it('列间行注释与列后块注释不残留，row_id 物化仍按 token 语义工作', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    // 目标物理表名 beibaowupinbiao（inventory 重绑后）；列间 `-- 注释`、列后 `/* */` 都合法。
+    const sql = [
+      "INSERT INTO beibaowupinbiao (item_name, -- 物品名\n  quantity /* 数量 */) VALUES ('药水', 5)",
+    ];
+    const result = materializeSystemRowIdsForSqlInserts_ACU(sql, inputSnapshot);
+    // 物化后列名只保留 token 语义，注释已消失；row_id 前置，业务列原文保留。
+    expect(result).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', 5)",
+    ]);
+  });
+
+  it('字符串字面量中的注释样文本不参与列清单解析', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    // 列名是 item_name、quantity，不是字符串里的 "-- 伪注释"。
+    const sql = [
+      "INSERT INTO beibaowupinbiao (item_name, quantity) VALUES ('-- 伪注释', 5)",
+    ];
+    const result = materializeSystemRowIdsForSqlInserts_ACU(sql, inputSnapshot);
+    expect(result).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '-- 伪注释', 5)",
+    ]);
+  });
+
+  it('尾逗号 / 空项 / 重复列 / 非法关键字列一律 fail-closed', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU(
+      ['INSERT INTO beibaowupinbiao (item_name, quantity,) VALUES (\'药水\', 5)'],
+      inputSnapshot,
+    )).toThrow(/列清单|括号未闭合|空项|无法安全解析/);
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU(
+      ['INSERT INTO beibaowupinbiao (item_name,, quantity) VALUES (\'药水\', 5)'],
+      inputSnapshot,
+    )).toThrow(/列清单|空项|无法安全解析/);
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU(
+      ['INSERT INTO beibaowupinbiao (item_name, item_name) VALUES (\'药水\', 5)'],
+      inputSnapshot,
+    )).toThrow('列名重复');
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU(
+      ['INSERT INTO beibaowupinbiao (SELECT, quantity) VALUES (\'药水\', 5)'],
+      inputSnapshot,
+    )).toThrow('非法标识符');
+  });
+
+  it('INSERT SELECT / 无显式列清单保持 fail-closed', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU(
+      ['INSERT INTO beibaowupinbiao SELECT * FROM other'],
+      inputSnapshot,
+    )).toThrow('不支持 INSERT SELECT');
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU(
+      ['INSERT INTO beibaowupinbiao VALUES (1, \'药水\', 5)'],
+      inputSnapshot,
+    )).toThrow('必须显式列出业务列');
+  });
+
+  it('显式 row_id 重分配 + 多 VALUES tuple + 注释同时存在时逐 tuple 物化', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const sql = [
+      "INSERT INTO beibaowupinbiao (row_id /* 显式旧 id */, item_name, quantity) VALUES (99, '药水', 5), (88, '卷轴', 2)",
+    ];
+    const result = materializeSystemRowIdsForSqlInserts_ACU(sql, inputSnapshot);
+    expect(result).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', 5), (3, '卷轴', 2)",
+    ]);
+  });
+
 });
 
 describe('assertNoHiddenPhysicalColumnMutations_ACU', () => {
@@ -1609,6 +1680,52 @@ describe('SqlTableService', () => {
 
       exportSpy.mockRestore();
       expect(service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory').values[0][0]).toBe(0);
+      expect(service.getCurrentData()?.sheet_0.content).toEqual([
+        ['row_id', 'item_name', 'quantity'],
+      ]);
+    });
+
+    // test31 复现矩阵：无 DDL fallback 表写错列。
+    // 阶段 E 修复后：rebind 对 registry 未知 INSERT 列执行前抛
+    // SQL_INSERT_UNKNOWN_COLUMN_ACU（结构化拒绝），错误只含表名/列名/允许列，
+    // 不含 VALUES 与完整 SQL；零 SQLite mutation。
+    it('test31 无 DDL fallback 表：未知列必须在 SQLite mutation 前结构化拒绝，数据库内容不变且错误脱敏', () => {
+      // 构造无 DDL 的 inventory（fallback 列：row_id/item_name/quantity），
+      // AI 拼写漂移写 xiang_xiang_guan_wu_pin / di_di_an_lei_xing 属于未知列。
+      mockMergeAll.mockResolvedValue({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'inventory',
+          name: '背包物品表',
+          sourceData: {},
+          content: [['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 0,
+        },
+      } as any);
+      service.applyEditsWithSystemRowIds(['DELETE FROM inventory;']);
+
+      const unknownColumn = 'xi_xiang_guan_wu_pin';
+      let caughtError: unknown;
+      try {
+        service.applyEditsWithSystemRowIds([
+          `INSERT INTO inventory (${unknownColumn}) VALUES ('错误列');`,
+        ]);
+      } catch (error: any) {
+        caughtError = error;
+      }
+      expect(caughtError).toBeTruthy();
+      // 阶段 E：执行前结构化拒绝，错误码必须是 SQL_INSERT_UNKNOWN_COLUMN_ACU。
+      const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
+      expect(message).toContain('SQL_INSERT_UNKNOWN_COLUMN_ACU');
+      // 脱敏：错误不得含 VALUES 里的业务值（'错误列'），也不得含完整 SQL。
+      expect(message).not.toContain('错误列');
+      expect(message).not.toContain('INSERT INTO');
+
+      // 无论采用哪种拒绝路径，数据库内容必须保持原样：零 mutation。
+      const count = service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory').values[0][0];
+      expect(count).toBe(0);
       expect(service.getCurrentData()?.sheet_0.content).toEqual([
         ['row_id', 'item_name', 'quantity'],
       ]);

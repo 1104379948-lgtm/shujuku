@@ -230,6 +230,8 @@ export function rebindSqlMutationColumnReferences_ACU(
   targetPhysicalTableName: string,
   options: {
     ambiguousColumns?: ReadonlySet<string>;
+    /** 实时 AI 写路径 opt-in：INSERT/REPLACE 显式列清单命中 registry 未知列时抛 SQL_INSERT_UNKNOWN_COLUMN_ACU。 */
+    requireKnownInsertColumns?: boolean;
     /** 每次实际发生的列改写上报一次（from=历史/别名列名，to=当前物理列名），供调用方做诊断取证。 */
     onRebound?: (rebind: { from: string; to: string }) => void;
     /**
@@ -281,7 +283,7 @@ export function rebindSqlMutationColumnReferences_ACU(
       );
     }
 
-    const replacements = collectMutationColumnReplacements_ACU(statement, values, resolvedAliases, normalizedAmbiguous, options.resolveAmbiguity);
+    const replacements = collectMutationColumnReplacements_ACU(statement, values, resolvedAliases, normalizedAmbiguous, options.resolveAmbiguity, options.requireKnownInsertColumns, targetPhysicalTableName);
     let result = statement;
     for (const { token, value } of replacements) {
       options.onRebound?.({ from: decodeSqlIdentifier_ACU(token.value), to: value });
@@ -312,6 +314,8 @@ export function rebindSqlMutationColumnsByTarget_ACU(
   columnAliases: SqlColumnAliasMap_ACU,
   options: {
     ambiguousColumns?: ReadonlyMap<string, ReadonlySet<string>>;
+    /** 实时 AI 写路径 opt-in：INSERT/REPLACE 显式列清单命中 registry 未知列时抛 SQL_INSERT_UNKNOWN_COLUMN_ACU。 */
+    requireKnownInsertColumns?: boolean;
     onRebound?: (rebind: { from: string; to: string; targetTable: string }) => void;
     resolveAmbiguity?: (targetTable: string, alias: string) => ReadonlyArray<{ target: string; evidence: string }>;
   } = {},
@@ -328,6 +332,7 @@ export function rebindSqlMutationColumnsByTarget_ACU(
       if (!tableColumns) return statement; // 未注册列别名的目标表 → 原样放行
       return rebindSqlMutationColumnReferences_ACU([statement], columnAliases, target.value, {
         ambiguousColumns: options.ambiguousColumns?.get(targetKey),
+        requireKnownInsertColumns: options.requireKnownInsertColumns,
         onRebound: options.onRebound
           ? rebind => options.onRebound?.({ ...rebind, targetTable: targetTableName as string })
           : undefined,
@@ -361,10 +366,14 @@ function collectMutationColumnReplacements_ACU(
   aliases: Map<string, string>,
   ambiguous: Set<string>,
   resolveAmbiguity?: (alias: string) => ReadonlyArray<{ target: string; evidence: string }>,
+  /** INSERT/REPLACE 显式列清单命中 registry 未知列时 fail-closed（实时 AI 写路径 opt-in）。 */
+  requireKnownInsertColumns?: boolean,
+  /** 目标物理表名（仅用于未知列结构化错误信息）。 */
+  targetTableName?: string,
 ): Array<{ token: Token_ACU; value: string }> {
   const replacements: Array<{ token: Token_ACU; value: string }> = [];
   const handledStarts = new Set<number>();
-  const addIfAlias = (token: Token_ACU | undefined): void => {
+  const addIfAlias = (token: Token_ACU | undefined, isInsertColumn: boolean): void => {
     if (!token) return;
     const key = decodeSqlIdentifier_ACU(token.value).toLowerCase();
     if (ambiguous.has(key)) {
@@ -378,7 +387,22 @@ function collectMutationColumnReplacements_ACU(
       );
     }
     const target = aliases.get(key);
-    if (!target || target.toLowerCase() === key) return;
+    if (!target) {
+      // 列清单里出现 registry 未知列：实时 AI 写路径必须 fail-closed，
+      // 否则 SQLite 晚失败会泄漏完整 SQL/VALUES（test31 根因 3.4）。
+      if (isInsertColumn && requireKnownInsertColumns) {
+        const allowed = [...new Set([...aliases.values()].map(value => value.toLowerCase()))]
+          .filter(Boolean)
+          .sort()
+          .join(', ');
+        throw structuredMutationColumnError_ACU(
+          'SQL_INSERT_UNKNOWN_COLUMN_ACU',
+          `目标表「${targetTableName || ''}」的 INSERT 引用了未知列「${token.value}」；请只使用允许列：${allowed}。`,
+        );
+      }
+      return;
+    }
+    if (target.toLowerCase() === key) return;
     if (handledStarts.has(token.start)) return;
     handledStarts.add(token.start);
     replacements.push({ token, value: target });
@@ -411,20 +435,20 @@ function collectMutationColumnReplacements_ACU(
         const next = values[index + 1];
         // `=` 不是标识符 token，next 是 `=` 之后的值 token；检查两者之间含 `=`。
         if (next && next.depth === token.depth && /=/.test(sql.slice(token.end, next.start))) {
-          addIfAlias(token);
+          addIfAlias(token, false);
         }
       }
     }
   } else if (actionValue === 'INSERT' || actionValue === 'REPLACE') {
-    // 列清单：目标表 token 之后第一个 depth+1 的括号 token，其内同 depth 标识符为列。
+    // 列清单：目标表 token 之后第一个 depth+1 的 token 即首列（tokenizer 不产出括号 token）。
     const openIndex = values.findIndex(token => token.depth === actionDepth + 1 && token.start > action.start);
     if (openIndex >= 0) {
-      let cursor = openIndex + 1;
+      let cursor = openIndex;
       while (cursor < values.length && values[cursor].depth >= actionDepth + 1) {
         const token = values[cursor];
         if (token.depth === actionDepth + 1) {
           if (token.value === ')') break;
-          addIfAlias(token);
+          addIfAlias(token, true);
         }
         cursor += 1;
       }
@@ -442,7 +466,7 @@ function collectMutationColumnReplacements_ACU(
     if (previous && previous.depth === token.depth && keyword(previous, 'AS')) continue;
     const beforeDot = values[index - 1];
     if (beforeDot && beforeDot.depth === token.depth && /^\s*\.\s*$/.test(sql.slice(beforeDot.end, token.start))) continue;
-    addIfAlias(token);
+    addIfAlias(token, false);
   }
   return replacements;
 }

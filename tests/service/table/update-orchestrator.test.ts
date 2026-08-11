@@ -4724,6 +4724,52 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       vi.mocked(isSqliteMode).mockReturnValue(false);
     }
   });
+
+  // ── 阶段 E：未知 INSERT 列 gate 在统一提交层 fail-closed（零 mutation / 零 persist）──
+  it('test31 无 DDL fallback 表：未知 INSERT 列在 SQLite mutation 前结构化拒绝，零持久化且错误脱敏', async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1 },
+      // 无 DDL fallback 表：runtime 物理列 row_id/item_name/quantity（拼音 slug）。
+      sheet_0: { uid: 'inventory', name: '背包物品表', sourceData: {}, content: [['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const sqlApplyScope = {
+      isolationKey: 'scope-unknown-col-e2e',
+      templateData: baseSnapshot,
+      templateDataWithRows: baseSnapshot,
+      activeSheetKeys: ['sheet_0'],
+      skippedSheets: [],
+    } as any;
+    const sql = "INSERT INTO inventory (xi_xiang_guan_wu_pin) VALUES ('错误列');";
+    const responses = [{
+      success: true,
+      attempt: 1,
+      aiResponse: `<tableEdit>${sql}</tableEdit>`,
+      tableEditText: sql,
+      job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
+    }];
+
+    mockSettings.discardUnauthorizedTableEditsEnabled = false;
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, {
+      saveTargetIndex: 3,
+      updateMode: 'auto_standard',
+      isImportMode: false,
+      sqlApplyScope,
+    });
+
+    // 结构化失败：SQL_INSERT_UNKNOWN_COLUMN_ACU，分类为可重试 model。
+    expect(result.success).toBe(false);
+    expect(result.errorCategory).toBe('model');
+    expect(result.error).toContain('SQL_INSERT_UNKNOWN_COLUMN_ACU');
+    // 脱敏：不得回显 VALUES 业务值 / 完整 SQL。
+    expect(result.error).not.toContain('错误列');
+    expect(result.error).not.toContain('INSERT INTO');
+    // 零持久化：不触发任何 frame/chat 提交。
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
+
   it('SQL 活动快照投影剔除非首列空表头表后，AI 猜测休眠表写入在 rebind 层即被拒绝', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     vi.mocked(isSqliteMode).mockReturnValue(true);

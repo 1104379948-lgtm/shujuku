@@ -192,6 +192,43 @@ export interface SheetColumnProjectionItem_ACU {
   hidden: boolean;
 }
 
+export const RUNTIME_EFFECTIVE_SCHEMA_KEY_ACU = '_acu_runtimeEffectiveSchema';
+
+/**
+ * 把源对象的 non-enumerable `_acu_runtimeEffectiveSchema` descriptor 复制到目标对象，
+ * 供投影副本（如 TemplateScope 隐藏列投影）保留 SQLite 实际 schema 证据。
+ *
+ * 语义约束：
+ * - 只复制 descriptor，不复制实现类型：本模块不反向依赖 data 层，
+ *   因此不 import RuntimeEffectiveSchema_ACU；值类型由调用方保证一致。
+ * - 保持 non-enumerable：runtime schema 不得进入 JSON 序列化 / V2 持久化边界。
+ * - 保持源 descriptor 的 writable/configurable 属性。
+ * - 不修改源对象；源对象无该字段时目标对象也不添加。
+ */
+export function copyRuntimeEffectiveSchemaDescriptor_ACU(
+  source: unknown,
+  target: Record<string, unknown>,
+): void {
+  if (!source || (typeof source !== 'object' && typeof source !== 'function')) return;
+  const sourceObject = source as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(sourceObject, RUNTIME_EFFECTIVE_SCHEMA_KEY_ACU)) return;
+  const descriptor = Object.getOwnPropertyDescriptor(sourceObject, RUNTIME_EFFECTIVE_SCHEMA_KEY_ACU);
+  if (!descriptor) return;
+  // 复制必须保留 non-enumerable（禁止泄漏进 JSON/persist）；
+  // 若源 descriptor 意外是 enumerable，仍强制 non-enumerable 以避免持久化泄漏。
+  Object.defineProperty(target, RUNTIME_EFFECTIVE_SCHEMA_KEY_ACU, {
+    ...descriptor,
+    enumerable: false,
+  });
+}
+
+/** 读取（只读访问）投影对象上的 runtime effective schema descriptor 值；无则返回 undefined。 */
+export function getRuntimeEffectiveSchema_ACU(sheet: unknown): unknown {
+  if (!sheet || (typeof sheet !== 'object' && typeof sheet !== 'function')) return undefined;
+  const value = (sheet as Record<string, unknown>)[RUNTIME_EFFECTIVE_SCHEMA_KEY_ACU];
+  return value;
+}
+
 /**
  * Resolves the persisted physical-column visibility contract without changing
  * the sheet's schema or row layout. Consumers must keep sourceIndex when they

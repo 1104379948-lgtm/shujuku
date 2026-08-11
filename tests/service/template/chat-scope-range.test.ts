@@ -99,6 +99,58 @@ describe('projectSheetForTemplateScope_ACU', () => {
     const runtimeSheet = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT);', ['row_id', 'a']);
     expect(range.projectSheetForTemplateScope_ACU(runtimeSheet as any, null, 'sheet_t')).toBe(runtimeSheet);
   });
+
+  it('test31 隐藏列创建副本时保留 non-enumerable runtime effective schema descriptor', () => {
+    const scopeSheet = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT);', ['row_id', 'a']);
+    const scope = { sheetKeys: new Set(['sheet_t']), sheets: { sheet_t: scopeSheet as any } };
+    const runtimeSheet: any = makeSheet(
+      'CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT, extra TEXT);',
+      ['row_id', 'a', 'extra'],
+    );
+    const runtimeSchema = {
+      source: 'fallback_missing',
+      diagnostics: ['DDL 缺失，已使用运行时 fallback schema。'],
+      effectiveDDL: 'CREATE TABLE t (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  a TEXT -- a\n  extra TEXT -- extra\n);',
+      columnMap: { mappings: [], sqlToDisplay: new Map() },
+      originalDdlDigest: 'digest',
+    };
+    Object.defineProperty(runtimeSheet, '_acu_runtimeEffectiveSchema', {
+      value: runtimeSchema,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+
+    const projected = range.projectSheetForTemplateScope_ACU(runtimeSheet, scope, 'sheet_t') as any;
+
+    // descriptor 被复制且保持 non-enumerable / 与源一致。
+    const descriptor = Object.getOwnPropertyDescriptor(projected, '_acu_runtimeEffectiveSchema');
+    expect(descriptor).toBeDefined();
+    expect(descriptor!.enumerable).toBe(false);
+    expect(descriptor!.writable).toBe(false);
+    expect(descriptor!.configurable).toBe(false);
+    expect(projected._acu_runtimeEffectiveSchema).toBe(runtimeSchema);
+    // JSON 序列化不包含该字段：不进入持久化边界。
+    expect(JSON.stringify(projected)).not.toContain('_acu_runtimeEffectiveSchema');
+    // 原对象不被修改。
+    expect(runtimeSheet._acu_runtimeEffectiveSchema).toBe(runtimeSchema);
+    expect(Object.getOwnPropertyDescriptor(runtimeSheet, '_acu_runtimeEffectiveSchema')!.enumerable).toBe(false);
+  });
+
+  it('无隐藏列时返回原对象，不复制 descriptor（不产生无意义副本）', () => {
+    const scopeSheet = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT);', ['row_id', 'a']);
+    const scope = { sheetKeys: new Set(['sheet_t']), sheets: { sheet_t: scopeSheet as any } };
+    const runtimeSheet: any = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT);', ['row_id', 'a']);
+    const runtimeSchema = { source: 'fallback_missing', diagnostics: [], effectiveDDL: 'CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT);', columnMap: { mappings: [], sqlToDisplay: new Map() }, originalDdlDigest: '' };
+    Object.defineProperty(runtimeSheet, '_acu_runtimeEffectiveSchema', {
+      value: runtimeSchema,
+      enumerable: false,
+    });
+
+    const projected = range.projectSheetForTemplateScope_ACU(runtimeSheet, scope, 'sheet_t');
+    expect(projected).toBe(runtimeSheet);
+    expect((projected as any)._acu_runtimeEffectiveSchema).toBe(runtimeSchema);
+  });
 });
 
 describe('projectTableDataForTemplateScope_ACU', () => {

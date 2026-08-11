@@ -13,7 +13,7 @@
  */
 import type { Sheet_ACU, TableDataObject_ACU } from '../../../shared/models/table-data';
 import { logWarn_ACU, parseTableTemplateJson_ACU } from '../../../shared/utils';
-import { getSheetColumnProjection_ACU } from '../../../shared/ddl-utils';
+import { copyRuntimeEffectiveSchemaDescriptor_ACU, getSheetColumnProjection_ACU } from '../../../shared/ddl-utils';
 import { getChatSheetGuideDataForIsolationKey_ACU } from './chat-scope-guide';
 
 /** 模板范围。null 表示范围未知，调用方应退化为不过滤。 */
@@ -140,10 +140,14 @@ export function projectSheetForTemplateScope_ACU(sheet: Sheet_ACU, scope: Templa
     if (!merged.some(value => value.toLowerCase() === name.toLowerCase())) merged.push(name);
   });
 
-  return {
+  const projected: Sheet_ACU = {
     ...sheet,
-    sourceData: { ...(sheet.sourceData || {}), hiddenPhysicalColumns: merged },
-  } as Sheet_ACU;
+    sourceData: { ...sheet.sourceData, hiddenPhysicalColumns: merged },
+  };
+  // 对象展开不会复制 non-enumerable 的 `_acu_runtimeEffectiveSchema` descriptor；
+  // 手动复制，使投影副本保留 SQLite 实际 schema 证据（不进入 JSON/persist）。
+  copyRuntimeEffectiveSchemaDescriptor_ACU(sheet, projected as unknown as Record<string, unknown>);
+  return projected;
 }
 
 /**

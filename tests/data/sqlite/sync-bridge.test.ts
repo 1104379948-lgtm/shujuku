@@ -792,5 +792,44 @@ describe('SyncBridge', () => {
         [2, '多云', '24'],
       ]);
     });
+
+    it('test31 两组真实中文表头 fallback 后，PRAGMA table_info 与 runtime effective columnMap 完全一致', () => {
+      const storyHeaders = ['row_id', '时间范围', '大纲概要', '事件意义', '相关人物', '相关物品', '编码索引'];
+      const placeHeaders = ['row_id', '地点名称', '地点类型', '地点描述', '所属区域', '关联事件', '剧情意义'];
+      const data = makeTableData({
+        sheet_gushidagang: makeSheet({
+          uid: 'gushidagangbiao',
+          name: '故事大纲表',
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '' },
+          content: [storyHeaders, ['1', '起点', '开局', '相遇', '主角', '信物', 'A001']],
+        }),
+        sheet_zhongyaodidian: makeSheet({
+          uid: 'zhongyaodidianbiao',
+          name: '重要地点表',
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '' },
+          content: [placeHeaders, ['1', '指挥室', '室内', '中央房间', '总部', '开场', '关键']],
+        }),
+      });
+      bridge.loadFromTableData(data);
+
+      const gushidagang = bridge.exportToTableData(makeMate()).sheet_gushidagang as Sheet_ACU & { _acu_runtimeEffectiveSchema?: any };
+      const zhongyaodidian = bridge.exportToTableData(makeMate()).sheet_zhongyaodidian as Sheet_ACU & { _acu_runtimeEffectiveSchema?: any };
+      const expectedStory = ['row_id', 'shi_jian_fan_wei', 'da_gang_gai_yao', 'shi_jian_yi_yi', 'xiang_guan_ren_wu', 'xiang_guan_wu_pin', 'bian_ma_suo_yin'];
+      const expectedPlace = ['row_id', 'di_dian_ming_cheng', 'di_dian_lei_xing', 'di_dian_miao_shu', 'suo_shu_qu_yu', 'guan_lian_shi_jian', 'ju_qing_yi_yi'];
+
+      // runtime effective schema 的 columnMap 就是 SQLite 实际列序。
+      expect(gushidagang._acu_runtimeEffectiveSchema.columnMap.mappings.map((m: any) => m.sqlName)).toEqual(expectedStory);
+      expect(zhongyaodidian._acu_runtimeEffectiveSchema.columnMap.mappings.map((m: any) => m.sqlName)).toEqual(expectedPlace);
+
+      // PRAGMA table_info 列序与 columnMap 完全一致：SQLite 实际 schema 是唯一权威。
+      for (const [tableName, expected] of [['gushidagangbiao', expectedStory], ['zhongyaodidianbiao', expectedPlace]] as const) {
+        const tableInfo = engine.getTableInfo(tableName);
+        expect(tableInfo.map(column => column.name)).toEqual(expected);
+      }
+
+      // 错误拼写绝不出现在 runtime schema 中。
+      expect(expectedStory).not.toContain('xi_xiang_guan_wu_pin');
+      expect(expectedPlace).not.toContain('di_di_an_lei_xing');
+    });
   });
 });

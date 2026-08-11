@@ -19,7 +19,37 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
   // 模板范围默认「未知」，即不过滤，保持既有用例语义。
   resolveTemplateScope_ACU: vi.fn(() => null),
   filterSheetKeysByTemplateScope_ACU: vi.fn((keys: string[], scope: any) => (scope ? keys.filter((k: string) => scope.sheetKeys.has(k)) : [...keys])),
-  projectSheetForTemplateScope_ACU: vi.fn((sheet: any) => sheet),
+  // 阶段 C：不再 mock 掉关键投影行为——同步复刻真实投影（隐藏列合并 +
+  // runtime schema descriptor 保留），prompt-prepare 的调用点是同步的。
+  projectSheetForTemplateScope_ACU: (sheet: any, scope: any, sheetKey: string) => {
+    if (!scope || !scope.sheets?.[sheetKey]) return sheet;
+    const scopeSheet = scope.sheets[sheetKey];
+    const runtimeColumns = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
+    const templateColumns = Array.isArray(scopeSheet?.content?.[0]) ? scopeSheet.content[0] : [];
+    const normalize = (value: unknown) => String(value ?? '').normalize('NFKC').trim().toLocaleLowerCase('en-US');
+    const outOfScope = runtimeColumns.filter((header: string) => {
+      const normalized = normalize(header);
+      if (!normalized || normalized === 'row_id') return false;
+      return !templateColumns.some((templateHeader: string) => normalize(templateHeader) === normalized);
+    });
+    if (outOfScope.length === 0) return sheet;
+    const existingHidden = Array.isArray(sheet.sourceData?.hiddenPhysicalColumns)
+      ? sheet.sourceData.hiddenPhysicalColumns.map((value: unknown) => String(value ?? '')).filter(Boolean)
+      : [];
+    const merged: string[] = [];
+    [...existingHidden, ...outOfScope].forEach((name: string) => {
+      if (!merged.some(value => normalize(value) === normalize(name))) merged.push(name);
+    });
+    const projected: Record<string, unknown> = {
+      ...sheet,
+      sourceData: { ...(sheet.sourceData || {}), hiddenPhysicalColumns: merged },
+    };
+    if (sheet && typeof sheet === 'object' && Object.prototype.hasOwnProperty.call(sheet, '_acu_runtimeEffectiveSchema')) {
+      const descriptor = Object.getOwnPropertyDescriptor(sheet, '_acu_runtimeEffectiveSchema');
+      if (descriptor) Object.defineProperty(projected, '_acu_runtimeEffectiveSchema', { ...descriptor, enumerable: false });
+    }
+    return projected;
+  },
 }));
 
 vi.mock('../../../src/shared/utils', () => ({
@@ -579,6 +609,140 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(text).toContain('wu_pin_ming_cheng TEXT');
     expect(text).toContain('-- | row_id | wu_pin_ming_cheng |');
     expect(text).not.toContain('INVALID_SUFFIX');
+  });
+
+  it('test31 无 DDL fallback + scope 隐藏列：Prompt 只出现 runtime actual 列，不出现错误拼写', () => {
+    // 模拟 chat-scope-range.projectSheetForTemplateScope_ACU 投影后的运行时表：
+    // sourceData 无 DDL（fallback），模板只声明了 row_id/时间范围/事件意义，
+    // 其余列（大纲概要/相关人物/相关物品/编码索引）被合并进 hiddenPhysicalColumns。
+    // 注意：无 DDL 表 getSheetColumnProjection_ACU 的 physicalName 回退到中文表头，
+    // 因此 hiddenPhysicalColumns 记录的是中文表头名（与 resolveOutOfScopeColumns_ACU 一致）。
+    const table: any = {
+      uid: 'gushidagangbiao',
+      name: '故事大纲表',
+      sourceData: {
+        hiddenPhysicalColumns: ['大纲概要', '相关人物', '相关物品', '编码索引'],
+      },
+      content: [
+        ['row_id', '时间范围', '大纲概要', '事件意义', '相关人物', '相关物品', '编码索引'],
+        ['1', '起点', '开局', '相遇', '主角', '信物', 'A001'],
+      ],
+      updateConfig: {},
+    };
+    // runtime effective schema 来自 SyncBridge 实际建表（拼音物理列）。
+    Object.defineProperty(table, '_acu_runtimeEffectiveSchema', {
+      enumerable: false,
+      value: {
+        source: 'fallback_missing',
+        diagnostics: ['DDL 缺失，已使用运行时 fallback schema。'],
+        effectiveDDL: 'CREATE TABLE gushidagangbiao (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  shi_jian_fan_wei TEXT, -- 时间范围\n  da_gang_gai_yao TEXT, -- 大纲概要\n  shi_jian_yi_yi TEXT, -- 事件意义\n  xiang_guan_ren_wu TEXT, -- 相关人物\n  xiang_guan_wu_pin TEXT, -- 相关物品\n  bian_ma_suo_yin TEXT -- 编码索引\n);',
+        columnMap: {
+          mappings: [
+            { sourceIndex: 0, displayName: 'row_id', sqlName: 'row_id', required: true },
+            { sourceIndex: 1, displayName: '时间范围', sqlName: 'shi_jian_fan_wei', required: false },
+            { sourceIndex: 2, displayName: '大纲概要', sqlName: 'da_gang_gai_yao', required: false },
+            { sourceIndex: 3, displayName: '事件意义', sqlName: 'shi_jian_yi_yi', required: false },
+            { sourceIndex: 4, displayName: '相关人物', sqlName: 'xiang_guan_ren_wu', required: false },
+            { sourceIndex: 5, displayName: '相关物品', sqlName: 'xiang_guan_wu_pin', required: false },
+            { sourceIndex: 6, displayName: '编码索引', sqlName: 'bian_ma_suo_yin', required: false },
+          ],
+        },
+      },
+    });
+
+    const text = formatTableForSqliteMode(table, 0, 'sheet_gushidagang', null, {
+      allowSeedRowsFallback: false,
+      runtimeTableName: 'gushidagangbiao',
+      authoredTableName: 'gushidagangbiao',
+    });
+
+    // 表名保留作者表名。
+    expect(text).toContain('CREATE TABLE gushidagangbiao');
+    // 只出现 runtime actual 列（可见列）。
+    expect(text).toContain('-- | row_id | shi_jian_fan_wei | shi_jian_yi_yi |');
+    expect(text).toContain('-- | 1 | 起点 | 相遇 |');
+    // 隐藏列从 DDL 与数据表头中剔除。
+    expect(text).not.toContain('da_gang_gai_yao');
+    expect(text).not.toContain('xiang_guan_ren_wu');
+    expect(text).not.toContain('xiang_guan_wu_pin');
+    expect(text).not.toContain('bian_ma_suo_yin');
+    // 错误拼写绝不出现在 Prompt。
+    expect(text).not.toContain('xi_xiang_guan_wu_pin');
+    // DDL 中保留列的中文注释（列语义不丢失）。
+    expect(text).toContain('shi_jian_fan_wei TEXT, -- 时间范围');
+  });
+
+  it('test31 组合链路：scope 投影隐藏列 + runtime schema 保留，Prompt 只含 SQLite 实际列', async () => {
+    // 运行时表带 _acu_runtimeEffectiveSchema（SyncBridge 导出，无 DDL fallback）。
+    const runtimeTable: any = {
+      uid: 'gushidagangbiao',
+      name: '故事大纲表',
+      sourceData: {},
+      content: [
+        ['row_id', '时间范围', '大纲概要', '事件意义', '相关人物', '相关物品', '编码索引'],
+        ['1', '起点', '开局', '相遇', '主角', '信物', 'A001'],
+      ],
+      updateConfig: {},
+    };
+    Object.defineProperty(runtimeTable, '_acu_runtimeEffectiveSchema', {
+      enumerable: false,
+      value: {
+        source: 'fallback_missing',
+        diagnostics: ['DDL 缺失，已使用运行时 fallback schema。'],
+        effectiveDDL: 'CREATE TABLE gushidagangbiao (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  shi_jian_fan_wei TEXT, -- 时间范围\n  da_gang_gai_yao TEXT, -- 大纲概要\n  shi_jian_yi_yi TEXT, -- 事件意义\n  xiang_guan_ren_wu TEXT, -- 相关人物\n  xiang_guan_wu_pin TEXT, -- 相关物品\n  bian_ma_suo_yin TEXT -- 编码索引\n);',
+        columnMap: {
+          mappings: [
+            { sourceIndex: 0, displayName: 'row_id', sqlName: 'row_id', required: true },
+            { sourceIndex: 1, displayName: '时间范围', sqlName: 'shi_jian_fan_wei', required: false },
+            { sourceIndex: 2, displayName: '大纲概要', sqlName: 'da_gang_gai_yao', required: false },
+            { sourceIndex: 3, displayName: '事件意义', sqlName: 'shi_jian_yi_yi', required: false },
+            { sourceIndex: 4, displayName: '相关人物', sqlName: 'xiang_guan_ren_wu', required: false },
+            { sourceIndex: 5, displayName: '相关物品', sqlName: 'xiang_guan_wu_pin', required: false },
+            { sourceIndex: 6, displayName: '编码索引', sqlName: 'bian_ma_suo_yin', required: false },
+          ],
+        },
+      },
+    });
+    mockCurrentJsonTableData = { sheet_gushidagang: runtimeTable };
+
+    // 模板只声明 row_id/时间范围/事件意义 → scope 投影会把其余列并入 hiddenPhysicalColumns。
+    const scopeTemplate = {
+      mate: { type: 'acu', version: 1 },
+      sheet_gushidagang: {
+        uid: 'gushidagangbiao',
+        name: '故事大纲表',
+        sourceData: { note: '' },
+        content: [['row_id', '时间范围', '事件意义']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+
+    const result = await prepareAIInput_ACU([], 'standard', null, {
+      templateScope: {
+        sheetKeys: new Set(['sheet_gushidagang']),
+        sheets: { sheet_gushidagang: scopeTemplate.sheet_gushidagang },
+      },
+      sqlApplyScope: {
+        isolationKey: 'scope-test31-chain',
+        templateData: scopeTemplate,
+        templateDataWithRows: scopeTemplate,
+      },
+    });
+
+    expect(result).not.toBeNull();
+    const text = result!.tableDataText;
+    // 表名保留作者表名。
+    expect(text).toContain('CREATE TABLE gushidagangbiao');
+    // Prompt 只出现 runtime actual 可见列。
+    expect(text).toContain('-- | row_id | shi_jian_fan_wei | shi_jian_yi_yi |');
+    expect(text).toContain('-- | 1 | 起点 | 相遇 |');
+    // 隐藏列与错误拼写不出现。
+    expect(text).not.toContain('da_gang_gai_yao');
+    expect(text).not.toContain('xiang_guan_ren_wu');
+    expect(text).not.toContain('xiang_guan_wu_pin');
+    expect(text).not.toContain('xi_xiang_guan_wu_pin');
   });
 
   it('执行期 fallback 经真实 export 和 runtime provider 后，prompt 仍使用实际 schema', async () => {

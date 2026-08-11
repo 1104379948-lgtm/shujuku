@@ -22,7 +22,7 @@ import { applyContextTagFilters_ACU } from '../../runtime/helpers-remaining';
 import { isSqliteMode } from '../../table/storage-mode';
 import { ensureStorageProviderReady_ACU, getStorageRuntimeHealth_ACU } from '../../table/table-storage-strategy';
 import { parseDDLTableName, rebindCreateTableName_ACU, resolveEffectiveDDL, type EffectiveDDLColumnMap_ACU } from '../../../data/sqlite/schema-mapper';
-import { getSheetColumnProjection_ACU, projectSheetDDLForVisibleColumns_ACU, projectSheetRowToVisibleColumns_ACU } from '../../../shared/ddl-utils';
+import { getSheetColumnProjection_ACU, projectSheetDDLForVisibleColumns_ACU } from '../../../shared/ddl-utils';
 import { getPhysicalTableNameForSheet_ACU } from '../../../shared/sheet-identity';
 import { buildSheetTableAliasMap_ACU } from '../../../shared/sql-read-resolver';
 import { decodeSqlIdentifier_ACU } from '../../../shared/sql-mutation-table-rebind';
@@ -578,28 +578,59 @@ export function formatTableForSqliteMode(
     let text = '';
     const projection = getSheetColumnProjection_ACU(table);
     const hasHiddenPhysicalColumns = projection.hiddenPhysicalColumns.length > 0;
-    const visibleDDL = projectSheetDDLForVisibleColumns_ACU(table);
-    const promptSchemaTable = hasHiddenPhysicalColumns
+    const visibleSourceIndexes = new Set(projection.visibleColumns.map(column => column.sourceIndex));
+    // 显式 DDL + 隐藏列场景：resolveInsertColumnMappings 会用完整表头对齐 DDL，
+    // 隐藏列表头（如「旧备注」）有业务值时会被误判为「没有对应的 DDL 列」而抛错。
+    // 因此先构造仅含可见列的投影副本再 resolve，使 buildExplicitColumnMap_ACU
+    // 只看到可见列（与旧实现「先压缩后 resolve」同语义，但只用于 resolve 阶段，
+    // 不改变 runtime schema 权威与数据行原始布局）。
+    // 投影副本构建时记录「投影下标 → 原表 sourceIndex」映射，供 resolve 结果回映射。
+    const projectedIndexToOriginal: number[] = projection.visibleColumns.map(column => column.sourceIndex);
+    const projectedTableForResolve = (hasHiddenPhysicalColumns && !table?._acu_runtimeEffectiveSchema)
         ? {
             ...table,
-            sourceData: { ...table.sourceData, ddl: visibleDDL, hiddenPhysicalColumns: [] },
-            content: (Array.isArray(table.content) ? table.content : []).map((row: unknown[]) =>
-                projectSheetRowToVisibleColumns_ACU(table, row)),
+            sourceData: { ...(table.sourceData || {}), hiddenPhysicalColumns: undefined },
+            content: [
+                table.content[0].filter((_: unknown, index: number) => visibleSourceIndexes.has(index)),
+                ...(Array.isArray(table.content) ? table.content.slice(1) : []).map((row: unknown[]) =>
+                    Array.isArray(row) ? row.filter((_: unknown, index: number) => visibleSourceIndexes.has(index)) : row),
+            ],
         }
         : table;
     const runtimeSchema = table?._acu_runtimeEffectiveSchema;
-    // runtime effective schema controls columns; only its CREATE TABLE name is
-    // replaced with the author-facing SQL contract shown to AI.
-    const resolvedDDL = (!hasHiddenPhysicalColumns && runtimeSchema)
-        || resolveEffectiveDDL(promptSchemaTable, table.uid || sheetKey, options.runtimeTableName);
-    let ddl = hasHiddenPhysicalColumns
-        ? resolvedDDL.effectiveDDL
-        : projectSheetDDLForVisibleColumns_ACU(table, resolvedDDL.effectiveDDL);
+    // runtime effective schema（来自 SyncBridge 实际建表）是唯一权威：无 DDL fallback
+    // 表或执行失败回退表都必须以此为准，禁止对模板/投影副本重新 resolve fallback，
+    // 否则可能生成与既有 SQLite 表不同的列身份（test31 列漂移根因 3.1）。
+    const resolvedDDL = runtimeSchema
+        ? {
+            effectiveDDL: runtimeSchema.effectiveDDL,
+            columnMap: runtimeSchema.columnMap,
+            source: runtimeSchema.source,
+            diagnostics: runtimeSchema.diagnostics,
+        }
+        : (() => {
+            const resolved = resolveEffectiveDDL(projectedTableForResolve, table.uid || sheetKey, options.runtimeTableName);
+            // 投影 resolve 的 sourceIndex 是投影下标；回映射到原表下标，
+            // 使 columnMappings 过滤与行取值都基于原表物理列布局。
+            if (!hasHiddenPhysicalColumns) return resolved;
+            return { ...resolved, columnMap: { ...resolved.columnMap, mappings: resolved.columnMap.mappings.map(mapping => ({
+                ...mapping,
+                sourceIndex: projectedIndexToOriginal[mapping.sourceIndex] ?? mapping.sourceIndex,
+            })) } };
+        })();
+    let ddl = resolvedDDL.effectiveDDL;
+    // 隐藏列只对 runtime DDL 做列集合投影；禁止重新生成 fallback schema。
+    // 列名绝不从作者 note/trigger/旧 DDL 或重新 slug 的表头覆盖 runtime 列。
+    if (hasHiddenPhysicalColumns) {
+        ddl = projectSheetDDLForVisibleColumns_ACU(table, ddl);
+    }
     const promptTableName = options.authoredTableName || options.runtimeTableName;
     if (promptTableName) {
         ddl = rebindCreateTableName_ACU(ddl, promptTableName);
     }
-    const visiblePhysicalNames = new Set(projection.visibleColumns.map(column => column.physicalName.toLowerCase()));
+    // 隐藏列集合以投影为准，按权威列序 sourceIndex 过滤 runtime columnMap：
+    // 无 DDL fallback 表的 runtime sqlName 是拼音、而投影 physicalName 是中文表头，
+    // 按名称匹配会把全部列过滤掉；sourceIndex 是 SQLite 实际建表与表头之间的唯一对齐轴。
     const allowSeedRowsFallback = options.allowSeedRowsFallback !== false;
 
     // 输出 DDL
@@ -625,9 +656,10 @@ export function formatTableForSqliteMode(
     const seedRows = allowSeedRowsFallback ? getEffectiveSeedRowsForSheet_ACU(sheetKey, { guideData, allowTemplateFallback: true }) : [];
     const isUsingSeedRows = (allRows.length === 0 && seedRows.length > 0);
     const sourceRows = (allRows.length > 0) ? allRows : (seedRows.length > 0 ? seedRows : []);
-    const effectiveAllRows = hasHiddenPhysicalColumns
-        ? sourceRows.map((row: unknown[]) => projectSheetRowToVisibleColumns_ACU(table, row))
-        : sourceRows;
+    // 数据行必须保持原始物理列布局：columnMappings 按 runtime columnMap.sourceIndex
+    // 从原始行取值（见下方 orderedValues）。若先按 visibleColumns 压缩行，再用
+    // sourceIndex 取值会双重重映射错位（test31 场景第 3 个值被读成 undefined）。
+    const effectiveAllRows = sourceRows;
 
     if (effectiveAllRows.length === 0) {
         if (table.sourceData?.initNode) {
@@ -643,7 +675,7 @@ export function formatTableForSqliteMode(
 
     const columnMappings: EffectiveDDLColumnMap_ACU['mappings'] = projection.hiddenPhysicalColumns.length === 0
         ? resolvedDDL.columnMap.mappings
-        : resolvedDDL.columnMap.mappings.filter((mapping: EffectiveDDLColumnMap_ACU['mappings'][number]) => visiblePhysicalNames.has(mapping.sqlName.toLowerCase()));
+        : resolvedDDL.columnMap.mappings.filter((mapping: EffectiveDDLColumnMap_ACU['mappings'][number]) => visibleSourceIndexes.has(mapping.sourceIndex));
     const headers = columnMappings.map(mapping => mapping.sqlName);
     const sendRowsSqlTemplate = typeof table.updateConfig?.sendRowsSqlTemplate === 'string'
         ? table.updateConfig.sendRowsSqlTemplate.trim()

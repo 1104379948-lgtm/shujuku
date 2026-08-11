@@ -613,3 +613,73 @@ describe('sql mutation column rebind', () => {
     );
     expect(result).toBe('INSERT INTO quanjushujubiao (current_location) SELECT prev_scene_time FROM quanjushujubiao WHERE row_id = 1');
   });
+
+  // ── 阶段 E：requireKnownInsertColumns opt-in 未知 INSERT 列 gate ──
+  it('INSERT 列清单命中 registry 未知列时，requireKnownInsertColumns 抛 SQL_INSERT_UNKNOWN_COLUMN_ACU 且不含 VALUES', () => {
+    const aliases = new Map([
+      ['beibaowupinbiao', new Map([
+        ['row_id', 'row_id'],
+        ['item_name', 'item_name'],
+        ['quantity', 'quantity'],
+      ])],
+    ]);
+    // opt-in 关闭（默认）：未知列原样放行，保持 replay/历史兼容。
+    const [lenient] = rebindSqlMutationColumnsByTarget_ACU(
+      ["INSERT INTO beibaowupinbiao (xi_xiang_guan_wu_pin) VALUES ('错误列')"],
+      aliases,
+    );
+    expect(lenient).toBe("INSERT INTO beibaowupinbiao (xi_xiang_guan_wu_pin) VALUES ('错误列')");
+    // opt-in 开启：结构化拒绝，错误只含目标表/未知列/允许列，不含 VALUES。
+    let caughtError: unknown;
+    try {
+      rebindSqlMutationColumnsByTarget_ACU(
+        ["INSERT INTO beibaowupinbiao (xi_xiang_guan_wu_pin) VALUES ('错误列')"],
+        aliases,
+        { requireKnownInsertColumns: true },
+      );
+    } catch (error: unknown) {
+      caughtError = error;
+    }
+    expect(caughtError).toBeTruthy();
+    const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
+    expect(message).toContain('SQL_INSERT_UNKNOWN_COLUMN_ACU');
+    expect(message).toContain('xi_xiang_guan_wu_pin');
+    expect(message).toContain('beibaowupinbiao');
+    // 脱敏：不得回显 VALUES 业务值与完整 SQL。
+    expect(message).not.toContain('错误列');
+    expect(message).not.toContain('INSERT INTO');
+    expect(message).not.toContain('VALUES');
+  });
+
+  it('INSERT 列清单命中 registry 已知列（含别名）时不触发未知列 gate，并正常重绑', () => {
+    const aliases = new Map([
+      ['beibaowupinbiao', new Map([
+        ['row_id', 'row_id'],
+        ['item_name', 'item_name'],
+        ['wu_pin_ming_cheng', 'item_name'],
+      ])],
+    ]);
+    const [result] = rebindSqlMutationColumnsByTarget_ACU(
+      ["INSERT INTO beibaowupinbiao (wu_pin_ming_cheng) VALUES ('药水')"],
+      aliases,
+      { requireKnownInsertColumns: true },
+    );
+    expect(result).toBe("INSERT INTO beibaowupinbiao (item_name) VALUES ('药水')");
+  });
+
+  it('UPDATE SET 不受 requireKnownInsertColumns 影响（gate 仅作用于 INSERT/REPLACE 列清单）', () => {
+    const aliases = new Map([
+      ['beibaowupinbiao', new Map([
+        ['row_id', 'row_id'],
+        ['item_name', 'item_name'],
+      ])],
+    ]);
+    // UPDATE 里未知列不触发 INSERT gate（保持既有 no such column 语义，不引入新错误面）。
+    const [result] = rebindSqlMutationColumnsByTarget_ACU(
+      ["UPDATE beibaowupinbiao SET xi_xiang_guan_wu_pin = 'x' WHERE row_id = 1"],
+      aliases,
+      { requireKnownInsertColumns: true },
+    );
+    expect(result).toBe("UPDATE beibaowupinbiao SET xi_xiang_guan_wu_pin = 'x' WHERE row_id = 1");
+  });
+

@@ -1300,7 +1300,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                     normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''),
                     baseSnapshot as any,
                     capturedSqlApplyScope?.templateData,
-                    { requireKnownTables: true, targetSheetKeys: activeSheetKeySet },
+                    { requireKnownTables: true, targetSheetKeys: activeSheetKeySet, requireKnownInsertColumns: true },
                 );
                 // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
                 assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
