@@ -17,6 +17,15 @@
 | 1.7 | v1 缺 requestId | 协议校验 | 拒绝 | 应重试 | service.test.ts:170-181 |
 | 1.8 | 未知表/未知列/不存在的 sheetKey | 编译 | 拒绝，不猜测 | 应零写入阻断 | compiler.ts:assertPatchTargetsCurrentSheet_ACU:165-175；compiler.test.ts:465-481 |
 | 1.9 | 重复表头 / 表名 canonical 冲突 / row_id 作业务表头 | 编译 | 拒绝 | 应零写入阻断 | compiler.test.ts:126-167 |
+| 1.10 | v3：顶层输出 `operations[]`（含空数组） | 协议校验 | 拒绝（v3 只能有单个 `result` 信封） | 应重试 | service.ts:validateTemplateAssistantDraftV3_ACU；compiler.test.ts:530+ |
+| 1.11 | v3：`result.action` 不是 replace/create/delete | 协议校验 | 拒绝 | 应重试 | service.ts:validateTemplateAssistantDraftV3_ACU |
+| 1.12 | v3：replace 缺 sheetKey / create 带 sheetKey / delete 带 sheet | 协议校验 | 拒绝（信封字段互斥） | 应重试 | service.ts:validateTemplateAssistantDraftV3_ACU:1404-1436 |
+| 1.13 | v3：replace/create 的 sheet 缺必填字段 / 携带 uid/orderNo | 协议校验 | 拒绝 | 应重试 | service.ts:validateTemplateAssistantDraftV3_ACU；compiler.test.ts:578-591 |
+| 1.14 | v3：replace/delete 目标表不存在 | 编译 | 拒绝，不猜测 | 应零写入阻断 | compiler.ts:compileTemplateAssistantDraftV3_ACU ensureSheetExists_ACU；compiler.test.ts:553-563 |
+| 1.15 | v3：create 表名 canonical 重复 | 编译 | 拒绝 | 应零写入阻断 | compiler.ts:createUniqueSheetKey_ACU；compiler.test.ts:659-666 |
+| 1.16 | v3：create insertAfterSheetKey 不存在 | 编译 | 拒绝 | 应零写入阻断 | compiler.ts:insertAfterAnchor_ACU；compiler.test.ts:713-721 |
+| 1.17 | v3：未目标表因「缺席」被误删 | 编译 | **未目标表保持不变**（缺席不等于删除） | 应零写入阻断 | compiler.ts:compileTemplateAssistantDraftV3_ACU；compiler.test.ts:544-551 |
+| 1.18 | v3：完整 Sheet 内容契约（row_id 首列/行宽一致/DDL 匹配/row_id 非空不重复） | 编译 | 任一不满足即拒绝 | 应零写入阻断 | compiler.ts:normalizeV3FullSheet_ACU；compiler.test.ts:592-641 |
 
 ## 2. 低风险操作（应低阻力通过）
 
@@ -53,6 +62,9 @@
 | 4.5 | 畸形 migrationIntent（缺字段） | preflight | **不接受快路径**，拒绝 | 应零写入阻断 | service.test.ts:262-281 |
 | 4.6 | schema/DDL 高风险项 | UI | 确认前 `canApplyTurn=false` | 应要求确认 | useVisualizerAssistant.test.ts:266-289 |
 | 4.7 | 跨表变更派生高风险确认 | UI | 确认前不能应用 | 应要求确认 | useVisualizerAssistant.test.ts:291-331 |
+| 4.8 | v3：replace 导致 row_id 集合缩减（未请求删行） | 编译+UI | 产生 `row_id_set_reduction` 守卫，UI 确认前不能应用 | 应要求确认 | compiler.ts:collectV3RowIdGuardFindings_ACU；service.ts:session.v3RowIdGuardFindings |
+| 4.9 | v3：非当前表 replace/delete | UI | 目标不是当前选中表，必须展示真实目标并确认 | 应要求确认 | useVisualizerAssistant.ts:applyTurnDraft |
+| 4.10 | v3：payload 上下文预算超额 | 生成 | 阻止请求，不静默截断，failureKind=context_budget 且不可重试 | 应零写入阻断 | service.ts:assertV3ContextBudget_ACU / TEMPLATE_ASSISTANT_V3_CONTEXT_BUDGET_CHARS_ACU；service.test.ts v3 上下文预算守卫组 |
 
 ## 5. 空表模板保存（P0 核心）
 
@@ -87,6 +99,11 @@
 | 7.6 | repair 重试耗尽 | 会话 | 透出结构化 lastFailure（分类+原文） | — | service.test.ts:627-651 |
 | 7.7 | `operations=[]` 且用户要求修改 | UI | stopReason=empty_operations → “AI 未生成任何修改（可继续重试）”，可一键重新生成，不伪装成功 | — | useVisualizerAssistant.ts:368-376, 778-786；use-visualizer-assistant.test.ts:624-676 |
 | 7.8 | repair prompt 只修失败 operation | 会话 | 二次请求不再重生成整份草稿 | 应自动归一 | service.ts:buildSessionRoundUserRequest_ACU（repair 分支） |
+| 7.9 | v3：无 result 的 noop（会话失败回退） | 会话 | finalDraft 为 v3 信封（无 result），不可应用，stopReason 语义不变 | — | service.ts:buildTemplateAssistantNoopDraftV3_ACU |
+| 7.10 | v3：默认新会话 protocolVersion=3、mode=single_sheet_full_replace | 生成 | 未显式指定协议时走 v3 payload/提示词 | — | service.ts:buildTemplateAssistantMessages_ACU / buildUserPromptPayload_ACU |
+| 7.11 | 协议一致性门禁：请求协议与 AI 输出协议必须一致 | 生成 | 默认 v3 请求收到 v2 输出 → 拒绝（validate）；显式 v2 请求允许 v1/v2 输出 | 应重试 | service.ts:generateTemplateAssistantDraft_ACU（protocolAccepted）；service.test.ts 协议一致性门禁组 |
+| 7.12 | v3 上下文预算超额分类 | 会话 | failureKind=context_budget，不可重试、不消耗 repairRetries | — | service.ts:runTemplateAssistantSession_ACU catch（isContextBudgetFailure）；service.test.ts 预算守卫组 |
+| 7.13 | 核心协议卡按协议版本分支 | 提示词 | v3 自定义 segments 追加 v3 卡（无 patch_sheet_* 术语）；v2 追加 v2 卡；已含标记不重复 | — | service.ts:resolveAssistantSystemPrompt_ACU / buildCoreProtocolCardV3_ACU；prompt-placeholders.test.ts 核心协议卡组 |
 
 ## 8. 真实宿主手工验收（阶段 G，需人工）
 
@@ -101,9 +118,9 @@
 
 ## 9. 门禁执行记录（阶段 G）
 
-- [ ] `pnpm vitest run`（全量，基线 6241 passed / 28 skipped @ C/D/E 后）
-- [ ] `pnpm typecheck`（tsc --noEmit）
-- [ ] `pnpm build`（rollup 构建，产物核对）
+- [x] `pnpm vitest run`（全量：6497 passed / 28 skipped / 0 failed，v3 升级后）
+- [x] `pnpm typecheck`（tsc --noEmit，v3 升级后通过）
+- [x] `pnpm build`（rollup 构建，dist/index.bundle.js 生成）
 - [ ] 文档漂移守护：`docs/自定义表建表指南.md:168-176` 操作对照表逐项 vs `service.ts:1235-1245` 白名单核对（已人工核对一致：update_config/source_data/content/schema/renameColumns/addColumns/deleteColumns/ddl/migrationIntent/locks/global_injection 全在 v2 白名单内，无 `<tableEdit>`）
 - [ ] 真实宿主空表保存 ≥3 次（矩阵 8.1，人工）
 - [ ] 真实宿主已有数据保存 ≥3 次（矩阵 8.2，人工）

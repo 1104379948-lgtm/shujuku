@@ -104,6 +104,7 @@ function buildInput_ACU() {
     tempData: buildTempData_ACU(),
     currentSheetKey: 'sheet_a',
     userRequest: '新增一列 备注',
+    protocolVersion: 2,
     priorTurns: [
       { user: '帮我看看当前表', assistant: '好的，当前表为 A表' },
     ],
@@ -201,7 +202,7 @@ describe('buildAssistantPlaceholderContext_ACU 映射', () => {
 
 describe('伪 role 模板结构', () => {
   it('第 1 张 SYSTEM 卡包含完整标签字面量与 9 个顶层键清单', () => {
-    const segments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    const segments = buildPseudoRoleTemplateAssistantPromptSegments_ACU(2);
     const first = segments[0]!;
     expect(first.role).toBe('SYSTEM');
     expect(first.content).toContain('<templateAssistantDraft>');
@@ -218,7 +219,7 @@ describe('伪 role 模板结构', () => {
   });
 
   it('第 3 张 USER 协议卡包含全部 11 个白名单操作名且不含 patch_sheet_ddl', () => {
-    const segments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    const segments = buildPseudoRoleTemplateAssistantPromptSegments_ACU(2);
     const third = segments[2]!;
     expect(third.role).toBe('USER');
     const whitelist = [
@@ -253,7 +254,7 @@ describe('伪 role 模板结构', () => {
   });
 
   it('10 卡，恰 1 张含 $1 且下标 8，末条 role 为 assistant 且不含 draft 开标签，role 交替', () => {
-    const segments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    const segments = buildPseudoRoleTemplateAssistantPromptSegments_ACU(2);
     expect(segments).toHaveLength(10);
 
     const dollarOneIndexes = segments
@@ -396,7 +397,7 @@ describe('buildTemplateAssistantMessages_ACU 消息组装', () => {
 
 
   it('伪 role 模板 + priorTurns → 提示词组整体放最前（预填充卡位于词组内），历史与本轮 USER 紧随其后', () => {
-    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU(2);
     const messages = buildTemplateAssistantMessages_ACU(buildInput_ACU() as any, 'acu-struct:fp');
     // 结构：提示词组整体(10) + 历史(2) + 本轮 USER(1) = 13
     expect(messages).toHaveLength(13);
@@ -425,7 +426,7 @@ describe('buildTemplateAssistantMessages_ACU 消息组装', () => {
 });
 
   it('首轮（无 priorTurns）：完整伪 role 结构，含卡 9 包装语，末条为预填充卡', () => {
-    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU(2);
     const messages = buildTemplateAssistantMessages_ACU(
       { ...buildInput_ACU(), priorTurns: [] } as any,
       'acu-struct:fp',
@@ -442,7 +443,7 @@ describe('buildTemplateAssistantMessages_ACU 消息组装', () => {
   });
 
   it('多轮：伪 role 提示词组整体放最顶（含卡 9 包装语与卡 10 预填充），真实历史按 user→assistant 顺序，本轮需求作为最后 USER 消息', () => {
-    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU(2);
     const messages = buildTemplateAssistantMessages_ACU(
       {
         ...buildInput_ACU(),
@@ -474,8 +475,58 @@ describe('buildTemplateAssistantMessages_ACU 消息组装', () => {
 
 
   it('多轮：不追加完整 payload（不存在含 userRequest 的 JSON 消息）', () => {
-    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU();
+    settings_ACU.templateAssistantPromptSegments = buildPseudoRoleTemplateAssistantPromptSegments_ACU(2);
     const messages = buildTemplateAssistantMessages_ACU(buildInput_ACU() as any, 'acu-struct:fp');
     const userPayloadCount = messages.filter((m) => m.role === 'user' && m.content.includes('"userRequest"')).length;
     expect(userPayloadCount).toBe(0);
   });
+
+describe('resolveAssistantSystemPrompt_ACU 核心协议卡按协议版本分支', () => {
+  beforeEach(() => {
+    settings_ACU.templateAssistantPromptSegments = [];
+  });
+
+  it('v3 自定义 segments：追加 v3 核心卡，不注入 v2 patch_sheet_* 术语', async () => {
+    const { resolveAssistantSystemPrompt_ACU } = await import('../../../src/service/template-assistant/service');
+    const resolved = resolveAssistantSystemPrompt_ACU(
+      [{ role: 'SYSTEM', content: '自定义规则', deletable: false }],
+      null,
+      3,
+    );
+    const joined = resolved.map((m: any) => m.content).join('\n');
+    expect(joined).toContain('[ACU 改表助手核心协议]');
+    expect(joined).toContain('v3 单表完整替换协议');
+    expect(joined).toContain('result.action');
+    expect(joined).not.toContain('patch_sheet_update_config');
+    expect(joined).not.toContain('operations[i]');
+    expect(joined).not.toContain('patch_sheet_schema');
+  });
+
+  it('v2 自定义 segments：追加 v2 核心卡（patch_sheet_* 路由），不注入 v3 术语', async () => {
+    const { resolveAssistantSystemPrompt_ACU } = await import('../../../src/service/template-assistant/service');
+    const resolved = resolveAssistantSystemPrompt_ACU(
+      [{ role: 'SYSTEM', content: '自定义规则', deletable: false }],
+      null,
+      2,
+    );
+    const joined = resolved.map((m: any) => m.content).join('\n');
+    expect(joined).toContain('[ACU 改表助手核心协议]');
+    expect(joined).toContain('patch_sheet_update_config');
+    expect(joined).toContain('operations');
+    expect(joined).not.toContain('v3 单表完整替换协议');
+  });
+
+  it('用户自定义 segments 已含核心协议标记时不重复追加', async () => {
+    const { resolveAssistantSystemPrompt_ACU } = await import('../../../src/service/template-assistant/service');
+    const resolved = resolveAssistantSystemPrompt_ACU(
+      [{ role: 'SYSTEM', content: '[ACU 改表助手核心协议]\n我自己的规则', deletable: false }],
+      null,
+      3,
+    );
+    expect(resolved).toHaveLength(1);
+    const content = resolved[0]?.content || '';
+    // 标记只出现一次（用户自带，未再追加）
+    expect(content.match(/\[ACU 改表助手核心协议\]/g)).toHaveLength(1);
+  });
+});
+

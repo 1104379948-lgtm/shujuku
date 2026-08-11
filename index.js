@@ -36586,6 +36586,58 @@ $CONTENT
         return result;
     }
 
+    /** 返回空业务表头的 1-based 列号（第 2 列及以后）。无空表头返回 []。 */
+    function findEmptyBusinessHeaderIndexes_ACU(sheet) {
+        if (!sheet || typeof sheet !== 'object')
+            return [];
+        const headerRow = sheet.content?.[0];
+        if (!Array.isArray(headerRow))
+            return [];
+        const emptyIndexes = [];
+        for (let index = 1; index < headerRow.length; index += 1) {
+            const value = headerRow[index];
+            const isEmpty = value === null || value === undefined
+                || String(value).normalize('NFKC').trim() === '';
+            if (isEmpty)
+                emptyIndexes.push(index + 1); // 1-based 列号
+        }
+        return emptyIndexes;
+    }
+    /** 判断一张模板表在 SQL 活动路径中是否有效（非首列空表头 → false）。DDL 有无不改变判定。 */
+    function isSqlActiveTemplateSheet_ACU(sheet) {
+        return findEmptyBusinessHeaderIndexes_ACU(sheet).length === 0;
+    }
+    /**
+     * 从模板数据对象中投影出“SQL 活动表”子集：非 sheet_* 元数据原样保留，
+     * 非首列空表头的模板表被剔除（休眠）。不修改传入对象。
+     * 返回 { data, skippedSheets }，skippedSheets 只含 sheetKey/显示名/空列序号（脱敏）。
+     */
+    function projectSqlActiveTemplateData_ACU(data) {
+        if (!data || typeof data !== 'object') {
+            return { data: (data || {}), skippedSheets: [] };
+        }
+        const out = {};
+        const skippedSheets = [];
+        Object.keys(data).forEach(key => {
+            const value = data[key];
+            if (!key.startsWith('sheet_')) {
+                out[key] = value;
+                return;
+            }
+            const emptyHeaderIndexes = findEmptyBusinessHeaderIndexes_ACU(value);
+            if (emptyHeaderIndexes.length > 0) {
+                skippedSheets.push({
+                    sheetKey: key,
+                    name: String(value?.name ?? key),
+                    emptyHeaderIndexes,
+                });
+                return;
+            }
+            out[key] = value;
+        });
+        return { data: out, skippedSheets };
+    }
+
     /**
      * data/sqlite/sync-bridge.ts — SQLite ↔ ChatMessage 双向同步桥
      *
@@ -36691,7 +36743,9 @@ $CONTENT
             }
             this.engine.run(META_TABLE_DDL);
             this._ensureMetaSchema();
-            // 遍历所有 sheet
+            // 遍历所有 sheet。非首列空业务表头的模板表是 SQL 活动路径中的休眠表：
+            // 不建表、不灌数据（既有物理表与历史数据保留，修正表头后由模板恢复参与），
+            // 避免坏表头在 resolveEffectiveDDL 触发 fallback DDL 错误导致整个 hydrate 失败。
             const sheetKeys = Object.keys(workingData).filter(k => k.startsWith('sheet_'));
             const physicalTableNames = resolvePhysicalTableNames_ACU(workingData);
             logDebug_ACU(`[SyncBridge] 开始加载 ${sheetKeys.length} 张表到 SQLite`);
@@ -36699,6 +36753,10 @@ $CONTENT
                 const sheet = workingData[key];
                 if (!sheet || !Array.isArray(sheet.content))
                     continue;
+                if (!isSqlActiveTemplateSheet_ACU(sheet)) {
+                    logDebug_ACU(`[SyncBridge] 跳过休眠表 ${key} (${sheet.name})：非首列空业务表头，SQL 活动路径中视为不存在。`);
+                    continue;
+                }
                 try {
                     this._loadSheet(key, sheet, options.allowRuntimeDdlFallback === true, physicalTableNames.get(key), legacyDuplicateRowIds);
                 }
@@ -55036,6 +55094,7 @@ $CONTENT
         const { aliases: columnAliases, conflicts: columnConflicts, conflictCandidates } = buildSheetColumnAliasMap_ACU(targetData, {
             supplementalSources: [templateSource],
             skipInvalidSupplementalSources: true,
+            targetSheetKeys: options.targetSheetKeys,
         });
         // 冲突别名 → 目标表 → 冲突集：命中即结构化拒绝（fail closed），不原样放行。
         const ambiguousByTarget = new Map();
@@ -55104,16 +55163,37 @@ $CONTENT
     }
     /** 在 AI 请求前捕获建表与别名解析所需的不可变模板快照。 */
     function captureSqlTableApplyScope_ACU(options) {
-        const templateData = resolveChatTemplateData_ACU({ ...options, stripSeedRows: true });
-        const templateDataWithRows = resolveChatTemplateData_ACU({ ...options, stripSeedRows: false });
-        if (!templateData || !templateDataWithRows) {
+        const rawTemplateData = resolveChatTemplateData_ACU({ ...options, stripSeedRows: true });
+        const rawTemplateDataWithRows = resolveChatTemplateData_ACU({ ...options, stripSeedRows: false });
+        if (!rawTemplateData || !rawTemplateDataWithRows) {
             throw new Error(`[SqlTableService] 无法捕获提交模板上下文 (isolationKey=${options.isolationKey || 'default'})。`);
         }
+        // 非首列空业务表头的模板表在 SQL 活动路径中休眠跳过：
+        // stripped 与 unstripped 两份快照必须共享同一有效 key 集合（带行版本只能多数据行，
+        // 不能多出被跳过的表），使 Prompt、调度与提交使用同一份表集合，避免请求期间模板变化竞态。
+        const projected = projectSqlActiveTemplateData_ACU(rawTemplateData);
+        const projectedWithRows = projectSqlActiveTemplateData_ACU(rawTemplateDataWithRows);
+        const templateData = projected.data;
+        const templateDataWithRows = projectedWithRows.data;
+        const activeSheetKeys = Object.keys(templateData).filter(key => key.startsWith('sheet_')).sort();
+        const skippedSheets = projected.skippedSheets.length >= projectedWithRows.skippedSheets.length
+            ? projected.skippedSheets
+            : projectedWithRows.skippedSheets;
+        if (skippedSheets.length > 0) {
+            // 脱敏诊断：只记录 sheetKey / 显示名 / 空列序号，不记录数据行、DDL 或聊天正文。
+            logWarn_ACU(`[SqlTableService] 模板存在非首列空业务表头的表，SQL 填表中将休眠跳过: ${skippedSheets
+            .map(skip => `${skip.sheetKey}(${skip.name}) 空列[${skip.emptyHeaderIndexes.join(',')}]`)
+            .join('；')}。修正表头后可在下次请求恢复参与。`);
+        }
+        // 物理表名冲突检查在投影后执行：被判定为不存在的无效表不阻塞有效表；
+        // 但有效表之间的冲突仍 fail-loud。
         assertNoPhysicalTableNameCollision_ACU(templateData);
         return {
             isolationKey: options.isolationKey,
             templateData,
             templateDataWithRows,
+            activeSheetKeys,
+            skippedSheets,
         };
     }
     function splitTopLevelSqlList_ACU(value, context) {
@@ -55875,6 +55955,10 @@ $CONTENT
                     const templateSheet = templateData[key];
                     if (!templateSheet || typeof templateSheet !== 'object')
                         continue;
+                    // 非首列空业务表头的模板表在 SQL 活动路径中休眠跳过：不复制进初始运行时数据，
+                    // 避免建表/校验阶段对坏表头触发 fallback DDL 报错；既有同 key 运行时数据保留。
+                    if (!isSqlActiveTemplateSheet_ACU(templateSheet))
+                        continue;
                     const targetSheet = baseData[key];
                     if (!targetSheet || typeof targetSheet !== 'object')
                         continue;
@@ -55901,6 +55985,10 @@ $CONTENT
             for (const key of Object.keys(baseData).filter(k => k.startsWith('sheet_'))) {
                 const sheet = baseData[key];
                 if (!sheet || typeof sheet !== 'object')
+                    continue;
+                // 初始运行时数据同样不携带休眠表：坏表头表不进入 runtimeData，
+                // 既不会被 _validateRuntimeSchema_ACU 校验，也不会在 _buildNameMapper 引爆。
+                if (!isSqlActiveTemplateSheet_ACU(sheet))
                     continue;
                 hasSheet = true;
                 delete sheet._acu_from_base_state;
@@ -55982,6 +56070,10 @@ $CONTENT
                 const sheet = data[key];
                 if (!sheet || typeof sheet !== 'object')
                     continue;
+                // 休眠表（非首列空业务表头）不参与 runtime schema 校验：它们不建表、不进 SQLite，
+                // 校验它们只会误报 schema_missing_table。
+                if (!isSqlActiveTemplateSheet_ACU(sheet))
+                    continue;
                 const runtimeTableName = getPhysicalTableNameForSheet_ACU(data, key);
                 if (!actualTables.has(runtimeTableName)) {
                     throw new Error(`schema_missing_table: ${key} (${runtimeTableName}) 未在 SQLite runtime 中创建。`);
@@ -56009,6 +56101,10 @@ $CONTENT
                         continue;
                     const sheet = value;
                     if (!sheet || typeof sheet !== 'object')
+                        continue;
+                    // 休眠表（非首列空业务表头）不参与 NameMapper：它们不在 SQLite runtime 中，
+                    // 构建映射会对坏表头触发 fallback DDL 报错。
+                    if (!isSqlActiveTemplateSheet_ACU(sheet))
                         continue;
                     // NameMapper 必须和 SQLite 实际采用的 schema 一致。直接读取 sourceData.ddl
                     // 会在 fallback_invalid 场景留下无法映射运行时物理列名的陈旧映射。
@@ -56098,8 +56194,15 @@ $CONTENT
             }
             // 建表前自检：模板内拼音物理名冲突直接 fail-loud，避免建表途中报晦涩的 SQL 错误。
             assertNoPhysicalTableNameCollision_ACU(templateData);
-            // 收集当前聊天模板中所有表的 sheetKey 和表名，找出 SQLite 中缺失的
-            const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));
+            // 收集当前聊天模板中所有有效表的 sheetKey 和表名，找出 SQLite 中缺失的。
+            // 非首列空业务表头的模板表在 SQL 活动路径中休眠跳过：不建表、不注入 seedRows、
+            // 不合并进 currentJsonTableData_ACU；既有同 key 运行时数据保留，修正表头后可恢复。
+            const sheetKeys = Object.keys(templateData).filter(k => {
+                if (!k.startsWith('sheet_'))
+                    return false;
+                const sheet = templateData[k];
+                return isSqlActiveTemplateSheet_ACU(sheet);
+            });
             const missingSheets = {};
             for (const key of sheetKeys) {
                 // 当前聊天模板是建表结构权威；currentJsonTableData_ACU 可能是旧运行时快照，不能让旧 DDL/CHECK 覆盖模板。
@@ -92777,7 +92880,9 @@ $CONTENT
             sheetKeys.add(sheetKey);
             sheets[sheetKey] = data[sheetKey];
         });
-        return sheetKeys.size > 0 ? { sheetKeys, sheets } : null;
+        // 空集合表示“已确认无活动表”（SQL 活动模板投影后全部被过滤），绝不能折叠成 null：
+        // null 在契约中表示“范围未知、不过滤”，会把所有运行时表重新放进来。
+        return { sheetKeys, sheets };
     }
     function resolveManualRefillTemplateData_ACU(chat, isolationKey) {
         const scopedState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey });
@@ -93703,7 +93808,12 @@ $CONTENT
                 }
                 let reboundStatements;
                 try {
-                    reboundStatements = rebindSqlMutationIdentifiers_ACU(normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''), baseSnapshot, capturedSqlApplyScope?.templateData, { requireKnownTables: true });
+                    // 列 registry 只注册本次请求的 SQL 活动表（scope 已过滤非首列空表头表）：
+                    // 休眠表即使被 AI 猜中也不进入 registry，杜绝把它当作可写目标。
+                    const activeSheetKeySet = capturedSqlApplyScope?.activeSheetKeys
+                        ? new Set(capturedSqlApplyScope.activeSheetKeys)
+                        : undefined;
+                    reboundStatements = rebindSqlMutationIdentifiers_ACU(normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''), baseSnapshot, capturedSqlApplyScope?.templateData, { requireKnownTables: true, targetSheetKeys: activeSheetKeySet });
                     // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
                     assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
                 }
@@ -153779,6 +153889,9 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         const draft = input?.draft;
         if (!draft || !Array.isArray(draft.operations)) {
+            if (draft?.protocolVersion === 3) {
+                return compileTemplateAssistantDraftV3_ACU(input.tempData, input.sheetOrder, input.currentSheetKey, draft);
+            }
             throw new Error('缺少合法 draft.operations');
         }
         const protocolVersion = draft?.protocolVersion === 1 ? 1 : 2;
@@ -154029,6 +154142,264 @@ Expected function or array of functions, received type ${typeof value}.`
             schemaMigrationIntents: {},
         };
     }
+    /**
+     * v3 编译：单表完整输出协议。
+     *
+     * 输入约束（由 service 的 validateTemplateAssistantDraftV3_ACU 保证信封，本函数保证内容）：
+     * - result.action 仅为 replace / create / delete；
+     * - replace/delete 必须指向输入 allSheets 中真实存在的 sheetKey；
+     * - create 的完整 Sheet 由本地分配 sheetKey/uid/orderNo；
+     * - 未目标表一律保持不变，不允许「缺席即删除」。
+     *
+     * 硬性保护（与计划 v3-contract/v3-data-guards 对齐）：
+     * - 完整字段归一：name/domain/type/enable/required/content/sourceData/updateConfig/exportConfig 必须齐全；
+     * - content 必须是非空二维数组、首列 row_id、业务表头唯一、所有数据行宽一致；
+     * - sourceData.ddl 必须非空且通过 validateDDLTextAgainstHeaders_ACU；
+     * - row_id 集合守卫：空/重复拒绝；replace 未请求删行时，若 AI 少给行 → 阻断（防止静默丢行）。
+     */
+    function compileTemplateAssistantDraftV3_ACU(tempData, sheetOrder, currentSheetKey, draft) {
+        const candidateData = clone_ACU$1(tempData);
+        const orderedSheetKeys = getBaseOrderedSheetKeys_ACU(candidateData, sheetOrder);
+        const deletedSheetKeys = [];
+        const highRiskItems = [];
+        const lockChanges = [];
+        const schemaMigrationIntents = {};
+        const diff = createEmptyDiff_ACU();
+        const result = draft?.result;
+        if (!result || typeof result !== 'object' || Array.isArray(result)) {
+            throw new Error('v3 draft.result 必须存在且为对象');
+        }
+        const action = String(result.action || '');
+        if (action !== 'replace' && action !== 'create' && action !== 'delete') {
+            throw new Error('v3 result.action 必须为 replace / create / delete 之一');
+        }
+        let focusSheetKey = null;
+        if (action === 'replace') {
+            const targetSheetKey = String(result.sheetKey || '').trim();
+            if (!targetSheetKey) {
+                throw new Error('v3 replace 必须提供非空 sheetKey');
+            }
+            const sheet = ensureSheetExists_ACU(candidateData, targetSheetKey);
+            const beforeName = String(sheet.name || targetSheetKey);
+            const normalized = normalizeV3FullSheet_ACU(result.sheet, targetSheetKey);
+            // 物理列重命名：DDL 中物理列名/注释变化但业务表头未变。由 preflight 后续复核，
+            // 此处只识别并给出风险标签（不阻断），避免重复实现 preflight 逻辑。
+            const beforeDdl = String(sheet?.sourceData?.ddl || '');
+            const afterDdl = String(normalized.sourceData?.ddl || '');
+            if (beforeDdl && afterDdl && beforeDdl !== afterDdl) {
+                highRiskItems.push({ type: 'patch_sheet_schema', label: `更新 DDL: ${normalized.name || beforeName}` });
+            }
+            candidateData[targetSheetKey] = {
+                ...normalized,
+                uid: sheet.uid ?? targetSheetKey,
+                [TABLE_ORDER_FIELD_ACU]: orderedSheetKeys.indexOf(targetSheetKey),
+            };
+            maybeApplySpecialIndexSequenceToSheet_ACU(candidateData[targetSheetKey], targetSheetKey, {});
+            diff.patchedContentSheets.push({ sheetKey: targetSheetKey, name: normalized.name || beforeName, changes: ['单表完整替换'] });
+            if (beforeDdl !== afterDdl) {
+                diff.patchedSchemaSheets.push({ sheetKey: targetSheetKey, name: normalized.name || beforeName, changes: ['DDL 已更新'] });
+                // DDL 变化交给 preflight 判断 migration/rebase，不在此伪造 intent。
+            }
+            if (beforeName !== normalized.name) {
+                diff.renamedSheets.push({ sheetKey: targetSheetKey, beforeName, afterName: normalized.name });
+            }
+            focusSheetKey = targetSheetKey;
+        }
+        else if (action === 'create') {
+            const normalized = normalizeV3FullSheet_ACU(result.sheet, '');
+            const newKey = createUniqueSheetKey_ACU(candidateData, normalized.name);
+            const insertAfter = result.insertAfterSheetKey !== undefined ? String(result.insertAfterSheetKey || '') : '';
+            const newSheet = {
+                ...normalized,
+                uid: newKey,
+                [TABLE_ORDER_FIELD_ACU]: orderedSheetKeys.length,
+            };
+            candidateData[newKey] = newSheet;
+            insertAfterAnchor_ACU(orderedSheetKeys, newKey, insertAfter || undefined);
+            maybeApplySpecialIndexSequenceToSheet_ACU(candidateData[newKey], newKey, {});
+            diff.addedSheets.push({ sheetKey: newKey, name: normalized.name });
+            focusSheetKey = newKey;
+        }
+        else {
+            // delete
+            const targetSheetKey = String(result.sheetKey || '').trim();
+            if (!targetSheetKey) {
+                throw new Error('v3 delete 必须提供非空 sheetKey');
+            }
+            const sheet = ensureSheetExists_ACU(candidateData, targetSheetKey);
+            const name = String(sheet.name || targetSheetKey);
+            diff.deletedSheets.push({ sheetKey: targetSheetKey, name });
+            deletedSheetKeys.push(targetSheetKey);
+            highRiskItems.push({ type: 'delete_sheet', label: `删除表: ${name}` });
+            delete candidateData[targetSheetKey];
+            const idx = orderedSheetKeys.indexOf(targetSheetKey);
+            if (idx >= 0)
+                orderedSheetKeys.splice(idx, 1);
+            if (String(currentSheetKey || '') === targetSheetKey) {
+                focusSheetKey = orderedSheetKeys[0] || null;
+            }
+            else {
+                focusSheetKey = String(currentSheetKey || '') || orderedSheetKeys[0] || null;
+            }
+        }
+        orderedSheetKeys.forEach((sheetKey, index) => {
+            if (candidateData?.[sheetKey] && typeof candidateData[sheetKey] === 'object') {
+                candidateData[sheetKey][TABLE_ORDER_FIELD_ACU] = index;
+            }
+        });
+        if (!focusSheetKey || !candidateData[focusSheetKey]) {
+            focusSheetKey = orderedSheetKeys[0] || null;
+        }
+        return {
+            candidateData,
+            orderedSheetKeys,
+            deletedSheetKeys,
+            focusSheetKey,
+            diff,
+            highRiskItems,
+            lockChanges,
+            schemaMigrationIntents,
+        };
+    }
+    /**
+     * v3 完整 Sheet 归一 + 硬性校验。校验失败一律抛错（拒绝应用），绝不静默补齐。
+     */
+    function normalizeV3FullSheet_ACU(rawSheet, targetSheetKey) {
+        if (!rawSheet || typeof rawSheet !== 'object' || Array.isArray(rawSheet)) {
+            throw new Error('v3 必须返回完整 sheet 对象');
+        }
+        const requiredKeys = ['name', 'domain', 'type', 'enable', 'required', 'content', 'sourceData', 'updateConfig', 'exportConfig'];
+        requiredKeys.forEach((key) => {
+            if (!Object.prototype.hasOwnProperty.call(rawSheet, key)) {
+                throw new Error(`v3 sheet 缺少必填字段: ${key}`);
+            }
+        });
+        const name = String(rawSheet.name || '').trim();
+        if (!name) {
+            throw new Error('v3 sheet.name 必须是非空字符串');
+        }
+        if (typeof rawSheet.domain !== 'string' || !rawSheet.domain.trim()) {
+            throw new Error('v3 sheet.domain 必须是非空字符串');
+        }
+        if (typeof rawSheet.type !== 'string' || !rawSheet.type.trim()) {
+            throw new Error('v3 sheet.type 必须是非空字符串');
+        }
+        if (typeof rawSheet.enable !== 'boolean') {
+            throw new Error('v3 sheet.enable 必须是布尔值');
+        }
+        if (typeof rawSheet.required !== 'boolean') {
+            throw new Error('v3 sheet.required 必须是布尔值');
+        }
+        const content = rawSheet.content;
+        if (!Array.isArray(content) || content.length === 0) {
+            throw new Error('v3 sheet.content 必须是非空二维数组');
+        }
+        if (!Array.isArray(content[0])) {
+            throw new Error('v3 sheet.content[0]（表头行）必须是数组');
+        }
+        const headerRow = content[0].map((item) => String(item ?? '').trim());
+        if (headerRow[0] !== 'row_id') {
+            throw new Error('v3 sheet.content[0][0] 必须为 row_id');
+        }
+        const headers = headerRow.slice(1);
+        if (headers.length === 0) {
+            throw new Error('v3 sheet 至少需要一个业务表头');
+        }
+        assertHeadersUnique_ACU(headers);
+        const headerWidth = headerRow.length;
+        content.slice(1).forEach((row, index) => {
+            if (!Array.isArray(row)) {
+                throw new Error(`v3 sheet.content[${index + 1}] 必须是数组`);
+            }
+            if (row.length !== headerWidth) {
+                throw new Error(`v3 sheet.content[${index + 1}] 行宽(${row.length})与表头行宽(${headerWidth})不一致`);
+            }
+        });
+        const sourceData = isObject_ACU(rawSheet.sourceData) ? rawSheet.sourceData : null;
+        if (!sourceData) {
+            throw new Error('v3 sheet.sourceData 必须是对象');
+        }
+        const ddlText = typeof sourceData.ddl === 'string' ? sourceData.ddl.trim() : '';
+        if (!ddlText) {
+            throw new Error('v3 replace/create 必须提供非空 sourceData.ddl');
+        }
+        const ddlValidation = validateDdlAgainstHeaders_ACU(ddlText, headerRow);
+        if (!ddlValidation.valid) {
+            throw new Error(`v3 sheet.sourceData.ddl 非法: ${ddlValidation.message}`);
+        }
+        const updateConfig = isObject_ACU(rawSheet.updateConfig) ? rawSheet.updateConfig : null;
+        if (!updateConfig) {
+            throw new Error('v3 sheet.updateConfig 必须是对象');
+        }
+        const exportConfig = isObject_ACU(rawSheet.exportConfig) ? rawSheet.exportConfig : null;
+        if (!exportConfig) {
+            throw new Error('v3 sheet.exportConfig 必须是对象');
+        }
+        // row_id 集合守卫：空/重复拒绝（未删行要求保持集合一致在 compile 之后由调用方复核）。
+        const rowIdSet = new Set();
+        content.slice(1).forEach((row) => {
+            const rowId = String(row[0] ?? '').trim();
+            if (!rowId) {
+                throw new Error('v3 sheet 数据行 row_id 不能为空');
+            }
+            if (rowIdSet.has(rowId)) {
+                throw new Error(`v3 sheet 数据行 row_id 重复: ${rowId}`);
+            }
+            rowIdSet.add(rowId);
+        });
+        const normalized = {
+            name,
+            domain: String(rawSheet.domain),
+            type: String(rawSheet.type),
+            enable: rawSheet.enable === true,
+            required: rawSheet.required === true,
+            content: clone_ACU$1(content),
+            sourceData: clone_ACU$1(sourceData),
+            updateConfig: clone_ACU$1(updateConfig),
+            exportConfig: clone_ACU$1(exportConfig),
+        };
+        TEMPLATE_ASSISTANT_V3_AUX_KEYS_ACU.forEach((key) => {
+            if (Object.prototype.hasOwnProperty.call(rawSheet, key)) {
+                normalized[key] = clone_ACU$1(rawSheet[key]);
+            }
+        });
+        // 未目标表的 row_id 集合差异（该表不是 replace 目标时不允许任何 row_id 变化）由调用方在
+        // 更高层（service）对比 baseline 与 candidate 判定，见 compileV3 之外的守卫。
+        return normalized;
+    }
+    const TEMPLATE_ASSISTANT_V3_AUX_KEYS_ACU = ['hiddenPhysicalColumns', 'tableAliases', 'columnAliases'];
+    /**
+     * v3 未删行保护：对 replace 目标表，若 AI 返回的 row_id 集合是 baseline 的子集（少了行），
+     * 而用户并未要求删行（result 无显式标记），则阻断——防止 AI 静默吞行。
+     * 返回高风险管理（需用户确认）或空数组（无需确认）。
+     */
+    function collectV3RowIdGuardFindings_ACU(baselineData, candidateData, sheetKey, userRequest) {
+        const baseline = baselineData?.[sheetKey];
+        const candidate = candidateData?.[sheetKey];
+        if (!baseline || !candidate)
+            return [];
+        const baselineIds = extractRowIds_ACU(baseline);
+        const candidateIds = extractRowIds_ACU(candidate);
+        const baselineSet = new Set(baselineIds);
+        const missing = baselineIds.filter((rowId) => !candidateIds.includes(rowId));
+        if (missing.length === 0)
+            return [];
+        // 用户需求显式提到「删除/移除/去掉」等动作时，认为删行是有意的，交给高风险确认流程而非硬阻断。
+        const explicitDeleteIntent = /删除|移除|去掉|清除|drop|delete|remove/i.test(String(userRequest || ''));
+        if (explicitDeleteIntent)
+            return [];
+        return [{ code: 'row_id_set_reduction', sheetKey, missingRowIds: missing }];
+    }
+    function extractRowIds_ACU(sheet) {
+        if (!Array.isArray(sheet?.content))
+            return [];
+        return sheet.content.slice(1)
+            .map((row) => String(Array.isArray(row) ? row[0] ?? '' : '').trim())
+            .filter(Boolean);
+    }
+    function hasV3RowIdSetReduction_ACU(findings) {
+        return findings.length > 0;
+    }
 
     const joinLines_ACU = (...lines) => lines.join('\n');
     const TEMPLATE_ASSISTANT_EMBEDDED_REFERENCE_CHUNKS_ACU = [
@@ -154084,6 +154455,9 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU = ['note', 'initNode', 'insertNode', 'updateNode', 'deleteNode'];
     const TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEY_SET_ACU = new Set(TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU);
+    function isTemplateAssistantV3Draft_ACU(draft) {
+        return !!draft && draft.protocolVersion === 3;
+    }
     class TemplateAssistantSessionStoppedError_ACU extends Error {
         constructor(stopReason) {
             super(stopReason === 'cancelled' ? '模板助手会话已取消' : '模板助手会话已过期');
@@ -154192,7 +154566,10 @@ Expected function or array of functions, received type ${typeof value}.`
      *
      * 全模板不含世界书占位符。
      */
-    function buildPseudoRoleTemplateAssistantPromptSegments_ACU() {
+    function buildPseudoRoleTemplateAssistantPromptSegments_ACU(protocolVersion = 3) {
+        if (protocolVersion === 3) {
+            return buildPseudoRoleTemplateAssistantPromptSegmentsV3_ACU();
+        }
         return [
             {
                 role: 'SYSTEM',
@@ -154274,6 +154651,99 @@ Expected function or array of functions, received type ${typeof value}.`
         ];
     }
     /**
+     * v3 伪 role 默认模板（10 卡结构不变，协议内容切到 v3）。
+     * 与 v2 版本保持相同消息顺序/锚点/预填充约束，仅协议描述与输出信封不同。
+     */
+    function buildPseudoRoleTemplateAssistantPromptSegmentsV3_ACU() {
+        return [
+            {
+                role: 'SYSTEM',
+                pinned: true,
+                content: [
+                    '你是 visualizer 内的模板改表助手。',
+                    '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
+                    '严格使用 protocolVersion=3、mode="single_sheet_full_replace"、atomic=true。',
+                    '顶层 JSON 必须包含且只包含以下键：protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、result。',
+                    'baseFingerprint 与 selectedSheetKey 必须原样复制输入数据中给出的值，不得自造。',
+                    '每一轮只能输出一个 result（replace / create / delete 之一）；禁止输出 operations[]、禁止字段级 patch、禁止一次修改多张表。',
+                    'replace：提供 sheetKey（必须来自输入 allSheets 中真实存在的 key）和完整 sheet 对象。',
+                    'create：只提供完整 sheet 对象；不要生成 sheetKey/uid/orderNo（本地分配）。可用 insertAfterSheetKey 指定插入位置。',
+                    'delete：只提供 sheetKey，不要携带 sheet。删除必须是明确动作，不能通过不输出表来暗示。',
+                    'replace/create 的 sheet 必须完整包含 name、domain、type、enable、required、content、sourceData、updateConfig、exportConfig；不得省略、不得携带 uid/orderNo。',
+                    'content 第一行是表头、第一列必须是 row_id；所有数据行行宽一致；row_id 不能为空、不能重复。',
+                    'sourceData.ddl 必须非空且完整，与 content 表头逐列匹配；中文表头必须英文/ASCII 物理列名 + `-- 中文表头` 注释；第一列 row_id INTEGER PRIMARY KEY。',
+                    '输入中其他表一律保持原样；未输出的表不会被删除。',
+                    '输入数据中 constraints 里的字段（如 singleSheetFullReplace）是给你看的约束说明，不是 draft 的字段，禁止出现在输出 JSON 里。',
+                ].join('\n'),
+                deletable: false,
+            },
+            {
+                role: 'assistant',
+                pinned: true,
+                content: '收到，我将只输出合法的 v3 draft JSON（单 result 信封），不输出任何解释文本。',
+                deletable: true,
+            },
+            {
+                role: 'USER',
+                pinned: true,
+                content: [
+                    `以下是表格结构协议与规则，必须严格遵守：${TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU}；语法参考文档：${TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU}`,
+                    'result.action 只允许 replace / create / delete 之一；禁止字段级 patch 与多表 operations。',
+                    'replace/create 必须返回完整 sheet（name/domain/type/enable/required/content/sourceData/updateConfig/exportConfig 全量），禁止省略字段或只给差异。',
+                    'sheet.content 第一列必须是 row_id，所有数据行行宽一致，row_id 非空且不重复。',
+                    'sourceData.ddl 必须非空且与 content 表头逐列匹配；中文表头必须英文/ASCII 物理列名 + `-- 中文表头` 注释按原顺序一一对应；第一列必须 row_id INTEGER PRIMARY KEY 并保留 `-- 行号` 注释。',
+                    'delete 必须显式给出要删除的 sheetKey；禁止通过不输出某张表来暗示删除，禁止修改未目标表。',
+                    'create 不要生成 sheetKey/uid/orderNo，本地会自动分配；insertAfterSheetKey 必须来自输入中真实存在的 key。',
+                    '禁止修改全局注入配置；禁止直接保存行为。',
+                    '如果需求信息不足、字段缺失、或当前协议无法安全表达，仍然必须返回合法 v3 draft：summary 简述原因、warnings 写明原因、result 输出 {action:"replace", sheetKey:"<真实key>", sheet:{...完整原样...}}；不要输出追问文本。',
+                ].join('\n'),
+                deletable: true,
+            },
+            {
+                role: 'assistant',
+                pinned: true,
+                content: '收到，我已阅读 v3 协议约束与语法文档，将严格在协议范围内生成单表完整结果。',
+                deletable: true,
+            },
+            {
+                role: 'USER',
+                pinned: true,
+                content: `以下是全局表格结构：${TEMPLATE_ASSISTANT_PLACEHOLDER_ALL_SHEETS_ACU}`,
+                deletable: true,
+            },
+            {
+                role: 'assistant',
+                pinned: true,
+                content: '收到，我已了解全部表格的完整结构（含 DDL）。',
+                deletable: true,
+            },
+            {
+                role: 'USER',
+                pinned: true,
+                content: `以下是当前选中表：${TEMPLATE_ASSISTANT_PLACEHOLDER_CURRENT_SHEET_ACU}`,
+                deletable: true,
+            },
+            {
+                role: 'assistant',
+                pinned: true,
+                content: '收到，我已聚焦当前选中表，随时可以按需求生成单表完整替换结果。',
+                deletable: true,
+            },
+            {
+                role: 'USER',
+                pinned: true,
+                content: `现在请按照我的需求立刻开始工作：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`,
+                deletable: false,
+            },
+            {
+                role: 'assistant',
+                pinned: true,
+                content: '收到，我不会输出解释文本，现在直接输出完整的 v3 draft 标签与 JSON：',
+                deletable: true,
+            },
+        ];
+    }
+    /**
      * 将占位符值序列化为字符串，供替换进提示词。
      * - string 原样返回；
      * - number / boolean 走 String()；
@@ -154334,13 +154804,33 @@ Expected function or array of functions, received type ${typeof value}.`
         }))
             .filter((turn) => !!turn.user || !!turn.assistant);
     }
+    /**
+     * v3 上下文预算守卫：v3 全表 DDL 全量注入可能让 payload 极大。
+     * 超过预算必须**阻止请求**（fail-closed），绝不静默截断——截断会让 AI 拿到
+     * 不完整的表结构，反而制造不一致的 replace 结果。
+     * 阈值按字符近似 token（中文 1 字符 ≈ 1 token，保守取 2 字符/token）。
+     */
+    const TEMPLATE_ASSISTANT_V3_CONTEXT_BUDGET_CHARS_ACU = 40000;
+    function assertV3ContextBudget_ACU(payloadText) {
+        const chars = String(payloadText || '').length;
+        if (chars > TEMPLATE_ASSISTANT_V3_CONTEXT_BUDGET_CHARS_ACU) {
+            const wrapped = new Error(`v3 全表上下文预算超限：payload ${chars} 字符（上限 ${TEMPLATE_ASSISTANT_V3_CONTEXT_BUDGET_CHARS_ACU}）。`
+                + '请减少表数量/行数，或改用 v2 增量协议。');
+            wrapped.failureKind = 'context_budget';
+            throw wrapped;
+        }
+    }
     function buildTemplateAssistantMessages_ACU(input, baseFingerprint) {
-        const payload = buildUserPromptPayload_ACU(input, baseFingerprint);
+        const protocolVersion = input.protocolVersion === 3 ? 3 : (input.protocolVersion === 2 ? 2 : 3);
+        const payload = buildUserPromptPayload_ACU(input, baseFingerprint, protocolVersion);
         const normalized = normalizeAssistantPromptSegments_ACU(settings_ACU.templateAssistantPromptSegments);
         const referenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
         const valueMap = buildAssistantPlaceholderContext_ACU(payload, referenceText);
-        const resolved = resolveAssistantSystemPrompt_ACU(normalized, valueMap);
+        const resolved = resolveAssistantSystemPrompt_ACU(normalized, valueMap, protocolVersion);
         const fullPayloadText = safeJsonStringify_ACU(payload, '{}');
+        if (protocolVersion === 3) {
+            assertV3ContextBudget_ACU(fullPayloadText);
+        }
         const messages = [];
         if (normalized.length === 0) {
             // 存量路径：与旧版字节级一致（role 小写 system 单条 + priorTurns + 完整 payload）。
@@ -154423,7 +154913,12 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         return { ok: true };
     }
-    function sanitizeSourceDataSnapshotForAssistant_ACU(value) {
+    const TEMPLATE_ASSISTANT_PERSISTED_AUX_KEYS_ACU = [
+        'hiddenPhysicalColumns',
+        'tableAliases',
+        'columnAliases',
+    ];
+    function sanitizeSourceDataSnapshotForAssistant_ACU(value, includeDdl = false) {
         const sourceData = asObject_ACU(value);
         const sanitized = {};
         TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU.forEach((key) => {
@@ -154431,7 +154926,18 @@ Expected function or array of functions, received type ${typeof value}.`
                 sanitized[key] = clone_ACU(sourceData[key]);
             }
         });
+        if (includeDdl && typeof sourceData?.ddl === 'string' && sourceData.ddl.trim()) {
+            sanitized.ddl = clone_ACU(sourceData.ddl);
+        }
         return sanitized;
+    }
+    function copyPersistedAuxFields_ACU(sheet, snapshot) {
+        TEMPLATE_ASSISTANT_PERSISTED_AUX_KEYS_ACU.forEach((key) => {
+            if (Object.prototype.hasOwnProperty.call(sheet, key) && sheet[key] !== undefined) {
+                snapshot[key] = clone_ACU(sheet[key]);
+            }
+        });
+        return snapshot;
     }
     function validateSourceDataPayload_ACU(value, label) {
         if (value == null)
@@ -154451,23 +154957,31 @@ Expected function or array of functions, received type ${typeof value}.`
     function extractHeaders_ACU(sheet) {
         return Array.isArray(sheet?.content?.[0]) ? sheet.content[0].slice(1).map((item) => String(item ?? '')) : [];
     }
-    function getSheetSnapshot_ACU(tempData, sheetKey) {
+    function getSheetSnapshot_ACU(tempData, sheetKey, options) {
         const sheet = tempData?.[sheetKey] || {};
-        return {
+        const snapshot = {
             sheetKey,
             name: String(sheet?.name || ''),
+            domain: typeof sheet?.domain === 'string' ? sheet.domain : 'chat',
+            type: typeof sheet?.type === 'string' ? sheet.type : 'dynamic',
+            enable: sheet?.enable !== false,
+            required: sheet?.required === true,
             orderNo: Number.isFinite(sheet?.orderNo) ? sheet.orderNo : null,
             headers: extractHeaders_ACU(sheet),
             content: clone_ACU(Array.isArray(sheet?.content) ? sheet.content : []),
-            sourceData: sanitizeSourceDataSnapshotForAssistant_ACU(sheet?.sourceData),
+            sourceData: sanitizeSourceDataSnapshotForAssistant_ACU(sheet?.sourceData, options?.includeDdl === true),
             updateConfig: clone_ACU(asObject_ACU(sheet?.updateConfig)),
             exportConfig: clone_ACU(asObject_ACU(sheet?.exportConfig)),
         };
+        if (options?.includeDdl === true) {
+            copyPersistedAuxFields_ACU(sheet, snapshot);
+        }
+        return snapshot;
     }
-    function getSelectedSheetSnapshot_ACU(tempData, sheetKey) {
+    function getSelectedSheetSnapshot_ACU(tempData, sheetKey, options) {
         if (!sheetKey || !tempData?.[sheetKey])
             return null;
-        return getSheetSnapshot_ACU(tempData, sheetKey);
+        return getSheetSnapshot_ACU(tempData, sheetKey, options);
     }
     function buildSheetSummary_ACU(tempData) {
         const sheetKeys = getSortedSheetKeys_ACU(tempData, { ignoreChatGuide: true });
@@ -154482,8 +154996,8 @@ Expected function or array of functions, received type ${typeof value}.`
             };
         });
     }
-    function buildDetailedSheetSnapshots_ACU(tempData) {
-        return buildSheetSummary_ACU(tempData).map((item) => getSheetSnapshot_ACU(tempData, item.sheetKey));
+    function buildDetailedSheetSnapshots_ACU(tempData, options) {
+        return buildSheetSummary_ACU(tempData).map((item) => getSheetSnapshot_ACU(tempData, item.sheetKey, options));
     }
     function buildTemplateAssistantFingerprint_ACU(tempData) {
         const normalized = asObject_ACU(tempData);
@@ -154912,10 +155426,13 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!draft || typeof draft !== 'object') {
             throw new Error('assistant draft 必须是对象');
         }
-        if (draft.protocolVersion !== 1 && draft.protocolVersion !== 2) {
-            throw new Error('assistant draft.protocolVersion 必须为 1 或 2');
+        if (draft.protocolVersion !== 1 && draft.protocolVersion !== 2 && draft.protocolVersion !== 3) {
+            throw new Error('assistant draft.protocolVersion 必须为 1、2 或 3');
         }
-        if (draft.mode !== 'modify_current_template_incremental') {
+        if (draft.protocolVersion === 3 && draft.mode !== 'single_sheet_full_replace') {
+            throw new Error('assistant draft.mode 非法（v3 必须为 single_sheet_full_replace）');
+        }
+        if (draft.protocolVersion !== 3 && draft.mode !== 'modify_current_template_incremental') {
             throw new Error('assistant draft.mode 非法');
         }
         if (typeof draft.baseFingerprint !== 'string' || !draft.baseFingerprint.trim()) {
@@ -154930,10 +155447,13 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!Array.isArray(draft.warnings)) {
             throw new Error('assistant draft.warnings 必须是数组');
         }
+        if (draft.protocolVersion === 3) {
+            return validateTemplateAssistantDraftV3_ACU(draft);
+        }
+        const protocolVersion = draft.protocolVersion;
         if (!Array.isArray(draft.operations)) {
             throw new Error('assistant draft.operations 必须是数组');
         }
-        const protocolVersion = draft.protocolVersion;
         if (protocolVersion === 2) {
             if (typeof draft.requestId !== 'string' || !draft.requestId.trim()) {
                 throw new Error('assistant draft.requestId 必须是非空字符串');
@@ -155010,6 +155530,75 @@ Expected function or array of functions, received type ${typeof value}.`
             protocolVersion: 1,
         };
     }
+    /**
+     * v3 draft 校验：单结果信封，禁止 operations[]、禁止多 action、禁止混用协议字段。
+     * 只校验信封结构与字段类型；完整 Sheet 归一（content/DDL/row_id/行宽等）由 compiler 执行。
+     */
+    function validateTemplateAssistantDraftV3_ACU(draft) {
+        if (draft.atomic !== true) {
+            throw new Error('assistant draft.atomic 目前必须为 true');
+        }
+        if (typeof draft.requestId !== 'string' || !draft.requestId.trim()) {
+            throw new Error('assistant draft.requestId 必须是非空字符串');
+        }
+        if (draft.operations !== undefined && !Array.isArray(draft.operations)) {
+            throw new Error('v3 禁止 operations[]，必须使用单个 result');
+        }
+        if (draft.operations !== undefined && Array.isArray(draft.operations) && draft.operations.length > 0) {
+            throw new Error('v3 禁止字段级 patch / operations[]，必须返回单个 result（replace/create/delete）');
+        }
+        if (draft.result === undefined || draft.result === null || typeof draft.result !== 'object' || Array.isArray(draft.result)) {
+            throw new Error('assistant draft.result 必须存在且为对象');
+        }
+        const action = String(draft.result.action || '');
+        if (action !== 'replace' && action !== 'create' && action !== 'delete') {
+            throw new Error('v3 result.action 必须为 replace / create / delete 之一');
+        }
+        if (action === 'replace') {
+            if (typeof draft.result.sheetKey !== 'string' || !draft.result.sheetKey.trim()) {
+                throw new Error('v3 replace 必须提供非空 sheetKey');
+            }
+            if (draft.result.sheet === undefined || draft.result.sheet === null || typeof draft.result.sheet !== 'object' || Array.isArray(draft.result.sheet)) {
+                throw new Error('v3 replace 必须返回完整 sheet 对象');
+            }
+            if (Object.prototype.hasOwnProperty.call(draft.result.sheet, 'uid') || Object.prototype.hasOwnProperty.call(draft.result.sheet, 'orderNo')) {
+                throw new Error('v3 replace.sheet 禁止携带 uid/orderNo（本地继承既有身份与顺序）');
+            }
+            if (draft.result.insertAfterSheetKey !== undefined) {
+                throw new Error('v3 replace 禁止携带 insertAfterSheetKey');
+            }
+        }
+        if (action === 'create') {
+            if (draft.result.sheet === undefined || draft.result.sheet === null || typeof draft.result.sheet !== 'object' || Array.isArray(draft.result.sheet)) {
+                throw new Error('v3 create 必须返回完整 sheet 对象');
+            }
+            if (Object.prototype.hasOwnProperty.call(draft.result.sheet, 'uid') || Object.prototype.hasOwnProperty.call(draft.result.sheet, 'orderNo')) {
+                throw new Error('v3 create.sheet 禁止携带 uid/orderNo（本地分配身份与顺序）');
+            }
+            if (draft.result.sheetKey !== undefined) {
+                throw new Error('v3 create 禁止携带最终 sheetKey（本地稳定分配）');
+            }
+        }
+        if (action === 'delete') {
+            if (typeof draft.result.sheetKey !== 'string' || !draft.result.sheetKey.trim()) {
+                throw new Error('v3 delete 必须提供非空 sheetKey');
+            }
+            if (draft.result.sheet !== undefined) {
+                throw new Error('v3 delete 禁止同时携带 sheet');
+            }
+        }
+        return {
+            protocolVersion: 3,
+            mode: 'single_sheet_full_replace',
+            requestId: String(draft.requestId || ''),
+            baseFingerprint: String(draft.baseFingerprint || ''),
+            atomic: true,
+            selectedSheetKey: String(draft.selectedSheetKey || ''),
+            summary: String(draft.summary || ''),
+            warnings: (Array.isArray(draft.warnings) ? draft.warnings : []).map((item) => String(item ?? '')),
+            result: clone_ACU(draft.result),
+        };
+    }
     function buildDefaultSystemPrompt_ACU() {
         return [
             '你是 visualizer 内的模板改表助手。',
@@ -155050,6 +155639,28 @@ Expected function or array of functions, received type ${typeof value}.`
             TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
         ].join('\n');
     }
+    function buildDefaultSystemPromptV3_ACU() {
+        return [
+            '你是 visualizer 内的模板改表助手。',
+            '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
+            '严格使用 protocolVersion=3、mode="single_sheet_full_replace"、atomic=true。',
+            '顶层 JSON 必须包含且只包含以下键：protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、result。',
+            'baseFingerprint 与 selectedSheetKey 必须原样复制输入数据中给出的值，不得自造。',
+            '每一轮只能输出一个 result；禁止输出 operations[] 数组、禁止字段级 patch、禁止一次修改多张表。',
+            'result.action 只允许 replace / create / delete 之一：',
+            '- replace：完整替换一张已存在的表。必须提供 sheetKey（从输入 allSheets 中真实存在的 key 中选择）和完整的 sheet 对象。',
+            '- create：完整新增一张表。只提供完整 sheet 对象；不要生成 sheetKey/uid/orderNo，本地会自动分配。可用 insertAfterSheetKey（必须来自输入中真实存在的 key）指定插入位置。',
+            '- delete：显式删除一张已存在的表。只提供 sheetKey；不要携带 sheet。删除必须是你明确决定的动作，不能通过“不输出某张表”来暗示删除。',
+            'replace/create 的 sheet 对象必须完整包含：name、domain、type、enable、required、content、sourceData、updateConfig、exportConfig；不得省略、不得缺字段、不得携带 uid/orderNo/sheetKey（replace 的身份由 sheetKey 继承，create 的身份本地分配）。',
+            'sheet.content 必须是完整二维数组：第一行是表头，第一列必须是 row_id；所有数据行行宽必须与表头一致；数据行第一列（row_id）不能为空、不能重复。',
+            'sheet.sourceData.ddl 必须非空且完整（replace/create 都要求），必须与 content 表头逐列匹配：中文表头必须使用英文/ASCII 物理列名，并用 `-- 中文表头` 注释按原顺序一一对应；第一列必须 row_id INTEGER PRIMARY KEY 并保留 `-- 行号` 注释。',
+            '只有你要修改的那张表会发生变化；输入中其他表一律保持原样。不要假设未输出的表会被删除，也不要修改未目标表的任何字段。',
+            '严格禁止直接保存行为；禁止修改全局注入配置（globalInjectionConfig）；禁止删除/重建 row_id 列。',
+            '如果需求信息不足、字段缺失、或当前协议无法安全表达，仍然必须返回合法 draft：summary 简述原因、warnings 写明原因、result 输出 {action:"replace", sheetKey:"<真实存在的key>", sheet:{...完整原样...}}；不要输出追问文本，不要输出非法操作。',
+            'warnings 必须是字符串数组；没有则输出空数组。',
+            TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
+        ].join('\n');
+    }
     /**
      * AI 改表助手「核心协议卡」：短路由表 + 防误操作边界。
      *
@@ -155083,6 +155694,20 @@ Expected function or array of functions, received type ${typeof value}.`
             '- 需求信息不足时仍必须返回合法 draft：summary 简述、warnings 写明、operations=[]，禁止输出追问文本',
         ].join('\n');
     }
+    function buildCoreProtocolCardV3_ACU() {
+        return [
+            TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU,
+            '【v3 单表完整替换协议】默认协议，每轮只输出一个 result：',
+            '- 顶层 JSON 只含 protocolVersion=3、mode="single_sheet_full_replace"、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、result。',
+            '- result.action 只允许 replace / create / delete 之一；禁止 operations[]、禁止字段级 patch、禁止一次改多张表。',
+            '- replace：完整替换一张已存在表。必须提供 sheetKey（输入中真实存在的 key）和完整 sheet（name/domain/type/enable/required/content/sourceData/updateConfig/exportConfig 全量）。',
+            '- create：完整新增一张表。只提供完整 sheet；不要生成 sheetKey/uid/orderNo（本地分配）。可用 insertAfterSheetKey（真实存在的 key）指定插入位置。',
+            '- delete：显式删除一张已存在表。只提供 sheetKey；禁止通过「不输出某张表」暗示删除。',
+            '- content 首列必须 row_id 且非空不重复；sourceData.ddl 必须非空并与表头逐列匹配（中文表头用英文/ASCII 物理列名 + `-- 中文表头` 注释）。',
+            '- 未目标表保持原样；禁止修改全局注入配置；禁止删除/重建 row_id 列。',
+            '- 信息不足时仍返回合法 draft：summary 简述、warnings 写明、result 输出完整原样 replace；禁止输出追问文本或非法操作。',
+        ].join('\n');
+    }
     /**
      * 解析 assistant 系统提示词：
      * - segments 为空（settings 无自定义或全空）→ 使用默认提示词（与旧硬编码一致，含占位符）。
@@ -155096,11 +155721,12 @@ Expected function or array of functions, received type ${typeof value}.`
      * 占位符 `$1`-`$4` 语义见 TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU。valueMap 缺失的 key
      * 保留原 token 字面量（不替换为空串），用户可从提示词直观看到「这个占位符没生效」。
      */
-    function resolveAssistantSystemPrompt_ACU(segments, valueMap) {
+    function resolveAssistantSystemPrompt_ACU(segments, valueMap, protocolVersion = 3) {
         const normalized = normalizeAssistantPromptSegments_ACU(segments);
         if (normalized.length === 0) {
             const referenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
-            const defaultContent = buildDefaultSystemPrompt_ACU().replace(TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU, referenceText);
+            const defaultPrompt = protocolVersion === 3 ? buildDefaultSystemPromptV3_ACU() : buildDefaultSystemPrompt_ACU();
+            const defaultContent = defaultPrompt.replace(TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU, referenceText);
             return [{ role: 'system', content: defaultContent }];
         }
         const cards = normalized;
@@ -155124,12 +155750,16 @@ Expected function or array of functions, received type ${typeof value}.`
         // 核心协议卡自动追加（兼容旧自定义提示词）：任何自定义 segments 若未包含
         // 核心协议标记，则把路由表追加到最后一个 SYSTEM 卡末尾。不改变用户消息顺序
         // （仅追加到 SYSTEM 卡内容），不覆盖用户编辑内容，幂等（已含标记则跳过）。
+        // v2（含 v1 存量）追加 v2 路由卡；v3 追加 v3 单表完整替换卡。
+        // 绝不能把 v2 的 patch_sheet_*/operations 术语注入 v3 上下文，反之亦然。
         if (resolved.length > 0) {
             const hasCoreProtocol = cards.some((seg) => String(seg.content || '').includes(TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU));
             if (!hasCoreProtocol) {
                 const lastSystemIndex = resolved.map((item) => item.role).lastIndexOf('SYSTEM');
                 const targetIndex = lastSystemIndex >= 0 ? lastSystemIndex : resolved.length - 1;
-                const coreCard = buildCoreProtocolCard_ACU();
+                const coreCard = protocolVersion === 3
+                    ? buildCoreProtocolCardV3_ACU()
+                    : buildCoreProtocolCard_ACU();
                 resolved[targetIndex] = {
                     ...resolved[targetIndex],
                     content: `${resolved[targetIndex].content}\n\n${coreCard}`,
@@ -155142,38 +155772,54 @@ Expected function or array of functions, received type ${typeof value}.`
      * 产出改表助手 user payload 对象（8 个顶层键，constraints 内容冻结）。
      * 占位符 `$1`-`$4` 是这 8 个键的完备划分（见 TEMPLATE_ASSISTANT_PAYLOAD_PARTITION_ACU）。
      */
-    function buildUserPromptPayload_ACU(input, baseFingerprint) {
+    function buildUserPromptPayload_ACU(input, baseFingerprint, protocolVersion = 2) {
         const tempData = input.tempData;
+        const includeDdl = protocolVersion === 3;
         return {
             userRequest: String(input.userRequest || '').trim(),
             baseFingerprint,
             selectedSheetKey: input.currentSheetKey || '',
-            selectedSheet: getSelectedSheetSnapshot_ACU(tempData, input.currentSheetKey),
+            selectedSheet: getSelectedSheetSnapshot_ACU(tempData, input.currentSheetKey, { includeDdl }),
             sheetCount: buildSheetSummary_ACU(tempData).length,
-            allSheets: buildDetailedSheetSnapshots_ACU(tempData),
+            allSheets: buildDetailedSheetSnapshots_ACU(tempData, { includeDdl }),
             globalInjectionConfig: getGlobalInjectionConfigFromData_ACU(tempData, { ensureWriteBack: false }),
             constraints: {
-                protocolVersion: 2,
-                requestIdRequired: true,
+                protocolVersion,
+                requestIdRequired: protocolVersion === 2,
                 atomicOnly: true,
-                allowCrossSheetPatch: true,
-                patchSourceDataForbidDdl: true,
+                allowCrossSheetPatch: protocolVersion === 2,
+                patchSourceDataForbidDdl: protocolVersion === 2,
                 sourceDataAllowedKeys: [...TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU],
-                addSheetSourceDataForbidDdl: true,
-                allowStructuredContentPatch: true,
-                allowStructuredSchemaPatch: true,
-                allowStructuredLockPatch: true,
+                addSheetSourceDataForbidDdl: protocolVersion === 2,
+                allowStructuredContentPatch: protocolVersion === 2,
+                allowStructuredSchemaPatch: protocolVersion === 2,
+                allowStructuredLockPatch: protocolVersion === 2,
                 contentPatchRowNumberBase: 1,
                 lockPatchRowNumberBase: 1,
-                preferRichSourceDataForAddSheet: true,
-                defaultNoDdlForNewSheetUnlessExplicitlyRequested: true,
+                preferRichSourceDataForAddSheet: protocolVersion === 2,
+                defaultNoDdlForNewSheetUnlessExplicitlyRequested: protocolVersion === 2,
                 ddlMustPreserveHeaderOrder: true,
                 ddlChineseHeadersRequireCommentMapping: true,
                 ddlChineseHeadersForbidChinesePhysicalNames: true,
                 ddlPhysicalColumnNamesShouldBeAsciiWhenHeadersAreChinese: true,
-                avoidSlashInNewCustomHeaders: true,
-                cannotPatchNewSheetAfterAddInSameDraft: true,
-                redactExistingSourceDataDdlFromSnapshots: true,
+                avoidSlashInNewCustomHeaders: protocolVersion === 2,
+                cannotPatchNewSheetAfterAddInSameDraft: protocolVersion === 2,
+                redactExistingSourceDataDdlFromSnapshots: protocolVersion === 2,
+                ...(protocolVersion === 3
+                    ? {
+                        singleSheetFullReplace: true,
+                        singleResultEnvelope: true,
+                        forbidFieldLevelPatch: true,
+                        forbidGlobalConfigModification: true,
+                        replaceRequiresCompleteSheetAndDdl: true,
+                        createRequiresCompleteSheetAndDdl: true,
+                        deleteRequiresExplicitAction: true,
+                        missingUntargetedSheetsKeptUnchanged: true,
+                        rowIdSetGuardEnabled: true,
+                        rowIdReductionRequiresHighRiskConfirmation: true,
+                        contextBudgetEnabled: true,
+                    }
+                    : {}),
             },
         };
     }
@@ -155211,18 +155857,22 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
     function buildUserPrompt_ACU(input, baseFingerprint) {
-        return safeJsonStringify_ACU(buildUserPromptPayload_ACU(input, baseFingerprint), '{}');
+        const protocolVersion = input.protocolVersion === 3 ? 3 : (input.protocolVersion === 2 ? 2 : 3);
+        return safeJsonStringify_ACU(buildUserPromptPayload_ACU(input, baseFingerprint, protocolVersion), '{}');
     }
     function buildSessionRoundUserRequest_ACU(options) {
         const chunks = [String(options.userRequest || '').trim()];
         if (options.repairReason) {
+            const isV3 = options.protocolVersion === 3;
             chunks.push('修复要求：上一轮 assistant 草稿未通过本地校验，原因是：'
                 + `${options.repairReason}。`
                 + '请只修复校验失败的那个 operation，不要重新生成整份复杂草稿；'
                 + '不得改变需求中未提及的表与字段。'
-                + '只改更新频率时输出 patch_sheet_update_config；'
-                + '只改显示表头时输出 patch_sheet_schema.renameColumns，不输出 headers 字段。'
-                + '仍然只能输出合法 draft JSON（protocolVersion=2、atomic=true、含 requestId/baseFingerprint/selectedSheetKey）。');
+                + (isV3
+                    ? '仍然只能输出合法 v3 draft JSON（protocolVersion=3、mode="single_sheet_full_replace"、atomic=true、含 requestId/baseFingerprint/selectedSheetKey，且只能有单个 result：replace/create/delete）。'
+                    : '只改更新频率时输出 patch_sheet_update_config；'
+                        + '只改显示表头时输出 patch_sheet_schema.renameColumns，不输出 headers 字段。'
+                        + '仍然只能输出合法 draft JSON（protocolVersion=2、atomic=true、含 requestId/baseFingerprint/selectedSheetKey）。'));
         }
         return chunks.filter(Boolean).join('\n\n');
     }
@@ -155288,6 +155938,45 @@ Expected function or array of functions, received type ${typeof value}.`
             warnings: warnings.map((item) => String(item ?? '')),
             operations: [],
         };
+    }
+    /**
+     * v3 noop draft：与 v3 信封协议一致的空结果（无 result 时表示「无可应用变更」）。
+     * 仅在 v3 会话全部失败、回退到空 diff 时使用，保证 finalDraft 的协议版本与输入一致。
+     */
+    function buildTemplateAssistantNoopDraftV3_ACU(baseFingerprint, selectedSheetKey, summary = '', warnings = []) {
+        return {
+            protocolVersion: 3,
+            mode: 'single_sheet_full_replace',
+            requestId: 'template-assistant-noop',
+            baseFingerprint,
+            atomic: true,
+            selectedSheetKey: String(selectedSheetKey || ''),
+            summary,
+            warnings: warnings.map((item) => String(item ?? '')),
+            // v3「无可应用变更」= 不携带 result；hasTemplateAssistantApplicableDraft_ACU 据此判定不可应用。
+            // 该 draft 不会进入 validator（validator 只作用于 AI 输出），类型按信封宽限处理。
+            result: undefined,
+        };
+    }
+    /**
+     * 判断 draft 是否包含「可应用的变更」，兼容 v1/v2 的 operations 与 v3 的 result 信封。
+     * - v1/v2：operations 非空即视为有变更（与既有语义一致）。
+     * - v3：必须有对象 result，且 action 是 replace/create/delete 之一；delete 是显式动作，同样视为可应用。
+     * 供 generate/session/apply 链路统一使用，避免各调用点直接读 draft.operations 而破坏 v3。
+     */
+    function hasTemplateAssistantApplicableDraft_ACU(draft) {
+        if (!draft || typeof draft !== 'object')
+            return false;
+        if (draft.protocolVersion === 3) {
+            const action = String(draft?.result?.action || '');
+            return action === 'replace' || action === 'create' || action === 'delete';
+        }
+        return Array.isArray(draft.operations) && draft.operations.length > 0;
+    }
+    function assertTemplateAssistantDraftApplicable_ACU(draft) {
+        if (!hasTemplateAssistantApplicableDraft_ACU(draft)) {
+            throw new Error('assistant draft 不包含可应用的变更');
+        }
     }
     function getTemplateAssistantApplyBaselineFingerprint_ACU(result) {
         const originalBaseFingerprint = String(result?.originalBaseFingerprint || '').trim();
@@ -155364,17 +156053,38 @@ Expected function or array of functions, received type ${typeof value}.`
             wrapped.failureRawText = aiRawText;
             throw wrapped;
         }
+        // 协议一致性门禁：请求协议与 AI 输出协议必须一致。
+        // 默认新会话为 v3；若 AI 在 v3 请求下返回 v2 草稿（或反之），说明提示词/模型未遵守信封，
+        // 直接拒绝并归类为 validate，绝不静默混用两种协议的语义。
+        const requestedProtocolVersion = input.protocolVersion === 2 ? 2 : 3;
+        // 存量兼容：显式 v2 请求允许 v1 输出（v1/v2 共用 operations 语义），v3 请求只接受 v3。
+        const protocolAccepted = requestedProtocolVersion === 3
+            ? draft.protocolVersion === 3
+            : draft.protocolVersion === 1 || draft.protocolVersion === 2;
+        if (!protocolAccepted) {
+            const wrapped = new Error(`AI 返回的协议版本 (${draft.protocolVersion}) 与请求的协议版本 (${requestedProtocolVersion}) 不一致`);
+            wrapped.failureKind = 'validate';
+            wrapped.failureRawText = aiRawText;
+            throw wrapped;
+        }
         if (draft.baseFingerprint !== baseFingerprint) {
             const wrapped = new Error('AI 返回的 baseFingerprint 与当前结构不一致');
             wrapped.failureKind = 'fingerprint';
             wrapped.failureRawText = aiRawText;
             throw wrapped;
         }
-        draft.operations.forEach((op) => {
-            if (String(op?.op || '').startsWith('patch_sheet_')) {
-                validatePatchSheetBoundary_ACU(op, draft.selectedSheetKey, input.currentSheetKey, draft.protocolVersion);
-            }
-        });
+        if (isTemplateAssistantV3Draft_ACU(draft)) {
+            // v3 信封必须携带可应用的 result；validator 已保证 action 为 replace/create/delete 之一，这里兜底防御。
+            assertTemplateAssistantDraftApplicable_ACU(draft);
+        }
+        else {
+            draft.operations.forEach((op) => {
+                if (String(op?.op || '').startsWith('patch_sheet_')) {
+                    validatePatchSheetBoundary_ACU(op, draft.selectedSheetKey, input.currentSheetKey, draft.protocolVersion);
+                }
+            });
+            // v1/v2 空 operations 是合法结论（empty_operations），不在此抛错。
+        }
         const compileResult = compileTemplateAssistantDraft_ACU({
             tempData,
             sheetOrder: input.sheetOrder,
@@ -155417,6 +156127,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const originalTempData = clone_ACU(tempData);
         const originalSheetOrder = Array.isArray(input?.sheetOrder) ? [...input.sheetOrder] : null;
         const originalBaseFingerprint = buildTemplateAssistantFingerprint_ACU(originalTempData);
+        const protocolVersion = input.protocolVersion === 2 ? 2 : 3;
         const rounds = [];
         const onRoundComplete = input?.onRoundComplete;
         let stopReason = 'success';
@@ -155431,6 +156142,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const roundUserRequest = buildSessionRoundUserRequest_ACU({
                 userRequest,
                 repairReason,
+                protocolVersion,
             });
             try {
                 const historyForRound = [
@@ -155447,6 +156159,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     userRequest: roundUserRequest,
                     priorTurns: historyForRound,
                     tableApiPreset: input.tableApiPreset,
+                    protocolVersion,
                     guard: input.guard,
                 });
                 assertTemplateAssistantSessionActive_ACU(input.guard);
@@ -155469,7 +156182,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 // 空 operations 表示 AI 认为无需修改，同样视为成功结论。
                 lastFailure = null;
                 lastErrorMessage = '';
-                stopReason = result.draft.operations.length > 0 ? 'success' : 'empty_operations';
+                stopReason = hasTemplateAssistantApplicableDraft_ACU(result.draft) ? 'success' : 'empty_operations';
                 break;
             }
             catch (error) {
@@ -155480,10 +156193,12 @@ Expected function or array of functions, received type ${typeof value}.`
                 // 它不是 AI 输出问题：重试不会改善、回喂 AI 无意义，必须单独分类并终止。
                 const isEnvironmentFailure = error instanceof SqliteRuntimeUnavailableError_ACU
                     || error?.failureKind === 'environment';
+                const isContextBudgetFailure = error?.failureKind === 'context_budget';
                 const failureKind = error?.failureKind === 'parse'
                     || error?.failureKind === 'validate'
                     || error?.failureKind === 'fingerprint'
                     || error?.failureKind === 'preflight'
+                    || error?.failureKind === 'context_budget'
                     ? error.failureKind
                     : isEnvironmentFailure
                         ? 'environment'
@@ -155492,6 +156207,13 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (isEnvironmentFailure) {
                     // 环境失败：不可重试、不消耗 repairRetriesUsed、不把 sql.js 错误当修复上下文回喂 AI。
                     stopReason = 'environment_failure';
+                    repairReason = '';
+                    break;
+                }
+                if (isContextBudgetFailure) {
+                    // 上下文预算超限：payload 本身超出协议上限，属于输入侧问题。
+                    // 重试只会再次超限、回喂 AI 无意义，必须不可重试、不消耗 repairRetriesUsed。
+                    stopReason = 'context_budget_failure';
                     repairReason = '';
                     break;
                 }
@@ -155523,7 +156245,11 @@ Expected function or array of functions, received type ${typeof value}.`
         assertTemplateAssistantSessionActive_ACU(input.guard);
         if (finalPreflight.blockers.length > 0)
             throw new Error(`schema migration 最终 preflight 失败：${finalPreflight.blockers.join('；')}`);
-        const finalDraft = lastResult?.draft || buildTemplateAssistantNoopDraft_ACU(originalBaseFingerprint, currentSheetKey);
+        const v3RowIdGuardFindings = lastResult?.draft && isTemplateAssistantV3Draft_ACU(lastResult.draft)
+            ? collectV3RowIdGuardFindings_ACU(originalTempData, compileResult.candidateData, currentSheetKey, String(input.userRequest || ''))
+            : [];
+        const finalDraft = lastResult?.draft
+            || (protocolVersion === 3 ? buildTemplateAssistantNoopDraftV3_ACU(originalBaseFingerprint, currentSheetKey) : buildTemplateAssistantNoopDraft_ACU(originalBaseFingerprint, currentSheetKey));
         const finalWorkingFingerprint = buildTemplateAssistantFingerprint_ACU(compileResult.candidateData || originalTempData);
         return {
             draft: finalDraft,
@@ -155542,6 +156268,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 maxRepairRetries,
                 lastErrorMessage,
                 lastFailure,
+                ...(v3RowIdGuardFindings.length > 0 ? { v3RowIdGuardFindings } : {}),
             },
         };
     }
@@ -155893,6 +156620,17 @@ Expected function or array of functions, received type ${typeof value}.`
         asList(compileResult.highRiskItems).forEach((item, index) => {
             add(String(item?.type || 'service_high_risk'), String(item?.label || ''), `service:${index}:${item?.type}:${item?.label}`);
         });
+        // v3 row_id 集合守卫：replace 目标表出现「AI 未请求删行但 row_id 集合缩减」时，
+        // 必须作为高风险项要求用户显式确认，未确认前不得应用（见 getTurnApplyBlockReason）。
+        asList(result?.session?.v3RowIdGuardFindings).forEach((finding, index) => {
+            const sheetKey = String(finding?.sheetKey || '').trim();
+            const beforeCount = Number(finding?.beforeRowCount ?? -1);
+            const afterCount = Number(finding?.afterRowCount ?? -1);
+            const label = sheetKey
+                ? `row_id 集合缩减：${sheetKey} 的行由 ${beforeCount} 缩减到 ${afterCount}（AI 未显式请求删行，请确认是否允许）`
+                : `row_id 集合缩减：${beforeCount} → ${afterCount}（AI 未显式请求删行，请确认是否允许）`;
+            add('v3_row_id_set_reduction', label, `v3-rowid:${index}:${sheetKey}`);
+        });
         const addCrossSheetPatch = (patches, kind, render) => {
             asList(patches).forEach(item => {
                 const sheetKey = String(item?.sheetKey || '').trim();
@@ -155952,7 +156690,7 @@ Expected function or array of functions, received type ${typeof value}.`
         if (turn.type === 'round') {
             const compileResult = turn.roundData.perRoundCompileResult;
             const draft = turn.roundData.draft;
-            if (!compileResult || !draft || !asList(draft.operations).length)
+            if (!compileResult || !draft || !hasTemplateAssistantApplicableDraft_ACU(draft))
                 return null;
             const candidateData = compileResult.candidateData && typeof compileResult.candidateData === 'object'
                 ? compileResult.candidateData
@@ -155972,7 +156710,7 @@ Expected function or array of functions, received type ${typeof value}.`
         if (turn.type === 'final') {
             const compileResult = turn.result.compileResult;
             const draft = turn.result.draft;
-            if (!compileResult || !draft || !asList(draft.operations).length)
+            if (!compileResult || !draft || !hasTemplateAssistantApplicableDraft_ACU(draft))
                 return null;
             const candidateData = compileResult.candidateData && typeof compileResult.candidateData === 'object'
                 ? compileResult.candidateData

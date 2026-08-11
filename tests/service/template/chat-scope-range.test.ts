@@ -111,3 +111,65 @@ describe('projectTableDataForTemplateScope_ACU', () => {
     expect(projected.sheet_c).toBeUndefined();
   });
 });
+
+
+describe('findEmptyBusinessHeaderIndexes_ACU / isSqlActiveTemplateSheet_ACU / projectSqlActiveTemplateData_ACU', () => {
+  it('首列 null 占位 + 后续有效列 → 有效', () => {
+    const sheet = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT);', [null, 'a']);
+    expect(range.findEmptyBusinessHeaderIndexes_ACU(sheet as any)).toEqual([]);
+    expect(range.isSqlActiveTemplateSheet_ACU(sheet as any)).toBe(true);
+  });
+
+  it('第二列为 null/undefined/空串/全角空白 → 无效并返回准确列号', () => {
+    for (const bad of [null, undefined, '', '\u3000', ' \t ']) {
+      const sheet = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, b TEXT);', ['row_id', bad]);
+      expect(range.findEmptyBusinessHeaderIndexes_ACU(sheet as any)).toEqual([2]);
+      expect(range.isSqlActiveTemplateSheet_ACU(sheet as any)).toBe(false);
+    }
+  });
+
+  it('中间或末尾空表头 → 无效并返回准确列号', () => {
+    const middle = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT, b TEXT);', ['row_id', 'a', null, 'b']);
+    expect(range.findEmptyBusinessHeaderIndexes_ACU(middle as any)).toEqual([3]);
+    const tail = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT);', ['row_id', 'a', '']);
+    expect(range.findEmptyBusinessHeaderIndexes_ACU(tail as any)).toEqual([3]);
+  });
+
+  it('显式 DDL 表仍按空业务表头跳过（DDL 无关）', () => {
+    const sheet = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, a TEXT);', ['row_id', null]);
+    expect(range.isSqlActiveTemplateSheet_ACU(sheet as any)).toBe(false);
+  });
+
+  it('不改写原模板对象', () => {
+    const sheet = makeSheet('CREATE TABLE t (row_id INTEGER PRIMARY KEY, b TEXT);', ['row_id', '']);
+    const data: any = { mate: { type: 'acu' }, sheet_t: sheet };
+    const before = JSON.stringify(sheet);
+    range.projectSqlActiveTemplateData_ACU(data);
+    expect(JSON.stringify(sheet)).toBe(before);
+  });
+
+  it('全部表被过滤后得到空投影而不是 null', () => {
+    const data: any = { mate: { type: 'acu' }, sheet_a: makeSheet('CREATE TABLE a (row_id INTEGER PRIMARY KEY);', ['row_id', '']) };
+    const result = range.projectSqlActiveTemplateData_ACU(data);
+    expect(result.data.mate).toEqual({ type: 'acu' });
+    expect(Object.keys(result.data).filter(k => k.startsWith('sheet_'))).toEqual([]);
+    expect(result.skippedSheets).toHaveLength(1);
+    expect(result.skippedSheets[0].sheetKey).toBe('sheet_a');
+    expect(result.skippedSheets[0].emptyHeaderIndexes).toEqual([2]);
+  });
+
+  it('mate 与非 sheet_* 元数据原样保留', () => {
+    const data: any = { mate: { type: 'acu' }, other: { x: 1 }, sheet_ok: makeSheet('CREATE TABLE ok (row_id INTEGER PRIMARY KEY, a TEXT);', ['row_id', 'a']) };
+    const result = range.projectSqlActiveTemplateData_ACU(data);
+    expect(result.data.mate).toEqual({ type: 'acu' });
+    expect(result.data.other).toEqual({ x: 1 });
+    expect(result.data.sheet_ok).toBeDefined();
+    expect(result.skippedSheets).toEqual([]);
+  });
+
+  it('表头缺失/非数组/只有首列 不归入空业务列判定', () => {
+    expect(range.findEmptyBusinessHeaderIndexes_ACU(null)).toEqual([]);
+    expect(range.findEmptyBusinessHeaderIndexes_ACU({ uid: 'u', name: 'n', sourceData: {}, content: ['not-array'] } as any)).toEqual([]);
+    expect(range.findEmptyBusinessHeaderIndexes_ACU({ uid: 'u', name: 'n', sourceData: {}, content: [['row_id']] } as any)).toEqual([]);
+  });
+});

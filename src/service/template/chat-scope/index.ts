@@ -69,5 +69,8 @@ export {
     resolveOutOfScopeColumns_ACU,
     projectSheetForTemplateScope_ACU,
     projectTableDataForTemplateScope_ACU,
+    findEmptyBusinessHeaderIndexes_ACU,
+    isSqlActiveTemplateSheet_ACU,
+    projectSqlActiveTemplateData_ACU,
     type TemplateScope_ACU,
 } from './chat-scope-range';

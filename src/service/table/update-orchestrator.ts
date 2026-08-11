@@ -238,7 +238,9 @@ function buildTemplateScopeFromData_ACU(data: Record<string, any> | null | undef
         sheetKeys.add(sheetKey);
         sheets[sheetKey] = data[sheetKey];
     });
-    return sheetKeys.size > 0 ? { sheetKeys, sheets } : null;
+    // 空集合表示“已确认无活动表”（SQL 活动模板投影后全部被过滤），绝不能折叠成 null：
+    // null 在契约中表示“范围未知、不过滤”，会把所有运行时表重新放进来。
+    return { sheetKeys, sheets };
 }
 
 function resolveManualRefillTemplateData_ACU(chat: any[], isolationKey: string): Record<string, any> | null {
@@ -1289,11 +1291,16 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             }
             let reboundStatements: string[];
             try {
+                // 列 registry 只注册本次请求的 SQL 活动表（scope 已过滤非首列空表头表）：
+                // 休眠表即使被 AI 猜中也不进入 registry，杜绝把它当作可写目标。
+                const activeSheetKeySet = capturedSqlApplyScope?.activeSheetKeys
+                    ? new Set(capturedSqlApplyScope.activeSheetKeys)
+                    : undefined;
                 reboundStatements = rebindSqlMutationIdentifiers_ACU(
                     normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''),
                     baseSnapshot as any,
                     capturedSqlApplyScope?.templateData,
-                    { requireKnownTables: true },
+                    { requireKnownTables: true, targetSheetKeys: activeSheetKeySet },
                 );
                 // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
                 assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);

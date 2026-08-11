@@ -60,6 +60,20 @@ export interface SqlTableApplyScope_ACU {
   readonly templateData: TableDataObject_ACU;
   /** 保留作者数据行的模板快照，仅供首次建表补种。 */
   readonly templateDataWithRows: TableDataObject_ACU;
+  /**
+   * 请求级 SQL 活动表集合（非首列空业务表头已剔除）。缺省时调用方必须
+   * 回退到 templateData 的全部 sheet_* 键（兼容旧调用方）。
+   */
+  readonly activeSheetKeys?: readonly string[];
+  /**
+   * 因非首列空业务表头而在 SQL 活动路径中休眠跳过的模板表诊断。
+   * 只包含 sheetKey / 显示名 / 空列序号，不包含数据行、DDL 或聊天正文。
+   */
+  readonly skippedSheets?: ReadonlyArray<{
+    sheetKey: string;
+    name: string;
+    emptyHeaderIndexes: readonly number[];
+  }>;
 }
 
 /**

@@ -1276,6 +1276,7 @@ interface QueryExecResult {
 | 大表性能问题（>1000 行） | 加载/导出变慢 | 分批 INSERT + 事务包裹 + 性能监控 |
 | DDL 与数据不匹配 | 数据丢失/加载失败 | 校验机制 + 用户确认 + 自动修复 |
 | 内存占用增加 | 浏览器卡顿 | sql.js 内存数据库本身很轻量，几百行数据 < 1MB |
+| 模板表存在非首列空业务表头（第 2 列及以后为 null/undefined/空串/空白） | 原逻辑在 `generateFallbackDDL()` / `resolveEffectiveDDL()` 抛 `empty_column_name`，可能阻塞同批有效表 | 在 SQL 活动路径中将这些表视为**休眠**：不进 SQL Prompt、不进 AI 调度、不建表、不进 NameMapper/列 registry、不进 writeSet 与提交 operation。判定源为 `src/shared/sql-active-template.ts`（`findEmptyBusinessHeaderIndexes_ACU` / `isSqlActiveTemplateSheet_ACU` / `projectSqlActiveTemplateData_ACU`），捕获快照在 `captureSqlTableApplyScope_ACU()` 一次性投影，Prompt/调度/提交共享同一 `activeSheetKeys` 集合。首列 `null`/`undefined` 仍是 `row_id` 占位，不视为空业务列。**休眠是活动范围语义，不删除**：既有物理表、聊天历史、checkpoint、快照保留；修正表头后按"中途加表"语义在下次请求恢复参与。Native 模式不受影响。`generateFallbackDDL()` 对直接处理的非法表头仍 fail-closed，不 catch、不自动补 `col_N`。 |
 
 ---
 

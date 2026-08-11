@@ -136,7 +136,7 @@ describe('提示词占位符与默认等价', () => {
     const messages = resolveAssistantSystemPrompt_ACU([
       { role: 'SYSTEM', content: '我的自定义规则' },
       { role: 'USER', content: '用户补充规则' },
-    ]);
+    ], null, 2);
     expect(messages).toHaveLength(2);
     const systemContent = messages[0]?.content || '';
     // 核心协议卡被追加（含操作路由标记）

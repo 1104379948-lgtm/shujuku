@@ -5,6 +5,7 @@ import {
   buildTemplateAssistantFingerprint_ACU,
   buildPseudoRoleTemplateAssistantPromptSegments_ACU,
   createTemplateAssistantSessionGuard_ACU,
+  hasTemplateAssistantApplicableDraft_ACU,
   getTemplateAssistantApplyBaselineFingerprint_ACU,
   runTemplateAssistantSession_ACU,
   setTemplateAssistantPrompt_ACU,
@@ -160,6 +161,18 @@ export function buildVisualizerAssistantHighRiskItems(
     add(String(item?.type || 'service_high_risk'), String(item?.label || ''), `service:${index}:${item?.type}:${item?.label}`);
   });
 
+  // v3 row_id 集合守卫：replace 目标表出现「AI 未请求删行但 row_id 集合缩减」时，
+  // 必须作为高风险项要求用户显式确认，未确认前不得应用（见 getTurnApplyBlockReason）。
+  asList(result?.session?.v3RowIdGuardFindings).forEach((finding, index) => {
+    const sheetKey = String(finding?.sheetKey || '').trim();
+    const beforeCount = Number(finding?.beforeRowCount ?? -1);
+    const afterCount = Number(finding?.afterRowCount ?? -1);
+    const label = sheetKey
+      ? `row_id 集合缩减：${sheetKey} 的行由 ${beforeCount} 缩减到 ${afterCount}（AI 未显式请求删行，请确认是否允许）`
+      : `row_id 集合缩减：${beforeCount} → ${afterCount}（AI 未显式请求删行，请确认是否允许）`;
+    add('v3_row_id_set_reduction', label, `v3-rowid:${index}:${sheetKey}`);
+  });
+
   const addCrossSheetPatch = (patches: any[], kind: string, render: (item: any) => string) => {
     asList(patches).forEach(item => {
       const sheetKey = String(item?.sheetKey || '').trim();
@@ -237,7 +250,7 @@ export function getTurnApplyPayload(turn: VisualizerAssistantTurn): VisualizerAs
   if (turn.type === 'round') {
     const compileResult = turn.roundData.perRoundCompileResult;
     const draft = turn.roundData.draft;
-    if (!compileResult || !draft || !asList(draft.operations).length) return null;
+    if (!compileResult || !draft || !hasTemplateAssistantApplicableDraft_ACU(draft)) return null;
     const candidateData = compileResult.candidateData && typeof compileResult.candidateData === 'object'
       ? compileResult.candidateData
       : null;
@@ -255,7 +268,7 @@ export function getTurnApplyPayload(turn: VisualizerAssistantTurn): VisualizerAs
   if (turn.type === 'final') {
     const compileResult = turn.result.compileResult;
     const draft = turn.result.draft;
-    if (!compileResult || !draft || !asList(draft.operations).length) return null;
+    if (!compileResult || !draft || !hasTemplateAssistantApplicableDraft_ACU(draft)) return null;
     const candidateData = compileResult.candidateData && typeof compileResult.candidateData === 'object'
       ? compileResult.candidateData
       : null;

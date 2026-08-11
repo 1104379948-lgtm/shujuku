@@ -69,6 +69,7 @@ import {
   createTemplateAssistantSessionGuard_ACU,
   generateTemplateAssistantDraft_ACU,
   getTemplateAssistantApplyBaselineFingerprint_ACU,
+  hasTemplateAssistantApplicableDraft_ACU,
   parseTemplateAssistantDraft_ACU,
   runTemplateAssistantSession_ACU,
   TemplateAssistantSessionStoppedError_ACU,
@@ -121,7 +122,7 @@ describe('template assistant service', () => {
     const fp = buildTemplateAssistantFingerprint_ACU(tempData);
     mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-override","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`);
 
-    await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', tableApiPreset: 'assistant-preset' });
+    await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', tableApiPreset: 'assistant-preset', protocolVersion: 2 });
 
     expect(mockCallAIWithPreset).toHaveBeenCalledWith(expect.any(Array), 'assistant-preset');
   });
@@ -131,7 +132,7 @@ describe('template assistant service', () => {
     const fp = buildTemplateAssistantFingerprint_ACU(tempData);
     mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-fallback","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`);
 
-    await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', tableApiPreset: '   ' });
+    await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', tableApiPreset: '   ', protocolVersion: 2 });
 
     expect(mockCallAIWithPreset).toHaveBeenCalledWith(expect.any(Array), 'preset-1');
   });
@@ -164,7 +165,7 @@ describe('template assistant service', () => {
     const tempData = buildTempData_ACU();
     const fp = buildTemplateAssistantFingerprint_ACU(tempData);
     mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":1,"mode":"modify_current_template_incremental","baseFingerprint":"${fp}","selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_b","patch":{"contextDepth":8}}]}</templateAssistantDraft>`);
-    await expect(generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表' })).rejects.toThrow(/selectedSheetKey/);
+    await expect(generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', protocolVersion: 2 })).rejects.toThrow(/selectedSheetKey/);
   });
 
   it('v2 缺少 requestId 时校验失败', () => {
@@ -295,7 +296,7 @@ describe('template assistant service', () => {
     } as any;
     const fp = buildTemplateAssistantFingerprint_ACU(tempData);
     mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-1","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[{"op":"patch_sheet_update_config","sheetKey":"sheet_b","patch":{"contextDepth":8}}]}</templateAssistantDraft>`);
-    const result = await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a', 'sheet_b'], userRequest: '修改 B 表' });
+    const result = await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a', 'sheet_b'], userRequest: '修改 B 表', protocolVersion: 2 });
     expect(result.draft.protocolVersion).toBe(2);
   });
 
@@ -305,7 +306,7 @@ describe('template assistant service', () => {
     const aiRawText = `<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-bad","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[{"op":"create_sheet","sheetName":"战利品表"}]}</templateAssistantDraft>`;
     mockCallAIWithPreset.mockResolvedValue(aiRawText);
 
-    await expect(generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '帮我新建一个战利品表吧' })).rejects.toThrow(/包含当前协议不支持的操作/);
+    await expect(generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '帮我新建一个战利品表吧', protocolVersion: 2 })).rejects.toThrow(/包含当前协议不支持的操作/);
 
     expect(mockLogError).toHaveBeenCalledTimes(1);
     expect(mockLogError).toHaveBeenCalledWith('[TemplateAssistant] draft 解析失败', expect.objectContaining({
@@ -336,7 +337,7 @@ describe('template assistant service', () => {
     const tempData = buildTempData_ACU();
     const fp = buildTemplateAssistantFingerprint_ACU(tempData);
     mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-2","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`);
-    const result = await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '查看' });
+    const result = await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '查看', protocolVersion: 2 });
     expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
     expect(result.messages).toHaveLength(2);
   });
@@ -347,7 +348,7 @@ describe('template assistant service', () => {
     const fp = buildTemplateAssistantFingerprint_ACU(tempData);
     mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-payload","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`);
 
-    const result = await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '检查 payload' });
+    const result = await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '检查 payload', protocolVersion: 2 });
     const payload = JSON.parse(result.messages[1]?.content || '{}');
     const selectedSheet = payload.selectedSheet;
     const sheetA = Array.isArray(payload.allSheets) ? payload.allSheets.find((item: any) => item.sheetKey === 'sheet_a') : null;
@@ -365,7 +366,7 @@ describe('template assistant service', () => {
     const fp = buildTemplateAssistantFingerprint_ACU(tempData);
     mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-3","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`);
 
-    const result = await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '新增角色关系表' });
+    const result = await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '新增角色关系表', protocolVersion: 2 });
     const systemPrompt = result.messages[0]?.content || '';
 
     expect(systemPrompt).toContain('每个 operations[i] 必须使用 op 字段表示操作名');
@@ -438,7 +439,7 @@ describe('template assistant service', () => {
       schemaMigrationIntents: { sheet_a: migrationIntent },
     });
 
-    await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '把姓名改为角色名' });
+    await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '把姓名改为角色名', protocolVersion: 2 });
 
     expect(mockPreflightSchemaMigrations).toHaveBeenCalledWith(expect.objectContaining({
       baselineData: tempData,
@@ -461,6 +462,7 @@ describe('template assistant service', () => {
         { user: '先建一个掉落表', assistant: '已生成初版草稿' },
         { user: '再补充备注列', assistant: '已补充备注列建议' },
       ],
+      protocolVersion: 2,
     });
 
     expect(result.messages).toHaveLength(6);
@@ -483,6 +485,7 @@ describe('template assistant service', () => {
       userRequest: '检查是否还需要修改',
       priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
       maxRounds: 3,
+      protocolVersion: 2,
     });
 
     expect(result.originalBaseFingerprint).toBe(fp);
@@ -514,6 +517,7 @@ describe('template assistant service', () => {
       userRequest: '第二次对话需求',
       priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
       maxRounds: 3,
+      protocolVersion: 2,
     });
 
     expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
@@ -565,6 +569,7 @@ describe('template assistant service', () => {
       userRequest: '修改当前表',
       maxRounds: 1,
       maxRepairRetries: 3,
+      protocolVersion: 2,
     });
 
     // 环境失败立即终止：不可重试、不消耗 repairRetriesUsed、stopReason 独立。
@@ -635,6 +640,7 @@ describe('template assistant service', () => {
       currentSheetKey: 'sheet_a',
       sheetOrder: ['sheet_a'],
       userRequest: '请生成草稿',
+      protocolVersion: 2,
       maxRounds: 2,
       maxRepairRetries: 1,
     });
@@ -682,6 +688,7 @@ describe('template assistant service', () => {
       userRequest: '请生成草稿',
       maxRounds: 1,
       maxRepairRetries: 0,
+      protocolVersion: 2,
     });
 
     expect(result.session.stopReason).toBe('repair_retry_capped');
@@ -705,6 +712,7 @@ describe('template assistant service', () => {
       userRequest: '请生成草稿',
       maxRounds: 3,
       maxRepairRetries: 1,
+      protocolVersion: 2,
     });
 
     expect(result.session.stopReason).toBe('empty_operations');
@@ -738,6 +746,7 @@ describe('template assistant service', () => {
       userRequest: '连续处理',
       priorTurns: [{ user: '上一轮需求', assistant: '上一轮结果' }],
       maxRounds: 3,
+      protocolVersion: 2,
       guard: runGuard,
       onRoundComplete() {
         if (!cancelled) {
@@ -770,15 +779,101 @@ describe('template assistant service', () => {
     guard.getSignal();
     const runGuard = guard.createRunGuard();
 
-    await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', guard: runGuard });
+    await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', guard: runGuard, protocolVersion: 2 });
 
     expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
     const signalArg = mockCallAIWithPreset.mock.calls[0][3];
     expect(signalArg).toBeDefined();
     expect(signalArg.aborted).toBe(false);
+
+
     guard.cancel();
     expect(signalArg.aborted).toBe(true);
     expect(runGuard.isCancelled?.()).toBe(true);
+  });
+
+
+  it('v3 会话全部失败时回退的 noop draft 不可应用且协议版本为 3', async () => {
+    mockCallAIWithPreset.mockRejectedValue(new Error('mock ai failure'));
+
+    const result = await runTemplateAssistantSession_ACU({
+      tempData: buildTempData_ACU(),
+      currentSheetKey: 'sheet_a',
+      sheetOrder: ['sheet_a'],
+      userRequest: '请生成草稿',
+      maxRounds: 1,
+      maxRepairRetries: 0,
+    });
+
+    expect(result.session.stopReason).toBe('repair_retry_capped');
+    expect(result.draft.protocolVersion).toBe(3);
+    expect(hasTemplateAssistantApplicableDraft_ACU(result.draft)).toBe(false);
+    expect(result.draft.result).toBeUndefined();
+  });
+
+
+  it('协议一致性门禁：默认 v3 请求下 AI 返回 v2 draft 会被拒绝（validate）', async () => {
+    const tempData = buildTempData_ACU();
+    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+    const v2RawText = `<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-mix","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`;
+    mockCallAIWithPreset.mockResolvedValue(v2RawText);
+
+    await expect(
+      generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表' }),
+    ).rejects.toMatchObject({ failureKind: 'validate' });
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
+  });
+
+  it('协议一致性门禁：显式 v3 请求下 AI 返回 v2 draft 会被拒绝，v2 请求接受 v1 输出', async () => {
+    const tempData = buildTempData_ACU();
+    const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+    const v2RawText = `<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-mix2","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`;
+    mockCallAIWithPreset.mockResolvedValue(v2RawText);
+
+    await expect(
+      generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', protocolVersion: 3 }),
+    ).rejects.toMatchObject({ failureKind: 'validate' });
+
+    // v2 请求接受 v1 输出（存量兼容）
+    mockCallAIWithPreset.mockResolvedValue(`<templateAssistantDraft>{"protocolVersion":1,"mode":"modify_current_template_incremental","baseFingerprint":"${fp}","selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`);
+    const v1Result = await generateTemplateAssistantDraft_ACU({ tempData, currentSheetKey: 'sheet_a', sheetOrder: ['sheet_a'], userRequest: '修改当前表', protocolVersion: 2 });
+    expect(v1Result.draft.protocolVersion).toBe(1);
+  });
+
+
+  describe('v3 上下文预算守卫', () => {
+    it('v3 payload 超过预算时拒绝请求且不调用 AI（fail-closed）', async () => {
+      const tempData = buildTempData_ACU();
+      // 构造超长 userRequest，使 v3 payload 超过 40,000 字符。
+      const hugeRequest = '请修改当前表。' + '扩'.repeat(45_000);
+      await expect(
+        generateTemplateAssistantDraft_ACU({
+          tempData,
+          currentSheetKey: 'sheet_a',
+          sheetOrder: ['sheet_a'],
+          userRequest: hugeRequest,
+        }),
+      ).rejects.toThrow(/预算超限|context budget/i);
+      expect(mockCallAIWithPreset).not.toHaveBeenCalled();
+    });
+
+    it('v2 payload 不受 v3 预算限制', async () => {
+      const tempData = buildTempData_ACU();
+      const fp = buildTemplateAssistantFingerprint_ACU(tempData);
+      const hugeRequest = '请修改当前表。' + '扩'.repeat(45_000);
+      mockCallAIWithPreset.mockResolvedValue(
+        `<templateAssistantDraft>{"protocolVersion":2,"mode":"modify_current_template_incremental","requestId":"req-budget-v2","baseFingerprint":"${fp}","atomic":true,"selectedSheetKey":"sheet_a","summary":"x","warnings":[],"operations":[]}</templateAssistantDraft>`,
+      );
+      const result = await generateTemplateAssistantDraft_ACU({
+        tempData,
+        currentSheetKey: 'sheet_a',
+        sheetOrder: ['sheet_a'],
+        userRequest: hugeRequest,
+        protocolVersion: 2,
+      });
+      expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
+      expect(result.draft.protocolVersion).toBe(2);
+    });
   });
 
   });

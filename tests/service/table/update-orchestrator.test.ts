@@ -4724,6 +4724,53 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       vi.mocked(isSqliteMode).mockReturnValue(false);
     }
   });
+  it('SQL 活动快照投影剔除非首列空表头表后，AI 猜测休眠表写入在 rebind 层即被拒绝', async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value'], ['1', 'base-a']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      // sheet_1 在运行时快照中仍存在（历史数据保留），但模板侧因非首列空表头被投影为休眠表。
+      sheet_1: { uid: 'quest_log', name: '表B', sourceData: { ddl: 'CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value'], ['1', 'base-b']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    // 请求前捕获的 SQL 活动快照：sheet_1 已被投影剔除（非首列空表头 → 休眠）。
+    const sqlApplyScope = {
+      isolationKey: 'scope-dormant-e2e',
+      templateData: {
+        mate: { type: 'acu', version: 1 },
+        sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      },
+      templateDataWithRows: {
+        mate: { type: 'acu', version: 1 },
+        sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value'], ['1', 'base-a']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      },
+      activeSheetKeys: ['sheet_0'],
+      skippedSheets: [{ sheetKey: 'sheet_1', name: '表B', emptyHeaderIndexes: [2] }],
+    } as any;
+    // AI 仍猜测写休眠表 sheet_1（quest_log）。
+    const sql = "INSERT INTO quest_log (value) VALUES ('dormant-write');";
+    const responses = [{
+      success: true,
+      attempt: 1,
+      aiResponse: `<tableEdit>${sql}</tableEdit>`,
+      tableEditText: sql,
+      job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
+    }];
+
+    mockSettings.discardUnauthorizedTableEditsEnabled = false;
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, {
+      saveTargetIndex: 3,
+      updateMode: 'auto_standard',
+      isImportMode: false,
+      sqlApplyScope,
+    });
+
+    // 休眠表不在列 registry（targetSheetKeys 过滤）：rebind fail-closed，不静默放行。
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/quest_log|未知|无法识别|失败/);
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
 
   it('无法归属到已知表的 SQL 保持失败，禁止以越权降级名义静默丢弃', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');

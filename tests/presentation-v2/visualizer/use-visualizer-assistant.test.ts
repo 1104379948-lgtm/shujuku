@@ -35,6 +35,8 @@ vi.mock('../../../src/service/template-assistant/service', () => ({
   ],
   createTemplateAssistantSessionGuard_ACU: mockCreateGuard,
   getTemplateAssistantApplyBaselineFingerprint_ACU: mockGetBaselineFingerprint,
+  hasTemplateAssistantApplicableDraft_ACU: (draft: any) =>
+    Array.isArray(draft?.operations) && draft.operations.length > 0 || draft?.protocolVersion === 3 && ['replace', 'create', 'delete'].includes(draft?.result?.action),
   resolveAssistantSystemPrompt_ACU: (segments: any[]) => (Array.isArray(segments) && segments.length
     ? segments.map((seg: any) => ({ role: seg.role, content: seg.content }))
     : [{ role: 'SYSTEM', content: '伪 role 模板卡' }]),
@@ -986,6 +988,40 @@ describe('useVisualizerAssistant', () => {
     expect(await assistant.regenerateFromUserTurn(userTurn)).toBe(false);
     expect(assistant.turns.value.length).toBe(before);
     expect(assistant.turns.value.find(turn => turn.id === finalTurn.id)).toBeDefined();
+  });
+
+
+  it('v3 row_id 集合缩减派生高风险确认，确认前不能应用', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+    }, ['sheet_a']);
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      session: {
+        v3RowIdGuardFindings: [{
+          code: 'row_id_set_reduction',
+          sheetKey: 'sheet_a',
+          beforeRowCount: 3,
+          afterRowCount: 1,
+          message: 'row_id 集合缩减',
+        }],
+      },
+    }));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '精简行数据';
+    await assistant.run();
+
+    expect(assistant.highRiskItems.value.map(item => item.label).join('；')).toContain('row_id 集合缩减');
+    expect(assistant.canApply.value).toBe(false);
+    expect(assistant.applyLatestDraft()).toBe(false);
+
+    const finalTurn = assistant.turns.value.find(turn => turn.type === 'final') as any;
+    assistant.setRiskConfirmation(finalTurn.id, 0, true);
+    expect(assistant.canApply.value).toBe(true);
   });
 
 });

@@ -480,3 +480,245 @@ describe('compileTemplateAssistantDraft_ACU', () => {
     })).toThrow(/仅支持纪要\/大纲类表格/);
   });
 });
+
+function buildV3ReplaceDraft_ACU(fp: string, sheetKey: string, sheet: any) {
+  return {
+    protocolVersion: 3,
+    mode: 'single_sheet_full_replace',
+    requestId: 'req-v3',
+    baseFingerprint: fp,
+    atomic: true,
+    selectedSheetKey: sheetKey,
+    summary: 'x',
+    warnings: [],
+    result: { action: 'replace', sheetKey, sheet },
+  };
+}
+
+function buildV3CreateDraft_ACU(fp: string, sheet: any, insertAfterSheetKey?: string) {
+  return {
+    protocolVersion: 3,
+    mode: 'single_sheet_full_replace',
+    requestId: 'req-v3',
+    baseFingerprint: fp,
+    atomic: true,
+    selectedSheetKey: 'sheet_a',
+    summary: 'x',
+    warnings: [],
+    result: { action: 'create', sheet, ...(insertAfterSheetKey ? { insertAfterSheetKey } : {}) },
+  };
+}
+
+function buildV3FullSheet_ACU(overrides: any = {}) {
+  return {
+    name: 'A表',
+    domain: 'chat',
+    type: 'dynamic',
+    enable: true,
+    required: false,
+    content: [['row_id', '姓名', '备注'], [1, '甲', '新备注']],
+    sourceData: {
+      note: 'a',
+      ddl: 'CREATE TABLE a (row_id INTEGER PRIMARY KEY, -- 行号\n  name TEXT, -- 姓名\n  remark TEXT -- 备注\n);',
+    },
+    updateConfig: { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1, sendLatestRows: -1, groupId: -1 },
+    exportConfig: { enabled: false, splitByRow: false, entryName: 'A表', entryType: 'constant', keywords: '', preventRecursion: true, injectionTemplate: '', extraIndexEnabled: false, extraIndexEntryName: 'A表-索引', extraIndexColumns: [], extraIndexColumnModes: {}, extraIndexInjectionTemplate: '', entryPlacement: { position: 'at_depth_as_system', depth: 2, order: 10000 }, extraIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 10010 }, fixedEntryPlacement: { position: 'at_depth_as_system', depth: 2, order: 99990 }, fixedIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 99991 } },
+    ...overrides,
+  };
+}
+
+describe('v3 单表完整替换协议', () => {
+  const fp = 'fp-v3';
+
+  it('replace 完整替换目标表并继承本地身份/顺序', () => {
+    const tempData = buildTempData_ACU();
+    const result = compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3ReplaceDraft_ACU(fp, 'sheet_a', buildV3FullSheet_ACU()),
+    });
+
+    expect(result.candidateData.sheet_a.content).toEqual([['row_id', '姓名', '备注'], [1, '甲', '新备注']]);
+    expect(result.candidateData.sheet_a.uid).toBe('sheet_a');
+    expect(result.candidateData.sheet_a.orderNo).toBe(0);
+    expect(result.candidateData.sheet_b.name).toBe('B表');
+    expect(result.candidateData.sheet_summary.name).toBe('纪要表');
+    expect(result.focusSheetKey).toBe('sheet_a');
+    expect(result.deletedSheetKeys).toEqual([]);
+  });
+
+  it('replace 未目标表保持不变（缺席不删除）', () => {
+    const tempData = buildTempData_ACU();
+    const result = compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3ReplaceDraft_ACU(fp, 'sheet_a', buildV3FullSheet_ACU()),
+    });
+
+    expect(Object.keys(result.candidateData).sort()).toEqual(['mate', 'sheet_a', 'sheet_b', 'sheet_summary']);
+    expect(result.candidateData.sheet_b.content[1]).toEqual([1, '旧值']);
+    expect(result.candidateData.sheet_summary.content[1]).toEqual([1, '第一条', 'AM0001']);
+  });
+
+  it('replace 目标表不存在时报错', () => {
+    const tempData = buildTempData_ACU();
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3ReplaceDraft_ACU(fp, 'sheet_not_exist', buildV3FullSheet_ACU()),
+    })).toThrow(/找不到目标表/);
+  });
+
+  it('replace 拒绝缺必填字段的完整 Sheet', () => {
+    const tempData = buildTempData_ACU();
+    const sheet = buildV3FullSheet_ACU();
+    delete sheet.required;
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3ReplaceDraft_ACU(fp, 'sheet_a', sheet),
+    })).toThrow(/缺少必填字段: required/);
+  });
+
+  it('replace 拒绝缺 DDL 或非法 DDL', () => {
+    const tempData = buildTempData_ACU();
+    const noDdl = buildV3FullSheet_ACU({ sourceData: { note: 'a' } });
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3ReplaceDraft_ACU(fp, 'sheet_a', noDdl),
+    })).toThrow(/必须提供非空 sourceData.ddl/);
+
+    const badDdl = buildV3FullSheet_ACU({ sourceData: { note: 'a', ddl: 'CREATE TABLE a (row_id INTEGER PRIMARY KEY, 姓名 TEXT)' } });
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3ReplaceDraft_ACU(fp, 'sheet_a', badDdl),
+    })).toThrow(/sourceData.ddl 非法/);
+  });
+
+  it('replace 拒绝表头非 row_id 开头', () => {
+    const tempData = buildTempData_ACU();
+    const sheet = buildV3FullSheet_ACU({ content: [['姓名', '备注'], [1, 'x']] });
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3ReplaceDraft_ACU(fp, 'sheet_a', sheet),
+    })).toThrow(/必须为 row_id/);
+  });
+
+  it('replace 拒绝行宽不一致', () => {
+    const tempData = buildTempData_ACU();
+    const sheet = buildV3FullSheet_ACU({ content: [['row_id', '姓名', '备注'], [1, '甲']] });
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3ReplaceDraft_ACU(fp, 'sheet_a', sheet),
+    })).toThrow(/行宽/);
+  });
+
+  it('replace 拒绝 row_id 重复', () => {
+    const tempData = buildTempData_ACU();
+    const sheet = buildV3FullSheet_ACU({ content: [['row_id', '姓名', '备注'], [1, '甲', 'x'], [1, '乙', 'y']] });
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3ReplaceDraft_ACU(fp, 'sheet_a', sheet),
+    })).toThrow(/row_id 重复/);
+  });
+
+  it('create 分配本地身份并保持未目标表不变', () => {
+    const tempData = buildTempData_ACU();
+    const result = compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3CreateDraft_ACU(fp, buildV3FullSheet_ACU({ name: '战利品表', content: [['row_id', 'item'], [1, '金币']], sourceData: { note: 'loot', ddl: 'CREATE TABLE loot (row_id INTEGER PRIMARY KEY, -- 行号\n  item TEXT\n);' } })),
+    });
+
+    expect(result.diff.addedSheets).toHaveLength(1);
+    const newKey = result.diff.addedSheets[0].sheetKey;
+    expect(newKey).toBe('sheet_zhan_li_pin_biao');
+    expect(result.candidateData[newKey].uid).toBe(newKey);
+    expect(result.candidateData[newKey].orderNo).toBe(3);
+    expect(result.candidateData.sheet_a.name).toBe('A表');
+    expect(result.focusSheetKey).toBe(newKey);
+  });
+
+  it('create 表名重复时报错', () => {
+    const tempData = buildTempData_ACU();
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3CreateDraft_ACU(fp, buildV3FullSheet_ACU({ name: 'A表', content: [['row_id', 'item'], [1, '金币']], sourceData: { note: 'loot', ddl: 'CREATE TABLE loot (row_id INTEGER PRIMARY KEY, -- 行号\n  item TEXT\n);' } })),
+    })).toThrow(/表名.*重复/);
+  });
+
+  it('delete 显式删除目标表并返回焦点', () => {
+    const tempData = buildTempData_ACU();
+    const result = compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: {
+        protocolVersion: 3,
+        mode: 'single_sheet_full_replace',
+        requestId: 'req-v3',
+        baseFingerprint: fp,
+        atomic: true,
+        selectedSheetKey: 'sheet_a',
+        summary: 'x',
+        warnings: [],
+        result: { action: 'delete', sheetKey: 'sheet_b' },
+      },
+    });
+
+    expect(result.deletedSheetKeys).toEqual(['sheet_b']);
+    expect(result.candidateData.sheet_b).toBeUndefined();
+    expect(result.candidateData.sheet_a).toBeDefined();
+    expect(result.candidateData.sheet_summary).toBeDefined();
+    expect(result.highRiskItems.some((item) => item.type === 'delete_sheet')).toBe(true);
+    expect(result.focusSheetKey).toBe('sheet_a');
+  });
+
+  it('delete 目标表不存在时报错', () => {
+    const tempData = buildTempData_ACU();
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: {
+        protocolVersion: 3,
+        mode: 'single_sheet_full_replace',
+        requestId: 'req-v3',
+        baseFingerprint: fp,
+        atomic: true,
+        selectedSheetKey: 'sheet_a',
+        summary: 'x',
+        warnings: [],
+        result: { action: 'delete', sheetKey: 'sheet_not_exist' },
+      },
+    })).toThrow(/找不到目标表/);
+  });
+
+  it('create 的 insertAfterSheetKey 不存在时报错', () => {
+    const tempData = buildTempData_ACU();
+    expect(() => compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: buildV3CreateDraft_ACU(fp, buildV3FullSheet_ACU({ name: '战利品表', content: [['row_id', 'item'], [1, '金币']], sourceData: { note: 'loot', ddl: 'CREATE TABLE loot (row_id INTEGER PRIMARY KEY, -- 行号\n  item TEXT\n);' } }), 'sheet_missing'),
+    })).toThrow(/insertAfterSheetKey 不存在/);
+  });
+});
+

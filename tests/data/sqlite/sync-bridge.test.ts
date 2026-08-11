@@ -122,6 +122,29 @@ describe('SyncBridge', () => {
       expect(engine.getTableNames()).toContain(getRuntimeTableName(data, 'sheet_1'));
     });
 
+    it('非首列空业务表头的表跳过建表，有效表照常建表（SQL 活动路径休眠）', () => {
+      const dormantSheet = makeSheet({
+        uid: 'dormant',
+        name: '空表头表',
+        sourceData: { ddl: 'CREATE TABLE dormant (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', '', '']], // 第 2、3 列空业务表头
+      });
+      const validSheet = makeSheet({
+        uid: 'inventory',
+        name: '背包物品表',
+      });
+      const data = makeTableData({ sheet_dormant: dormantSheet, sheet_0: validSheet });
+
+      bridge.loadFromTableData(data, { strict: true });
+
+      const tableNames = engine.getTableNames();
+      // 休眠表不建表
+      expect(tableNames).not.toContain('dormant');
+      expect(tableNames).not.toContain(getRuntimeTableName(data, 'sheet_dormant'));
+      // 有效表照常建表
+      expect(tableNames).toContain(getRuntimeTableName(data, 'sheet_0'));
+    });
+
     it('null 或空对象不报错', () => {
       expect(() => bridge.loadFromTableData(null as any)).not.toThrow();
       expect(() => bridge.loadFromTableData({} as any)).not.toThrow();

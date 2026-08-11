@@ -5,7 +5,7 @@ import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { getGlobalInjectionConfigFromData_ACU } from '../worldbook/injection-engine';
 import { safeJsonStringify_ACU } from '../../shared/json-helpers';
 import { hashUserInput_ACU, logError_ACU } from '../../shared/utils';
-import { buildTemplateAssistantCumulativeCompileResult_ACU, compileTemplateAssistantDraft_ACU, type TemplateAssistantCompileResult_ACU } from './compiler';
+import { buildTemplateAssistantCumulativeCompileResult_ACU, collectV3RowIdGuardFindings_ACU, compileTemplateAssistantDraft_ACU, type TemplateAssistantCompileResult_ACU } from './compiler';
 import { preflightSchemaMigrations_ACU, type SchemaMigrationPreflightIntent_ACU } from '../table/schema-migration-preflight';
 import { buildTemplateAssistantEmbeddedReferenceText_ACU } from './reference-docs';
 import { SqliteRuntimeUnavailableError_ACU } from '../../data/sqlite/sqlite-engine';
@@ -191,7 +191,54 @@ export interface TemplateAssistantDraftV2_ACU extends TemplateAssistantBaseDraft
     atomic: true;
 }
 
-export type TemplateAssistantDraft_ACU = TemplateAssistantDraftV1_ACU | TemplateAssistantDraftV2_ACU;
+export type TemplateAssistantDraft_ACU = TemplateAssistantDraftV1_ACU | TemplateAssistantDraftV2_ACU | TemplateAssistantDraftV3_ACU;
+
+
+/**
+ * v3 完整 Sheet 契约（单表完整输出）。
+ * 模型必须返回目标表修改后的完整对象；本地严格校验后整体替换。
+ */
+export interface TemplateAssistantFullSheetV3_ACU {
+    name: string;
+    domain: string;
+    type: string;
+    enable: boolean;
+    required: boolean;
+    content: any[][];
+    sourceData: Record<string, any>;
+    updateConfig: Record<string, any>;
+    exportConfig: Record<string, any>;
+    hiddenPhysicalColumns?: unknown;
+    tableAliases?: unknown;
+    columnAliases?: unknown;
+}
+
+/**
+ * v3 单动作结果信封：每轮只能有一个 result、一个目标表。
+ * - replace：完整替换一张已存在表（继承本地身份/顺序）。
+ * - create：完整新增一张表（本地分配身份）。
+ * - delete：显式删除一张已存在表（唯一不返回完整 Sheet 的动作）。
+ */
+export type TemplateAssistantV3Result_ACU =
+    | { action: 'replace'; sheetKey: string; sheet: TemplateAssistantFullSheetV3_ACU }
+    | { action: 'create'; insertAfterSheetKey?: string; sheet: TemplateAssistantFullSheetV3_ACU }
+    | { action: 'delete'; sheetKey: string };
+
+export interface TemplateAssistantDraftV3_ACU {
+    protocolVersion: 3;
+    mode: 'single_sheet_full_replace';
+    requestId: string;
+    baseFingerprint: string;
+    atomic: true;
+    selectedSheetKey: string;
+    summary: string;
+    warnings: string[];
+    result: TemplateAssistantV3Result_ACU;
+}
+
+export function isTemplateAssistantV3Draft_ACU(draft: any): draft is TemplateAssistantDraftV3_ACU {
+    return !!draft && draft.protocolVersion === 3;
+}
 
 export interface TemplateAssistantPriorTurn_ACU {
     user: string;
@@ -203,6 +250,7 @@ export interface TemplateAssistantGenerateInput_ACU {
     currentSheetKey: string | null;
     sheetOrder?: string[] | null;
     userRequest: string;
+    protocolVersion?: 2 | 3;
     priorTurns?: TemplateAssistantPriorTurn_ACU[] | null;
     tableApiPreset?: string;
     guard?: TemplateAssistantSessionRunGuard_ACU | null;
@@ -222,7 +270,8 @@ export type TemplateAssistantSessionStopReason_ACU =
     | 'success'
     | 'empty_operations'
     | 'repair_retry_capped'
-    | 'environment_failure';
+    | 'environment_failure'
+    | 'context_budget_failure';
 
 export type TemplateAssistantSessionAbortReason_ACU = 'cancelled' | 'stale';
 
@@ -253,6 +302,21 @@ export interface TemplateAssistantSessionMeta_ACU {
     repairRetriesUsed: number;
     maxRepairRetries: number;
     lastErrorMessage: string;
+    /**
+     * v3 row_id 集合守卫：仅当 replace 目标表出现「AI 未请求删行但 row_id 集合缩减」时非空。
+     * 供 UI 展示确认；未确认前不得应用候选。
+     */
+    v3RowIdGuardFindings?: Array<{
+        code: 'row_id_set_reduction';
+        sheetKey: string;
+        missingRowIds: string[];
+    }>;
+}
+
+export interface TemplateAssistantV3RowIdGuardFinding_ACU {
+    code: 'row_id_set_reduction';
+    sheetKey: string;
+    missingRowIds: string[];
 }
 
 export interface TemplateAssistantSessionResult_ACU extends TemplateAssistantGenerateResult_ACU {
@@ -319,7 +383,14 @@ export interface TemplateAssistantPromptSegment_ACU {
     pinned?: boolean;
 }
 
-export type TemplateAssistantFailureKind_ACU = 'parse' | 'validate' | 'fingerprint' | 'preflight' | 'environment' | 'unknown';
+export type TemplateAssistantFailureKind_ACU =
+    | 'parse'
+    | 'validate'
+    | 'fingerprint'
+    | 'preflight'
+    | 'environment'
+    | 'context_budget'
+    | 'unknown';
 
 export interface TemplateAssistantFailureInfo_ACU {
     kind: TemplateAssistantFailureKind_ACU;
@@ -439,7 +510,10 @@ function normalizeAssistantPromptSegments_ACU(input: unknown): TemplateAssistant
  *
  * 全模板不含世界书占位符。
  */
-export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(): TemplateAssistantPromptSegment_ACU[] {
+export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(protocolVersion: 2 | 3 = 3): TemplateAssistantPromptSegment_ACU[] {
+    if (protocolVersion === 3) {
+        return buildPseudoRoleTemplateAssistantPromptSegmentsV3_ACU();
+    }
     return [
         {
             role: 'SYSTEM',
@@ -523,6 +597,101 @@ export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(): TemplateAs
 
 
 /**
+ * v3 伪 role 默认模板（10 卡结构不变，协议内容切到 v3）。
+ * 与 v2 版本保持相同消息顺序/锚点/预填充约束，仅协议描述与输出信封不同。
+ */
+function buildPseudoRoleTemplateAssistantPromptSegmentsV3_ACU(): TemplateAssistantPromptSegment_ACU[] {
+    return [
+        {
+            role: 'SYSTEM',
+            pinned: true,
+            content: [
+                '你是 visualizer 内的模板改表助手。',
+                '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
+                '严格使用 protocolVersion=3、mode="single_sheet_full_replace"、atomic=true。',
+                '顶层 JSON 必须包含且只包含以下键：protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、result。',
+                'baseFingerprint 与 selectedSheetKey 必须原样复制输入数据中给出的值，不得自造。',
+                '每一轮只能输出一个 result（replace / create / delete 之一）；禁止输出 operations[]、禁止字段级 patch、禁止一次修改多张表。',
+                'replace：提供 sheetKey（必须来自输入 allSheets 中真实存在的 key）和完整 sheet 对象。',
+                'create：只提供完整 sheet 对象；不要生成 sheetKey/uid/orderNo（本地分配）。可用 insertAfterSheetKey 指定插入位置。',
+                'delete：只提供 sheetKey，不要携带 sheet。删除必须是明确动作，不能通过不输出表来暗示。',
+                'replace/create 的 sheet 必须完整包含 name、domain、type、enable、required、content、sourceData、updateConfig、exportConfig；不得省略、不得携带 uid/orderNo。',
+                'content 第一行是表头、第一列必须是 row_id；所有数据行行宽一致；row_id 不能为空、不能重复。',
+                'sourceData.ddl 必须非空且完整，与 content 表头逐列匹配；中文表头必须英文/ASCII 物理列名 + `-- 中文表头` 注释；第一列 row_id INTEGER PRIMARY KEY。',
+                '输入中其他表一律保持原样；未输出的表不会被删除。',
+                '输入数据中 constraints 里的字段（如 singleSheetFullReplace）是给你看的约束说明，不是 draft 的字段，禁止出现在输出 JSON 里。',
+            ].join('\n'),
+            deletable: false,
+        },
+        {
+            role: 'assistant',
+            pinned: true,
+            content: '收到，我将只输出合法的 v3 draft JSON（单 result 信封），不输出任何解释文本。',
+            deletable: true,
+        },
+        {
+            role: 'USER',
+            pinned: true,
+            content: [
+                `以下是表格结构协议与规则，必须严格遵守：${TEMPLATE_ASSISTANT_PLACEHOLDER_PROTOCOL_ACU}；语法参考文档：${TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU}`,
+                'result.action 只允许 replace / create / delete 之一；禁止字段级 patch 与多表 operations。',
+                'replace/create 必须返回完整 sheet（name/domain/type/enable/required/content/sourceData/updateConfig/exportConfig 全量），禁止省略字段或只给差异。',
+                'sheet.content 第一列必须是 row_id，所有数据行行宽一致，row_id 非空且不重复。',
+                'sourceData.ddl 必须非空且与 content 表头逐列匹配；中文表头必须英文/ASCII 物理列名 + `-- 中文表头` 注释按原顺序一一对应；第一列必须 row_id INTEGER PRIMARY KEY 并保留 `-- 行号` 注释。',
+                'delete 必须显式给出要删除的 sheetKey；禁止通过不输出某张表来暗示删除，禁止修改未目标表。',
+                'create 不要生成 sheetKey/uid/orderNo，本地会自动分配；insertAfterSheetKey 必须来自输入中真实存在的 key。',
+                '禁止修改全局注入配置；禁止直接保存行为。',
+                '如果需求信息不足、字段缺失、或当前协议无法安全表达，仍然必须返回合法 v3 draft：summary 简述原因、warnings 写明原因、result 输出 {action:"replace", sheetKey:"<真实key>", sheet:{...完整原样...}}；不要输出追问文本。',
+            ].join('\n'),
+            deletable: true,
+        },
+        {
+            role: 'assistant',
+            pinned: true,
+            content: '收到，我已阅读 v3 协议约束与语法文档，将严格在协议范围内生成单表完整结果。',
+            deletable: true,
+        },
+        {
+            role: 'USER',
+            pinned: true,
+            content: `以下是全局表格结构：${TEMPLATE_ASSISTANT_PLACEHOLDER_ALL_SHEETS_ACU}`,
+            deletable: true,
+        },
+        {
+            role: 'assistant',
+            pinned: true,
+            content: '收到，我已了解全部表格的完整结构（含 DDL）。',
+            deletable: true,
+        },
+        {
+            role: 'USER',
+            pinned: true,
+            content: `以下是当前选中表：${TEMPLATE_ASSISTANT_PLACEHOLDER_CURRENT_SHEET_ACU}`,
+            deletable: true,
+        },
+        {
+            role: 'assistant',
+            pinned: true,
+            content: '收到，我已聚焦当前选中表，随时可以按需求生成单表完整替换结果。',
+            deletable: true,
+        },
+        {
+            role: 'USER',
+            pinned: true,
+            content: `现在请按照我的需求立刻开始工作：${TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU}`,
+            deletable: false,
+        },
+        {
+            role: 'assistant',
+            pinned: true,
+            content: '收到，我不会输出解释文本，现在直接输出完整的 v3 draft 标签与 JSON：',
+            deletable: true,
+        },
+    ];
+}
+
+
+/**
  * 将占位符值序列化为字符串，供替换进提示词。
  * - string 原样返回；
  * - number / boolean 走 String()；
@@ -592,13 +761,38 @@ function normalizePriorTurns_ACU(priorTurns: TemplateAssistantPriorTurn_ACU[] | 
         .filter((turn) => !!turn.user || !!turn.assistant);
 }
 
+/**
+ * v3 上下文预算守卫：v3 全表 DDL 全量注入可能让 payload 极大。
+ * 超过预算必须**阻止请求**（fail-closed），绝不静默截断——截断会让 AI 拿到
+ * 不完整的表结构，反而制造不一致的 replace 结果。
+ * 阈值按字符近似 token（中文 1 字符 ≈ 1 token，保守取 2 字符/token）。
+ */
+const TEMPLATE_ASSISTANT_V3_CONTEXT_BUDGET_CHARS_ACU = 40_000;
+
+function assertV3ContextBudget_ACU(payloadText: string) {
+    const chars = String(payloadText || '').length;
+    if (chars > TEMPLATE_ASSISTANT_V3_CONTEXT_BUDGET_CHARS_ACU) {
+        const wrapped = new Error(
+            `v3 全表上下文预算超限：payload ${chars} 字符（上限 ${TEMPLATE_ASSISTANT_V3_CONTEXT_BUDGET_CHARS_ACU}）。`
+            + '请减少表数量/行数，或改用 v2 增量协议。',
+        );
+        (wrapped as any).failureKind = 'context_budget';
+        throw wrapped;
+    }
+}
+
+
 export function buildTemplateAssistantMessages_ACU(input: TemplateAssistantGenerateInput_ACU, baseFingerprint: string) {
-    const payload = buildUserPromptPayload_ACU(input, baseFingerprint);
+    const protocolVersion = input.protocolVersion === 3 ? 3 : (input.protocolVersion === 2 ? 2 : 3);
+    const payload = buildUserPromptPayload_ACU(input, baseFingerprint, protocolVersion);
     const normalized = normalizeAssistantPromptSegments_ACU(settings_ACU.templateAssistantPromptSegments);
     const referenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
     const valueMap = buildAssistantPlaceholderContext_ACU(payload, referenceText);
-    const resolved = resolveAssistantSystemPrompt_ACU(normalized, valueMap);
+    const resolved = resolveAssistantSystemPrompt_ACU(normalized, valueMap, protocolVersion);
     const fullPayloadText = safeJsonStringify_ACU(payload, '{}');
+    if (protocolVersion === 3) {
+        assertV3ContextBudget_ACU(fullPayloadText);
+    }
 
     const messages: Array<{ role: string; content: string }> = [];
 
@@ -683,7 +877,13 @@ export function setTemplateAssistantPrompt_ACU(
     return { ok: true };
 }
 
-function sanitizeSourceDataSnapshotForAssistant_ACU(value: any) {
+const TEMPLATE_ASSISTANT_PERSISTED_AUX_KEYS_ACU = [
+    'hiddenPhysicalColumns',
+    'tableAliases',
+    'columnAliases',
+] as const;
+
+function sanitizeSourceDataSnapshotForAssistant_ACU(value: any, includeDdl = false) {
     const sourceData = asObject_ACU(value);
     const sanitized: AnyRecord = {};
     TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU.forEach((key) => {
@@ -691,7 +891,19 @@ function sanitizeSourceDataSnapshotForAssistant_ACU(value: any) {
             sanitized[key] = clone_ACU(sourceData[key]);
         }
     });
+    if (includeDdl && typeof sourceData?.ddl === 'string' && sourceData.ddl.trim()) {
+        sanitized.ddl = clone_ACU(sourceData.ddl);
+    }
     return sanitized;
+}
+
+function copyPersistedAuxFields_ACU(sheet: AnyRecord, snapshot: AnyRecord) {
+    TEMPLATE_ASSISTANT_PERSISTED_AUX_KEYS_ACU.forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(sheet, key) && sheet[key] !== undefined) {
+            snapshot[key] = clone_ACU(sheet[key]);
+        }
+    });
+    return snapshot;
 }
 
 function validateSourceDataPayload_ACU(value: any, label: string) {
@@ -712,23 +924,31 @@ function extractHeaders_ACU(sheet: any) {
     return Array.isArray(sheet?.content?.[0]) ? sheet.content[0].slice(1).map((item: any) => String(item ?? '')) : [];
 }
 
-function getSheetSnapshot_ACU(tempData: AnyRecord, sheetKey: string) {
+function getSheetSnapshot_ACU(tempData: AnyRecord, sheetKey: string, options?: { includeDdl?: boolean }) {
     const sheet = tempData?.[sheetKey] || {};
-    return {
+    const snapshot: AnyRecord = {
         sheetKey,
         name: String(sheet?.name || ''),
+        domain: typeof sheet?.domain === 'string' ? sheet.domain : 'chat',
+        type: typeof sheet?.type === 'string' ? sheet.type : 'dynamic',
+        enable: sheet?.enable !== false,
+        required: sheet?.required === true,
         orderNo: Number.isFinite(sheet?.orderNo) ? sheet.orderNo : null,
         headers: extractHeaders_ACU(sheet),
         content: clone_ACU(Array.isArray(sheet?.content) ? sheet.content : []),
-        sourceData: sanitizeSourceDataSnapshotForAssistant_ACU(sheet?.sourceData),
+        sourceData: sanitizeSourceDataSnapshotForAssistant_ACU(sheet?.sourceData, options?.includeDdl === true),
         updateConfig: clone_ACU(asObject_ACU(sheet?.updateConfig)),
         exportConfig: clone_ACU(asObject_ACU(sheet?.exportConfig)),
     };
+    if (options?.includeDdl === true) {
+        copyPersistedAuxFields_ACU(sheet, snapshot);
+    }
+    return snapshot;
 }
 
-function getSelectedSheetSnapshot_ACU(tempData: AnyRecord, sheetKey: string | null) {
+function getSelectedSheetSnapshot_ACU(tempData: AnyRecord, sheetKey: string | null, options?: { includeDdl?: boolean }) {
     if (!sheetKey || !tempData?.[sheetKey]) return null;
-    return getSheetSnapshot_ACU(tempData, sheetKey);
+    return getSheetSnapshot_ACU(tempData, sheetKey, options);
 }
 
 function buildSheetSummary_ACU(tempData: AnyRecord) {
@@ -745,8 +965,8 @@ function buildSheetSummary_ACU(tempData: AnyRecord) {
     });
 }
 
-function buildDetailedSheetSnapshots_ACU(tempData: AnyRecord) {
-    return buildSheetSummary_ACU(tempData).map((item) => getSheetSnapshot_ACU(tempData, item.sheetKey));
+function buildDetailedSheetSnapshots_ACU(tempData: AnyRecord, options?: { includeDdl?: boolean }) {
+    return buildSheetSummary_ACU(tempData).map((item) => getSheetSnapshot_ACU(tempData, item.sheetKey, options));
 }
 
 export function buildTemplateAssistantFingerprint_ACU(tempData: AnyRecord) {
@@ -1195,10 +1415,13 @@ export function validateTemplateAssistantDraft_ACU(draft: any): TemplateAssistan
     if (!draft || typeof draft !== 'object') {
         throw new Error('assistant draft 必须是对象');
     }
-    if (draft.protocolVersion !== 1 && draft.protocolVersion !== 2) {
-        throw new Error('assistant draft.protocolVersion 必须为 1 或 2');
+    if (draft.protocolVersion !== 1 && draft.protocolVersion !== 2 && draft.protocolVersion !== 3) {
+        throw new Error('assistant draft.protocolVersion 必须为 1、2 或 3');
     }
-    if (draft.mode !== 'modify_current_template_incremental') {
+    if (draft.protocolVersion === 3 && draft.mode !== 'single_sheet_full_replace') {
+        throw new Error('assistant draft.mode 非法（v3 必须为 single_sheet_full_replace）');
+    }
+    if (draft.protocolVersion !== 3 && draft.mode !== 'modify_current_template_incremental') {
         throw new Error('assistant draft.mode 非法');
     }
     if (typeof draft.baseFingerprint !== 'string' || !draft.baseFingerprint.trim()) {
@@ -1213,11 +1436,15 @@ export function validateTemplateAssistantDraft_ACU(draft: any): TemplateAssistan
     if (!Array.isArray(draft.warnings)) {
         throw new Error('assistant draft.warnings 必须是数组');
     }
-    if (!Array.isArray(draft.operations)) {
-        throw new Error('assistant draft.operations 必须是数组');
+
+    if (draft.protocolVersion === 3) {
+        return validateTemplateAssistantDraftV3_ACU(draft);
     }
 
     const protocolVersion = draft.protocolVersion as 1 | 2;
+    if (!Array.isArray(draft.operations)) {
+        throw new Error('assistant draft.operations 必须是数组');
+    }
     if (protocolVersion === 2) {
         if (typeof draft.requestId !== 'string' || !draft.requestId.trim()) {
             throw new Error('assistant draft.requestId 必须是非空字符串');
@@ -1299,6 +1526,78 @@ export function validateTemplateAssistantDraft_ACU(draft: any): TemplateAssistan
     };
 }
 
+
+/**
+ * v3 draft 校验：单结果信封，禁止 operations[]、禁止多 action、禁止混用协议字段。
+ * 只校验信封结构与字段类型；完整 Sheet 归一（content/DDL/row_id/行宽等）由 compiler 执行。
+ */
+function validateTemplateAssistantDraftV3_ACU(draft: any): TemplateAssistantDraftV3_ACU {
+    if (draft.atomic !== true) {
+        throw new Error('assistant draft.atomic 目前必须为 true');
+    }
+    if (typeof draft.requestId !== 'string' || !draft.requestId.trim()) {
+        throw new Error('assistant draft.requestId 必须是非空字符串');
+    }
+    if (draft.operations !== undefined && !Array.isArray(draft.operations)) {
+        throw new Error('v3 禁止 operations[]，必须使用单个 result');
+    }
+    if (draft.operations !== undefined && Array.isArray(draft.operations) && draft.operations.length > 0) {
+        throw new Error('v3 禁止字段级 patch / operations[]，必须返回单个 result（replace/create/delete）');
+    }
+    if (draft.result === undefined || draft.result === null || typeof draft.result !== 'object' || Array.isArray(draft.result)) {
+        throw new Error('assistant draft.result 必须存在且为对象');
+    }
+    const action = String(draft.result.action || '');
+    if (action !== 'replace' && action !== 'create' && action !== 'delete') {
+        throw new Error('v3 result.action 必须为 replace / create / delete 之一');
+    }
+    if (action === 'replace') {
+        if (typeof draft.result.sheetKey !== 'string' || !draft.result.sheetKey.trim()) {
+            throw new Error('v3 replace 必须提供非空 sheetKey');
+        }
+        if (draft.result.sheet === undefined || draft.result.sheet === null || typeof draft.result.sheet !== 'object' || Array.isArray(draft.result.sheet)) {
+            throw new Error('v3 replace 必须返回完整 sheet 对象');
+        }
+        if (Object.prototype.hasOwnProperty.call(draft.result.sheet, 'uid') || Object.prototype.hasOwnProperty.call(draft.result.sheet, 'orderNo')) {
+            throw new Error('v3 replace.sheet 禁止携带 uid/orderNo（本地继承既有身份与顺序）');
+        }
+        if (draft.result.insertAfterSheetKey !== undefined) {
+            throw new Error('v3 replace 禁止携带 insertAfterSheetKey');
+        }
+    }
+    if (action === 'create') {
+        if (draft.result.sheet === undefined || draft.result.sheet === null || typeof draft.result.sheet !== 'object' || Array.isArray(draft.result.sheet)) {
+            throw new Error('v3 create 必须返回完整 sheet 对象');
+        }
+        if (Object.prototype.hasOwnProperty.call(draft.result.sheet, 'uid') || Object.prototype.hasOwnProperty.call(draft.result.sheet, 'orderNo')) {
+            throw new Error('v3 create.sheet 禁止携带 uid/orderNo（本地分配身份与顺序）');
+        }
+        if (draft.result.sheetKey !== undefined) {
+            throw new Error('v3 create 禁止携带最终 sheetKey（本地稳定分配）');
+        }
+    }
+    if (action === 'delete') {
+        if (typeof draft.result.sheetKey !== 'string' || !draft.result.sheetKey.trim()) {
+            throw new Error('v3 delete 必须提供非空 sheetKey');
+        }
+        if (draft.result.sheet !== undefined) {
+            throw new Error('v3 delete 禁止同时携带 sheet');
+        }
+    }
+
+    return {
+        protocolVersion: 3,
+        mode: 'single_sheet_full_replace',
+        requestId: String(draft.requestId || ''),
+        baseFingerprint: String(draft.baseFingerprint || ''),
+        atomic: true,
+        selectedSheetKey: String(draft.selectedSheetKey || ''),
+        summary: String(draft.summary || ''),
+        warnings: (Array.isArray(draft.warnings) ? draft.warnings : []).map((item: any) => String(item ?? '')),
+        result: clone_ACU(draft.result),
+    };
+}
+
 function buildDefaultSystemPrompt_ACU() {
     return [
         '你是 visualizer 内的模板改表助手。',
@@ -1340,6 +1639,29 @@ function buildDefaultSystemPrompt_ACU() {
     ].join('\n');
 }
 
+function buildDefaultSystemPromptV3_ACU() {
+    return [
+        '你是 visualizer 内的模板改表助手。',
+        '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
+        '严格使用 protocolVersion=3、mode="single_sheet_full_replace"、atomic=true。',
+        '顶层 JSON 必须包含且只包含以下键：protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、result。',
+        'baseFingerprint 与 selectedSheetKey 必须原样复制输入数据中给出的值，不得自造。',
+        '每一轮只能输出一个 result；禁止输出 operations[] 数组、禁止字段级 patch、禁止一次修改多张表。',
+        'result.action 只允许 replace / create / delete 之一：',
+        '- replace：完整替换一张已存在的表。必须提供 sheetKey（从输入 allSheets 中真实存在的 key 中选择）和完整的 sheet 对象。',
+        '- create：完整新增一张表。只提供完整 sheet 对象；不要生成 sheetKey/uid/orderNo，本地会自动分配。可用 insertAfterSheetKey（必须来自输入中真实存在的 key）指定插入位置。',
+        '- delete：显式删除一张已存在的表。只提供 sheetKey；不要携带 sheet。删除必须是你明确决定的动作，不能通过“不输出某张表”来暗示删除。',
+        'replace/create 的 sheet 对象必须完整包含：name、domain、type、enable、required、content、sourceData、updateConfig、exportConfig；不得省略、不得缺字段、不得携带 uid/orderNo/sheetKey（replace 的身份由 sheetKey 继承，create 的身份本地分配）。',
+        'sheet.content 必须是完整二维数组：第一行是表头，第一列必须是 row_id；所有数据行行宽必须与表头一致；数据行第一列（row_id）不能为空、不能重复。',
+        'sheet.sourceData.ddl 必须非空且完整（replace/create 都要求），必须与 content 表头逐列匹配：中文表头必须使用英文/ASCII 物理列名，并用 `-- 中文表头` 注释按原顺序一一对应；第一列必须 row_id INTEGER PRIMARY KEY 并保留 `-- 行号` 注释。',
+        '只有你要修改的那张表会发生变化；输入中其他表一律保持原样。不要假设未输出的表会被删除，也不要修改未目标表的任何字段。',
+        '严格禁止直接保存行为；禁止修改全局注入配置（globalInjectionConfig）；禁止删除/重建 row_id 列。',
+        '如果需求信息不足、字段缺失、或当前协议无法安全表达，仍然必须返回合法 draft：summary 简述原因、warnings 写明原因、result 输出 {action:"replace", sheetKey:"<真实存在的key>", sheet:{...完整原样...}}；不要输出追问文本，不要输出非法操作。',
+        'warnings 必须是字符串数组；没有则输出空数组。',
+        TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
+    ].join('\n');
+}
+
 /**
  * AI 改表助手「核心协议卡」：短路由表 + 防误操作边界。
  *
@@ -1375,6 +1697,22 @@ export function buildCoreProtocolCard_ACU(): string {
     ].join('\n');
 }
 
+export function buildCoreProtocolCardV3_ACU(): string {
+    return [
+        TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU,
+        '【v3 单表完整替换协议】默认协议，每轮只输出一个 result：',
+        '- 顶层 JSON 只含 protocolVersion=3、mode="single_sheet_full_replace"、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、result。',
+        '- result.action 只允许 replace / create / delete 之一；禁止 operations[]、禁止字段级 patch、禁止一次改多张表。',
+        '- replace：完整替换一张已存在表。必须提供 sheetKey（输入中真实存在的 key）和完整 sheet（name/domain/type/enable/required/content/sourceData/updateConfig/exportConfig 全量）。',
+        '- create：完整新增一张表。只提供完整 sheet；不要生成 sheetKey/uid/orderNo（本地分配）。可用 insertAfterSheetKey（真实存在的 key）指定插入位置。',
+        '- delete：显式删除一张已存在表。只提供 sheetKey；禁止通过「不输出某张表」暗示删除。',
+        '- content 首列必须 row_id 且非空不重复；sourceData.ddl 必须非空并与表头逐列匹配（中文表头用英文/ASCII 物理列名 + `-- 中文表头` 注释）。',
+        '- 未目标表保持原样；禁止修改全局注入配置；禁止删除/重建 row_id 列。',
+        '- 信息不足时仍返回合法 draft：summary 简述、warnings 写明、result 输出完整原样 replace；禁止输出追问文本或非法操作。',
+    ].join('\n');
+}
+
+
 /**
  * 解析 assistant 系统提示词：
  * - segments 为空（settings 无自定义或全空）→ 使用默认提示词（与旧硬编码一致，含占位符）。
@@ -1391,11 +1729,13 @@ export function buildCoreProtocolCard_ACU(): string {
 export function resolveAssistantSystemPrompt_ACU(
     segments?: TemplateAssistantPromptSegment_ACU[] | null,
     valueMap?: Record<string, string> | null,
+    protocolVersion: 2 | 3 = 3,
 ): Array<{ role: string; content: string }> {
     const normalized = normalizeAssistantPromptSegments_ACU(segments);
     if (normalized.length === 0) {
         const referenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
-        const defaultContent = buildDefaultSystemPrompt_ACU().replace(
+        const defaultPrompt = protocolVersion === 3 ? buildDefaultSystemPromptV3_ACU() : buildDefaultSystemPrompt_ACU();
+        const defaultContent = defaultPrompt.replace(
             TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU,
             referenceText,
         );
@@ -1425,6 +1765,8 @@ export function resolveAssistantSystemPrompt_ACU(
     // 核心协议卡自动追加（兼容旧自定义提示词）：任何自定义 segments 若未包含
     // 核心协议标记，则把路由表追加到最后一个 SYSTEM 卡末尾。不改变用户消息顺序
     // （仅追加到 SYSTEM 卡内容），不覆盖用户编辑内容，幂等（已含标记则跳过）。
+    // v2（含 v1 存量）追加 v2 路由卡；v3 追加 v3 单表完整替换卡。
+    // 绝不能把 v2 的 patch_sheet_*/operations 术语注入 v3 上下文，反之亦然。
     if (resolved.length > 0) {
         const hasCoreProtocol = cards.some((seg) =>
             String(seg.content || '').includes(TEMPLATE_ASSISTANT_CORE_PROTOCOL_MARKER_ACU),
@@ -1432,7 +1774,9 @@ export function resolveAssistantSystemPrompt_ACU(
         if (!hasCoreProtocol) {
             const lastSystemIndex = resolved.map((item) => item.role).lastIndexOf('SYSTEM');
             const targetIndex = lastSystemIndex >= 0 ? lastSystemIndex : resolved.length - 1;
-            const coreCard = buildCoreProtocolCard_ACU();
+            const coreCard = protocolVersion === 3
+                ? buildCoreProtocolCardV3_ACU()
+                : buildCoreProtocolCard_ACU();
             resolved[targetIndex] = {
                 ...resolved[targetIndex],
                 content: `${resolved[targetIndex].content}\n\n${coreCard}`,
@@ -1449,38 +1793,55 @@ export function resolveAssistantSystemPrompt_ACU(
 export function buildUserPromptPayload_ACU(
     input: TemplateAssistantGenerateInput_ACU,
     baseFingerprint: string,
+    protocolVersion: 2 | 3 = 2,
 ): AnyRecord {
     const tempData = input.tempData;
+    const includeDdl = protocolVersion === 3;
     return {
         userRequest: String(input.userRequest || '').trim(),
         baseFingerprint,
         selectedSheetKey: input.currentSheetKey || '',
-        selectedSheet: getSelectedSheetSnapshot_ACU(tempData, input.currentSheetKey),
+        selectedSheet: getSelectedSheetSnapshot_ACU(tempData, input.currentSheetKey, { includeDdl }),
         sheetCount: buildSheetSummary_ACU(tempData).length,
-        allSheets: buildDetailedSheetSnapshots_ACU(tempData),
+        allSheets: buildDetailedSheetSnapshots_ACU(tempData, { includeDdl }),
         globalInjectionConfig: getGlobalInjectionConfigFromData_ACU(tempData, { ensureWriteBack: false }),
         constraints: {
-            protocolVersion: 2,
-            requestIdRequired: true,
+            protocolVersion,
+            requestIdRequired: protocolVersion === 2,
             atomicOnly: true,
-            allowCrossSheetPatch: true,
-            patchSourceDataForbidDdl: true,
+            allowCrossSheetPatch: protocolVersion === 2,
+            patchSourceDataForbidDdl: protocolVersion === 2,
             sourceDataAllowedKeys: [...TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU],
-            addSheetSourceDataForbidDdl: true,
-            allowStructuredContentPatch: true,
-            allowStructuredSchemaPatch: true,
-            allowStructuredLockPatch: true,
+            addSheetSourceDataForbidDdl: protocolVersion === 2,
+            allowStructuredContentPatch: protocolVersion === 2,
+            allowStructuredSchemaPatch: protocolVersion === 2,
+            allowStructuredLockPatch: protocolVersion === 2,
             contentPatchRowNumberBase: 1,
             lockPatchRowNumberBase: 1,
-            preferRichSourceDataForAddSheet: true,
-            defaultNoDdlForNewSheetUnlessExplicitlyRequested: true,
+            preferRichSourceDataForAddSheet: protocolVersion === 2,
+            defaultNoDdlForNewSheetUnlessExplicitlyRequested: protocolVersion === 2,
             ddlMustPreserveHeaderOrder: true,
             ddlChineseHeadersRequireCommentMapping: true,
             ddlChineseHeadersForbidChinesePhysicalNames: true,
             ddlPhysicalColumnNamesShouldBeAsciiWhenHeadersAreChinese: true,
-            avoidSlashInNewCustomHeaders: true,
-            cannotPatchNewSheetAfterAddInSameDraft: true,
-            redactExistingSourceDataDdlFromSnapshots: true,
+            avoidSlashInNewCustomHeaders: protocolVersion === 2,
+            cannotPatchNewSheetAfterAddInSameDraft: protocolVersion === 2,
+            redactExistingSourceDataDdlFromSnapshots: protocolVersion === 2,
+            ...(protocolVersion === 3
+                ? {
+                    singleSheetFullReplace: true,
+                    singleResultEnvelope: true,
+                    forbidFieldLevelPatch: true,
+                    forbidGlobalConfigModification: true,
+                    replaceRequiresCompleteSheetAndDdl: true,
+                    createRequiresCompleteSheetAndDdl: true,
+                    deleteRequiresExplicitAction: true,
+                    missingUntargetedSheetsKeptUnchanged: true,
+                    rowIdSetGuardEnabled: true,
+                    rowIdReductionRequiresHighRiskConfirmation: true,
+                    contextBudgetEnabled: true,
+                }
+                : {}),
         },
     };
 }
@@ -1524,23 +1885,28 @@ export function buildAssistantPlaceholderContext_ACU(
 }
 
 function buildUserPrompt_ACU(input: TemplateAssistantGenerateInput_ACU, baseFingerprint: string) {
-    return safeJsonStringify_ACU(buildUserPromptPayload_ACU(input, baseFingerprint), '{}');
+    const protocolVersion = input.protocolVersion === 3 ? 3 : (input.protocolVersion === 2 ? 2 : 3);
+    return safeJsonStringify_ACU(buildUserPromptPayload_ACU(input, baseFingerprint, protocolVersion), '{}');
 }
 
 function buildSessionRoundUserRequest_ACU(options: {
     userRequest: string;
     repairReason: string;
+    protocolVersion?: 2 | 3;
 }) {
     const chunks = [String(options.userRequest || '').trim()];
     if (options.repairReason) {
+        const isV3 = options.protocolVersion === 3;
         chunks.push(
             '修复要求：上一轮 assistant 草稿未通过本地校验，原因是：'
             + `${options.repairReason}。`
             + '请只修复校验失败的那个 operation，不要重新生成整份复杂草稿；'
             + '不得改变需求中未提及的表与字段。'
-            + '只改更新频率时输出 patch_sheet_update_config；'
-            + '只改显示表头时输出 patch_sheet_schema.renameColumns，不输出 headers 字段。'
-            + '仍然只能输出合法 draft JSON（protocolVersion=2、atomic=true、含 requestId/baseFingerprint/selectedSheetKey）。',
+            + (isV3
+                ? '仍然只能输出合法 v3 draft JSON（protocolVersion=3、mode="single_sheet_full_replace"、atomic=true、含 requestId/baseFingerprint/selectedSheetKey，且只能有单个 result：replace/create/delete）。'
+                : '只改更新频率时输出 patch_sheet_update_config；'
+                + '只改显示表头时输出 patch_sheet_schema.renameColumns，不输出 headers 字段。'
+                + '仍然只能输出合法 draft JSON（protocolVersion=2、atomic=true、含 requestId/baseFingerprint/selectedSheetKey）。'),
         );
     }
     return chunks.filter(Boolean).join('\n\n');
@@ -1609,6 +1975,47 @@ function buildTemplateAssistantNoopDraft_ACU(baseFingerprint: string, selectedSh
         warnings: warnings.map((item) => String(item ?? '')),
         operations: [],
     };
+}
+
+/**
+ * v3 noop draft：与 v3 信封协议一致的空结果（无 result 时表示「无可应用变更」）。
+ * 仅在 v3 会话全部失败、回退到空 diff 时使用，保证 finalDraft 的协议版本与输入一致。
+ */
+function buildTemplateAssistantNoopDraftV3_ACU(baseFingerprint: string, selectedSheetKey: string | null, summary = '', warnings: string[] = []): TemplateAssistantDraft_ACU {
+    return {
+        protocolVersion: 3,
+        mode: 'single_sheet_full_replace',
+        requestId: 'template-assistant-noop',
+        baseFingerprint,
+        atomic: true,
+        selectedSheetKey: String(selectedSheetKey || ''),
+        summary,
+        warnings: warnings.map((item) => String(item ?? '')),
+        // v3「无可应用变更」= 不携带 result；hasTemplateAssistantApplicableDraft_ACU 据此判定不可应用。
+        // 该 draft 不会进入 validator（validator 只作用于 AI 输出），类型按信封宽限处理。
+        result: undefined as unknown as TemplateAssistantV3Result_ACU,
+    } as TemplateAssistantDraft_ACU;
+}
+
+/**
+ * 判断 draft 是否包含「可应用的变更」，兼容 v1/v2 的 operations 与 v3 的 result 信封。
+ * - v1/v2：operations 非空即视为有变更（与既有语义一致）。
+ * - v3：必须有对象 result，且 action 是 replace/create/delete 之一；delete 是显式动作，同样视为可应用。
+ * 供 generate/session/apply 链路统一使用，避免各调用点直接读 draft.operations 而破坏 v3。
+ */
+export function hasTemplateAssistantApplicableDraft_ACU(draft: any): boolean {
+    if (!draft || typeof draft !== 'object') return false;
+    if (draft.protocolVersion === 3) {
+        const action = String(draft?.result?.action || '');
+        return action === 'replace' || action === 'create' || action === 'delete';
+    }
+    return Array.isArray(draft.operations) && draft.operations.length > 0;
+}
+
+function assertTemplateAssistantDraftApplicable_ACU(draft: any) {
+    if (!hasTemplateAssistantApplicableDraft_ACU(draft)) {
+        throw new Error('assistant draft 不包含可应用的变更');
+    }
 }
 
 
@@ -1695,17 +2102,40 @@ export async function generateTemplateAssistantDraft_ACU(input: TemplateAssistan
         throw wrapped;
     }
 
+    // 协议一致性门禁：请求协议与 AI 输出协议必须一致。
+    // 默认新会话为 v3；若 AI 在 v3 请求下返回 v2 草稿（或反之），说明提示词/模型未遵守信封，
+    // 直接拒绝并归类为 validate，绝不静默混用两种协议的语义。
+    const requestedProtocolVersion = input.protocolVersion === 2 ? 2 : 3;
+    // 存量兼容：显式 v2 请求允许 v1 输出（v1/v2 共用 operations 语义），v3 请求只接受 v3。
+    const protocolAccepted = requestedProtocolVersion === 3
+        ? draft.protocolVersion === 3
+        : draft.protocolVersion === 1 || draft.protocolVersion === 2;
+    if (!protocolAccepted) {
+        const wrapped = new Error(
+            `AI 返回的协议版本 (${draft.protocolVersion}) 与请求的协议版本 (${requestedProtocolVersion}) 不一致`,
+        );
+        (wrapped as any).failureKind = 'validate';
+        (wrapped as any).failureRawText = aiRawText;
+        throw wrapped;
+    }
+
     if (draft.baseFingerprint !== baseFingerprint) {
         const wrapped = new Error('AI 返回的 baseFingerprint 与当前结构不一致');
         (wrapped as any).failureKind = 'fingerprint';
         (wrapped as any).failureRawText = aiRawText;
         throw wrapped;
     }
-    draft.operations.forEach((op) => {
-        if (String(op?.op || '').startsWith('patch_sheet_')) {
-            validatePatchSheetBoundary_ACU(op, draft.selectedSheetKey, input.currentSheetKey, draft.protocolVersion);
-        }
-    });
+    if (isTemplateAssistantV3Draft_ACU(draft)) {
+        // v3 信封必须携带可应用的 result；validator 已保证 action 为 replace/create/delete 之一，这里兜底防御。
+        assertTemplateAssistantDraftApplicable_ACU(draft);
+    } else {
+        draft.operations.forEach((op) => {
+            if (String(op?.op || '').startsWith('patch_sheet_')) {
+                validatePatchSheetBoundary_ACU(op, draft.selectedSheetKey, input.currentSheetKey, draft.protocolVersion);
+            }
+        });
+        // v1/v2 空 operations 是合法结论（empty_operations），不在此抛错。
+    }
 
     const compileResult = compileTemplateAssistantDraft_ACU({
         tempData,
@@ -1752,6 +2182,7 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
     const originalTempData = clone_ACU(tempData);
     const originalSheetOrder = Array.isArray(input?.sheetOrder) ? [...input.sheetOrder] : null;
     const originalBaseFingerprint = buildTemplateAssistantFingerprint_ACU(originalTempData);
+    const protocolVersion: 2 | 3 = input.protocolVersion === 2 ? 2 : 3;
     const rounds: TemplateAssistantSessionRound_ACU[] = [];
     const onRoundComplete = input?.onRoundComplete;
 
@@ -1768,6 +2199,7 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
         const roundUserRequest = buildSessionRoundUserRequest_ACU({
             userRequest,
             repairReason,
+            protocolVersion,
         });
         try {
             const historyForRound = [
@@ -1784,6 +2216,7 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
                 userRequest: roundUserRequest,
                 priorTurns: historyForRound,
                 tableApiPreset: input.tableApiPreset,
+                protocolVersion,
                 guard: input.guard,
             });
             assertTemplateAssistantSessionActive_ACU(input.guard);
@@ -1808,7 +2241,7 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
             // 空 operations 表示 AI 认为无需修改，同样视为成功结论。
             lastFailure = null;
             lastErrorMessage = '';
-            stopReason = result.draft.operations.length > 0 ? 'success' : 'empty_operations';
+            stopReason = hasTemplateAssistantApplicableDraft_ACU(result.draft) ? 'success' : 'empty_operations';
             break;
         } catch (error: any) {
             assertTemplateAssistantSessionActive_ACU(input.guard);
@@ -1819,11 +2252,13 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
             const isEnvironmentFailure =
                 error instanceof SqliteRuntimeUnavailableError_ACU
                 || error?.failureKind === 'environment';
+            const isContextBudgetFailure = error?.failureKind === 'context_budget';
             const failureKind: TemplateAssistantFailureKind_ACU =
                 error?.failureKind === 'parse'
                 || error?.failureKind === 'validate'
                 || error?.failureKind === 'fingerprint'
                 || error?.failureKind === 'preflight'
+                || error?.failureKind === 'context_budget'
                     ? error.failureKind
                     : isEnvironmentFailure
                         ? 'environment'
@@ -1832,6 +2267,13 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
             if (isEnvironmentFailure) {
                 // 环境失败：不可重试、不消耗 repairRetriesUsed、不把 sql.js 错误当修复上下文回喂 AI。
                 stopReason = 'environment_failure';
+                repairReason = '';
+                break;
+            }
+            if (isContextBudgetFailure) {
+                // 上下文预算超限：payload 本身超出协议上限，属于输入侧问题。
+                // 重试只会再次超限、回喂 AI 无意义，必须不可重试、不消耗 repairRetriesUsed。
+                stopReason = 'context_budget_failure';
                 repairReason = '';
                 break;
             }
@@ -1863,7 +2305,11 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
     // 最终 preflight 为异步操作，返回后同样需要再次确认会话未被取消，才能提交成功结果。
     assertTemplateAssistantSessionActive_ACU(input.guard);
     if (finalPreflight.blockers.length > 0) throw new Error(`schema migration 最终 preflight 失败：${finalPreflight.blockers.join('；')}`);
-    const finalDraft = lastResult?.draft || buildTemplateAssistantNoopDraft_ACU(originalBaseFingerprint, currentSheetKey);
+    const v3RowIdGuardFindings = lastResult?.draft && isTemplateAssistantV3Draft_ACU(lastResult.draft)
+        ? collectV3RowIdGuardFindings_ACU(originalTempData, compileResult.candidateData, currentSheetKey, String(input.userRequest || ''))
+        : [];
+    const finalDraft = lastResult?.draft
+        || (protocolVersion === 3 ? buildTemplateAssistantNoopDraftV3_ACU(originalBaseFingerprint, currentSheetKey) : buildTemplateAssistantNoopDraft_ACU(originalBaseFingerprint, currentSheetKey));
     const finalWorkingFingerprint = buildTemplateAssistantFingerprint_ACU(compileResult.candidateData || originalTempData);
 
     return {
@@ -1883,6 +2329,7 @@ export async function runTemplateAssistantSession_ACU(input: TemplateAssistantSe
             maxRepairRetries,
             lastErrorMessage,
             lastFailure,
+            ...(v3RowIdGuardFindings.length > 0 ? { v3RowIdGuardFindings } : {}),
         },
     };
 }

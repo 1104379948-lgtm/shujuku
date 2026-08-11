@@ -16,6 +16,7 @@ import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU, repairLe
 import { validateCanonicalCheckpointSheet_ACU } from '../../shared/canonical-checkpoint-validator';
 import { resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { downgradeRowIdPrimaryKeyForLegacyReplay_ACU } from '../../shared/ddl-utils';
+import { isSqlActiveTemplateSheet_ACU } from '../../shared/sql-active-template';
 
 /** 同步桥的元数据表名（内部使用，对用户和 AI 不可见） */
 const META_TABLE_NAME = '_acu_sheet_meta';
@@ -142,13 +143,19 @@ export class SyncBridge {
     this.engine.run(META_TABLE_DDL);
     this._ensureMetaSchema();
 
-    // 遍历所有 sheet
+    // 遍历所有 sheet。非首列空业务表头的模板表是 SQL 活动路径中的休眠表：
+    // 不建表、不灌数据（既有物理表与历史数据保留，修正表头后由模板恢复参与），
+    // 避免坏表头在 resolveEffectiveDDL 触发 fallback DDL 错误导致整个 hydrate 失败。
     const sheetKeys = Object.keys(workingData).filter(k => k.startsWith('sheet_'));
     const physicalTableNames = resolvePhysicalTableNames_ACU(workingData);
     logDebug_ACU(`[SyncBridge] 开始加载 ${sheetKeys.length} 张表到 SQLite`);
     for (const key of sheetKeys) {
       const sheet = workingData[key] as Sheet_ACU;
       if (!sheet || !Array.isArray(sheet.content)) continue;
+      if (!isSqlActiveTemplateSheet_ACU(sheet)) {
+        logDebug_ACU(`[SyncBridge] 跳过休眠表 ${key} (${sheet.name})：非首列空业务表头，SQL 活动路径中视为不存在。`);
+        continue;
+      }
 
       try {
         this._loadSheet(

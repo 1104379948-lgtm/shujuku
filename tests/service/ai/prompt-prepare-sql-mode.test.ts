@@ -18,7 +18,7 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
   getSortedSheetKeys_ACU: vi.fn((data: any) => data ? Object.keys(data).filter((k: string) => k.startsWith('sheet_')) : []),
   // 模板范围默认「未知」，即不过滤，保持既有用例语义。
   resolveTemplateScope_ACU: vi.fn(() => null),
-  filterSheetKeysByTemplateScope_ACU: vi.fn((keys: string[]) => [...keys]),
+  filterSheetKeysByTemplateScope_ACU: vi.fn((keys: string[], scope: any) => (scope ? keys.filter((k: string) => scope.sheetKeys.has(k)) : [...keys])),
   projectSheetForTemplateScope_ACU: vi.fn((sheet: any) => sheet),
 }));
 
@@ -283,6 +283,97 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result!.tableDataText).not.toContain('CREATE TABLE runtime_table');
     expect(result!.tableDataText).not.toContain('CREATE TABLE qingqiuqianmubanbiao');
     expect(result!.tableDataText).toContain('运行时数据');
+  });
+  it('SQL 活动投影剔除空业务表头表后，Prompt 只含有效表、不含休眠表', async () => {
+    mockCurrentJsonTableData = {
+      sheet_valid: {
+        uid: 'valid_table',
+        name: '有效表',
+        sourceData: { ddl: 'CREATE TABLE valid_table (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', 'value'], ['1', '有效数据']],
+        updateConfig: {},
+      },
+      // 运行时仍保留历史数据，但模板侧因非首列空表头投影为休眠表。
+      sheet_dormant: {
+        uid: 'dormant_table',
+        name: '空表头表',
+        sourceData: { ddl: 'CREATE TABLE dormant_table (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', 'value'], ['1', '历史数据']],
+        updateConfig: {},
+      },
+    };
+    const projectedTemplate = {
+      mate: { type: 'acu', version: 1 },
+      sheet_valid: {
+        uid: 'valid_table',
+        name: '有效表',
+        sourceData: { ddl: 'CREATE TABLE valid_table (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', 'value']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+
+    const result = await prepareAIInput_ACU([], 'standard', null, {
+      // 投影后的模板：只有有效表，休眠表已被剔除（模拟 captureSqlTableApplyScope_ACU）。
+      templateScope: {
+        sheetKeys: new Set(['sheet_valid']),
+        sheets: { sheet_valid: projectedTemplate.sheet_valid },
+      },
+      sqlApplyScope: {
+        isolationKey: 'scope-dormant-prompt',
+        templateData: projectedTemplate,
+        templateDataWithRows: projectedTemplate,
+      },
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).toContain('CREATE TABLE valid_table');
+    expect(result!.tableDataText).not.toContain('dormant_table');
+    expect(result!.tableDataText).not.toContain('空表头表');
+  });
+
+  it('全部模板表均为非首列空表头时，Prompt 不含任何表且不触发 fallback DDL 错误', async () => {
+    mockCurrentJsonTableData = {
+      sheet_a: {
+        uid: 'dormant_a',
+        name: '空表头A',
+        sourceData: { ddl: 'CREATE TABLE dormant_a (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', 'value'], ['1', 'a']],
+        updateConfig: {},
+      },
+    };
+    const allDormantTemplate = {
+      mate: { type: 'acu', version: 1 },
+      sheet_a: {
+        uid: 'dormant_a',
+        name: '空表头A',
+        sourceData: { ddl: 'CREATE TABLE dormant_a (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', '']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+
+    const result = await prepareAIInput_ACU([], 'standard', null, {
+      templateScope: {
+        sheetKeys: new Set(), // 已知无活动表（空集，不是 null）
+        sheets: {},
+      },
+      sqlApplyScope: {
+        isolationKey: 'scope-all-dormant-prompt',
+        templateData: allDormantTemplate,
+        templateDataWithRows: allDormantTemplate,
+      },
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).not.toContain('CREATE TABLE');
+    expect(result!.tableDataText).not.toContain('dormant_a');
+    // 空集不等于 null：不应回退为不过滤导致运行时表重新出现。
+    expect(result!.tableDataText).not.toContain('空表头A');
   });
 
   it('请求模板内作者 DDL 表名冲突时，仅冲突组降级为各自拼音物理名，不阻断整个 Prompt', async () => {

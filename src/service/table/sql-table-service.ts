@@ -37,6 +37,7 @@ import {
 import { parseDDLTableName, generateDDL, generateInserts, resolveEffectiveDDL } from '../../data/sqlite/schema-mapper';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
 import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
+import { isSqlActiveTemplateSheet_ACU, projectSqlActiveTemplateData_ACU } from '../../shared/sql-active-template';
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_ACU, PhysicalTableNameCollisionError_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
@@ -380,7 +381,11 @@ export function rebindSqlMutationIdentifiers_ACU(
   statements: string[],
   targetData: TableDataObject_ACU,
   supplementalData?: TableDataObject_ACU | Record<string, unknown> | null,
-  options: { requireKnownTables?: boolean } = {},
+  options: {
+    requireKnownTables?: boolean;
+    /** 只构建这些 sheetKey 的列别名 registry（其余表不注册）。缺省 = 全量（旧行为）。 */
+    targetSheetKeys?: ReadonlySet<string>;
+  } = {},
 ): string[] {
   // 有运行时目标 schema 时，表名只能由它（或调用方显式提供的补充源）判定。
   // 不能让隐式当前模板参与表重绑：快照级 API 可能在与当前聊天模板无关的历史
@@ -397,6 +402,7 @@ export function rebindSqlMutationIdentifiers_ACU(
     {
       supplementalSources: [templateSource],
       skipInvalidSupplementalSources: true,
+      targetSheetKeys: options.targetSheetKeys,
     },
   );
   // 冲突别名 → 目标表 → 冲突集：命中即结构化拒绝（fail closed），不原样放行。
@@ -471,16 +477,42 @@ export function captureSqlTableApplyScope_ACU(options: {
   chat: any[];
   isolationKey: string;
 }): SqlTableApplyScope_ACU {
-  const templateData = resolveChatTemplateData_ACU({ ...options, stripSeedRows: true });
-  const templateDataWithRows = resolveChatTemplateData_ACU({ ...options, stripSeedRows: false });
-  if (!templateData || !templateDataWithRows) {
+  const rawTemplateData = resolveChatTemplateData_ACU({ ...options, stripSeedRows: true });
+  const rawTemplateDataWithRows = resolveChatTemplateData_ACU({ ...options, stripSeedRows: false });
+  if (!rawTemplateData || !rawTemplateDataWithRows) {
     throw new Error(`[SqlTableService] 无法捕获提交模板上下文 (isolationKey=${options.isolationKey || 'default'})。`);
   }
+
+  // 非首列空业务表头的模板表在 SQL 活动路径中休眠跳过：
+  // stripped 与 unstripped 两份快照必须共享同一有效 key 集合（带行版本只能多数据行，
+  // 不能多出被跳过的表），使 Prompt、调度与提交使用同一份表集合，避免请求期间模板变化竞态。
+  const projected = projectSqlActiveTemplateData_ACU(rawTemplateData);
+  const projectedWithRows = projectSqlActiveTemplateData_ACU(rawTemplateDataWithRows);
+  const templateData = projected.data;
+  const templateDataWithRows = projectedWithRows.data;
+
+  const activeSheetKeys = Object.keys(templateData).filter(key => key.startsWith('sheet_')).sort();
+  const skippedSheets = projected.skippedSheets.length >= projectedWithRows.skippedSheets.length
+    ? projected.skippedSheets
+    : projectedWithRows.skippedSheets;
+  if (skippedSheets.length > 0) {
+    // 脱敏诊断：只记录 sheetKey / 显示名 / 空列序号，不记录数据行、DDL 或聊天正文。
+    logWarn_ACU(`[SqlTableService] 模板存在非首列空业务表头的表，SQL 填表中将休眠跳过: ${
+      skippedSheets
+        .map(skip => `${skip.sheetKey}(${skip.name}) 空列[${skip.emptyHeaderIndexes.join(',')}]`)
+        .join('；')
+    }。修正表头后可在下次请求恢复参与。`);
+  }
+
+  // 物理表名冲突检查在投影后执行：被判定为不存在的无效表不阻塞有效表；
+  // 但有效表之间的冲突仍 fail-loud。
   assertNoPhysicalTableNameCollision_ACU(templateData);
   return {
     isolationKey: options.isolationKey,
     templateData,
     templateDataWithRows,
+    activeSheetKeys,
+    skippedSheets,
   };
 }
 
@@ -1335,6 +1367,9 @@ export class SqlTableService implements ITableStorageProvider {
       for (const key of Object.keys(templateData).filter(k => k.startsWith('sheet_'))) {
         const templateSheet = (templateData as any)[key];
         if (!templateSheet || typeof templateSheet !== 'object') continue;
+        // 非首列空业务表头的模板表在 SQL 活动路径中休眠跳过：不复制进初始运行时数据，
+        // 避免建表/校验阶段对坏表头触发 fallback DDL 报错；既有同 key 运行时数据保留。
+        if (!isSqlActiveTemplateSheet_ACU(templateSheet)) continue;
         const targetSheet = (baseData as any)[key];
         if (!targetSheet || typeof targetSheet !== 'object') continue;
         if (templateSheet.uid) targetSheet.uid = templateSheet.uid;
@@ -1354,6 +1389,9 @@ export class SqlTableService implements ITableStorageProvider {
     for (const key of Object.keys(baseData).filter(k => k.startsWith('sheet_'))) {
       const sheet = (baseData as any)[key];
       if (!sheet || typeof sheet !== 'object') continue;
+      // 初始运行时数据同样不携带休眠表：坏表头表不进入 runtimeData，
+      // 既不会被 _validateRuntimeSchema_ACU 校验，也不会在 _buildNameMapper 引爆。
+      if (!isSqlActiveTemplateSheet_ACU(sheet)) continue;
       hasSheet = true;
       delete sheet._acu_from_base_state;
 
@@ -1433,6 +1471,9 @@ export class SqlTableService implements ITableStorageProvider {
     for (const key of Object.keys(data).filter(key => key.startsWith('sheet_'))) {
       const sheet = (data as any)[key];
       if (!sheet || typeof sheet !== 'object') continue;
+      // 休眠表（非首列空业务表头）不参与 runtime schema 校验：它们不建表、不进 SQLite，
+      // 校验它们只会误报 schema_missing_table。
+      if (!isSqlActiveTemplateSheet_ACU(sheet)) continue;
       const runtimeTableName = getPhysicalTableNameForSheet_ACU(data, key);
       if (!actualTables.has(runtimeTableName)) {
         throw new Error(`schema_missing_table: ${key} (${runtimeTableName}) 未在 SQLite runtime 中创建。`);
@@ -1460,6 +1501,9 @@ export class SqlTableService implements ITableStorageProvider {
         if (!key.startsWith('sheet_')) continue;
         const sheet = value as any;
         if (!sheet || typeof sheet !== 'object') continue;
+        // 休眠表（非首列空业务表头）不参与 NameMapper：它们不在 SQLite runtime 中，
+        // 构建映射会对坏表头触发 fallback DDL 报错。
+        if (!isSqlActiveTemplateSheet_ACU(sheet)) continue;
         // NameMapper 必须和 SQLite 实际采用的 schema 一致。直接读取 sourceData.ddl
         // 会在 fallback_invalid 场景留下无法映射运行时物理列名的陈旧映射。
         const runtimeTableName = getPhysicalTableNameForSheet_ACU(data, key);
@@ -1549,8 +1593,14 @@ export class SqlTableService implements ITableStorageProvider {
     // 建表前自检：模板内拼音物理名冲突直接 fail-loud，避免建表途中报晦涩的 SQL 错误。
     assertNoPhysicalTableNameCollision_ACU(templateData);
 
-    // 收集当前聊天模板中所有表的 sheetKey 和表名，找出 SQLite 中缺失的
-    const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));
+    // 收集当前聊天模板中所有有效表的 sheetKey 和表名，找出 SQLite 中缺失的。
+    // 非首列空业务表头的模板表在 SQL 活动路径中休眠跳过：不建表、不注入 seedRows、
+    // 不合并进 currentJsonTableData_ACU；既有同 key 运行时数据保留，修正表头后可恢复。
+    const sheetKeys = Object.keys(templateData).filter(k => {
+        if (!k.startsWith('sheet_')) return false;
+        const sheet = (templateData as any)[k];
+        return isSqlActiveTemplateSheet_ACU(sheet);
+    });
     const missingSheets: Record<string, any> = {};
 
     for (const key of sheetKeys) {

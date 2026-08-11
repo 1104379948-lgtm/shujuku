@@ -166,3 +166,12 @@ export function projectTableDataForTemplateScope_ACU(
   });
   return out as TableDataObject_ACU;
 }
+
+
+// SQL 活动模板判定（非首列空业务表头 → 休眠跳过）在 shared 层实现，
+// 供 data 层（sync-bridge hydrate 跳过休眠表）与 service 层共用同一判定源。
+export {
+    findEmptyBusinessHeaderIndexes_ACU,
+    isSqlActiveTemplateSheet_ACU,
+    projectSqlActiveTemplateData_ACU,
+} from '../../../shared/sql-active-template';

@@ -703,6 +703,9 @@ export function compileTemplateAssistantDraft_ACU(input: {
     }
     const draft = input?.draft;
     if (!draft || !Array.isArray(draft.operations)) {
+        if (draft?.protocolVersion === 3) {
+            return compileTemplateAssistantDraftV3_ACU(input.tempData, input.sheetOrder, input.currentSheetKey, draft);
+        }
         throw new Error('缺少合法 draft.operations');
     }
 
@@ -979,4 +982,286 @@ export function buildTemplateAssistantCumulativeCompileResult_ACU(input: Templat
         lockChanges: [],
         schemaMigrationIntents: {},
     };
+}
+
+/**
+ * v3 编译：单表完整输出协议。
+ *
+ * 输入约束（由 service 的 validateTemplateAssistantDraftV3_ACU 保证信封，本函数保证内容）：
+ * - result.action 仅为 replace / create / delete；
+ * - replace/delete 必须指向输入 allSheets 中真实存在的 sheetKey；
+ * - create 的完整 Sheet 由本地分配 sheetKey/uid/orderNo；
+ * - 未目标表一律保持不变，不允许「缺席即删除」。
+ *
+ * 硬性保护（与计划 v3-contract/v3-data-guards 对齐）：
+ * - 完整字段归一：name/domain/type/enable/required/content/sourceData/updateConfig/exportConfig 必须齐全；
+ * - content 必须是非空二维数组、首列 row_id、业务表头唯一、所有数据行宽一致；
+ * - sourceData.ddl 必须非空且通过 validateDDLTextAgainstHeaders_ACU；
+ * - row_id 集合守卫：空/重复拒绝；replace 未请求删行时，若 AI 少给行 → 阻断（防止静默丢行）。
+ */
+function compileTemplateAssistantDraftV3_ACU(
+    tempData: AnyRecord,
+    sheetOrder: string[] | null | undefined,
+    currentSheetKey: string | null | undefined,
+    draft: any,
+): TemplateAssistantCompileResult_ACU {
+    const candidateData = clone_ACU(tempData);
+    const orderedSheetKeys = getBaseOrderedSheetKeys_ACU(candidateData, sheetOrder);
+    const deletedSheetKeys: string[] = [];
+    const highRiskItems: TemplateAssistantHighRiskItem_ACU[] = [];
+    const lockChanges: TemplateAssistantLockChange_ACU[] = [];
+    const schemaMigrationIntents: Record<string, SchemaMigrationPreflightIntent_ACU | undefined> = {};
+    const diff = createEmptyDiff_ACU();
+    const result = draft?.result;
+
+    if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        throw new Error('v3 draft.result 必须存在且为对象');
+    }
+    const action = String(result.action || '');
+    if (action !== 'replace' && action !== 'create' && action !== 'delete') {
+        throw new Error('v3 result.action 必须为 replace / create / delete 之一');
+    }
+
+    let focusSheetKey: string | null = null;
+
+    if (action === 'replace') {
+        const targetSheetKey = String(result.sheetKey || '').trim();
+        if (!targetSheetKey) {
+            throw new Error('v3 replace 必须提供非空 sheetKey');
+        }
+        const sheet = ensureSheetExists_ACU(candidateData, targetSheetKey);
+        const beforeName = String(sheet.name || targetSheetKey);
+        const normalized = normalizeV3FullSheet_ACU(result.sheet, targetSheetKey);
+
+        // 物理列重命名：DDL 中物理列名/注释变化但业务表头未变。由 preflight 后续复核，
+        // 此处只识别并给出风险标签（不阻断），避免重复实现 preflight 逻辑。
+        const beforeDdl = String(sheet?.sourceData?.ddl || '');
+        const afterDdl = String(normalized.sourceData?.ddl || '');
+        if (beforeDdl && afterDdl && beforeDdl !== afterDdl) {
+            highRiskItems.push({ type: 'patch_sheet_schema', label: `更新 DDL: ${normalized.name || beforeName}` });
+        }
+
+        candidateData[targetSheetKey] = {
+            ...normalized,
+            uid: sheet.uid ?? targetSheetKey,
+            [TABLE_ORDER_FIELD_ACU]: orderedSheetKeys.indexOf(targetSheetKey),
+        };
+        maybeApplySpecialIndexSequenceToSheet_ACU(candidateData[targetSheetKey], targetSheetKey, {});
+        diff.patchedContentSheets.push({ sheetKey: targetSheetKey, name: normalized.name || beforeName, changes: ['单表完整替换'] });
+        if (beforeDdl !== afterDdl) {
+            diff.patchedSchemaSheets.push({ sheetKey: targetSheetKey, name: normalized.name || beforeName, changes: ['DDL 已更新'] });
+            // DDL 变化交给 preflight 判断 migration/rebase，不在此伪造 intent。
+        }
+        if (beforeName !== normalized.name) {
+            diff.renamedSheets.push({ sheetKey: targetSheetKey, beforeName, afterName: normalized.name });
+        }
+        focusSheetKey = targetSheetKey;
+    } else if (action === 'create') {
+        const normalized = normalizeV3FullSheet_ACU(result.sheet, '');
+        const newKey = createUniqueSheetKey_ACU(candidateData, normalized.name);
+        const insertAfter = result.insertAfterSheetKey !== undefined ? String(result.insertAfterSheetKey || '') : '';
+        const newSheet: AnyRecord = {
+            ...normalized,
+            uid: newKey,
+            [TABLE_ORDER_FIELD_ACU]: orderedSheetKeys.length,
+        };
+        candidateData[newKey] = newSheet;
+        insertAfterAnchor_ACU(orderedSheetKeys, newKey, insertAfter || undefined);
+        maybeApplySpecialIndexSequenceToSheet_ACU(candidateData[newKey], newKey, {});
+        diff.addedSheets.push({ sheetKey: newKey, name: normalized.name });
+        focusSheetKey = newKey;
+    } else {
+        // delete
+        const targetSheetKey = String(result.sheetKey || '').trim();
+        if (!targetSheetKey) {
+            throw new Error('v3 delete 必须提供非空 sheetKey');
+        }
+        const sheet = ensureSheetExists_ACU(candidateData, targetSheetKey);
+        const name = String(sheet.name || targetSheetKey);
+        diff.deletedSheets.push({ sheetKey: targetSheetKey, name });
+        deletedSheetKeys.push(targetSheetKey);
+        highRiskItems.push({ type: 'delete_sheet', label: `删除表: ${name}` });
+        delete candidateData[targetSheetKey];
+        const idx = orderedSheetKeys.indexOf(targetSheetKey);
+        if (idx >= 0) orderedSheetKeys.splice(idx, 1);
+        if (String(currentSheetKey || '') === targetSheetKey) {
+            focusSheetKey = orderedSheetKeys[0] || null;
+        } else {
+            focusSheetKey = String(currentSheetKey || '') || orderedSheetKeys[0] || null;
+        }
+    }
+
+    orderedSheetKeys.forEach((sheetKey, index) => {
+        if (candidateData?.[sheetKey] && typeof candidateData[sheetKey] === 'object') {
+            candidateData[sheetKey][TABLE_ORDER_FIELD_ACU] = index;
+        }
+    });
+
+    if (!focusSheetKey || !candidateData[focusSheetKey]) {
+        focusSheetKey = orderedSheetKeys[0] || null;
+    }
+
+    return {
+        candidateData,
+        orderedSheetKeys,
+        deletedSheetKeys,
+        focusSheetKey,
+        diff,
+        highRiskItems,
+        lockChanges,
+        schemaMigrationIntents,
+    };
+}
+
+/**
+ * v3 完整 Sheet 归一 + 硬性校验。校验失败一律抛错（拒绝应用），绝不静默补齐。
+ */
+function normalizeV3FullSheet_ACU(rawSheet: any, targetSheetKey: string): AnyRecord {
+    if (!rawSheet || typeof rawSheet !== 'object' || Array.isArray(rawSheet)) {
+        throw new Error('v3 必须返回完整 sheet 对象');
+    }
+
+    const requiredKeys = ['name', 'domain', 'type', 'enable', 'required', 'content', 'sourceData', 'updateConfig', 'exportConfig'];
+    requiredKeys.forEach((key) => {
+        if (!Object.prototype.hasOwnProperty.call(rawSheet, key)) {
+            throw new Error(`v3 sheet 缺少必填字段: ${key}`);
+        }
+    });
+
+    const name = String(rawSheet.name || '').trim();
+    if (!name) {
+        throw new Error('v3 sheet.name 必须是非空字符串');
+    }
+    if (typeof rawSheet.domain !== 'string' || !rawSheet.domain.trim()) {
+        throw new Error('v3 sheet.domain 必须是非空字符串');
+    }
+    if (typeof rawSheet.type !== 'string' || !rawSheet.type.trim()) {
+        throw new Error('v3 sheet.type 必须是非空字符串');
+    }
+    if (typeof rawSheet.enable !== 'boolean') {
+        throw new Error('v3 sheet.enable 必须是布尔值');
+    }
+    if (typeof rawSheet.required !== 'boolean') {
+        throw new Error('v3 sheet.required 必须是布尔值');
+    }
+
+    const content = rawSheet.content;
+    if (!Array.isArray(content) || content.length === 0) {
+        throw new Error('v3 sheet.content 必须是非空二维数组');
+    }
+    if (!Array.isArray(content[0])) {
+        throw new Error('v3 sheet.content[0]（表头行）必须是数组');
+    }
+    const headerRow = content[0].map((item: any) => String(item ?? '').trim());
+    if (headerRow[0] !== 'row_id') {
+        throw new Error('v3 sheet.content[0][0] 必须为 row_id');
+    }
+    const headers = headerRow.slice(1);
+    if (headers.length === 0) {
+        throw new Error('v3 sheet 至少需要一个业务表头');
+    }
+    assertHeadersUnique_ACU(headers);
+
+    const headerWidth = headerRow.length;
+    content.slice(1).forEach((row: any, index: number) => {
+        if (!Array.isArray(row)) {
+            throw new Error(`v3 sheet.content[${index + 1}] 必须是数组`);
+        }
+        if (row.length !== headerWidth) {
+            throw new Error(`v3 sheet.content[${index + 1}] 行宽(${row.length})与表头行宽(${headerWidth})不一致`);
+        }
+    });
+
+    const sourceData = isObject_ACU(rawSheet.sourceData) ? rawSheet.sourceData : null;
+    if (!sourceData) {
+        throw new Error('v3 sheet.sourceData 必须是对象');
+    }
+    const ddlText = typeof sourceData.ddl === 'string' ? sourceData.ddl.trim() : '';
+    if (!ddlText) {
+        throw new Error('v3 replace/create 必须提供非空 sourceData.ddl');
+    }
+    const ddlValidation = validateDdlAgainstHeaders_ACU(ddlText, headerRow);
+    if (!ddlValidation.valid) {
+        throw new Error(`v3 sheet.sourceData.ddl 非法: ${ddlValidation.message}`);
+    }
+    const updateConfig = isObject_ACU(rawSheet.updateConfig) ? rawSheet.updateConfig : null;
+    if (!updateConfig) {
+        throw new Error('v3 sheet.updateConfig 必须是对象');
+    }
+    const exportConfig = isObject_ACU(rawSheet.exportConfig) ? rawSheet.exportConfig : null;
+    if (!exportConfig) {
+        throw new Error('v3 sheet.exportConfig 必须是对象');
+    }
+
+    // row_id 集合守卫：空/重复拒绝（未删行要求保持集合一致在 compile 之后由调用方复核）。
+    const rowIdSet = new Set<string>();
+    content.slice(1).forEach((row: any) => {
+        const rowId = String(row[0] ?? '').trim();
+        if (!rowId) {
+            throw new Error('v3 sheet 数据行 row_id 不能为空');
+        }
+        if (rowIdSet.has(rowId)) {
+            throw new Error(`v3 sheet 数据行 row_id 重复: ${rowId}`);
+        }
+        rowIdSet.add(rowId);
+    });
+
+    const normalized: AnyRecord = {
+        name,
+        domain: String(rawSheet.domain),
+        type: String(rawSheet.type),
+        enable: rawSheet.enable === true,
+        required: rawSheet.required === true,
+        content: clone_ACU(content),
+        sourceData: clone_ACU(sourceData),
+        updateConfig: clone_ACU(updateConfig),
+        exportConfig: clone_ACU(exportConfig),
+    };
+    TEMPLATE_ASSISTANT_V3_AUX_KEYS_ACU.forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(rawSheet, key)) {
+            normalized[key] = clone_ACU(rawSheet[key]);
+        }
+    });
+
+    // 未目标表的 row_id 集合差异（该表不是 replace 目标时不允许任何 row_id 变化）由调用方在
+    // 更高层（service）对比 baseline 与 candidate 判定，见 compileV3 之外的守卫。
+    return normalized;
+}
+
+const TEMPLATE_ASSISTANT_V3_AUX_KEYS_ACU = ['hiddenPhysicalColumns', 'tableAliases', 'columnAliases'] as const;
+
+/**
+ * v3 未删行保护：对 replace 目标表，若 AI 返回的 row_id 集合是 baseline 的子集（少了行），
+ * 而用户并未要求删行（result 无显式标记），则阻断——防止 AI 静默吞行。
+ * 返回高风险管理（需用户确认）或空数组（无需确认）。
+ */
+export function collectV3RowIdGuardFindings_ACU(
+    baselineData: AnyRecord,
+    candidateData: AnyRecord,
+    sheetKey: string,
+    userRequest: string,
+): Array<{ code: 'row_id_set_reduction'; sheetKey: string; missingRowIds: string[] }> {
+    const baseline = baselineData?.[sheetKey];
+    const candidate = candidateData?.[sheetKey];
+    if (!baseline || !candidate) return [];
+    const baselineIds = extractRowIds_ACU(baseline);
+    const candidateIds = extractRowIds_ACU(candidate);
+    const baselineSet = new Set(baselineIds);
+    const missing = baselineIds.filter((rowId) => !candidateIds.includes(rowId));
+    if (missing.length === 0) return [];
+    // 用户需求显式提到「删除/移除/去掉」等动作时，认为删行是有意的，交给高风险确认流程而非硬阻断。
+    const explicitDeleteIntent = /删除|移除|去掉|清除|drop|delete|remove/i.test(String(userRequest || ''));
+    if (explicitDeleteIntent) return [];
+    return [{ code: 'row_id_set_reduction', sheetKey, missingRowIds: missing }];
+}
+
+function extractRowIds_ACU(sheet: any): string[] {
+    if (!Array.isArray(sheet?.content)) return [];
+    return sheet.content.slice(1)
+        .map((row: any) => String(Array.isArray(row) ? row[0] ?? '' : '').trim())
+        .filter(Boolean);
+}
+
+export function hasV3RowIdSetReduction_ACU(findings: Array<{ code: 'row_id_set_reduction'; sheetKey: string; missingRowIds: string[] }>): boolean {
+    return findings.length > 0;
 }

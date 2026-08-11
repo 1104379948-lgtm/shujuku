@@ -1454,6 +1454,90 @@ describe('SqlTableService', () => {
       ]);
     });
 
+    it('非首列空业务表头的模板表在 SQL 活动快照中休眠：不进 activeSheetKeys，不阻塞有效表', () => {
+      const originalChat = [{ mes: 'chat-scope-capture' }];
+      const mixedTemplate = {
+        mate: { type: 'acu', version: 1 },
+        sheet_valid: {
+          uid: 'valid_table',
+          name: '有效表',
+          sourceData: {
+            ddl: 'CREATE TABLE valid_table (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);',
+          },
+          content: [['row_id', 'value']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 1,
+        },
+        sheet_dormant: {
+          uid: 'dormant_table',
+          name: '空表头表',
+          sourceData: {
+            ddl: 'CREATE TABLE dormant_table (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);',
+          },
+          content: [['row_id', '', '']], // 第 2、3 列空业务表头
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 2,
+        },
+      } as any;
+      mockGetCurrentChatTemplateScopeState.mockImplementation(() => ({
+        mode: 'chat_override',
+        templateStr: JSON.stringify(mixedTemplate),
+      }));
+      mockGetEffectiveSeedRows.mockReturnValue([]);
+
+      const capturedScope = captureSqlTableApplyScope_ACU({ chat: originalChat, isolationKey: 'scope-dormant' });
+
+      // 有效表保留，休眠表剔除
+      expect(capturedScope.activeSheetKeys).toEqual(['sheet_valid']);
+      expect(capturedScope.templateData.sheet_valid).toBeDefined();
+      expect(capturedScope.templateData.sheet_dormant).toBeUndefined();
+      expect(capturedScope.templateDataWithRows.sheet_dormant).toBeUndefined();
+      // 脱敏诊断：只含 sheetKey / 显示名 / 空列序号
+      expect(capturedScope.skippedSheets).toEqual([
+        { sheetKey: 'sheet_dormant', name: '空表头表', emptyHeaderIndexes: [2, 3] },
+      ]);
+    });
+
+    it('全部模板表均非首列空表头时，SQL 活动快照为空集而非 null，且不丢元数据', () => {
+      const originalChat = [{ mes: 'chat-scope-all-dormant' }];
+      const allDormantTemplate = {
+        mate: { type: 'acu', version: 1 },
+        sheet_a: {
+          uid: 'dormant_a',
+          name: '空表头A',
+          sourceData: { ddl: 'CREATE TABLE dormant_a (row_id INTEGER PRIMARY KEY, value TEXT);' },
+          content: [['row_id', '']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 1,
+        },
+        sheet_b: {
+          uid: 'dormant_b',
+          name: '空表头B',
+          sourceData: { ddl: 'CREATE TABLE dormant_b (row_id INTEGER PRIMARY KEY, value TEXT);' },
+          content: [['row_id', null]], // 首列占位合法，第 2 列 null
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 2,
+        },
+      } as any;
+      mockGetCurrentChatTemplateScopeState.mockImplementation(() => ({
+        mode: 'chat_override',
+        templateStr: JSON.stringify(allDormantTemplate),
+      }));
+      mockGetEffectiveSeedRows.mockReturnValue([]);
+
+      const capturedScope = captureSqlTableApplyScope_ACU({ chat: originalChat, isolationKey: 'scope-all-dormant' });
+
+      // 空 activeSheetKeys 表示“已知无活动表”，不是 null（null 表示范围未知、不过滤）
+      expect(capturedScope.activeSheetKeys).toEqual([]);
+      expect(capturedScope.templateData.mate).toEqual({ type: 'acu', version: 1 });
+      expect(capturedScope.templateData.sheet_a).toBeUndefined();
+      expect(capturedScope.templateData.sheet_b).toBeUndefined();
+      expect(capturedScope.skippedSheets.map(s => s.sheetKey).sort()).toEqual(['sheet_a', 'sheet_b']);
+    });
     it('AI 等待期间切换聊天模板后，提交仍使用请求前捕获的建表与别名快照', () => {
       const originalChat = [{ mes: 'chat-a' }];
       const switchedChat = [{ mes: 'chat-b' }];
