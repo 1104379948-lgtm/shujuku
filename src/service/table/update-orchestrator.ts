@@ -19,6 +19,7 @@ import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStateFrom
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
+import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { rebindSheetKeysThroughTableAliases_ACU, resolveHistoricalSheetKeyMigrations_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
 import { recoverProvisionalBridgeSession_ACU, hasActiveProvisionalBridgeAnywhere_ACU } from './manual-catch-up-provisional-bridge';
 import {
@@ -64,7 +65,7 @@ import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
-import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
+import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSchemaInvalidError_ACU, SqlRuntimeSchemaStaleError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
 import { hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
@@ -267,9 +268,18 @@ function capturePromptMessageSnapshot_ACU(messages: any[]): any[] {
     });
 }
 
-function captureFillExecutionScope_ACU(
+/**
+ * AI 请求前捕获请求级执行作用域：
+ * - 模板上下文（stripped / with rows / active sheet keys）
+ * - live SQLite provider 的 runtime schema 冻结视图（窄 schema + digest + 完整 runtimeData）
+ *
+ * schema 冻结失败（provider 未 ready / 导出失败 / 解析失败）时，不在捕获阶段抛错冒泡
+ * （调用点控制流复杂），而是把结构化失败标记写入 scope.runtimeSchemaFailure；所有
+ * 消费方必须在使用 scope 前检查并 fail-closed。绝不回退 baseSnapshot 冒充 live schema。
+ */
+async function captureFillExecutionScope_ACU(
     performanceContext?: { runId?: string; parentSpanId?: string },
-): FillExecutionScope_ACU {
+): Promise<FillExecutionScope_ACU> {
     const performanceSpan = startRuntimePerformanceSpan_ACU('fill-execution-scope-capture', {
         ...performanceContext,
         settings: settings_ACU,
@@ -279,9 +289,28 @@ function captureFillExecutionScope_ACU(
     const isolationKey = getCurrentIsolationKey_ACU();
     const liveChat = getChatArray_ACU() || [];
     const promptMessages = capturePromptMessageSnapshot_ACU(liveChat);
-    const sqlApplyScope = isSqliteMode()
-        ? captureSqlTableApplyScope_ACU({ chat: liveChat, isolationKey })
-        : undefined;
+    let sqlApplyScope: SqlTableApplyScope_ACU | undefined;
+    if (isSqliteMode()) {
+        let runtimeData: TableDataObject_ACU | null = null;
+        let runtimeSchemaFailure: SqlTableApplyScope_ACU['runtimeSchemaFailure'] | undefined;
+        try {
+            const provider = await ensureStorageProviderReady_ACU();
+            if (provider.mode !== 'sqlite') {
+                runtimeSchemaFailure = { code: 'provider_unavailable', message: 'SQLite 模式需要 SQLite provider，当前未就绪。' };
+            } else {
+                runtimeData = provider.getCurrentData();
+                if (!runtimeData) {
+                    runtimeSchemaFailure = { code: 'SQL_RUNTIME_SCHEMA_INVALID_ACU', message: 'SQLite runtime 未导出表格数据，无法冻结 schema。' };
+                }
+            }
+        } catch (e: any) {
+            runtimeSchemaFailure = { code: 'provider_unavailable', message: `SQLite 运行时未就绪，已阻止本轮填表：${String(e?.message || e)}` };
+        }
+        sqlApplyScope = captureSqlTableApplyScope_ACU({ chat: liveChat, isolationKey, runtimeData });
+        if (runtimeSchemaFailure) {
+            sqlApplyScope = { ...sqlApplyScope, runtimeSchemaFailure };
+        }
+    }
     const templateScope = sqlApplyScope
         ? buildTemplateScopeFromData_ACU(sqlApplyScope.templateData)
         : resolveTemplateScope_ACU(isolationKey);
@@ -868,6 +897,20 @@ export async function collectGroupFillResponse_ACU(
     const isStopped = () => effectiveAbortController.signal.aborted || (options.respectGlobalStop !== false && wasStoppedByUser_ACU);
     const maxRetries = options.maxRetriesOverride || settings_ACU.tableMaxRetries || 3;
     if (isStopped()) return { job, success: false, attempt: 0, aborted: true };
+    // 请求前冻结 runtime schema 失败 = 本地基础设施失败：模型无法通过重试修复。
+    // 必须在 AI 调用前 fail-closed，避免消耗 token 后在提交阶段才失败。
+    const runtimeSchemaFailure = job.sqlApplyScope?.runtimeSchemaFailure;
+    if (runtimeSchemaFailure) {
+        const error = `SQLite runtime schema 冻结失败（${runtimeSchemaFailure.code}）：${runtimeSchemaFailure.message}`;
+        return {
+            job,
+            success: false,
+            attempt: 0,
+            error,
+            rawError: error,
+            errorCategory: 'infrastructure',
+        };
+    }
     options.onProgress?.({ phase: 'preparing', attempt: 1, maxRetries: 1 });
     const prepareSpan = startRuntimePerformanceSpan_ACU('table-fill-prepare-ai-input', {
         runId: job.performanceRunId,
@@ -993,7 +1036,12 @@ export async function collectGroupFillResponse_ACU(
             }
             if (isSqliteMode() && tableEditText && isSqlContent(tableEditText)) {
                 try {
-                    assertNoHiddenPhysicalColumnMutations_ACU(splitSqlStatements(tableEditText), job.baseSnapshot);
+                    // 隐藏列保护使用请求前冻结的 live runtime schema 证据，而不是 baseSnapshot：
+                    // 历史快照可能缺失 descriptor 或含旧表头，会把 live 合法列误判为隐藏列。
+                    assertNoHiddenPhysicalColumnMutations_ACU(
+                        splitSqlStatements(tableEditText),
+                        job.sqlApplyScope?.runtimeData ? job.sqlApplyScope.runtimeData as any : job.baseSnapshot,
+                    );
                 } catch (error: any) {
                     throw new ModelOutputRetryError_ACU(error?.message || 'SQLite 填表 SQL 无效。');
                 }
@@ -1234,6 +1282,18 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         ? buildTemplateScopeFromData_ACU(capturedSqlApplyScope.templateData)
         : resolveTemplateScope_ACU(capturedIsolationKey);
 
+    // 请求前冻结 runtime schema 失败 = 本地前置条件/infrastructure 失败：
+    // 模型无法通过重试修复，不得进入 UNIFIED_GROUP_ERROR_FEEDBACK、不得触发第二次模型调用。
+    const runtimeSchemaFailure = capturedSqlApplyScope?.runtimeSchemaFailure;
+    if (runtimeSchemaFailure) {
+        return {
+            success: false,
+            modifiedKeys: [],
+            error: `统一提交失败：SQLite runtime schema 冻结失败（${runtimeSchemaFailure.code}）。${sanitizeRetryFeedback_ACU(runtimeSchemaFailure.message)}`,
+            errorCategory: 'infrastructure' as const,
+        };
+    }
+
     const seenTargetSheetKeys = new Set<string>();
     const allTargetSheetKeySet = new Set<string>();
     for (const response of sortedResponses) {
@@ -1296,25 +1356,37 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                 const activeSheetKeySet = capturedSqlApplyScope?.activeSheetKeys
                     ? new Set(capturedSqlApplyScope.activeSheetKeys)
                     : undefined;
+                // [统一 schema 权威] 重绑 targetData 使用请求前冻结的 live runtime schema 视图，
+                // 而不是 baseSnapshot（历史 replay/merge 基底只承担数据/CAS/操作职责）。
+                // baseSnapshot 含旧空表头时不再阻断对 live 合法表的 SQL 校验（test31 根因修复）。
+                const rebindTargetData = (capturedSqlApplyScope?.runtimeData
+                    ? capturedSqlApplyScope.runtimeData
+                    : baseSnapshot) as any;
                 reboundStatements = rebindSqlMutationIdentifiers_ACU(
                     normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''),
-                    baseSnapshot as any,
+                    rebindTargetData,
                     capturedSqlApplyScope?.templateData,
                     { requireKnownTables: true, targetSheetKeys: activeSheetKeySet, requireKnownInsertColumns: true },
                 );
                 // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
-                assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
+                assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, capturedSqlApplyScope?.runtimeData ? capturedSqlApplyScope.runtimeData as any : baseSnapshot);
             } catch (error: any) {
                 // 歧义英文表名属于前置条件失败：AI 无法通过重试解决，回灌错误只会浪费模型调用并等待 5 秒。
                 // 分类为 precondition，不包装 ModelOutputRetryError_ACU、不回灌、不重试。
                 const isAliasAmbiguous = error?.code === 'SQL_ALIAS_AMBIGUOUS_ACU';
+                // 本地 runtime schema 问题（冻结失败/漂移）也是前置条件/infrastructure 失败：
+                // 模型无法修复，禁止回灌 UNIFIED_GROUP_ERROR_FEEDBACK。
+                const isRuntimeSchemaError = error instanceof SqlRuntimeSchemaInvalidError_ACU
+                    || error instanceof SqlRuntimeSchemaStaleError_ACU
+                    || error?.code === 'SQL_RUNTIME_SCHEMA_INVALID_ACU'
+                    || error?.code === 'SQL_RUNTIME_SCHEMA_STALE_ACU';
                 return {
                     success: false,
                     modifiedKeys: [],
-                    error: isAliasAmbiguous
+                    error: isAliasAmbiguous || isRuntimeSchemaError
                         ? `统一提交失败：${formatResponseGroupReference_ACU(response)} ${sanitizeRetryFeedback_ACU(error?.message || String(error))}`
                         : `统一提交失败：${formatResponseGroupReference_ACU(response)} SQL 校验失败。${sanitizeRetryFeedback_ACU(error?.message || String(error))}`,
-                    errorCategory: isAliasAmbiguous ? 'precondition' : 'model',
+                    errorCategory: isAliasAmbiguous || isRuntimeSchemaError ? 'precondition' : 'model',
                 };
             }
 
@@ -1325,7 +1397,9 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                 const retainedStatements: string[] = [];
                 const discardedKeys = new Set<string>();
                 for (const statement of reboundStatements) {
-                    const touchedKeys = getTouchedSheetKeysFromSqlText_ACU(statement, baseSnapshot);
+                    // 表名归属同样以冻结 runtime 视图为准：baseSnapshot 可能是旧 schema/空表头，
+                    // 用它反查会让真实表被误判为"未授权"或"范围外"。
+                    const touchedKeys = getTouchedSheetKeysFromSqlText_ACU(statement, capturedSqlApplyScope?.runtimeData ? capturedSqlApplyScope.runtimeData as any : baseSnapshot);
                     const unauthorizedKeys = touchedKeys.filter(sheetKey => !allowedSheetKeys.has(sheetKey));
                     if (unauthorizedKeys.length === 0) {
                         retainedStatements.push(statement);
@@ -1403,7 +1477,9 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                 sqlTexts.splice(0, sqlTexts.length, ...parseResult.materializedSqlTexts);
             } catch (error: any) {
                 const rawErrorMessage = error?.message || String(error);
-                const isInfrastructureError = error instanceof SqlRuntimeSnapshotError_ACU;
+                const isInfrastructureError = error instanceof SqlRuntimeSnapshotError_ACU
+                    || error instanceof SqlRuntimeSchemaInvalidError_ACU
+                    || error instanceof SqlRuntimeSchemaStaleError_ACU;
                 const failedGroupKey = findSqlFailureGroupKey_ACU(sqlTexts, sortedResponses, rawErrorMessage);
                 return {
                     success: false,
@@ -1799,7 +1875,7 @@ async function processGroupedRuntimeChunkCore_ACU(
         await reloadStorageProvider();
     }
 
-    const executionScope = captureFillExecutionScope_ACU({
+    const executionScope = await captureFillExecutionScope_ACU({
         runId: options.performanceRunId,
         parentSpanId: options.performanceParentSpanId,
     });
@@ -2524,7 +2600,7 @@ export async function executeCardUpdateCore_ACU(
     let success = false;
     let modifiedKeys: string[] = [];
     const maxRetries = settings_ACU.tableMaxRetries || 3;
-    const executionScope = captureFillExecutionScope_ACU();
+    const executionScope = await captureFillExecutionScope_ACU();
     const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
         chat: getChatArray_ACU() || [],
         isolationKey: executionScope.isolationKey,
@@ -2644,7 +2720,10 @@ export async function executeCardUpdateCore_ACU(
                                 executionScope.sqlApplyScope,
                             );
                         } catch (error: any) {
-                            const errorCategory = error instanceof SqlRuntimeSnapshotError_ACU ? 'infrastructure' as const : 'model' as const;
+                            const isRuntimeSchemaError = error instanceof SqlRuntimeSnapshotError_ACU
+                                || error instanceof SqlRuntimeSchemaInvalidError_ACU
+                                || error instanceof SqlRuntimeSchemaStaleError_ACU;
+                            const errorCategory = isRuntimeSchemaError ? 'infrastructure' as const : 'model' as const;
                             return { success: false, error: sanitizeRetryFeedback_ACU(error?.message || String(error)), errorCategory };
                         }
                         const parseSuccess = !!parseResult?.success;

@@ -109,6 +109,22 @@ function resolvePromptRowWindow_ACU(
         return options?.tableData || currentJsonTableData_ACU;
     }
 
+    // [统一 schema 权威] 显式 sqlApplyScope 携带请求前冻结的 live SQLite runtime 数据时，
+    // Prompt 必须使用该冻结视图，而不是再次读取 live provider：AI 等待期间模板切换、
+    // 运行时重载或并发提交不得改变本轮 Prompt 的 schema/行数据契约（test31 双权威修复）。
+    if (options?.sqlApplyScope?.runtimeData) {
+        return options.sqlApplyScope.runtimeData;
+    }
+    if (options?.sqlApplyScope?.runtimeSchemaFailure) {
+        return createPromptRuntimeFailure_ACU(
+            options.sqlApplyScope.runtimeSchemaFailure.code === 'SQL_RUNTIME_SCHEMA_INVALID_ACU'
+                ? 'runtime_schema_invalid'
+                : 'provider_unavailable',
+            options.sqlApplyScope.runtimeSchemaFailure.message,
+            false,
+        );
+    }
+
     try {
         const provider = await ensureStorageProviderReady_ACU({ signal: options?.signal });
         if (provider.mode !== 'sqlite') {

@@ -11,6 +11,8 @@
 import type {
   ITableStorageProvider,
   SqlTableApplyScope_ACU,
+  RuntimeSchemaFreeze_ACU,
+  FrozenSheetRuntimeSchema_ACU,
   SqlQueryResult,
   SqlMutationResult,
   ApplyEditsWithRowIdMaterializationResult_ACU,
@@ -26,7 +28,7 @@ import {
   _set_currentJsonTableData_ACU,
 } from '../runtime/state-manager';
 import { mergeAllIndependentTables_ACU } from '../runtime/helpers-data-merge';
-import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
+import { hashUserInput_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
 import {
   createNameMapperOwnerToken_ACU,
   publishGlobalNameMapperEmptySchema_ACU,
@@ -41,7 +43,7 @@ import { isSqlActiveTemplateSheet_ACU, projectSqlActiveTemplateData_ACU } from '
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_ACU, PhysicalTableNameCollisionError_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
-import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
+import { getRuntimeEffectiveSchema_ACU, getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { rebindSqlMutationTableReferences_ACU, rebindSqlMutationColumnsByTarget_ACU, decodeSqlIdentifier_ACU } from '../../shared/sql-mutation-table-rebind';
 import { buildSheetTableAliasMap_ACU, buildSheetColumnAliasMap_ACU } from '../../shared/sql-read-resolver';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
@@ -479,6 +481,8 @@ function resolveChatTemplateData_ACU(
 export function captureSqlTableApplyScope_ACU(options: {
   chat: any[];
   isolationKey: string;
+  /** 请求前从 live SQLite provider 冻结的完整运行时数据（含 non-enumerable descriptor）。 */
+  runtimeData?: TableDataObject_ACU | null;
 }): SqlTableApplyScope_ACU {
   const rawTemplateData = resolveChatTemplateData_ACU({ ...options, stripSeedRows: true });
   const rawTemplateDataWithRows = resolveChatTemplateData_ACU({ ...options, stripSeedRows: false });
@@ -510,12 +514,23 @@ export function captureSqlTableApplyScope_ACU(options: {
   // 物理表名冲突检查在投影后执行：被判定为不存在的无效表不阻塞有效表；
   // 但有效表之间的冲突仍 fail-loud。
   assertNoPhysicalTableNameCollision_ACU(templateData);
+
+  // 请求级 runtime schema 冻结：只允许来自调用方显式传入的 live provider 导出数据。
+  // 绝不在这里隐式回退到 baseSnapshot / currentJsonTableData_ACU —— 那会把历史基底
+  // 冒充 live schema 权威（test31 根因）。provider 未 ready 时由调用方（orchestrator）
+  // 决定是返回 infrastructure failure 还是走旧模板捕获路径。
+  const runtimeSchema = freezeRuntimeSchemaFromData_ACU(
+    options.runtimeData || null,
+    new Set(activeSheetKeys),
+  );
   return {
     isolationKey: options.isolationKey,
     templateData,
     templateDataWithRows,
     activeSheetKeys,
     skippedSheets,
+    runtimeSchema: runtimeSchema ?? undefined,
+    runtimeData: options.runtimeData || undefined,
   };
 }
 
@@ -609,6 +624,90 @@ export class SqlRuntimeSnapshotError_ACU extends Error {
     super(message);
     this.name = 'SqlRuntimeSnapshotError_ACU';
   }
+}
+
+/**
+ * 请求前冻结的 runtime schema 无法建立（provider 未 ready / 导出失败 / schema 解析失败）。
+ * 属于本地前置条件失败：模型无法通过重试修复，必须分类为 infrastructure/precondition，
+ * 不得进入 UNIFIED_GROUP_ERROR_FEEDBACK 模型重试链。
+ */
+export class SqlRuntimeSchemaInvalidError_ACU extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SqlRuntimeSchemaInvalidError_ACU';
+    Object.defineProperty(this, 'code', { value: 'SQL_RUNTIME_SCHEMA_INVALID_ACU', enumerable: false });
+  }
+}
+
+/**
+ * 提交时检测到 live SQLite runtime schema 与请求前冻结 schema 不一致。
+ * 必须在任何 SQLite mutation 前中止（零写入），并分类为 infrastructure/precondition。
+ */
+export class SqlRuntimeSchemaStaleError_ACU extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SqlRuntimeSchemaStaleError_ACU';
+    Object.defineProperty(this, 'code', { value: 'SQL_RUNTIME_SCHEMA_STALE_ACU', enumerable: false });
+  }
+}
+
+/**
+ * 计算请求级 runtime schema 的稳定 digest。
+ *
+ * 输入只取 effectiveDDL（规范化空白）与 columnMap（稳定排序），不包含业务行、
+ * diagnostics、聊天正文或 SQL。返回空串表示无可参与 digest 的表（调用方必须
+ * 结合自身状态 fail-closed，不能把空 digest 当作“已一致”）。
+ */
+export function computeRuntimeSchemaDigest_ACU(
+  bySheetKey: ReadonlyMap<string, { effectiveDDL: string; columnMap: unknown }>,
+): string {
+  const sheetKeys = Array.from(bySheetKey.keys()).sort();
+  if (sheetKeys.length === 0) return '';
+  const lines = sheetKeys.map(sheetKey => {
+    const schema = bySheetKey.get(sheetKey)!;
+    const normalizedDDL = String(schema.effectiveDDL || '').replace(/\s+/g, ' ').trim();
+    const columnMap = schema.columnMap as {
+      mappings?: Array<{ sourceIndex?: number; displayName?: string; sqlName?: string; required?: boolean }>;
+      sqlToDisplay?: unknown;
+    } | null | undefined;
+    const mappings = Array.isArray(columnMap?.mappings) ? [...columnMap!.mappings].sort((a, b) => (a.sourceIndex ?? 0) - (b.sourceIndex ?? 0)) : [];
+    const mapLines = mappings.map(mapping => `${mapping.sourceIndex ?? ''}|${String(mapping.displayName ?? '').toLowerCase()}|${String(mapping.sqlName ?? '').toLowerCase()}`).join(',');
+    return `${sheetKey}\u0000${normalizedDDL}\u0000${mapLines}`;
+  });
+  return hashUserInput_ACU(lines.join('\n'));
+}
+
+/** 从冻结的完整 runtimeData 中构建窄 schema 视图（只保留 schema 证据，不复制业务行）。 */
+export function freezeRuntimeSchemaFromData_ACU(
+  runtimeData: TableDataObject_ACU | null | undefined,
+  activeSheetKeys: ReadonlySet<string> | null | undefined,
+): RuntimeSchemaFreeze_ACU | null {
+  if (!runtimeData || typeof runtimeData !== 'object') return null;
+  const bySheetKey = new Map<string, FrozenSheetRuntimeSchema_ACU>();
+  const activeKeys = activeSheetKeys ? activeSheetKeys : new Set(Object.keys(runtimeData).filter(key => key.startsWith('sheet_')));
+  for (const sheetKey of Object.keys(runtimeData).filter(key => key.startsWith('sheet_'))) {
+    if (activeKeys.size > 0 && !activeKeys.has(sheetKey)) continue;
+    const sheet = (runtimeData as any)[sheetKey];
+    if (!sheet || typeof sheet !== 'object') continue;
+    const descriptor = getRuntimeEffectiveSchema_ACU(sheet) as {
+      effectiveDDL?: string; columnMap?: unknown; source?: string; diagnostics?: readonly string[];
+    } | null | undefined;
+    if (!descriptor || typeof descriptor !== 'object') {
+      // 运行时表必须携带 descriptor；缺失视为 schema 契约损坏（fail-closed）。
+      return null;
+    }
+    const physicalTableName = getPhysicalTableNameForSheet_ACU(runtimeData, sheetKey);
+    bySheetKey.set(sheetKey, {
+      sheetKey,
+      physicalTableName,
+      effectiveDDL: String(descriptor.effectiveDDL || ''),
+      columnMap: descriptor.columnMap,
+      source: String(descriptor.source || ''),
+      diagnostics: Array.isArray(descriptor.diagnostics) ? descriptor.diagnostics : [],
+    });
+  }
+  if (bySheetKey.size === 0) return null;
+  return { bySheetKey, sheetKeys: Array.from(bySheetKey.keys()).sort(), digest: computeRuntimeSchemaDigest_ACU(bySheetKey) };
 }
 
 interface SqlInsertColumnToken_ACU {
@@ -1371,6 +1470,9 @@ export class SqlTableService implements ITableStorageProvider {
     _updateMode?: string,
     scope?: SqlTableApplyScope_ACU,
   ): ApplyEditsWithRowIdMaterializationResult_ACU {
+    // 请求级冻结 runtime schema 是本轮写路径的 schema 权威；提交前必须确认
+    // live SQLite 与其一致。若 AI 等待期间 schema 漂移，零 mutation 中止。
+    this._assertRuntimeSchemaCurrent(scope);
     this._ensureInitialized();
     this._ensureTablesFromTemplate(scope);
 
@@ -1378,7 +1480,7 @@ export class SqlTableService implements ITableStorageProvider {
       const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
       return rebindSqlMutationIdentifiers_ACU(
         normalizedStatements,
-        (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
+        (scope?.runtimeData || currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
         scope?.templateData,
         { requireKnownTables: Boolean(scope?.templateData), requireKnownInsertColumns: true },
       );
@@ -1731,6 +1833,35 @@ export class SqlTableService implements ITableStorageProvider {
   private _ensureInitialized(): void {
     if (!this._initialized || !this.engine.isReady) {
       throw new Error('[SqlTableService] SQLite 引擎未初始化，请先调用 loadFromChat()');
+    }
+  }
+
+  /**
+   * 提交前 schema 一致性 gate：live SQLite runtime 与请求前冻结的 runtime schema
+   * 必须一致，否则任何 SQLite mutation 都不得执行（fail-closed，零写入）。
+   *
+   * 比较依据是冻结 digest 与当前实时导出（仅 activeSheetKeys 参与）的 digest。
+   * 无冻结 scope 时跳过（旧调用方/低层工具路径），不收紧 Native 与历史 replay。
+   */
+  private _assertRuntimeSchemaCurrent(scope?: SqlTableApplyScope_ACU): void {
+    const frozenDigest = scope?.runtimeSchema?.digest;
+    if (!frozenDigest) return; // 无冻结 schema：兼容旧调用方，不做 gate。
+    if (!this._initialized || !this.engine.isReady) {
+      throw new SqlRuntimeSchemaInvalidError_ACU('SQLite 运行时未就绪，无法验证冻结 schema 一致性，已阻止本轮写入。');
+    }
+    let currentData: TableDataObject_ACU | null;
+    try {
+      const mate = (currentJsonTableData_ACU?.mate as Mate_ACU) || DEFAULT_MATE_ACU;
+      currentData = this.syncBridge.exportToTableData(mate);
+    } catch (error: any) {
+      throw new SqlRuntimeSchemaInvalidError_ACU(`无法导出当前 SQLite schema 用于一致性验证：${String(error?.message || error)}`);
+    }
+    const activeSheetKeys = scope?.activeSheetKeys ? new Set(scope.activeSheetKeys) : undefined;
+    const current = freezeRuntimeSchemaFromData_ACU(currentData, activeSheetKeys);
+    if (!current || current.digest !== frozenDigest) {
+      throw new SqlRuntimeSchemaStaleError_ACU(
+        'SQLite runtime schema 在 AI 请求等待期间发生变化，与请求前冻结的 schema 不一致，已阻止本轮写入（零 mutation）。请重新发起本轮填表。',
+      );
     }
   }
 

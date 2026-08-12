@@ -74,6 +74,70 @@ export interface SqlTableApplyScope_ACU {
     name: string;
     emptyHeaderIndexes: readonly number[];
   }>;
+  /**
+   * 请求前从 live SQLite provider 冻结的 runtime schema 证据（请求级，不持久化）。
+   *
+   * 它是 AI Prompt、提交前表/列重绑、未知 INSERT 列 gate 与 applyEditsWithSystemRowIds()
+   * 共同消费的 schema 权威；baseSnapshot（历史 replay/merge）只保留数据/CAS/操作基底，
+   * 不得再充当 live 列 schema registry。
+   *
+   * 设计约束（与计划阶段 B/C 对齐）：
+   * - 只保留窄 schema 视图（物理表名 / effectiveDDL / columnMap / descriptor 源 / digest），
+   *   不复制业务行；
+   * - 不进入 JSON stringify / frame / chat / checkpoint；
+   * - 仅在单次 AI 请求生命周期内使用。
+   */
+  readonly runtimeSchema?: RuntimeSchemaFreeze_ACU;
+  /**
+   * 请求前冻结的完整 live SQLite 导出数据（仅供 Prompt 行数据与单请求内消费；
+   * 保留 non-enumerable `_acu_runtimeEffectiveSchema`，绝不 JSON 序列化）。
+   */
+  readonly runtimeData?: TableDataObject_ACU;
+  /**
+   * 请求前冻结 runtime schema 失败的结构化标记（provider 未 ready / 导出失败 /
+   * schema 解析失败）。消费方必须先检查并 fail-closed：不进入 UNIFIED_GROUP_ERROR_FEEDBACK、
+   * 不触发第二次模型调用、不等待 5 秒重试。
+   */
+  readonly runtimeSchemaFailure?: { code: 'SQL_RUNTIME_SCHEMA_INVALID_ACU' | 'provider_unavailable'; message: string };
+}
+
+/**
+ * 请求前冻结 runtime schema 失败的结构化标记（provider 未 ready / 导出失败 / schema 解析失败）。
+ *
+ * 语义：属于本地前置条件/infrastructure 失败，模型无法通过重试修复。消费方必须在
+ * 使用 scope 前检查该字段并 fail-closed：不进入 UNIFIED_GROUP_ERROR_FEEDBACK、
+ * 不触发第二次模型调用、不等待 5 秒重试。
+ */
+export interface SqlTableApplyScopeRuntimeSchemaFailure_ACU {
+  code: 'SQL_RUNTIME_SCHEMA_INVALID_ACU' | 'provider_unavailable';
+  message: string;
+}
+
+/**
+ * 请求级 SQLite runtime schema 冻结视图（窄 schema，不携带业务行）。
+ *
+ * digest 由 stable 排序的 effectiveDDL + columnMap 计算，用于提交前一致性 gate。
+ * descriptor 源来自 SyncBridge 导出的 non-enumerable `_acu_runtimeEffectiveSchema`，
+ * 以值拷贝保留在快照内（该字段本身只含 schema 证据，无业务行）。
+ */
+export interface RuntimeSchemaFreeze_ACU {
+  /** 按 sheetKey 排序的冻结 schema 表集合。 */
+  readonly bySheetKey: ReadonlyMap<string, FrozenSheetRuntimeSchema_ACU>;
+  /** 参与冻结的表集合（sheetKey 排序）。 */
+  readonly sheetKeys: readonly string[];
+  /** 稳定 schema digest：effectiveDDL + columnMap 排序后计算。 */
+  readonly digest: string;
+}
+
+export interface FrozenSheetRuntimeSchema_ACU {
+  readonly sheetKey: string;
+  readonly physicalTableName: string;
+  readonly effectiveDDL: string;
+  /** 与 SyncBridge descriptor 一致的列映射（列名权威）。 */
+  readonly columnMap: unknown;
+  /** descriptor 来源：explicit（作者 DDL）/ fallback_missing / fallback_invalid。 */
+  readonly source: string;
+  readonly diagnostics: readonly string[];
 }
 
 /**

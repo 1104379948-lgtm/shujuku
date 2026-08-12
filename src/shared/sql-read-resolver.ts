@@ -1,5 +1,5 @@
 import type { TableDataObject_ACU } from './models/table-data';
-import { parseDDLColumnInfos_ACU, parseDDLTableName } from './ddl-utils';
+import { getRuntimeEffectiveSchema_ACU, parseDDLColumnInfos_ACU, parseDDLTableName } from './ddl-utils';
 import { canonicalizeDisplayName_ACU, getPhysicalTableNameFromResolvedMap_ACU, resolvePhysicalTableNames_ACU } from './sheet-identity';
 import { resolveEffectiveDDL } from '../data/sqlite/schema-mapper';
 import { rebindSqlReadIdentifiers_ACU } from './sql-mutation-table-rebind';
@@ -376,7 +376,19 @@ export function buildSheetColumnAliasMap_ACU(
     const tableConflicts = conflicts.get(physicalName) || new Set<string>();
     const tableConflictCandidates = conflictCandidates.get(physicalName) || new Map<string, SheetColumnAliasConflictCandidate_ACU[]>();
     const tableEvidence = sourceByAlias.get(physicalName) || new Map<string, SheetColumnAliasEvidence_ACU>();
-    const resolved = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, physicalName);
+    // runtime descriptor 优先：SyncBridge 导出的 non-enumerable `_acu_runtimeEffectiveSchema`
+    // 是 SQLite 实际建表 schema 的唯一权威。冻结的 live runtime 数据作为 targetData 时
+    // 必须直接消费 descriptor 的 columnMap，禁止对 sheet 重新 resolveEffectiveDDL——
+    // 否则会因「DDL 英文列名无法与中文表头对齐」重算 fallback，制造列身份漂移（test31 双权威）。
+    // 历史 replay/baseSnapshot 无 descriptor 时维持原 resolve 路径，行为完全兼容。
+    const descriptor = getRuntimeEffectiveSchema_ACU(sheet) as {
+      effectiveDDL?: string;
+      columnMap?: {
+        mappings?: Array<{ sourceIndex?: number; displayName?: string; sqlName?: string; required?: boolean }>;
+        sqlToDisplay?: unknown;
+      } | null | undefined;
+    } | null | undefined;
+    const resolved = resolveSheetColumns_ACU(sheet, sheet.uid || sheetKey, physicalName, descriptor);
     for (const mapping of resolved.columnMap.mappings) {
       // 自身物理名（target）不构成重绑，但注册 key 使读/写能识别它。
       columns.set(String(mapping.sqlName).toLowerCase(), mapping.sqlName);
@@ -441,12 +453,22 @@ export function buildSheetColumnAliasMap_ACU(
         // mapping.displayName 来自目标 content[0] 表头，统一按 canonical 显示名索引；
         // fallback 的 sqlName（拼音 slug）也一并登记，作为补充英文列名的确定性桥。
         const targetCanonicalToSql = new Map<string, string>();
-        const targetResolved = resolveEffectiveDDL(
-          (targetData as any)[target.sheetKey],
-          (targetData as any)[target.sheetKey]?.uid || target.sheetKey,
+        // 与主 target 注册同一权威：带 runtime descriptor 的 target 直接消费
+        // descriptor 的 columnMap，禁止对冻结的 live runtime 数据重新
+        // resolveEffectiveDDL（中文表头 + 英文无注释 DDL 会再次抛「表头没有对应
+        // DDL 列」，即 test31 双权威漏网）。无 descriptor 的历史路径保持原 resolve。
+        const targetSheet = (targetData as any)[target.sheetKey];
+        const targetDescriptor = getRuntimeEffectiveSchema_ACU(targetSheet) as {
+          columnMap?: {
+            mappings?: Array<{ sourceIndex?: number; displayName?: string; sqlName?: string; required?: boolean }>;
+          } | null | undefined;
+        } | null | undefined;
+        for (const mapping of resolveSheetColumns_ACU(
+          targetSheet,
+          targetSheet?.uid || target.sheetKey,
           target.physicalName,
-        );
-        for (const mapping of targetResolved.columnMap.mappings) {
+          targetDescriptor,
+        ).columnMap.mappings) {
           const canonicalDisplay = canonicalizeDisplayName_ACU(mapping.displayName);
           const canonicalSql = canonicalizeDisplayName_ACU(mapping.sqlName);
           if (canonicalDisplay) {
@@ -488,12 +510,18 @@ export function buildSheetColumnAliasMap_ACU(
       const rawColumnAliases = (sheet?.sourceData as Record<string, any> | undefined)?.columnAliases;
       if (rawColumnAliases && typeof rawColumnAliases === 'object' && !Array.isArray(rawColumnAliases)) {
         const targetCanonicalToSql = new Map<string, string>();
-        const targetResolved = resolveEffectiveDDL(
-          (targetData as any)[target.sheetKey],
-          (targetData as any)[target.sheetKey]?.uid || target.sheetKey,
+        const targetSheet = (targetData as any)[target.sheetKey];
+        const targetDescriptor = getRuntimeEffectiveSchema_ACU(targetSheet) as {
+          columnMap?: {
+            mappings?: Array<{ sourceIndex?: number; displayName?: string; sqlName?: string; required?: boolean }>;
+          } | null | undefined;
+        } | null | undefined;
+        for (const mapping of resolveSheetColumns_ACU(
+          targetSheet,
+          targetSheet?.uid || target.sheetKey,
           target.physicalName,
-        );
-        for (const mapping of targetResolved.columnMap.mappings) {
+          targetDescriptor,
+        ).columnMap.mappings) {
           const canonical = canonicalizeDisplayName_ACU(mapping.displayName);
           if (canonical && !targetCanonicalToSql.has(canonical)) targetCanonicalToSql.set(canonical, mapping.sqlName);
         }
@@ -525,11 +553,53 @@ function isSqlWordPart_ACU(char: string): boolean {
   return /^[A-Za-z0-9_$\u0080-\uFFFF]$/.test(char);
 }
 
+/**
+ * 解析目标 sheet 的列映射，优先消费 runtime descriptor（SQLite 实际建表 schema 的
+ * 唯一权威），回退到 resolveEffectiveDDL（历史 replay / 无 descriptor 路径，行为兼容）。
+ *
+ * 禁止对冻结的 live runtime 数据重新 resolveEffectiveDDL：中文表头 + 英文无注释 DDL
+ * 会被 resolveInsertColumnMappings 判定「表头没有对应 DDL 列」而抛错（test31 双权威
+ * 漏网）。descriptor 缺失或 columnMap 不完整时才走原 resolve 路径。
+ */
+function resolveSheetColumns_ACU(
+  sheet: unknown,
+  fallbackTableName: string,
+  runtimeTableName: string,
+  descriptor: {
+    columnMap?: {
+      mappings?: Array<{ sourceIndex?: number; displayName?: string; sqlName?: string; required?: boolean }>;
+    } | null | undefined;
+  } | null | undefined,
+): { columnMap: { mappings: ReadonlyArray<{ sourceIndex: number; displayName: string; sqlName: string; required: boolean }> } } {
+  if (descriptor && typeof descriptor === 'object' && descriptor.columnMap) {
+    return {
+      columnMap: {
+        mappings: Array.isArray(descriptor.columnMap.mappings)
+          ? descriptor.columnMap.mappings.map(mapping => ({
+              sourceIndex: mapping.sourceIndex ?? 0,
+              displayName: String(mapping.displayName ?? ''),
+              sqlName: String(mapping.sqlName ?? ''),
+              required: mapping.required === true,
+            }))
+          : [],
+      },
+    };
+  }
+  const resolved = resolveEffectiveDDL(
+    sheet as any,
+    fallbackTableName,
+    runtimeTableName,
+  );
+  return { columnMap: resolved.columnMap };
+}
+
+
 function protectImplicitSelectAliases_ACU(masked: string, mask: (value: string) => string): string {
   const selectScopes: Array<{ start: number; depth: number }> = [];
   let depth = 0;
   for (let index = 0; index < masked.length;) {
     if (masked[index] === '(') { depth += 1; index += 1; continue; }
+
     if (masked[index] === ')') { depth = Math.max(0, depth - 1); index += 1; continue; }
     if (!isSqlWordStart_ACU(masked[index])) { index += 1; continue; }
     const start = index;

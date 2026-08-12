@@ -1820,7 +1820,11 @@ describe('orchestrateManualUpdate_ACU', () => {
     };
     // 本例验证清理后的 reload 编排，不会进入 SQL 提交；数据夹具也没有可 hydrate 的 DDL。
     // 因此只提供 readiness 通过的 provider stub，避免把无关的 schema 校验混入该行为测试。
-    mockEnsureStorageProviderReady.mockResolvedValue({ mode: 'sqlite', isReady: () => true });
+    mockEnsureStorageProviderReady.mockResolvedValue({
+      mode: 'sqlite',
+      isReady: () => true,
+      getCurrentData: () => mockCurrentJsonTableData,
+    });
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
 
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
@@ -4740,7 +4744,38 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       templateDataWithRows: baseSnapshot,
       activeSheetKeys: ['sheet_0'],
       skippedSheets: [],
+      runtimeData: buildInventoryRuntimeDataWithSchema(),
     } as any;
+    // 有效冻结 runtime schema：live 合法列只有 row_id/item_name/quantity。
+    function buildInventoryRuntimeDataWithSchema(): any {
+      const ddl = 'CREATE TABLE inventory (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  item_name TEXT -- 物品名\n  quantity INTEGER -- 数量\n);';
+      const data: any = {
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'inventory', name: '背包物品表', sourceData: { ddl },
+          content: [['row_id', '物品名', '数量'], ['1', '铁剑', '3']],
+          updateConfig: {}, exportConfig: {}, orderNo: 0,
+        },
+      };
+      Object.defineProperty(data.sheet_0, '_acu_runtimeEffectiveSchema', {
+        value: {
+          effectiveDDL: ddl,
+          columnMap: {
+            mappings: [
+              { sourceIndex: 0, displayName: 'row_id', sqlName: 'row_id', required: true },
+              { sourceIndex: 1, displayName: '物品名', sqlName: 'item_name', required: false },
+              { sourceIndex: 2, displayName: '数量', sqlName: 'quantity', required: false },
+            ],
+            sqlToDisplay: { row_id: 'row_id', item_name: '物品名', quantity: '数量' },
+          },
+          source: 'explicit',
+          diagnostics: [],
+          originalDdlDigest: 'inventory-test',
+        },
+        enumerable: false,
+      });
+      return data;
+    }
     const sql = "INSERT INTO inventory (xi_xiang_guan_wu_pin) VALUES ('错误列');";
     const responses = [{
       success: true,
@@ -6995,3 +7030,232 @@ describe('executeAutoFillStagingGroups_ACU', () => {
   });
 
 });
+
+// ═══════════════════════════════════════════════════════════════
+// runtime schema 冻结与双权威修复（test31 根因回归）
+// ═══════════════════════════════════════════════════════════════
+describe('runtime schema 冻结与双权威修复', () => {
+  beforeEach(async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { disposeStorageProvider } = await import('../../../src/service/table/table-storage-strategy');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
+    disposeStorageProvider();
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    vi.clearAllMocks();
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '活动表', content: [['row_id', '值']] },
+    } as any);
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(null);
+    vi.mocked(getEffectiveSeedRowsForSheet_ACU).mockReturnValue([] as any);
+    mockSettings = {
+      ...mockSettings,
+      discardUnauthorizedTableEditsEnabled: true,
+      summaryVectorIndexModeEnabled: true,
+    };
+    mockUpdateReadableLorebookEntry.mockResolvedValue(undefined);
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 3 });
+    mockChatArrayForSeedStage.length = 0;
+    mockChatArrayForSeedStage.push(
+      {
+        is_user: false,
+        mes: 'AI锚点',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' }, sheet_0: { name: '表A', content: [['row_id', '值']] } } },
+              logEntries: [],
+            },
+          },
+        },
+      } as any,
+      { is_user: true, mes: '用户' } as any,
+      { is_user: false, mes: 'AI2' } as any,
+      { is_user: true, mes: '用户2' } as any,
+      { is_user: false, mes: 'AI3' } as any,
+    );
+  });
+
+  function makeRuntimeDataWithSchema(): any {
+    // DDL 必须每列独立一行：parseDDLColumnComments 按原始行匹配列注释，
+    // 单行多列 + 行尾注释会把注释错误挂到首列（row_id → 值），导致
+    // row_id 同时命中表头 row_id 与 值 → 「匹配到多个表头」无法 hydrate。
+    const ddl = 'CREATE TABLE activity (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  value TEXT -- 值\n);';
+    const data: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'activity',
+        name: '活动表',
+        sourceData: { ddl },
+        content: [['row_id', '值'], ['1', '现有']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    };
+    Object.defineProperty(data.sheet_0, '_acu_runtimeEffectiveSchema', {
+      value: {
+        effectiveDDL: ddl,
+        columnMap: {
+          mappings: [
+            { sourceIndex: 0, displayName: 'row_id', sqlName: 'row_id', required: true },
+            { sourceIndex: 1, displayName: '值', sqlName: 'value', required: false },
+          ],
+          sqlToDisplay: { row_id: 'row_id', value: '值' },
+        },
+        source: 'explicit',
+        diagnostics: [],
+        originalDdlDigest: 'test',
+      },
+      enumerable: false,
+    });
+    return data;
+  }
+
+  function makeInventoryRuntimeDataWithSchema(): any {
+    const ddl = 'CREATE TABLE inventory (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  item_name TEXT -- 物品名\n  quantity INTEGER -- 数量\n);';
+    const data: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory',
+        name: '背包物品表',
+        sourceData: { ddl },
+        content: [['row_id', '物品名', '数量'], ['1', '铁剑', '3']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    };
+    Object.defineProperty(data.sheet_0, '_acu_runtimeEffectiveSchema', {
+      value: {
+        effectiveDDL: ddl,
+        columnMap: {
+          mappings: [
+            { sourceIndex: 0, displayName: 'row_id', sqlName: 'row_id', required: true },
+            { sourceIndex: 1, displayName: '物品名', sqlName: 'item_name', required: false },
+            { sourceIndex: 2, displayName: '数量', sqlName: 'quantity', required: false },
+          ],
+          sqlToDisplay: { row_id: 'row_id', item_name: '物品名', quantity: '数量' },
+        },
+        source: 'explicit',
+        diagnostics: [],
+        originalDdlDigest: 'inventory-test',
+      },
+      enumerable: false,
+    });
+    return data;
+  }
+
+
+  it('baseSnapshot 含非首列空业务表头时，不再阻断对 live 合法表的 SQL 校验（test31 根因修复）', async () => {
+    const runtimeData = makeRuntimeDataWithSchema();
+    mockCurrentJsonTableData = runtimeData;
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'activity',
+        name: '活动表',
+        sourceData: {},
+        content: [['row_id', '', ''], ['1', '', '']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+    const sql = "INSERT INTO activity (value) VALUES ('新值');";
+    const responses = [{
+      success: true,
+      attempt: 1,
+      aiResponse: `<tableEdit>${sql}</tableEdit>`,
+      tableEditText: sql,
+      job: {
+        groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3,
+        targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard',
+        requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false,
+        sqlApplyScope: {
+          isolationKey: '',
+          templateData: { mate: { type: 'acu' }, sheet_0: { name: '活动表', content: [['row_id', '值']] } } as any,
+          templateDataWithRows: { mate: { type: 'acu' }, sheet_0: { name: '活动表', content: [['row_id', '值']] } } as any,
+          activeSheetKeys: ['sheet_0'],
+          skippedSheets: [],
+          runtimeData,
+        },
+      },
+    }];
+
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, {
+      saveTargetIndex: 3,
+      updateMode: 'auto_standard',
+      isImportMode: false,
+      sqlApplyScope: (responses[0] as any).job.sqlApplyScope,
+    });
+
+    expect(result.success, result.error).toBe(true);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('runtimeSchemaFailure 存在时 collect 阶段 fail-closed：不调用模型、不进入重试', async () => {
+    const job: any = {
+      groupKey: 'g0', groupId: 0, batchNumber: 1, targetSheetKeys: ['sheet_0'],
+      messagesForContext: [{ is_user: false, mes: 'AI回复' }],
+      saveTargetIndex: 0, updateMode: 'auto_standard', isImportMode: false,
+      requestOptions: null,
+      baseSnapshot: { sheet_0: { name: '快照表', content: [['row_id'], ['snapshot']] } },
+      sqlApplyScope: {
+        isolationKey: '',
+        templateData: { mate: { type: 'acu' } } as any,
+        templateDataWithRows: { mate: { type: 'acu' } } as any,
+        activeSheetKeys: ['sheet_0'],
+        runtimeSchemaFailure: {
+          code: 'SQL_RUNTIME_SCHEMA_INVALID_ACU',
+          message: 'SQLite runtime 未导出表格数据，无法冻结 schema。',
+        },
+      },
+    };
+
+    const result = await collectGroupFillResponse_ACU(job);
+
+    expect(result.success).toBe(false);
+    expect(result.errorCategory).toBe('infrastructure');
+    expect(result.error).toContain('SQLite runtime schema 冻结失败');
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockPrepareAIInput).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+  });
+
+  it('统一提交入口存在 runtimeSchemaFailure 时直接 precondition 失败，不解析 SQL', async () => {
+    const baseSnapshot = {
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    } as any;
+    const responses = [{
+      success: true, attempt: 1, aiResponse: '<tableEdit>INSERT INTO x (y) VALUES (1);</tableEdit>',
+      tableEditText: 'INSERT INTO x (y) VALUES (1);',
+      job: {
+        groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3,
+        targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard',
+        requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false,
+        sqlApplyScope: {
+          isolationKey: '',
+          templateData: { mate: { type: 'acu' } } as any,
+          templateDataWithRows: { mate: { type: 'acu' } } as any,
+          activeSheetKeys: ['sheet_0'],
+          runtimeSchemaFailure: { code: 'provider_unavailable', message: 'SQLite 运行时未就绪。' },
+        },
+      },
+    }];
+
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, {
+      saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false,
+      sqlApplyScope: (responses[0] as any).job.sqlApplyScope,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCategory).toBe('infrastructure');
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
+  });
+});
+

@@ -1023,4 +1023,67 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result).not.toBeNull();
     expect(result!.messagesText).toContain('无最新对话内容');
   });
+
+  it('sqlApplyScope.runtimeData 冻结数据优先于 live provider，且不再次读取 provider', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: {
+        name: 'live 表',
+        sourceData: { ddl: 'CREATE TABLE live_table (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', 'value'], ['1', 'live 值']],
+        updateConfig: {},
+      },
+    };
+    const frozenRuntimeData: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '冻结表',
+        sourceData: { ddl: 'CREATE TABLE frozen_table (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', 'value'], ['1', '冻结值']],
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    };
+    mockEnsureStorageProviderReady.mockClear();
+
+    const result = await prepareAIInput_ACU([], 'standard', null, {
+      sqlApplyScope: {
+        isolationKey: 'scope-frozen-prompt',
+        templateData: frozenRuntimeData,
+        templateDataWithRows: frozenRuntimeData,
+        activeSheetKeys: ['sheet_0'],
+        skippedSheets: [],
+        runtimeData: frozenRuntimeData,
+      } as any,
+    });
+
+    expect(result).not.toBeNull();
+    // Prompt 使用冻结数据，而非 live provider 数据。
+    expect(result!.tableDataText).toContain('CREATE TABLE frozen_table');
+    expect(result!.tableDataText).toContain('冻结值');
+    expect(result!.tableDataText).not.toContain('CREATE TABLE live_table');
+    expect(result!.tableDataText).not.toContain('live 值');
+    // 关键：不得再次读取 provider（冻结路径直接返回）。
+    expect(mockEnsureStorageProviderReady).not.toHaveBeenCalled();
+  });
+
+  it('sqlApplyScope.runtimeSchemaFailure 存在时返回 failure，不读取 provider', async () => {
+    mockEnsureStorageProviderReady.mockClear();
+    const result = await prepareAIInput_ACU([], 'standard', null, {
+      sqlApplyScope: {
+        isolationKey: 'scope-failure-prompt',
+        activeSheetKeys: [],
+        skippedSheets: [],
+        runtimeSchemaFailure: {
+          code: 'SQL_RUNTIME_SCHEMA_INVALID_ACU',
+          message: 'SQLite runtime 未导出表格数据，无法冻结 schema。',
+        },
+      } as any,
+    });
+
+    expect(result).not.toBeNull();
+    expect((result as any).ok).toBe(false);
+    expect(String((result as any).failureCode)).toBe('runtime_schema_invalid');
+    expect((result as any).retryable).toBe(false);
+    expect(mockEnsureStorageProviderReady).not.toHaveBeenCalled();
+  });
+
 });

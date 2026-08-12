@@ -55,6 +55,64 @@ describe('sql read resolver', () => {
     });
   });
 
+  it('supplemental 路径对带 runtime descriptor 的 target 不重新 resolve 中文表头 DDL（双权威防漏网）', () => {
+    const ddl = 'CREATE TABLE inventory (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  item_name TEXT -- 物品名\n  quantity INTEGER -- 数量\n);';
+    // runtime 导出：中文表头 + descriptor（含 effectiveDDL 与 columnMap）。
+    const runtimeData: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表',
+        sourceData: { ddl },
+        content: [['row_id', '物品名', '数量'], ['1', '铁剑', '3']],
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    };
+    Object.defineProperty(runtimeData.sheet_0, '_acu_runtimeEffectiveSchema', {
+      value: {
+        effectiveDDL: ddl,
+        columnMap: {
+          mappings: [
+            { sourceIndex: 0, displayName: 'row_id', sqlName: 'row_id', required: true },
+            { sourceIndex: 1, displayName: '物品名', sqlName: 'item_name', required: false },
+            { sourceIndex: 2, displayName: '数量', sqlName: 'quantity', required: false },
+          ],
+          sqlToDisplay: { row_id: 'row_id', item_name: '物品名', quantity: '数量' },
+        },
+        source: 'explicit',
+        diagnostics: [],
+        originalDdlDigest: 'inventory-test',
+      },
+      enumerable: false,
+    });
+    // supplemental：同表名的模板（同样中文表头 + 英文无注释 DDL）。
+    const supplement: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包物品表',
+        sourceData: { ddl },
+        content: [['row_id', '物品名', '数量'], ['1', '铁剑', '3']],
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    };
+
+    let result: any;
+    expect(() => {
+      result = buildSheetColumnAliasMap_ACU(runtimeData, {
+        supplementalSources: [supplement],
+        skipInvalidSupplementalSources: true,
+      });
+    }).not.toThrow();
+    // 物理表名由显示名 slug 决定（背包物品表 → beibaowupinbiao），不依赖 uid。
+    const physicalNames = Array.from(result.aliases.keys());
+    expect(physicalNames.length).toBe(1);
+    const tableAliases = result.aliases.get(physicalNames[0]);
+    // 物理列名必须被注册（item_name / quantity / row_id）。
+    expect(tableAliases?.get('item_name')).toBe('item_name');
+    expect(tableAliases?.get('quantity')).toBe('quantity');
+    expect(tableAliases?.get('row_id')).toBe('row_id');
+  });
+
+
   it('PRAGMA 参数原样透传，不交给全文翻译', () => {
     const result = resolveReadQuerySql_ACU('PRAGMA table_info(纪要表)', null, sql => sql.replaceAll('纪要表', 'jiyaobiao'));
 

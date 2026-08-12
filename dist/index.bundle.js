@@ -38746,7 +38746,13 @@ $CONTENT
             const tableConflicts = conflicts.get(physicalName) || new Set();
             const tableConflictCandidates = conflictCandidates.get(physicalName) || new Map();
             const tableEvidence = sourceByAlias.get(physicalName) || new Map();
-            const resolved = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, physicalName);
+            // runtime descriptor 优先：SyncBridge 导出的 non-enumerable `_acu_runtimeEffectiveSchema`
+            // 是 SQLite 实际建表 schema 的唯一权威。冻结的 live runtime 数据作为 targetData 时
+            // 必须直接消费 descriptor 的 columnMap，禁止对 sheet 重新 resolveEffectiveDDL——
+            // 否则会因「DDL 英文列名无法与中文表头对齐」重算 fallback，制造列身份漂移（test31 双权威）。
+            // 历史 replay/baseSnapshot 无 descriptor 时维持原 resolve 路径，行为完全兼容。
+            const descriptor = getRuntimeEffectiveSchema_ACU(sheet);
+            const resolved = resolveSheetColumns_ACU(sheet, sheet.uid || sheetKey, physicalName, descriptor);
             for (const mapping of resolved.columnMap.mappings) {
                 // 自身物理名（target）不构成重绑，但注册 key 使读/写能识别它。
                 columns.set(String(mapping.sqlName).toLowerCase(), mapping.sqlName);
@@ -38821,8 +38827,13 @@ $CONTENT
                     // mapping.displayName 来自目标 content[0] 表头，统一按 canonical 显示名索引；
                     // fallback 的 sqlName（拼音 slug）也一并登记，作为补充英文列名的确定性桥。
                     const targetCanonicalToSql = new Map();
-                    const targetResolved = resolveEffectiveDDL(targetData[target.sheetKey], targetData[target.sheetKey]?.uid || target.sheetKey, target.physicalName);
-                    for (const mapping of targetResolved.columnMap.mappings) {
+                    // 与主 target 注册同一权威：带 runtime descriptor 的 target 直接消费
+                    // descriptor 的 columnMap，禁止对冻结的 live runtime 数据重新
+                    // resolveEffectiveDDL（中文表头 + 英文无注释 DDL 会再次抛「表头没有对应
+                    // DDL 列」，即 test31 双权威漏网）。无 descriptor 的历史路径保持原 resolve。
+                    const targetSheet = targetData[target.sheetKey];
+                    const targetDescriptor = getRuntimeEffectiveSchema_ACU(targetSheet);
+                    for (const mapping of resolveSheetColumns_ACU(targetSheet, targetSheet?.uid || target.sheetKey, target.physicalName, targetDescriptor).columnMap.mappings) {
                         const canonicalDisplay = canonicalizeDisplayName_ACU(mapping.displayName);
                         const canonicalSql = canonicalizeDisplayName_ACU(mapping.sqlName);
                         if (canonicalDisplay) {
@@ -38869,8 +38880,9 @@ $CONTENT
                 const rawColumnAliases = sheet?.sourceData?.columnAliases;
                 if (rawColumnAliases && typeof rawColumnAliases === 'object' && !Array.isArray(rawColumnAliases)) {
                     const targetCanonicalToSql = new Map();
-                    const targetResolved = resolveEffectiveDDL(targetData[target.sheetKey], targetData[target.sheetKey]?.uid || target.sheetKey, target.physicalName);
-                    for (const mapping of targetResolved.columnMap.mappings) {
+                    const targetSheet = targetData[target.sheetKey];
+                    const targetDescriptor = getRuntimeEffectiveSchema_ACU(targetSheet);
+                    for (const mapping of resolveSheetColumns_ACU(targetSheet, targetSheet?.uid || target.sheetKey, target.physicalName, targetDescriptor).columnMap.mappings) {
                         const canonical = canonicalizeDisplayName_ACU(mapping.displayName);
                         if (canonical && !targetCanonicalToSql.has(canonical))
                             targetCanonicalToSql.set(canonical, mapping.sqlName);
@@ -38901,6 +38913,32 @@ $CONTENT
     }
     function isSqlWordPart_ACU(char) {
         return /^[A-Za-z0-9_$\u0080-\uFFFF]$/.test(char);
+    }
+    /**
+     * 解析目标 sheet 的列映射，优先消费 runtime descriptor（SQLite 实际建表 schema 的
+     * 唯一权威），回退到 resolveEffectiveDDL（历史 replay / 无 descriptor 路径，行为兼容）。
+     *
+     * 禁止对冻结的 live runtime 数据重新 resolveEffectiveDDL：中文表头 + 英文无注释 DDL
+     * 会被 resolveInsertColumnMappings 判定「表头没有对应 DDL 列」而抛错（test31 双权威
+     * 漏网）。descriptor 缺失或 columnMap 不完整时才走原 resolve 路径。
+     */
+    function resolveSheetColumns_ACU(sheet, fallbackTableName, runtimeTableName, descriptor) {
+        if (descriptor && typeof descriptor === 'object' && descriptor.columnMap) {
+            return {
+                columnMap: {
+                    mappings: Array.isArray(descriptor.columnMap.mappings)
+                        ? descriptor.columnMap.mappings.map(mapping => ({
+                            sourceIndex: mapping.sourceIndex ?? 0,
+                            displayName: String(mapping.displayName ?? ''),
+                            sqlName: String(mapping.sqlName ?? ''),
+                            required: mapping.required === true,
+                        }))
+                        : [],
+                },
+            };
+        }
+        const resolved = resolveEffectiveDDL(sheet, fallbackTableName, runtimeTableName);
+        return { columnMap: resolved.columnMap };
     }
     function protectImplicitSelectAliases_ACU(masked, mask) {
         const selectScopes = [];
@@ -55241,12 +55279,19 @@ $CONTENT
         // 物理表名冲突检查在投影后执行：被判定为不存在的无效表不阻塞有效表；
         // 但有效表之间的冲突仍 fail-loud。
         assertNoPhysicalTableNameCollision_ACU(templateData);
+        // 请求级 runtime schema 冻结：只允许来自调用方显式传入的 live provider 导出数据。
+        // 绝不在这里隐式回退到 baseSnapshot / currentJsonTableData_ACU —— 那会把历史基底
+        // 冒充 live schema 权威（test31 根因）。provider 未 ready 时由调用方（orchestrator）
+        // 决定是返回 infrastructure failure 还是走旧模板捕获路径。
+        const runtimeSchema = freezeRuntimeSchemaFromData_ACU(options.runtimeData || null, new Set(activeSheetKeys));
         return {
             isolationKey: options.isolationKey,
             templateData,
             templateDataWithRows,
             activeSheetKeys,
             skippedSheets,
+            runtimeSchema: runtimeSchema ?? undefined,
+            runtimeData: options.runtimeData || undefined,
         };
     }
     function splitTopLevelSqlList_ACU(value, context) {
@@ -55347,6 +55392,81 @@ $CONTENT
             super(message);
             this.name = 'SqlRuntimeSnapshotError_ACU';
         }
+    }
+    /**
+     * 请求前冻结的 runtime schema 无法建立（provider 未 ready / 导出失败 / schema 解析失败）。
+     * 属于本地前置条件失败：模型无法通过重试修复，必须分类为 infrastructure/precondition，
+     * 不得进入 UNIFIED_GROUP_ERROR_FEEDBACK 模型重试链。
+     */
+    class SqlRuntimeSchemaInvalidError_ACU extends Error {
+        constructor(message) {
+            super(message);
+            this.name = 'SqlRuntimeSchemaInvalidError_ACU';
+            Object.defineProperty(this, 'code', { value: 'SQL_RUNTIME_SCHEMA_INVALID_ACU', enumerable: false });
+        }
+    }
+    /**
+     * 提交时检测到 live SQLite runtime schema 与请求前冻结 schema 不一致。
+     * 必须在任何 SQLite mutation 前中止（零写入），并分类为 infrastructure/precondition。
+     */
+    class SqlRuntimeSchemaStaleError_ACU extends Error {
+        constructor(message) {
+            super(message);
+            this.name = 'SqlRuntimeSchemaStaleError_ACU';
+            Object.defineProperty(this, 'code', { value: 'SQL_RUNTIME_SCHEMA_STALE_ACU', enumerable: false });
+        }
+    }
+    /**
+     * 计算请求级 runtime schema 的稳定 digest。
+     *
+     * 输入只取 effectiveDDL（规范化空白）与 columnMap（稳定排序），不包含业务行、
+     * diagnostics、聊天正文或 SQL。返回空串表示无可参与 digest 的表（调用方必须
+     * 结合自身状态 fail-closed，不能把空 digest 当作“已一致”）。
+     */
+    function computeRuntimeSchemaDigest_ACU(bySheetKey) {
+        const sheetKeys = Array.from(bySheetKey.keys()).sort();
+        if (sheetKeys.length === 0)
+            return '';
+        const lines = sheetKeys.map(sheetKey => {
+            const schema = bySheetKey.get(sheetKey);
+            const normalizedDDL = String(schema.effectiveDDL || '').replace(/\s+/g, ' ').trim();
+            const columnMap = schema.columnMap;
+            const mappings = Array.isArray(columnMap?.mappings) ? [...columnMap.mappings].sort((a, b) => (a.sourceIndex ?? 0) - (b.sourceIndex ?? 0)) : [];
+            const mapLines = mappings.map(mapping => `${mapping.sourceIndex ?? ''}|${String(mapping.displayName ?? '').toLowerCase()}|${String(mapping.sqlName ?? '').toLowerCase()}`).join(',');
+            return `${sheetKey}\u0000${normalizedDDL}\u0000${mapLines}`;
+        });
+        return hashUserInput_ACU(lines.join('\n'));
+    }
+    /** 从冻结的完整 runtimeData 中构建窄 schema 视图（只保留 schema 证据，不复制业务行）。 */
+    function freezeRuntimeSchemaFromData_ACU(runtimeData, activeSheetKeys) {
+        if (!runtimeData || typeof runtimeData !== 'object')
+            return null;
+        const bySheetKey = new Map();
+        const activeKeys = activeSheetKeys ? activeSheetKeys : new Set(Object.keys(runtimeData).filter(key => key.startsWith('sheet_')));
+        for (const sheetKey of Object.keys(runtimeData).filter(key => key.startsWith('sheet_'))) {
+            if (activeKeys.size > 0 && !activeKeys.has(sheetKey))
+                continue;
+            const sheet = runtimeData[sheetKey];
+            if (!sheet || typeof sheet !== 'object')
+                continue;
+            const descriptor = getRuntimeEffectiveSchema_ACU(sheet);
+            if (!descriptor || typeof descriptor !== 'object') {
+                // 运行时表必须携带 descriptor；缺失视为 schema 契约损坏（fail-closed）。
+                return null;
+            }
+            const physicalTableName = getPhysicalTableNameForSheet_ACU(runtimeData, sheetKey);
+            bySheetKey.set(sheetKey, {
+                sheetKey,
+                physicalTableName,
+                effectiveDDL: String(descriptor.effectiveDDL || ''),
+                columnMap: descriptor.columnMap,
+                source: String(descriptor.source || ''),
+                diagnostics: Array.isArray(descriptor.diagnostics) ? descriptor.diagnostics : [],
+            });
+        }
+        if (bySheetKey.size === 0)
+            return null;
+        return { bySheetKey, sheetKeys: Array.from(bySheetKey.keys()).sort(), digest: computeRuntimeSchemaDigest_ACU(bySheetKey) };
     }
     /** INSERT 列清单中不允许出现的 SQL 关键字（fail-closed：宁可拒绝也不猜测）。 */
     const INSERT_COLUMN_KEYWORDS_ACU = new Set([
@@ -56009,11 +56129,14 @@ $CONTENT
             }
         }
         applyEditsWithSystemRowIds(sqlTexts, _updateMode, scope) {
+            // 请求级冻结 runtime schema 是本轮写路径的 schema 权威；提交前必须确认
+            // live SQLite 与其一致。若 AI 等待期间 schema 漂移，零 mutation 中止。
+            this._assertRuntimeSchemaCurrent(scope);
             this._ensureInitialized();
             this._ensureTablesFromTemplate(scope);
             const normalizedGroups = (Array.isArray(sqlTexts) ? sqlTexts : []).map(sqlText => {
                 const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-                return rebindSqlMutationIdentifiers_ACU(normalizedStatements, (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }), scope?.templateData, { requireKnownTables: Boolean(scope?.templateData), requireKnownInsertColumns: true });
+                return rebindSqlMutationIdentifiers_ACU(normalizedStatements, (scope?.runtimeData || currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }), scope?.templateData, { requireKnownTables: Boolean(scope?.templateData), requireKnownInsertColumns: true });
             });
             const userStatements = normalizedGroups.flat();
             if (userStatements.length === 0) {
@@ -56355,6 +56478,34 @@ $CONTENT
         _ensureInitialized() {
             if (!this._initialized || !this.engine.isReady) {
                 throw new Error('[SqlTableService] SQLite 引擎未初始化，请先调用 loadFromChat()');
+            }
+        }
+        /**
+         * 提交前 schema 一致性 gate：live SQLite runtime 与请求前冻结的 runtime schema
+         * 必须一致，否则任何 SQLite mutation 都不得执行（fail-closed，零写入）。
+         *
+         * 比较依据是冻结 digest 与当前实时导出（仅 activeSheetKeys 参与）的 digest。
+         * 无冻结 scope 时跳过（旧调用方/低层工具路径），不收紧 Native 与历史 replay。
+         */
+        _assertRuntimeSchemaCurrent(scope) {
+            const frozenDigest = scope?.runtimeSchema?.digest;
+            if (!frozenDigest)
+                return; // 无冻结 schema：兼容旧调用方，不做 gate。
+            if (!this._initialized || !this.engine.isReady) {
+                throw new SqlRuntimeSchemaInvalidError_ACU('SQLite 运行时未就绪，无法验证冻结 schema 一致性，已阻止本轮写入。');
+            }
+            let currentData;
+            try {
+                const mate = currentJsonTableData_ACU?.mate || DEFAULT_MATE_ACU;
+                currentData = this.syncBridge.exportToTableData(mate);
+            }
+            catch (error) {
+                throw new SqlRuntimeSchemaInvalidError_ACU(`无法导出当前 SQLite schema 用于一致性验证：${String(error?.message || error)}`);
+            }
+            const activeSheetKeys = scope?.activeSheetKeys ? new Set(scope.activeSheetKeys) : undefined;
+            const current = freezeRuntimeSchemaFromData_ACU(currentData, activeSheetKeys);
+            if (!current || current.digest !== frozenDigest) {
+                throw new SqlRuntimeSchemaStaleError_ACU('SQLite runtime schema 在 AI 请求等待期间发生变化，与请求前冻结的 schema 不一致，已阻止本轮写入（零 mutation）。请重新发起本轮填表。');
             }
         }
         /**
@@ -63024,6 +63175,17 @@ $CONTENT
     async function resolvePromptSourceTableData_ACU(options, sqlMode) {
         if (!sqlMode) {
             return options?.tableData || currentJsonTableData_ACU;
+        }
+        // [统一 schema 权威] 显式 sqlApplyScope 携带请求前冻结的 live SQLite runtime 数据时，
+        // Prompt 必须使用该冻结视图，而不是再次读取 live provider：AI 等待期间模板切换、
+        // 运行时重载或并发提交不得改变本轮 Prompt 的 schema/行数据契约（test31 双权威修复）。
+        if (options?.sqlApplyScope?.runtimeData) {
+            return options.sqlApplyScope.runtimeData;
+        }
+        if (options?.sqlApplyScope?.runtimeSchemaFailure) {
+            return createPromptRuntimeFailure_ACU(options.sqlApplyScope.runtimeSchemaFailure.code === 'SQL_RUNTIME_SCHEMA_INVALID_ACU'
+                ? 'runtime_schema_invalid'
+                : 'provider_unavailable', options.sqlApplyScope.runtimeSchemaFailure.message, false);
         }
         try {
             const provider = await ensureStorageProviderReady_ACU({ signal: options?.signal });
@@ -93141,7 +93303,16 @@ $CONTENT
             };
         });
     }
-    function captureFillExecutionScope_ACU(performanceContext) {
+    /**
+     * AI 请求前捕获请求级执行作用域：
+     * - 模板上下文（stripped / with rows / active sheet keys）
+     * - live SQLite provider 的 runtime schema 冻结视图（窄 schema + digest + 完整 runtimeData）
+     *
+     * schema 冻结失败（provider 未 ready / 导出失败 / 解析失败）时，不在捕获阶段抛错冒泡
+     * （调用点控制流复杂），而是把结构化失败标记写入 scope.runtimeSchemaFailure；所有
+     * 消费方必须在使用 scope 前检查并 fail-closed。绝不回退 baseSnapshot 冒充 live schema。
+     */
+    async function captureFillExecutionScope_ACU(performanceContext) {
         const performanceSpan = startRuntimePerformanceSpan_ACU('fill-execution-scope-capture', {
             ...performanceContext,
             settings: settings_ACU,
@@ -93151,9 +93322,30 @@ $CONTENT
         const isolationKey = getCurrentIsolationKey_ACU();
         const liveChat = getChatArray_ACU() || [];
         const promptMessages = capturePromptMessageSnapshot_ACU(liveChat);
-        const sqlApplyScope = isSqliteMode()
-            ? captureSqlTableApplyScope_ACU({ chat: liveChat, isolationKey })
-            : undefined;
+        let sqlApplyScope;
+        if (isSqliteMode()) {
+            let runtimeData = null;
+            let runtimeSchemaFailure;
+            try {
+                const provider = await ensureStorageProviderReady_ACU();
+                if (provider.mode !== 'sqlite') {
+                    runtimeSchemaFailure = { code: 'provider_unavailable', message: 'SQLite 模式需要 SQLite provider，当前未就绪。' };
+                }
+                else {
+                    runtimeData = provider.getCurrentData();
+                    if (!runtimeData) {
+                        runtimeSchemaFailure = { code: 'SQL_RUNTIME_SCHEMA_INVALID_ACU', message: 'SQLite runtime 未导出表格数据，无法冻结 schema。' };
+                    }
+                }
+            }
+            catch (e) {
+                runtimeSchemaFailure = { code: 'provider_unavailable', message: `SQLite 运行时未就绪，已阻止本轮填表：${String(e?.message || e)}` };
+            }
+            sqlApplyScope = captureSqlTableApplyScope_ACU({ chat: liveChat, isolationKey, runtimeData });
+            if (runtimeSchemaFailure) {
+                sqlApplyScope = { ...sqlApplyScope, runtimeSchemaFailure };
+            }
+        }
         const templateScope = sqlApplyScope
             ? buildTemplateScopeFromData_ACU(sqlApplyScope.templateData)
             : resolveTemplateScope_ACU(isolationKey);
@@ -93649,6 +93841,20 @@ $CONTENT
         const maxRetries = options.maxRetriesOverride || settings_ACU.tableMaxRetries || 3;
         if (isStopped())
             return { job, success: false, attempt: 0, aborted: true };
+        // 请求前冻结 runtime schema 失败 = 本地基础设施失败：模型无法通过重试修复。
+        // 必须在 AI 调用前 fail-closed，避免消耗 token 后在提交阶段才失败。
+        const runtimeSchemaFailure = job.sqlApplyScope?.runtimeSchemaFailure;
+        if (runtimeSchemaFailure) {
+            const error = `SQLite runtime schema 冻结失败（${runtimeSchemaFailure.code}）：${runtimeSchemaFailure.message}`;
+            return {
+                job,
+                success: false,
+                attempt: 0,
+                error,
+                rawError: error,
+                errorCategory: 'infrastructure',
+            };
+        }
         options.onProgress?.({ phase: 'preparing', attempt: 1, maxRetries: 1 });
         const prepareSpan = startRuntimePerformanceSpan_ACU('table-fill-prepare-ai-input', {
             runId: job.performanceRunId,
@@ -93772,7 +93978,9 @@ $CONTENT
                 }
                 if (isSqliteMode() && tableEditText && isSqlContent(tableEditText)) {
                     try {
-                        assertNoHiddenPhysicalColumnMutations_ACU(splitSqlStatements(tableEditText), job.baseSnapshot);
+                        // 隐藏列保护使用请求前冻结的 live runtime schema 证据，而不是 baseSnapshot：
+                        // 历史快照可能缺失 descriptor 或含旧表头，会把 live 合法列误判为隐藏列。
+                        assertNoHiddenPhysicalColumnMutations_ACU(splitSqlStatements(tableEditText), job.sqlApplyScope?.runtimeData ? job.sqlApplyScope.runtimeData : job.baseSnapshot);
                     }
                     catch (error) {
                         throw new ModelOutputRetryError_ACU(error?.message || 'SQLite 填表 SQL 无效。');
@@ -93990,6 +94198,17 @@ $CONTENT
                 : capturedSqlApplyScope
                     ? buildTemplateScopeFromData_ACU(capturedSqlApplyScope.templateData)
                     : resolveTemplateScope_ACU(capturedIsolationKey);
+        // 请求前冻结 runtime schema 失败 = 本地前置条件/infrastructure 失败：
+        // 模型无法通过重试修复，不得进入 UNIFIED_GROUP_ERROR_FEEDBACK、不得触发第二次模型调用。
+        const runtimeSchemaFailure = capturedSqlApplyScope?.runtimeSchemaFailure;
+        if (runtimeSchemaFailure) {
+            return {
+                success: false,
+                modifiedKeys: [],
+                error: `统一提交失败：SQLite runtime schema 冻结失败（${runtimeSchemaFailure.code}）。${sanitizeRetryFeedback_ACU(runtimeSchemaFailure.message)}`,
+                errorCategory: 'infrastructure',
+            };
+        }
         const seenTargetSheetKeys = new Set();
         const allTargetSheetKeySet = new Set();
         for (const response of sortedResponses) {
@@ -94047,21 +94266,33 @@ $CONTENT
                     const activeSheetKeySet = capturedSqlApplyScope?.activeSheetKeys
                         ? new Set(capturedSqlApplyScope.activeSheetKeys)
                         : undefined;
-                    reboundStatements = rebindSqlMutationIdentifiers_ACU(normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''), baseSnapshot, capturedSqlApplyScope?.templateData, { requireKnownTables: true, targetSheetKeys: activeSheetKeySet, requireKnownInsertColumns: true });
+                    // [统一 schema 权威] 重绑 targetData 使用请求前冻结的 live runtime schema 视图，
+                    // 而不是 baseSnapshot（历史 replay/merge 基底只承担数据/CAS/操作职责）。
+                    // baseSnapshot 含旧空表头时不再阻断对 live 合法表的 SQL 校验（test31 根因修复）。
+                    const rebindTargetData = (capturedSqlApplyScope?.runtimeData
+                        ? capturedSqlApplyScope.runtimeData
+                        : baseSnapshot);
+                    reboundStatements = rebindSqlMutationIdentifiers_ACU(normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''), rebindTargetData, capturedSqlApplyScope?.templateData, { requireKnownTables: true, targetSheetKeys: activeSheetKeySet, requireKnownInsertColumns: true });
                     // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
-                    assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
+                    assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, capturedSqlApplyScope?.runtimeData ? capturedSqlApplyScope.runtimeData : baseSnapshot);
                 }
                 catch (error) {
                     // 歧义英文表名属于前置条件失败：AI 无法通过重试解决，回灌错误只会浪费模型调用并等待 5 秒。
                     // 分类为 precondition，不包装 ModelOutputRetryError_ACU、不回灌、不重试。
                     const isAliasAmbiguous = error?.code === 'SQL_ALIAS_AMBIGUOUS_ACU';
+                    // 本地 runtime schema 问题（冻结失败/漂移）也是前置条件/infrastructure 失败：
+                    // 模型无法修复，禁止回灌 UNIFIED_GROUP_ERROR_FEEDBACK。
+                    const isRuntimeSchemaError = error instanceof SqlRuntimeSchemaInvalidError_ACU
+                        || error instanceof SqlRuntimeSchemaStaleError_ACU
+                        || error?.code === 'SQL_RUNTIME_SCHEMA_INVALID_ACU'
+                        || error?.code === 'SQL_RUNTIME_SCHEMA_STALE_ACU';
                     return {
                         success: false,
                         modifiedKeys: [],
-                        error: isAliasAmbiguous
+                        error: isAliasAmbiguous || isRuntimeSchemaError
                             ? `统一提交失败：${formatResponseGroupReference_ACU(response)} ${sanitizeRetryFeedback_ACU(error?.message || String(error))}`
                             : `统一提交失败：${formatResponseGroupReference_ACU(response)} SQL 校验失败。${sanitizeRetryFeedback_ACU(error?.message || String(error))}`,
-                        errorCategory: isAliasAmbiguous ? 'precondition' : 'model',
+                        errorCategory: isAliasAmbiguous || isRuntimeSchemaError ? 'precondition' : 'model',
                     };
                 }
                 if (Array.isArray(response.job.targetSheetKeys) && response.job.targetSheetKeys.length > 0) {
@@ -94071,7 +94302,9 @@ $CONTENT
                     const retainedStatements = [];
                     const discardedKeys = new Set();
                     for (const statement of reboundStatements) {
-                        const touchedKeys = getTouchedSheetKeysFromSqlText_ACU(statement, baseSnapshot);
+                        // 表名归属同样以冻结 runtime 视图为准：baseSnapshot 可能是旧 schema/空表头，
+                        // 用它反查会让真实表被误判为"未授权"或"范围外"。
+                        const touchedKeys = getTouchedSheetKeysFromSqlText_ACU(statement, capturedSqlApplyScope?.runtimeData ? capturedSqlApplyScope.runtimeData : baseSnapshot);
                         const unauthorizedKeys = touchedKeys.filter(sheetKey => !allowedSheetKeys.has(sheetKey));
                         if (unauthorizedKeys.length === 0) {
                             retainedStatements.push(statement);
@@ -94148,7 +94381,9 @@ $CONTENT
                 }
                 catch (error) {
                     const rawErrorMessage = error?.message || String(error);
-                    const isInfrastructureError = error instanceof SqlRuntimeSnapshotError_ACU;
+                    const isInfrastructureError = error instanceof SqlRuntimeSnapshotError_ACU
+                        || error instanceof SqlRuntimeSchemaInvalidError_ACU
+                        || error instanceof SqlRuntimeSchemaStaleError_ACU;
                     const failedGroupKey = findSqlFailureGroupKey_ACU(sqlTexts, sortedResponses, rawErrorMessage);
                     return {
                         success: false,
@@ -94480,7 +94715,7 @@ $CONTENT
             }
             await reloadStorageProvider();
         }
-        const executionScope = captureFillExecutionScope_ACU({
+        const executionScope = await captureFillExecutionScope_ACU({
             runId: options.performanceRunId,
             parentSpanId: options.performanceParentSpanId,
         });
@@ -95120,7 +95355,7 @@ $CONTENT
         let success = false;
         let modifiedKeys = [];
         const maxRetries = settings_ACU.tableMaxRetries || 3;
-        const executionScope = captureFillExecutionScope_ACU();
+        const executionScope = await captureFillExecutionScope_ACU();
         const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
             chat: getChatArray_ACU() || [],
             isolationKey: executionScope.isolationKey,
@@ -95220,7 +95455,10 @@ $CONTENT
                                 parseResult = provider.applyEditsWithSystemRowIds([collectResult.tableEditText || ''], updateMode, executionScope.sqlApplyScope);
                             }
                             catch (error) {
-                                const errorCategory = error instanceof SqlRuntimeSnapshotError_ACU ? 'infrastructure' : 'model';
+                                const isRuntimeSchemaError = error instanceof SqlRuntimeSnapshotError_ACU
+                                    || error instanceof SqlRuntimeSchemaInvalidError_ACU
+                                    || error instanceof SqlRuntimeSchemaStaleError_ACU;
+                                const errorCategory = isRuntimeSchemaError ? 'infrastructure' : 'model';
                                 return { success: false, error: sanitizeRetryFeedback_ACU(error?.message || String(error)), errorCategory };
                             }
                             const parseSuccess = !!parseResult?.success;
