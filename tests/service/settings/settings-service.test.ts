@@ -146,6 +146,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU: 500,
   TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU: 'test-table-defaults-refresh',
   TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-prompt-force-default',
+  TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-template-assistant-prompt-force-default',
   STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU: 'test-strict-json-force-disable',
   VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
   SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU: 'spv3.6.10-v2-writer-force-enable',
@@ -790,4 +791,37 @@ describe('loadSettings_ACU', () => {
 
     expect(mockSettings.charCardPrompt[0].content).toBe('迁移后再次自定义');
   });
+
+  it('一次性强制恢复会清空 AI 改表助手自定义提示词并写入 marker', () => {
+    mockReadProfileSettings.mockReturnValue({
+      templateAssistantPromptSegments: [
+        { role: 'SYSTEM', content: '历史自定义改表助手提示词', deletable: false, pinned: true },
+      ],
+    });
+
+    loadSettings_ACU();
+
+    // 空数组不是空提示词：它是既有契约，运行时会回退到内置伪 role 默认提示词。
+    expect(mockSettings.templateAssistantPromptSegments).toEqual([]);
+    expect(mockSettings.templateAssistantPromptForceDefaultVersion)
+      .toBe('test-template-assistant-prompt-force-default');
+    expect(mockPersistSettingsToStorage).toHaveBeenCalled();
+  });
+
+  it('已记录 AI 改表助手恢复 marker 后，保留用户后续保存的自定义提示词', () => {
+    const customized = [
+      { role: 'SYSTEM', content: '迁移后再次自定义的改表助手提示词', deletable: false, pinned: true },
+    ];
+    mockReadProfileSettings.mockReturnValue({
+      templateAssistantPromptForceDefaultVersion: 'test-template-assistant-prompt-force-default',
+      templateAssistantPromptSegments: customized,
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.templateAssistantPromptSegments).toEqual(customized);
+    expect(mockSettings.templateAssistantPromptForceDefaultVersion)
+      .toBe('test-template-assistant-prompt-force-default');
+  });
+
 });

@@ -4035,6 +4035,9 @@ $CONTENT
     const SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU = 'spv3.6.10-v2-writer-force-enable';
     // 一次性强制恢复填表默认提示词；执行后用户仍可继续自定义。
     const TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv8.9.2-force-default-table-fill-prompt';
+    // 一次性强制恢复 AI 改表助手提示词；执行后用户仍可继续自定义。
+    // 空 segments 是既有契约：运行时回退到内置伪 role 默认提示词。
+    const TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv8.9.4-force-default-template-assistant-prompt';
     // 一次性关闭严格 JSON 填表：旧版本可能已保留显式开启状态；迁移完成后，用户仍可在高级设置中自行重新开启。
     const STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU = 'spv8.9.3-force-disable-strict-json-table-fill';
     // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
@@ -84141,6 +84144,7 @@ $CONTENT
         currentTemplatePresetName: '',
         tableTemplateDefaultsRefreshVersion: '',
         tableFillPromptForceDefaultVersion: '',
+        templateAssistantPromptForceDefaultVersion: '',
         strictJsonTableFillForceDisableVersion: '',
         tableContextExtractTags: '',
         tableContextExtractRules: [],
@@ -85156,6 +85160,7 @@ $CONTENT
         refreshDefaultTableTemplateOnce_ACU(activeCode);
         forceDisableStrictJsonTableFillOnce_ACU();
         forceDefaultTableFillPromptsOnce_ACU();
+        forceDefaultTemplateAssistantPromptOnce_ACU();
         if (shouldPersistSettingsAfterLoad_ACU) {
             saveGlobalMeta_ACU();
             persistSettingsToStorage_ACU(settings_ACU, activeCode);
@@ -85358,6 +85363,26 @@ $CONTENT
             logWarn_ACU('[填表提示词] 一次性强制恢复默认提示词失败:', error);
         }
     }
+    /**
+     * 一次性清除历史 AI 改表助手的自定义提示词，恢复内置伪 role 默认提示词。
+     * marker 按 profile 持久化；写入后不再执行，用户随后保存的自定义提示词必须保留。
+     */
+    function forceDefaultTemplateAssistantPromptOnce_ACU() {
+        try {
+            if (!settings_ACU || typeof settings_ACU !== 'object')
+                return;
+            if (settings_ACU.templateAssistantPromptForceDefaultVersion === TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU)
+                return;
+            // 空数组是既有运行时契约：buildTemplateAssistantMessages_ACU 回退到内置默认提示词。
+            settings_ACU.templateAssistantPromptSegments = [];
+            settings_ACU.templateAssistantPromptForceDefaultVersion = TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU;
+            saveSettings_ACU();
+            logDebug_ACU(`[AI 改表助手] 已一次性恢复内置默认提示词并记录版本: ${TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU}`);
+        }
+        catch (error) {
+            logWarn_ACU('[AI 改表助手] 一次性恢复默认提示词失败:', error);
+        }
+    }
     function buildDefaultSettings_ACU() {
         return {
             apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
@@ -85396,6 +85421,7 @@ $CONTENT
             currentTemplatePresetName: '', // [模板预设] 当前模板预设名，空表示默认预设
             tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
             tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
+            templateAssistantPromptForceDefaultVersion: '', // [AI 改表助手] 一次性强制恢复默认提示词版本
             strictJsonTableFillForceDisableVersion: '', // [填表功能] 一次性关闭严格 JSON 填表版本
             // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
             tableContextExtractTags: '',
