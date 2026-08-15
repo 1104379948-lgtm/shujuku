@@ -130,7 +130,7 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
     const manifest = manifest_ACU();
     h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
 
-    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true })).resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true })).resolves.toMatchObject([{ chunkId: 'chunk-a', vector: new Float32Array([1, 2]) }]);
     expect(h.read).toHaveBeenCalledWith(manifest.manifestFile);
     // V2 不可变快照：不查缓存、不回填缓存
     expect(h.getHot).not.toHaveBeenCalled();
@@ -143,7 +143,7 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
     h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest))
-      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: new Float32Array([1, 2]) }]);
     // 即使缓存有数据，V2 不可变快照也直接回源，不查询缓存
     expect(h.getHot).not.toHaveBeenCalled();
     expect(h.read).toHaveBeenCalledTimes(1);
@@ -156,7 +156,7 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
     h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest))
-      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: new Float32Array([1, 2]) }]);
     expect(h.getHot).not.toHaveBeenCalled();
     expect(h.read).toHaveBeenCalledWith(manifest.manifestFile);
     expect(h.putHot).not.toHaveBeenCalled();
@@ -169,7 +169,7 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
     h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
-      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: new Float32Array([1, 2]) }]);
     expect(h.getHot).not.toHaveBeenCalled();
     expect(h.read).toHaveBeenCalledWith(manifest.manifestFile);
   });
@@ -180,7 +180,7 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
     h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
-      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: new Float32Array([1, 2]) }]);
 
     expect(h.read).toHaveBeenCalledWith(manifest.manifestFile);
   });
@@ -224,7 +224,7 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
     h.read.mockResolvedValue({ ok: true, data: blob });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
-      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: new Float32Array([1, 2]) }]);
   });
 
   it('legacy 默认隔离域兼容 manifest=default 与 blob 空 isolationKey', async () => {
@@ -238,7 +238,7 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
     h.read.mockResolvedValue({ ok: true, data: blob });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
-      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: new Float32Array([1, 2]) }]);
     expect(h.putHot).toHaveBeenCalled();
   });
 

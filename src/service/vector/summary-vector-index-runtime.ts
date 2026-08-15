@@ -173,8 +173,8 @@ async function generateKeywords_ACU(config: any, userInput: string): Promise<str
 
 // T10：query 向量模长预计算。与 cosineSimilarity_ACU 内部的 leftNorm 算法逐位一致，
 // 外提后循环内不再重复累加 query 的平方和。
-function computeVectorNorm_ACU(vector: number[]): number {
-    if (!Array.isArray(vector) || vector.length <= 0) return 0;
+function computeVectorNorm_ACU(vector: number[] | Float32Array): number {
+    if ((!Array.isArray(vector) && !(vector instanceof Float32Array)) || vector.length <= 0) return 0;
     let norm = 0;
     for (const value of vector) {
         const num = Number(value) || 0;
@@ -186,8 +186,10 @@ function computeVectorNorm_ACU(vector: number[]): number {
 // T10：cosine 相似度，query 模长由调用方预计算传入（循环内只算点积与候选模长）。
 // T2：维度不一致直接返回 0，不再截断后照常打分——截断会把混维向量静默当成相似，
 // 产生错误召回且难以察觉。维度一致的路径与改动前逐项等价。
-function cosineSimilarity_ACU(left: number[], right: number[], leftNorm: number): number {
-    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length || left.length <= 0) return 0;
+function cosineSimilarity_ACU(left: number[] | Float32Array, right: number[] | Float32Array, leftNorm: number): number {
+    if ((!Array.isArray(left) && !(left instanceof Float32Array))
+        || (!Array.isArray(right) && !(right instanceof Float32Array))
+        || left.length !== right.length || left.length <= 0) return 0;
     const length = left.length;
     let dot = 0;
     let rightNorm = 0;
@@ -753,7 +755,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     // 否则保持原行为（空向量返回 empty_query_embedding；异常穿透给上层 init.ts 的 try/catch 兜底）。
     let keywords: string[] = [];
     let queryText = '';
-    let queryVector: number[] = [];
+    let queryVector: number[] | Float32Array = [];
     try {
         keywords = await generateKeywords_ACU(config, userInput);
         queryText = [userInput, keywords.join('，')].filter(Boolean).join('\n关键词：');
@@ -796,7 +798,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     const denseCandidates = searchableCandidates
         .map((candidate): RankedSummaryCandidate_ACU | null => {
             const chunk = candidate.chunk;
-            if (!Array.isArray(chunk.vector) || chunk.vector.length === 0) return null;
+            if ((!Array.isArray(chunk.vector) && !(chunk.vector instanceof Float32Array)) || chunk.vector.length === 0) return null;
             const score = cosineSimilarity_ACU(queryVector, chunk.vector, queryNorm);
             if (score < config.summaryIndexMinScore) return null;
             return { ...candidate, score, denseScore: score };

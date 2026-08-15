@@ -754,7 +754,7 @@ export   async function loadAllChatMessages_ACU() {
         include_swipes: false,
       });
       if (messagesFromApi && messagesFromApi.length > 0) {
-        _set_allChatMessages_ACU(messagesFromApi.map((msg, idx) => ({ ...msg, id: idx }))); // Add simple index for now
+        _set_allChatMessages_ACU(messagesFromApi.map((msg, idx) => ({ id: idx, is_user: msg.is_user, message: msg.message }))); // Projected lightweight view: only consumed fields retained
         logDebug_ACU(`ACU Loaded ${allChatMessages_ACU.length} messages for: ${currentChatFileIdentifier_ACU}.`);
       } else {
         _set_allChatMessages_ACU([]);

@@ -269,33 +269,44 @@ function normalizeRows_ACU(rows: ChatSummaryVectorIndexRow_ACU[]): ChatSummaryVe
 
 function normalizeChunks_ACU(chunks: ChatSummaryVectorIndexChunk_ACU[]): ChatSummaryVectorIndexChunk_ACU[] {
     return (Array.isArray(chunks) ? chunks : [])
-        .filter((chunk) => chunk?.chunkId && chunk?.rowKey && chunk?.text && Array.isArray(chunk.vector) && chunk.vector.length > 0)
+        .filter((chunk) => chunk?.chunkId && chunk?.rowKey && chunk?.text && isVectorLike_ACU(chunk.vector) && chunk.vector.length > 0)
         .map((chunk, index) => ({ ...chunk, sequence: index }));
 }
 
 const VECTOR_ENCODING_F32B64_ACU = 'f32b64' as const;
 
 type StoredVectorIndexChunk_ACU = Omit<ChatSummaryVectorIndexChunk_ACU, 'vector'> & {
-    vector: number[] | string;
+    vector: ChatSummaryVectorIndexChunk_ACU['vector'] | string;
     vectorEncoding?: typeof VECTOR_ENCODING_F32B64_ACU;
 };
 
 type StoredVectorIndexChunkBlob_ACU = Omit<VectorIndexChunkBlob_ACU, 'vector'> & {
-    vector: number[] | string;
+    vector: ChatSummaryVectorIndexChunk_ACU['vector'] | string;
     vectorEncoding?: typeof VECTOR_ENCODING_F32B64_ACU;
 };
 
-function encodeVectorToF32B64_ACU(vector: number[]): string {
-    if (!Array.isArray(vector)) return '';
+/** 摘要向量内存表示：Float32Array（解码）或 number[]（兼容旧内存数据）。 */
+function isVectorLike_ACU(value: unknown): value is number[] | Float32Array {
+    return Array.isArray(value) || value instanceof Float32Array;
+}
+
+/** 序列化边界用：把内存向量归一为普通 number[]，不改变落盘/IDB 数组格式。 */
+function vectorToFiniteNumberArray_ACU(vector: number[] | Float32Array | null | undefined): number[] {
+    if (!isVectorLike_ACU(vector)) return [];
+    return Array.from(vector, (value) => Number(value)).filter((value) => Number.isFinite(value));
+}
+
+function encodeVectorToF32B64_ACU(vector: number[] | Float32Array): string {
+    if (!isVectorLike_ACU(vector)) return '';
     const bytes = new Uint8Array(vector.length * 4);
     const view = new DataView(bytes.buffer);
-    vector.forEach((value, index) => {
-        const numeric = Number(value);
+    for (let index = 0; index < vector.length; index += 1) {
+        const numeric = Number(vector[index]);
         if (!Number.isFinite(numeric)) {
             throw new Error(`交火向量包含非有限数值，拒绝编码: index=${index}`);
         }
         view.setFloat32(index * 4, numeric, true);
-    });
+    }
     let binary = '';
     const blockSize = 0x8000;
     for (let offset = 0; offset < bytes.length; offset += blockSize) {
@@ -307,7 +318,7 @@ function encodeVectorToF32B64_ACU(vector: number[]): string {
     return encoder(binary);
 }
 
-function decodeF32B64ToVector_ACU(encoded: string): number[] {
+function decodeF32B64ToVector_ACU(encoded: string): Float32Array {
     const decoder = globalThis.atob;
     if (typeof decoder !== 'function') throw new Error('当前环境缺少 atob，无法解码交火向量。');
     const binary = decoder(String(encoded || ''));
@@ -317,8 +328,8 @@ function decodeF32B64ToVector_ACU(encoded: string): number[] {
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) & 0xff;
     const view = new DataView(bytes.buffer);
-    const vector: number[] = [];
-    for (let offset = 0; offset < bytes.length; offset += 4) vector.push(view.getFloat32(offset, true));
+    const vector = new Float32Array(bytes.length / 4);
+    for (let offset = 0; offset < bytes.length; offset += 4) vector[offset / 4] = view.getFloat32(offset, true);
     return vector;
 }
 
@@ -330,8 +341,9 @@ function decodeChunkVectorInPlace_ACU(chunk: StoredVectorIndexChunk_ACU): ChatSu
     if (chunk.vectorEncoding === VECTOR_ENCODING_F32B64_ACU || typeof chunk.vector === 'string') {
         chunk.vector = decodeF32B64ToVector_ACU(String(chunk.vector || ''));
         delete chunk.vectorEncoding;
-    } else if (Array.isArray(chunk.vector)) {
-        chunk.vector = chunk.vector.map((value) => Number(value)).filter((value) => Number.isFinite(value));
+    } else if (isVectorLike_ACU(chunk.vector)) {
+        // 旧内存 number[] → 统一为 Float32Array（内存表示迁移）。
+        chunk.vector = Float32Array.from(vectorToFiniteNumberArray_ACU(chunk.vector));
     }
     return chunk as ChatSummaryVectorIndexChunk_ACU;
 }
@@ -478,7 +490,7 @@ function buildVectorChunkBlob_ACU(chunk: ChatSummaryVectorIndexChunk_ACU, option
         rowKey: chunk.rowKey,
         rowOrder: Number.isFinite(Number((chunk as any).rowOrder)) ? Number((chunk as any).rowOrder) : 0,
         text: chunk.text,
-        vector: Array.isArray(chunk.vector) ? chunk.vector.map((item) => Number(item)).filter((item) => Number.isFinite(item)) : [],
+        vector: vectorToFiniteNumberArray_ACU(chunk.vector),
         sequence: Number.isFinite(Number(chunk.sequence)) ? Number(chunk.sequence) : 0,
         embeddingModel: options.embeddingModel,
         dimension: Math.max(0, Math.floor(Number(options.dimension) || 0)),
@@ -2084,7 +2096,7 @@ async function loadOneShardChunks_ACU(
     return (shard.chunks || [])
         .map((chunk) => ({ ...chunk, vector: Array.isArray(chunk.vector) ? [...chunk.vector] : chunk.vector } as StoredVectorIndexChunk_ACU))
         .map((chunk) => decodeChunkVectorInPlace_ACU(chunk))
-        .filter((chunk) => Array.isArray(chunk.vector) && chunk.vector.length > 0);
+        .filter((chunk) => isVectorLike_ACU(chunk.vector) && chunk.vector.length > 0);
 }
 
 async function loadChunksFromShardRefs_ACU(
@@ -2143,7 +2155,7 @@ async function loadChunksFromContentAddressedRefs_ACU(
             const message = error instanceof Error ? error.message : String(error || '未知错误');
             throw new Error(`交火向量索引内容块校验失败: ${sourcePath} chunk=${ref.chunkKey} ${message}`.trim());
         }
-        if (!Array.isArray(decoded.vector) || decoded.vector.length === 0) {
+        if (!isVectorLike_ACU(decoded.vector) || decoded.vector.length === 0) {
             throw new Error(`交火向量索引内容块校验失败: ${sourcePath} chunk=${ref.chunkKey} vector_empty`);
         }
         return decoded;
@@ -2222,7 +2234,7 @@ async function loadChunksFromContentAddressedRefs_ACU(
 function sortAndDedupeVectorChunks_ACU(chunks: ChatSummaryVectorIndexChunk_ACU[]): ChatSummaryVectorIndexChunk_ACU[] {
     const byChunkId = new Map<string, ChatSummaryVectorIndexChunk_ACU>();
     (Array.isArray(chunks) ? chunks : []).forEach((chunk) => {
-        if (!chunk?.chunkId || !chunk.rowKey || !Array.isArray(chunk.vector) || chunk.vector.length === 0) return;
+        if (!chunk?.chunkId || !chunk.rowKey || !isVectorLike_ACU(chunk.vector) || chunk.vector.length === 0) return;
         byChunkId.set(chunk.chunkId, { ...chunk });
     });
     // batchRefs 按 base -> delta 读取；相同 chunkId 必须让后出现的 delta 覆盖 base。

@@ -30,7 +30,11 @@ export interface ChatSummaryVectorIndexChunk_ACU {
     rowKey: string;
     rowOrder: number;
     text: string;
-    vector: number[];
+    /**
+     * 内存表示以 Float32Array 为主（解码路径）；兼容旧 number[]（IDB 缓存、聊天元数据回读）。
+     * 磁盘格式（f32b64 字符串 / legacy number[]）保持不变。
+     */
+    vector: Float32Array | number[];
     sequence: number;
     sourceFingerprint?: string;
     textHash?: string;

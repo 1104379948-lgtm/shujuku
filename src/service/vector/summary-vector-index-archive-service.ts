@@ -543,7 +543,9 @@ function buildExistingReusableRows_ACU(
     const existingChunks = Array.isArray(existingState?.chunks) ? existingState!.chunks : [];
     const existingChunksByRowKey = new Map<string, ChatSummaryVectorIndexChunk_ACU[]>();
     existingChunks.forEach((chunk) => {
-        if (!chunk?.rowKey || !chunk?.chunkId || !Array.isArray(chunk.vector) || chunk.vector.length === 0) return;
+        if (!chunk?.rowKey || !chunk?.chunkId
+            || (!Array.isArray(chunk.vector) && !(chunk.vector instanceof Float32Array))
+            || chunk.vector.length === 0) return;
         const list = existingChunksByRowKey.get(chunk.rowKey) || [];
         list.push({ ...chunk });
         existingChunksByRowKey.set(chunk.rowKey, list);
@@ -817,7 +819,9 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     const validRowKeys = new Set(nextRows.map((row) => row.rowKey));
     const validChunkIds = new Set(nextRows.flatMap((row) => row.chunkIds));
     const nextChunks = Array.from(nextChunksById.values())
-        .filter((chunk) => validRowKeys.has(chunk.rowKey) && validChunkIds.has(chunk.chunkId) && Array.isArray(chunk.vector) && chunk.vector.length > 0)
+        .filter((chunk) => validRowKeys.has(chunk.rowKey) && validChunkIds.has(chunk.chunkId)
+            && (Array.isArray(chunk.vector) || chunk.vector instanceof Float32Array)
+            && chunk.vector.length > 0)
         .map((chunk, index) => ({ ...chunk, sequence: index }));
     const nextState = buildLayerStateWithRows_ACU(previousState, nextRows, nextChunks, {
         snapshotMessageId: options.snapshotMessageId,
