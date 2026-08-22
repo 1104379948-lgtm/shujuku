@@ -1,0 +1,1 @@
+src/shared/sql-read-resolver.ts(406,11): error TS7018: Object literal's property 'diagnostics' implicitly has an 'any[]' type.

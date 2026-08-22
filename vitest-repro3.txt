@@ -1,0 +1,10 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90me:/xiangmu/shujuku[39m
+
+ [2m[90m↓[39m[22m tests/service/table/update-orchestrator.test.ts [2m([22m[2m222 tests[22m[2m | [22m[33m222 skipped[39m[2m)[22m
+
+[2m Test Files [22m [33m1 skipped[39m[90m (1)[39m
+[2m      Tests [22m [33m222 skipped[39m[90m (222)[39m
+[2m   Start at [22m 02:39:12
+[2m   Duration [22m 1.61s[2m (transform 991ms, setup 0ms, collect 1.42s, tests 0ms, environment 0ms, prepare 75ms)[22m
+

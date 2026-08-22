@@ -669,6 +669,9 @@ export function useManualUpdate(): ManualUpdateState {
           executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
         },
       );
+      if (result.dataCommitted === true) {
+        try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
+      }
       if (result.outcome === 'sync_pending') {
         showCatchUpSyncPending();
       } else if (result.outcome === 'no_work') {

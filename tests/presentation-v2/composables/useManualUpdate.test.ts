@@ -35,6 +35,7 @@ async function importManualUpdate() {
   const orchestrateManualCatchUp_ACU = vi.fn();
   const prepareManualCatchUpPlan_ACU = vi.fn();
   const refreshMergedDataAndNotify_ACU = vi.fn(async () => undefined);
+  const notifyTableUpdate = vi.fn();
   const setWasStoppedByUser = vi.fn();
   const saveSettings_ACU = vi.fn();
 
@@ -80,7 +81,7 @@ async function importManualUpdate() {
     refreshMergedDataAndNotify_ACU,
   }));
   vi.doMock('../../../src/shared/env', () => ({
-    topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableUpdate: vi.fn() } },
+    topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableUpdate: notifyTableUpdate } },
   }));
 
   const { createPinia, setActivePinia } = await import('pinia');
@@ -101,6 +102,7 @@ async function importManualUpdate() {
     orchestrateManualCatchUp_ACU,
     prepareManualCatchUpPlan_ACU,
     refreshMergedDataAndNotify_ACU,
+    notifyTableUpdate,
     setWasStoppedByUser,
   };
 }
@@ -622,3 +624,47 @@ describe('useManualUpdate purge 后执行边界守卫', () => {
     expect(toast.items.some(item => item.kind === 'warning' && item.text.includes('确认期间发生变化'))).toBe(true);
     __resetToastStoreForTests();
   });
+
+describe('useManualUpdate 手动追平表更新通知', () => {
+  it('正常完成且提交数据时通知表更新一次', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      prepareManualCatchUpPlan_ACU,
+      orchestrateManualCatchUp_ACU,
+      notifyTableUpdate,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    prepareManualCatchUpPlan_ACU.mockResolvedValue({
+      success: true,
+      plan: {
+        targetAiFloor: 1,
+        targetMessageIndex: 0,
+        planSignature: 'sig',
+        waves: [{
+          startAiFloor: 1,
+          endAiFloor: 1,
+          messageIndices: [0],
+          sheetKeys: ['sheet_0'],
+          groups: [{ batchSize: 2, messageIndices: [0] }],
+        }],
+      },
+    });
+    orchestrateManualCatchUp_ACU.mockResolvedValue({
+      outcome: 'complete',
+      success: true,
+      dataCommitted: true,
+      committedBucketCount: 1,
+    });
+    const manual = useManualUpdate();
+
+    const pending = manual.runManualCatchUp();
+    await waitForCondition(() => dialog.active?.title === '追平所选表未填楼层', '追平确认弹窗出现');
+    dialog.submitActive();
+    await pending;
+
+    expect(orchestrateManualCatchUp_ACU).toHaveBeenCalledTimes(1);
+    expect(notifyTableUpdate).toHaveBeenCalledTimes(1);
+    __resetToastStoreForTests();
+  });
+});
