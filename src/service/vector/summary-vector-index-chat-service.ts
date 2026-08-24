@@ -99,7 +99,11 @@ export async function tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU(): Pr
             rows,
             chunks: chunks.map((chunk: any) => ({
                 ...chunk,
-                vector: Array.isArray(chunk.vector) ? chunk.vector.map((item: any) => Number(item)).filter((item: number) => Number.isFinite(item)) : [],
+                // 统一归一为普通 number[]：state.chunks 会随聊天元数据 JSON 序列化，
+                // 不能把 Float32Array 落进持久化路径。
+                vector: Array.isArray(chunk.vector) || chunk.vector instanceof Float32Array
+                    ? Array.from(chunk.vector as any, (item: any) => Number(item)).filter((item: number) => Number.isFinite(item))
+                    : [],
             })),
             manifest: JSON.parse(JSON.stringify(manifest)),
         };

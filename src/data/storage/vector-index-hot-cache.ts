@@ -129,10 +129,25 @@ function openDb_ACU(): Promise<IDBDatabase> {
     });
 }
 
+// 摘要向量内存可能是 Float32Array（解码路径）或 number[]（IDB/元数据回读）。
+// IDB 序列化路径必须保持不变：写库前统一转回普通 number[]，避免结构化克隆把
+// Float32Array 落成不同形态，破坏既有缓存读取契约。
+function getChunkVector_ACU(chunk: ChatSummaryVectorIndexChunk_ACU | null | undefined): number[] | Float32Array | null {
+    if (Array.isArray(chunk?.vector)) return chunk!.vector;
+    if (chunk?.vector instanceof Float32Array) return chunk.vector;
+    return null;
+}
+
+function chunkVectorToNumberArray_ACU(chunk: ChatSummaryVectorIndexChunk_ACU | null | undefined): number[] {
+    const vector = getChunkVector_ACU(chunk);
+    if (!vector) return [];
+    return Array.from(vector, (value) => Number(value) || 0);
+}
+
 function cloneChunk_ACU(chunk: ChatSummaryVectorIndexChunk_ACU): ChatSummaryVectorIndexChunk_ACU {
     return {
         ...chunk,
-        vector: Array.isArray(chunk.vector) ? chunk.vector.map((value) => Number(value) || 0) : [],
+        vector: chunkVectorToNumberArray_ACU(chunk),
         chunkKeys: Array.isArray(chunk.chunkKeys) ? [...chunk.chunkKeys] : chunk.chunkKeys,
     };
 }
@@ -186,8 +201,8 @@ function isRecordCompatible_ACU(record: VectorIndexHotCacheChunkRecord_ACU | nul
     if (record.rowKey !== normalizeKeyPart_ACU(ref.rowKey)) return false;
     if (record.dimension !== Math.max(0, Number(ref.dimension) || 0)) return false;
     if (ref.checksum && record.checksum && record.checksum !== ref.checksum) return false;
-    const vector = Array.isArray(record.chunk.vector) ? record.chunk.vector : [];
-    return vector.length > 0 && (!ref.dimension || vector.length === ref.dimension);
+    const vector = getChunkVector_ACU(record.chunk);
+    return !!vector && vector.length > 0 && (!ref.dimension || vector.length === ref.dimension);
 }
 
 export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHotCacheWriteOptions_ACU): Promise<void> {
@@ -208,8 +223,8 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
                 const now = Date.now();
                 options.chunks.forEach((chunk) => {
                     const chunkId = normalizeKeyPart_ACU(chunk?.chunkId);
-                    const vector = Array.isArray(chunk?.vector) ? chunk.vector : [];
-                    if (!chunkId || vector.length === 0) return;
+                    const vector = getChunkVector_ACU(chunk);
+                    if (!chunkId || !vector || vector.length === 0) return;
                     const chunkKey = normalizeKeyPart_ACU((Array.isArray(chunk.chunkKeys) && chunk.chunkKeys[0]) || chunkId);
                     const normalizedChunk = cloneChunk_ACU({
                         ...chunk,
@@ -256,8 +271,8 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
             options.chunks.forEach((chunk) => {
                 const chunkId = normalizeKeyPart_ACU(chunk?.chunkId);
                 const ref = refsByChunkId.get(chunkId);
-                const vector = Array.isArray(chunk?.vector) ? chunk.vector : [];
-                if (!ref || vector.length === 0) return;
+                const vector = getChunkVector_ACU(chunk);
+                if (!ref || !vector || vector.length === 0) return;
                 const chunkKey = normalizeKeyPart_ACU(ref.chunkKey);
                 const normalizedChunk = cloneChunk_ACU({
                     ...chunk,

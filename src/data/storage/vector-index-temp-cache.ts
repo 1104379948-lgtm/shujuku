@@ -81,13 +81,26 @@ export async function putVectorIndexCachedShard_ACU(
     checksum = '',
 ): Promise<void> {
     try {
-        const json = JSON.stringify(shard || {});
+        // 向量内存表示可能是 Float32Array（解码路径）。IDB 序列化路径保持不变：
+        // 写库前统一转回普通 number[]，避免结构化克隆改变既有缓存存储形态。
+        const normalizedShard: SummaryVectorIndexShard_ACU = {
+            ...shard,
+            chunks: Array.isArray(shard?.chunks)
+                ? shard.chunks.map((chunk) => ({
+                    ...chunk,
+                    vector: Array.isArray(chunk.vector) || chunk.vector instanceof Float32Array
+                        ? Array.from(chunk.vector as number[] | Float32Array, (value) => Number(value) || 0)
+                        : [],
+                }))
+                : [],
+        };
+        const json = JSON.stringify(normalizedShard);
         const now = Date.now();
         const record: CachedShardRecord_ACU = {
             key: makeKey_ACU(indexId, shardId),
             indexId,
             shardId,
-            shard,
+            shard: normalizedShard,
             byteSize: new Blob([json]).size,
             checksum,
             lastAccessAt: now,

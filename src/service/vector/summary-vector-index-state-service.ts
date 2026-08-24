@@ -55,7 +55,11 @@ function normalizeChunks_ACU(chunks: any): ChatSummaryVectorIndexChunk_ACU[] {
                 rowKey: String(chunk.rowKey || ''),
                 rowOrder: Number.isFinite(Number(chunk.rowOrder)) ? Number(chunk.rowOrder) : 0,
                 text: String(chunk.text || ''),
-                vector: Array.isArray(chunk.vector) ? chunk.vector.map((item: any) => Number(item)).filter((item: number) => Number.isFinite(item)) : [],
+                // 统一归一为普通 number[]：state.chunks 会随聊天元数据 JSON 序列化，
+                // 不能把 Float32Array 落进持久化路径。
+                vector: Array.isArray(chunk.vector) || chunk.vector instanceof Float32Array
+                    ? Array.from(chunk.vector as any, (item: any) => Number(item)).filter((item: number) => Number.isFinite(item))
+                    : [],
                 sequence: Number.isFinite(Number(chunk.sequence)) ? Number(chunk.sequence) : 0,
                 sourceFingerprint: typeof chunk.sourceFingerprint === 'string' ? chunk.sourceFingerprint : undefined,
                 textHash: typeof chunk.textHash === 'string' ? chunk.textHash : undefined,
