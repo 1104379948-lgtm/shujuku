@@ -65,7 +65,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     contextTurnCount: 3,
     contextExtractRules: [],
     contextExcludeRules: [],
-    apiPresetMode: 'follow_plot',
+    apiPresetMode: 'current',
     fixedApiPresetName: '',
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     turnInstructionPrompt: buildDefaultContinuationTurnInstructionPrompt_ACU(),

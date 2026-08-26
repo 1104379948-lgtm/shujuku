@@ -131,7 +131,7 @@
         <label>总时长（分钟，0 为不设总时长）<AcuInput v-model="settingsDraft.totalDurationMinutes" type="number" :min="0" /></label>
         <label>最近剧情轮数<AcuInput v-model="settingsDraft.contextTurnCount" type="number" :min="0" /></label>
         <label>循环标签<AcuInput v-model="settingsDraft.loopTags" type="text" /></label>
-        <label>API 预设<select v-model="settingsDraft.apiPresetMode"><option value="follow_plot">跟随剧情预设</option><option value="fixed">固定预设</option></select></label>
+        <label>API 预设<select v-model="settingsDraft.apiPresetMode"><option value="current">跟随当前 API</option><option value="fixed">固定预设</option></select></label>
         <label v-if="settingsDraft.apiPresetMode === 'fixed'">固定预设名称<AcuInput v-model="settingsDraft.fixedApiPresetName" type="text" /></label>
       </div>
       <div class="acu-v2-continuation-page__toggles">

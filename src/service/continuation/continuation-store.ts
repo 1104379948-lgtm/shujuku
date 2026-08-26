@@ -84,7 +84,8 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
   const customTurnMax = raw.customTurnMax === null ? null : requireInteger_ACU(raw.customTurnMax, 'settings.customTurnMax', 1);
   if (raw.stageSize === 'custom' && (customTurnMin === null || customTurnMax === null || customTurnMin > customTurnMax || customTurnMax > 50)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', '自定义轮数范围非法');
-  if (!['follow_plot', 'fixed'].includes(raw.apiPresetMode as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'apiPresetMode 非法');
+  if (raw.apiPresetMode === 'follow_plot') raw.apiPresetMode = 'current';
+  if (!['current', 'fixed'].includes(raw.apiPresetMode as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'apiPresetMode 非法');
   return {
     stageSize: raw.stageSize as ContinuationSettings_ACU['stageSize'], customTurnMin, customTurnMax,
     outlinePreview: requireBoolean_ACU(raw.outlinePreview, 'settings.outlinePreview'), autoNextStage: requireBoolean_ACU(raw.autoNextStage, 'settings.autoNextStage'),

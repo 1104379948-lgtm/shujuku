@@ -144,7 +144,7 @@ describe('Continuation defaults', () => {
     expect(first.autoNextStage).toBe(true);
     expect(first.maxAutomaticStages).toBe(6);
     expect(first.internalAiRetryLimit).toBe(3);
-    expect(first.apiPresetMode).toBe('follow_plot');
+    expect(first.apiPresetMode).toBe('current');
     expect(first.outlinePrompt[0].content).toContain('严格 JSON 对象');
     expect(first.turnInstructionPrompt[0].content).toContain('最终普通文本');
 

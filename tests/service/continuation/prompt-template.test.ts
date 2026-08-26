@@ -80,27 +80,26 @@ describe('continuation prompt templates', () => {
 
     expect(restored.outlinePrompt[0].content).toContain('严格 JSON 对象');
     expect(restored.turnInstructionPrompt).toEqual(settings.turnInstructionPrompt);
-    expect(restored).toMatchObject({ apiPresetMode: 'follow_plot', maxAutomaticStages: 6 });
+    expect(restored).toMatchObject({ apiPresetMode: 'current', maxAutomaticStages: 6 });
   });
 });
 
 describe('continuation API preset resolution', () => {
-  it('resolves follow_plot at each call with explicit source diagnostics', () => {
+  it('resolves current at each call with explicit source diagnostics', () => {
     let plotPreset = 'plot-a';
     const resolvePreset = vi.fn((name: string) => ({ resolved: true, apiMode: 'custom' as const, apiConfig, tavernProfile: name }));
-    const dependencies = { getFollowPlotPresetName: () => plotPreset, resolvePreset };
+    const dependencies = { resolvePreset };
     const settings = buildDefaultContinuationSettings_ACU();
 
-    expect(resolveContinuationApiPreset_ACU(settings, 'outline_call', dependencies)).toMatchObject({ presetName: 'plot-a', source: 'follow_plot', reason: 'plot_preset' });
+    expect(resolveContinuationApiPreset_ACU(settings, 'outline_call', dependencies)).toMatchObject({ presetName: '', source: 'current', reason: 'current_configuration' });
     plotPreset = 'plot-b';
-    expect(resolveContinuationApiPreset_ACU(settings, 'turn_call', dependencies)).toMatchObject({ presetName: 'plot-b', source: 'follow_plot', reason: 'plot_preset' });
-    expect(resolvePreset).toHaveBeenCalledWith('plot-a');
-    expect(resolvePreset).toHaveBeenCalledWith('plot-b');
+    expect(resolveContinuationApiPreset_ACU(settings, 'turn_call', dependencies)).toMatchObject({ presetName: '', source: 'current', reason: 'current_configuration' });
+    expect(resolvePreset).toHaveBeenCalledWith('');
   });
 
   it('fails closed when a fixed preset is empty or unresolved', () => {
     const settings = { ...buildDefaultContinuationSettings_ACU(), apiPresetMode: 'fixed' as const, fixedApiPresetName: 'deleted' };
-    const missing = { getFollowPlotPresetName: () => 'ignored', resolvePreset: () => ({ resolved: false, apiMode: 'custom' as const, apiConfig, tavernProfile: '' }) };
+    const missing = { resolvePreset: () => ({ resolved: false, apiMode: 'custom' as const, apiConfig, tavernProfile: '' }) };
 
     expect(() => resolveContinuationApiPreset_ACU(settings, 'outline_call', missing)).toThrow(ContinuationValidationError_ACU);
     try { resolveContinuationApiPreset_ACU(settings, 'outline_call', missing); } catch (error) {

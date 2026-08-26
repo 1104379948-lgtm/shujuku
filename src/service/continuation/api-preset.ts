@@ -1,4 +1,3 @@
-import { getCurrentRuntimePlotPresetName_ACU } from '../plot/plot-logic';
 import { resolveApiConfigByPreset_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
 import {
   ContinuationValidationError_ACU,
@@ -9,8 +8,8 @@ import {
 
 export interface ContinuationResolvedApiPreset_ACU {
   presetName: string;
-  source: 'follow_plot' | 'fixed';
-  reason: 'plot_preset' | 'current_configuration' | 'fixed_preset';
+  source: 'current' | 'fixed';
+  reason: 'fixed_preset' | 'current_configuration';
   apiMode: ApiPresetApiMode_ACU;
   apiConfig: ApiPresetApiConfig_ACU;
   tavernProfile: string;
@@ -18,12 +17,10 @@ export interface ContinuationResolvedApiPreset_ACU {
 
 type ApiPresetResolution_ACU = Omit<ContinuationResolvedApiPreset_ACU, 'presetName' | 'source' | 'reason'> & { resolved: boolean };
 export interface ContinuationApiPresetDependencies_ACU {
-  getFollowPlotPresetName: () => string;
   resolvePreset: (presetName: string) => ApiPresetResolution_ACU;
 }
 
 const defaultDependencies_ACU: ContinuationApiPresetDependencies_ACU = {
-  getFollowPlotPresetName: () => getCurrentRuntimePlotPresetName_ACU(),
   resolvePreset: resolveApiConfigByPreset_ACU,
 };
 
@@ -45,11 +42,9 @@ export function resolveContinuationApiPreset_ACU(settings: Pick<ContinuationSett
     if (!resolved.resolved) failPreset_ACU(phase, 'missing');
     return { presetName, source: 'fixed', reason: 'fixed_preset', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
   }
-  if (settings.apiPresetMode !== 'follow_plot') {
+  if (settings.apiPresetMode !== 'current') {
     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_CONFIG_MISSING', phase, '智能续写 API 预设模式非法', false));
   }
-  const presetName = dependencies.getFollowPlotPresetName().trim();
-  const resolved = dependencies.resolvePreset(presetName);
-  if (presetName && !resolved.resolved) failPreset_ACU(phase, 'missing');
-  return { presetName, source: 'follow_plot', reason: presetName ? 'plot_preset' : 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
+  const resolved = dependencies.resolvePreset('');
+  return { presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
 }

@@ -130,7 +130,7 @@ export interface ContinuationSettings_ACU {
   contextTurnCount: number;
   contextExtractRules: ContinuationRulePair_ACU[];
   contextExcludeRules: ContinuationRulePair_ACU[];
-  apiPresetMode: 'follow_plot' | 'fixed';
+  apiPresetMode: 'current' | 'fixed';
   fixedApiPresetName: string;
   outlinePrompt: ContinuationPromptSegment_ACU[];
   turnInstructionPrompt: ContinuationPromptSegment_ACU[];
