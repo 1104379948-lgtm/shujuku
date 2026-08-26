@@ -91,8 +91,10 @@ export function useContinuationRuntime() {
     : '尚未创建任务');
 
   async function createTask(): Promise<void> {
-    await run_ACU(() => runtime.orchestrator.createTask({ originInstruction: originInstruction.value }));
+    const created = await run_ACU(() => runtime.orchestrator.createTask({ originInstruction: originInstruction.value }));
     if (task.value) originInstruction.value = '';
+    // 创建即时完成后直接开始第一轮：主 Agent 会先派工大纲子代理创建大纲，不需要用户再点一次继续。
+    if (created && canContinue.value) await continueTask();
   }
 
   async function continueTask(): Promise<void> {

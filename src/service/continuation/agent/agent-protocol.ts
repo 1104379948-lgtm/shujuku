@@ -40,15 +40,10 @@ function readTextList_ACU(value: unknown): string[] {
   return value.map(readText_ACU).filter(Boolean);
 }
 
-/**
- * 从任意文本里提取首个配平的 JSON 对象。
- * @param text 模型返回的原始文本，可能带 Markdown 围栏或前后解释
- * @returns 提取到的 JSON 子串；找不到返回 null
- */
-export function extractFirstJsonObject_ACU(text: string): string | null {
-  if (typeof text !== 'string') return null;
-  const start = text.indexOf('{');
-  if (start < 0) return null;
+/** 单次解析里最多扫描的顶层配平对象数，防止超长返回里的花括号碎片拖垮解析。 */
+const JSON_OBJECT_SCAN_LIMIT_ACU = 6;
+
+function balancedObjectFrom_ACU(text: string, start: number): { json: string; end: number } | null {
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -61,33 +56,83 @@ export function extractFirstJsonObject_ACU(text: string): string | null {
     if (char === '{') depth += 1;
     else if (char === '}') {
       depth -= 1;
-      if (depth === 0) return text.slice(start, index + 1);
+      if (depth === 0) return { json: text.slice(start, index + 1), end: index + 1 };
     }
   }
   return null;
 }
 
 /**
- * 解析一份 Agent 协议载荷，兼容「完整输出」与「仅续写预填充后半段」两种形态。
- * @param raw 模型返回的原始文本
- * @param prefill 该请求尾段预填充文本，可为空
- * @returns 解析出的对象
+ * 从任意文本里提取首个配平的 JSON 对象。
+ * @param text 模型返回的原始文本，可能带 Markdown 围栏或前后解释
+ * @returns 提取到的 JSON 子串；找不到返回 null
  */
-export function parseAgentJsonPayload_ACU(raw: string | null | undefined, prefill = ''): Record<string, unknown> {
-  const text = typeof raw === 'string' ? raw : '';
-  if (!text.trim()) failProtocol_ACU('内部 AI 返回为空');
-  const candidates = [text, `${prefill}${text}`];
-  for (const candidate of candidates) {
-    const extracted = extractFirstJsonObject_ACU(candidate);
-    if (!extracted) continue;
-    try {
-      const parsed = JSON.parse(extracted);
-      if (isRecord_ACU(parsed)) return parsed;
-    } catch {
+export function extractFirstJsonObject_ACU(text: string): string | null {
+  if (typeof text !== 'string') return null;
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+  return balancedObjectFrom_ACU(text, start)?.json ?? null;
+}
+
+/**
+ * 从任意文本里依次提取多个顶层配平 JSON 对象（已消费区间内的嵌套对象不重复提取）。
+ * @param text 模型返回的原始文本
+ * @returns 提取到的 JSON 子串列表，最多 6 个
+ */
+export function extractJsonObjects_ACU(text: string): string[] {
+  if (typeof text !== 'string') return [];
+  const objects: string[] = [];
+  let cursor = 0;
+  while (objects.length < JSON_OBJECT_SCAN_LIMIT_ACU) {
+    const start = text.indexOf('{', cursor);
+    if (start < 0) break;
+    const balanced = balancedObjectFrom_ACU(text, start);
+    if (!balanced) {
+      // 从该花括号起无法配平（多半是散文里的孤立花括号），跳过它继续找。
+      cursor = start + 1;
       continue;
     }
+    objects.push(balanced.json);
+    cursor = balanced.end;
   }
-  failProtocol_ACU('返回内容不包含可解析的 JSON 对象');
+  return objects;
+}
+
+function stripMarkdownFences_ACU(text: string): string {
+  return text.replace(/```[a-zA-Z]*\n?/g, '').trim();
+}
+
+/**
+ * 解析一份 Agent 协议载荷。对返回形态宽容：模型可以完整重输 JSON、只续写预填充、
+ * 或在 JSON 前后写自然语言——运行时按判别键从全文中挑出正确的动作对象。
+ * @param raw 模型返回的原始文本
+ * @param prefill 该请求尾段预填充文本，可为空
+ * @param requiredKeys 协议对象的判别键，含任意一个即视为目标对象；缺省不判别
+ * @returns 解析出的对象
+ */
+export function parseAgentJsonPayload_ACU(raw: string | null | undefined, prefill = '', requiredKeys: readonly string[] = []): Record<string, unknown> {
+  const text = typeof raw === 'string' ? raw : '';
+  if (!text.trim()) failProtocol_ACU('内部 AI 返回为空');
+  // 剥掉围栏后以 { 开头视为完整重输，原文优先；否则视为续写预填充，拼接候选优先。
+  const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+  const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+  let firstParsed: Record<string, unknown> | null = null;
+  for (const candidate of candidates) {
+    for (const extracted of extractJsonObjects_ACU(candidate)) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(extracted);
+      } catch {
+        continue;
+      }
+      if (!isRecord_ACU(parsed)) continue;
+      if (!requiredKeys.length || requiredKeys.some(key => key in parsed)) return parsed;
+      if (!firstParsed) firstParsed = parsed;
+    }
+  }
+  // 没有对象命中判别键时退回首个可解析对象，让上层契约校验给出准确的字段级报错。
+  if (firstParsed) return firstParsed;
+  failProtocol_ACU(`返回内容不包含可解析的 JSON 对象。模型返回片段：${text.trim().slice(0, 300)}`);
 }
 
 function parseDelegations_ACU(value: unknown): AgentDelegation_ACU[] {

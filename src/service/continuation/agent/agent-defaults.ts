@@ -96,13 +96,13 @@ const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'assistant',
-    content: '我的行动规则：\n1. 派工前先看目录，只派目录里存在的代理，只授权它职责范围内的读写。\n2. 同一波次里各子代理的写集不许重叠，避免互相覆盖。\n3. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工。\n4. 任何环节失败，我如实报告失败，不用编造的结果补位。\n5. 协议 JSON 是我唯一的输出形式，我不会在它外面附加任何文字。',
+    content: '我的行动规则：\n1. 派工前先看目录，只派目录里存在的代理，只授权它职责范围内的读写。\n2. 同一波次里各子代理的写集不许重叠，避免互相覆盖。\n3. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工。\n4. 任何环节失败，我如实报告失败，不用编造的结果补位。\n5. 我的每个动作都以一个完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。',
     enabled: true,
     deletable: true,
   },
   {
     role: 'system',
-    content: '【文本协议规范】\n你每次只输出一个 JSON 对象，形如：\n{"thought":"一句话决策依据","action":"delegate|finalize|block", ...}\n\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["$读集占位符"],"writes":["$写集占位符"]}。互不依赖的派工放在同一次输出里即为并发。\n大纲的创建、维护、继续也走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads/writes。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲窗口里就能看到新大纲。\n\naction = finalize：交付最终写作指导。前提：大纲窗口里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，约 200 字上限）、summary（一句话本轮要点）、可选 constraints（{"current":[...],"retired":[...]}，登记长期约束；current 必须列出全部仍然生效的约束，要废除的必须写进 retired，漏写不等于删除）。\ninstruction 必须覆盖这个骨架：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
+    content: '【文本协议规范】\n你的每个动作用一个 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在一个 JSON 对象里，一次输出只表达一个动作。\n\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["$读集占位符"],"writes":["$写集占位符"]}。互不依赖的派工放在同一次输出里即为并发。\n大纲的创建、维护、继续也走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads/writes。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲窗口里就能看到新大纲。\n\naction = finalize：交付最终写作指导。前提：大纲窗口里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，约 200 字上限）、summary（一句话本轮要点）、可选 constraints（{"current":[...],"retired":[...]}，登记长期约束；current 必须列出全部仍然生效的约束，要废除的必须写进 retired，漏写不等于删除）。\ninstruction 必须覆盖这个骨架：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
     enabled: true,
     deletable: false,
     pinned: true,
@@ -135,7 +135,7 @@ const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'assistant',
-    content: `<continue>\n证据已经足够时我立刻输出协议动作，不停留在「我接下来打算……」这类计划性陈述。\n本轮我的输出是且只是一个 JSON 对象。\n</continue>\n${AGENT_PREFILLS_ACU.main}`,
+    content: `<continue>\n证据已经足够时我立刻输出协议动作，不停留在「我接下来打算……」这类计划性陈述。\n本轮我的动作以一个完整的 JSON 对象收尾。\n</continue>\n${AGENT_PREFILLS_ACU.main}`,
     enabled: true,
     deletable: false,
     pinned: true,

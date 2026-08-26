@@ -94,6 +94,27 @@ describe('useContinuationRuntime', () => {
     expect(continuation.task.value).toBeNull();
   });
 
+  it('创建任务成功后自动开始第一轮，创建失败则不继续', async () => {
+    const pausedTask = { taskId: 'task-1', status: 'paused', stopReason: null, activeStageId: null, stages: [] };
+    const createdEnvelope = { schemaVersion: 1, settings: {}, activeTask: pausedTask } as any;
+    harness.createTask.mockResolvedValue({ envelope: createdEnvelope, task: pausedTask });
+    harness.read.mockReturnValue(createdEnvelope);
+    harness.continueTask.mockResolvedValue({ envelope: createdEnvelope, task: pausedTask });
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+    continuation.originInstruction.value = '推进剧情';
+
+    await continuation.createTask();
+    expect(harness.createTask).toHaveBeenCalledOnce();
+    expect(harness.continueTask).toHaveBeenCalledOnce();
+
+    harness.createTask.mockRejectedValue(new Error('创建失败'));
+    harness.continueTask.mockClear();
+    continuation.originInstruction.value = '再来一次';
+    await continuation.createTask();
+    expect(harness.continueTask).not.toHaveBeenCalled();
+  });
+
   it('将设置保存和预览确认经由编排器处理，不直接发送宿主消息', async () => {
     const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
     const continuation = useContinuationRuntime();

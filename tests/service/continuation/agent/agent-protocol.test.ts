@@ -35,6 +35,36 @@ describe('Agent 文本协议 JSON 提取', () => {
     expect(continued).toMatchObject({ thought: '够了', action: 'finalize', instruction: '写' });
   });
 
+  it('续写形态里 delegations 的嵌套对象不会被误选为协议对象', () => {
+    // 真实回归场景（gemini 返回）：thought 正文续写在前，delegations 数组里嵌着代理对象。
+    const raw = '大纲窗口显示尚无可执行的大纲轮次，必须先派工 outline-architect 创建首个阶段大纲。",\n'
+      + '  "action": "delegate",\n'
+      + '  "delegations": [\n'
+      + '    {\n      "agentName": "outline-architect",\n      "prompt": "基于目前的开头创建本故事第一个阶段大纲",\n      "reads": [],\n      "writes": []\n    }\n'
+      + '  ]\n}';
+    const payload = parseAgentJsonPayload_ACU(raw, AGENT_PREFILLS_ACU.main, ['action']);
+    expect(payload.action).toBe('delegate');
+    expect(payload.thought).toContain('必须先派工 outline-architect');
+    expect(Array.isArray(payload.delegations)).toBe(true);
+  });
+
+  it('模型在 JSON 前后写自然语言时按判别键挑出动作对象', () => {
+    const raw = '我先梳理一下思路：当前需要交付。{无关的花括号碎片\n'
+      + '```json\n{"thought":"证据足够","action":"finalize","instruction":"按第一轮写"}\n```\n以上就是我的决定。';
+    const payload = parseAgentJsonPayload_ACU(raw, AGENT_PREFILLS_ACU.main, ['action']);
+    expect(payload).toMatchObject({ action: 'finalize', instruction: '按第一轮写' });
+  });
+
+  it('无判别键命中时退回首个可解析对象，交由上层契约给出字段级报错', () => {
+    const payload = parseAgentJsonPayload_ACU('{"foo":"bar"}', AGENT_PREFILLS_ACU.main, ['action']);
+    expect(payload).toEqual({ foo: 'bar' });
+  });
+
+  it('完全无 JSON 时报错并附模型原文片段', () => {
+    expect(() => parseAgentJsonPayload_ACU('我拒绝输出任何结构化内容', AGENT_PREFILLS_ACU.main, ['action']))
+      .toThrowError(/模型返回片段：我拒绝输出任何结构化内容/);
+  });
+
   it('空返回与无 JSON 返回都按协议错误处理', () => {
     expect(() => parseAgentJsonPayload_ACU('   ')).toThrowError(/返回为空/);
     expect(() => parseAgentJsonPayload_ACU('我拒绝输出 JSON')).toThrowError(/不包含可解析的 JSON/);

@@ -92,6 +92,13 @@ const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], 
   reviewer: AGENT_PREFILLS_ACU.reviewer,
 };
 
+/** 各类子代理契约对象的判别键：解析器据此从模型全文中挑出正确的 JSON 对象。 */
+const KIND_PAYLOAD_KEYS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = {
+  maintain: ['delta', 'summary', 'needMore'],
+  plan: ['recommendation', 'summary', 'needMore'],
+  review: ['verdict', 'needMore'],
+};
+
 function rejectDelegation_ACU(message: string, details?: Record<string, unknown>): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
 }
@@ -226,7 +233,7 @@ export class AgentSubagentRuntime_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理结果已失效', false));
       }
       try {
-        const payload = parseAgentJsonPayload_ACU(raw, prefill);
+        const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
         return {
           agentName: definition.name,
           kind: definition.kind,

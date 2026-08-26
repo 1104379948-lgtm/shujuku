@@ -285,7 +285,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 结果已失效', false));
       }
       try {
-        const payload = parseAgentJsonPayload_ACU(raw, AGENT_PREFILLS_ACU.main);
+        const payload = parseAgentJsonPayload_ACU(raw, AGENT_PREFILLS_ACU.main, ['action']);
         const action = parseAgentMainAction_ACU(payload, allowDelegate);
         // 没有可执行的大纲轮次就不存在「本轮」，finalize 无从谈起；拒绝并回灌，让主 Agent 先走大纲子代理。
         if (action.kind === 'finalize' && !request.readContext().turn) {
@@ -294,11 +294,13 @@ export class ContinuationAgentTurnPlanner_ACU {
         return { action, attempts: attempt + 1 };
       } catch (error) {
         lastReason = compactAgentProtocolError_ACU(error);
-        logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 输出被拒绝`, detail: lastReason, ok: false });
+        // 会话流必须展示模型原文片段：解析被拒不等于模型没输出，用户要能看到它实际返回了什么。
+        const snippet = String(raw ?? '').trim().slice(0, 300) || '(空)';
+        logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 输出被拒绝`, detail: `${lastReason}\n模型返回片段：${snippet}`, ok: false });
       }
     }
 
-    failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', `主 Agent 连续 ${retries + 1} 次返回不符合协议`, { lastReason });
+    failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', `主 Agent 连续 ${retries + 1} 次返回不符合协议：${lastReason}`, { lastReason });
   }
 
   private renderUnsettledRange_ACU(context: AgentResolveContext_ACU): string {
