@@ -25,14 +25,14 @@ describe('host input helpers', () => {
     textarea.val.mockReturnValue('原始输入');
 
     expect(getSendTextareaValue_ACU()).toBe('原始输入');
-    setSendTextareaValue_ACU('下一条消息');
+    expect(setSendTextareaValue_ACU('下一条消息')).toBe(true);
 
     expect(textarea.val).toHaveBeenCalledWith('下一条消息');
     expect(textarea.trigger).toHaveBeenCalledWith('input');
   });
 
   it('点击宿主发送按钮', () => {
-    clickSendButton_ACU();
+    expect(clickSendButton_ACU()).toBe(true);
 
     expect(h.jquery).toHaveBeenCalledWith('#send_but');
     expect(sendButton.click).toHaveBeenCalledTimes(1);
@@ -42,7 +42,7 @@ describe('host input helpers', () => {
     h.jquery.mockImplementation(() => { throw new Error('host unavailable'); });
 
     expect(getSendTextareaValue_ACU()).toBe('');
-    expect(() => setSendTextareaValue_ACU('ignored')).not.toThrow();
-    expect(() => clickSendButton_ACU()).not.toThrow();
+    expect(setSendTextareaValue_ACU('ignored')).toBe(false);
+    expect(clickSendButton_ACU()).toBe(false);
   });
 });

@@ -355,8 +355,6 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
     "manualSelection": []
   },
   "loopSettings": {
-    "quickReplyContent": [],
-    "currentPromptIndex": 0,
     "loopTags": "",
     "loopDelay": 5,
     "retryDelay": 3,
@@ -542,8 +540,6 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
     "books": {}
   },
   "loopSettings": {
-    "quickReplyContent": [],
-    "currentPromptIndex": 0,
     "loopTags": "",
     "loopDelay": 5,
     "retryDelay": 3,

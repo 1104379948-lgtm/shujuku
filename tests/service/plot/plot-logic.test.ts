@@ -26,7 +26,7 @@ vi.mock('../../../src/shared/defaults-json.js', () => ({
     contextExcludeRules: [],
     contextExtractTags: '',
     contextExcludeTags: '',
-    loopSettings: { maxRetries: 3, quickReplyContent: [] },
+    loopSettings: { maxRetries: 3 },
     prompts: [
       { id: 'mainPrompt', content: '默认主提示词' },
       { id: 'systemPrompt', content: '默认系统提示词' },
@@ -164,21 +164,20 @@ beforeEach(() => {
 
 // ═══ ensureLoopPromptsArray_ACU ═══
 describe('ensureLoopPromptsArray_ACU', () => {
-  it('字符串迁移为数组', () => {
+  it('清除字符串形式的废弃循环字段', () => {
     const ps: any = { loopSettings: { quickReplyContent: '提示词' } };
     ensureLoopPromptsArray_ACU(ps);
-    expect(ps.loopSettings.quickReplyContent).toEqual(['提示词']);
-    expect(ps.loopSettings.currentPromptIndex).toBe(0);
+    expect(ps.loopSettings).toEqual({});
   });
-  it('空字符串迁移为空数组', () => {
+  it('清除空字符串形式的废弃循环字段', () => {
     const ps: any = { loopSettings: { quickReplyContent: '  ' } };
     ensureLoopPromptsArray_ACU(ps);
-    expect(ps.loopSettings.quickReplyContent).toEqual([]);
+    expect(ps.loopSettings).toEqual({});
   });
-  it('已是数组不变', () => {
-    const ps: any = { loopSettings: { quickReplyContent: ['a', 'b'], currentPromptIndex: 1 } };
+  it('清除数组和索引并保留其余 loop 设置', () => {
+    const ps: any = { loopSettings: { quickReplyContent: ['a', 'b'], currentPromptIndex: 1, maxRetries: 3, loopDelay: 500 } };
     ensureLoopPromptsArray_ACU(ps);
-    expect(ps.loopSettings.quickReplyContent).toEqual(['a', 'b']);
+    expect(ps.loopSettings).toEqual({ maxRetries: 3, loopDelay: 500 });
   });
   it('null plotSettings 不报错', () => {
     expect(() => ensureLoopPromptsArray_ACU(null as any)).not.toThrow();
@@ -186,10 +185,10 @@ describe('ensureLoopPromptsArray_ACU', () => {
   it('无 loopSettings 不报错', () => {
     expect(() => ensureLoopPromptsArray_ACU({})).not.toThrow();
   });
-  it('currentPromptIndex 越界时重置为 0', () => {
-    const ps: any = { loopSettings: { quickReplyContent: ['a'], currentPromptIndex: 5 } };
+  it('仅有索引时也会清除', () => {
+    const ps: any = { loopSettings: { currentPromptIndex: 5, maxRetries: 3 } };
     ensureLoopPromptsArray_ACU(ps);
-    expect(ps.loopSettings.currentPromptIndex).toBe(0);
+    expect(ps.loopSettings).toEqual({ maxRetries: 3 });
   });
 });
 
@@ -445,6 +444,15 @@ describe('normalizePlotPresetExcludeRules_ACU', () => {
     const result = normalizePlotPresetExcludeRules_ACU(preset);
     expect(result.contextExtractTags).toBeUndefined();
     expect(result.contextExcludeTags).toBeUndefined();
+  });
+  it('清除已废弃的循环提示词字段并保留其他 loop 设置', () => {
+    const preset: any = {
+      name: '预设',
+      loopSettings: { quickReplyContent: ['旧提示词'], currentPromptIndex: 1, maxRetries: 4, loopDelay: 250 },
+    };
+    const result = normalizePlotPresetExcludeRules_ACU(preset);
+    expect(result.loopSettings).toEqual({ maxRetries: 4, loopDelay: 250 });
+    expect(preset.loopSettings.quickReplyContent).toEqual(['旧提示词']);
   });
 });
 
@@ -792,6 +800,18 @@ describe('applyPlotPresetToSettings_ACU', () => {
     applyPlotPresetToSettings_ACU(plotSettings, preset);
     expect(plotSettings.loopSettings.maxRetries).toBe(5);
   });
+  it('应用预设时不让废弃循环字段留在运行时设置中', () => {
+    const plotSettings: any = {
+      prompts: [],
+      loopSettings: { quickReplyContent: ['旧设置'], currentPromptIndex: 1, maxRetries: 3 },
+    };
+    const preset: any = {
+      name: '预设',
+      loopSettings: { quickReplyContent: ['旧预设'], currentPromptIndex: 0, maxRetries: 5, loopDelay: 300 },
+    };
+    applyPlotPresetToSettings_ACU(plotSettings, preset);
+    expect(plotSettings.loopSettings).toEqual({ maxRetries: 5, loopDelay: 300 });
+  });
 });
 
 // ═══ resetPlotSettingsToDefault_ACU ═══
@@ -809,6 +829,14 @@ describe('resetPlotSettingsToDefault_ACU', () => {
     expect(result!.promptPresets).toEqual([{ name: '保留预设' }]);
     expect(result!.lastUsedPresetName).toBe('保留名称');
     expect(result!.globalRevision).toBe(5);
+  });
+  it('重置时清理保留预设中的废弃循环字段', () => {
+    const plotSettings: any = {
+      prompts: [],
+      promptPresets: [{ name: '保留预设', loopSettings: { quickReplyContent: ['旧提示词'], currentPromptIndex: 0, maxRetries: 3 } }],
+    };
+    const result = resetPlotSettingsToDefault_ACU(plotSettings);
+    expect(result!.promptPresets).toEqual([{ name: '保留预设', loopSettings: { maxRetries: 3 } }]);
   });
   it('null 输入返回 null', () => {
     expect(resetPlotSettingsToDefault_ACU(null as any)).toBeNull();
@@ -833,6 +861,15 @@ describe('replaceCurrentPlotSettingsWithSnapshot_ACU', () => {
     expect(result!.promptPresets).toEqual([{ name: '保留' }]);
     expect(result!.lastUsedPresetName).toBe('保留名');
     expect(result!.globalRevision).toBe(3);
+  });
+  it('恢复聊天快照时清理保留预设中的废弃循环字段', () => {
+    vi.mocked(sanitizePlotSettingsSnapshotForChat_ACU).mockReturnValueOnce({ rateMain: 0.9 } as any);
+    const plotSettings: any = {
+      prompts: [],
+      promptPresets: [{ name: '保留', loopSettings: { quickReplyContent: ['旧提示词'], currentPromptIndex: 0, maxRetries: 3 } }],
+    };
+    const result = replaceCurrentPlotSettingsWithSnapshot_ACU(plotSettings, { rateMain: 0.9 });
+    expect(result!.promptPresets).toEqual([{ name: '保留', loopSettings: { maxRetries: 3 } }]);
   });
   it('null plotSettings 返回 null', () => {
     expect(replaceCurrentPlotSettingsWithSnapshot_ACU(null as any, {})).toBeNull();

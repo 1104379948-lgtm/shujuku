@@ -9,20 +9,27 @@ export function getSendTextareaValue_ACU(): string {
     }
 }
 
-export function setSendTextareaValue_ACU(text: string): void {
+/** Writes the host textarea and reports availability instead of silently claiming success. */
+export function setSendTextareaValue_ACU(text: string): boolean {
     try {
         const $textarea = jQuery_API_ACU?.('#send_textarea');
+        if (!$textarea || typeof $textarea.val !== 'function' || typeof $textarea.trigger !== 'function') return false;
         $textarea?.val(text);
         $textarea?.trigger('input');
+        return true;
     } catch {
-        // 宿主输入框在页面切换期间可能暂时不存在。
+        return false;
     }
 }
 
-export function clickSendButton_ACU(): void {
+/** Clicks the host send button and reports availability instead of swallowing it. */
+export function clickSendButton_ACU(): boolean {
     try {
-        jQuery_API_ACU?.('#send_but').click();
+        const $button = jQuery_API_ACU?.('#send_but');
+        if (!$button || typeof $button.click !== 'function') return false;
+        $button.click();
+        return true;
     } catch {
-        // 宿主发送按钮在页面切换期间可能暂时不存在。
+        return false;
     }
 }

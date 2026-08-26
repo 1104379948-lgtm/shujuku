@@ -3,7 +3,6 @@
  */
 
 export {
-  ensureLoopPromptsArray_ACU,
   ensureTagRulesCompat_ACU,
   getLegacyPromptFromThree_ACU,
   getLegacyPromptTextsFromPromptGroup_ACU,
@@ -45,4 +44,4 @@ export {
 
 export { showOptimizationOverlay_ACU, hideOptimizationOverlay_ACU, showOptimizationProgressToast_ACU, hideOptimizationProgressToast_ACU } from './optimization-ui-overlay';
 export { reoptimizeMessage_ACU, executeContentOptimization_ACU } from './optimization-ui-exec';
-export { renderExcludeRuleRows_ACU, appendExcludeRuleRow_ACU, readExcludeRulesFromRows_ACU, renderLoopPromptsList_ACU, saveLoopPromptsFromUI_ACU } from './optimization-ui-rules';
+export { renderExcludeRuleRows_ACU, appendExcludeRuleRow_ACU, readExcludeRulesFromRows_ACU } from './optimization-ui-rules';

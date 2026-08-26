@@ -26,16 +26,14 @@ vi.mock('../../src/presentation/components/worldbook-selector', () => ({
 vi.mock('../../src/presentation/components/plot-editors', () => ({ addPlotTaskFromUI_ACU: mocks.noop, deleteCurrentPlotTaskFromUI_ACU: mocks.noop, flushCurrentPlotTaskEditorState_ACU: mocks.noop, getPlotPromptGroupFromUI_ACU: mocks.noop, loadCurrentPlotTaskToUI_ACU: mocks.noop, moveCurrentPlotTask_ACU: mocks.noop, renderPlotPromptSegments_ACU: mocks.noop, renderPlotTaskList_ACU: mocks.noop, saveCurrentPlotTaskApiPresetFromUI_ACU: mocks.noop, saveCurrentPlotTaskFromUI_ACU: mocks.noop, schedulePlotTaskAutoSave_ACU: mocks.noop, selectPlotTaskForEditing_ACU: mocks.noop }));
 vi.mock('../../src/service/plot/plot-state', () => ({ buildDefaultPlotPromptGroup_ACU: mocks.noop }));
 vi.mock('../../src/service/template/chat-scope', () => ({ getCurrentChatPlotScopeState_ACU: mocks.noop }));
-vi.mock('../../src/presentation/triggers/auto-loop', () => ({ startAutoLoop_ACU: mocks.noop, stopAutoLoop_ACU: mocks.noop }));
 vi.mock('../../src/presentation/pages/popup-helpers', () => ({ getCurrentPlotSettingsFromUI_ACU: mocks.noop, loadPlotPresetSelect_ACU: mocks.noop, loadPlotSettingsToUI_ACU: mocks.noop, savePlotPresetAsNew_ACU: mocks.noop }));
 vi.mock('../../src/presentation/components/pipeline-ui-helpers', () => ({ refreshPresetUIAfterSwitch_ACU: mocks.noop }));
 vi.mock('../../src/presentation/components/optimization-ui', () => ({
   appendExcludeRuleRow_ACU: mocks.noop, applyGlobalPlotPresetSelectionForEditor_ACU: mocks.noop, applyPlotPresetToSettings_ACU: mocks.noop,
-  clearPlotPresetBindingForChat_ACU: mocks.noop, ensureLoopPromptsArray_ACU: mocks.noop, ensurePlotTasksCompat_ACU: mocks.noop,
+  clearPlotPresetBindingForChat_ACU: mocks.noop, ensurePlotTasksCompat_ACU: mocks.noop,
   getActivePlotEditorSettings_ACU: mocks.noop, getCurrentRuntimePlotPresetName_ACU: mocks.noop, getPlotPresetBindingForChat_ACU: mocks.noop,
   isDefaultPlotPresetSelection_ACU: mocks.noop, normalizePlotPresetExcludeRules_ACU: mocks.noop, normalizePlotPresetSelectionValue_ACU: mocks.noop,
-  persistPlotPresetSelectionState_ACU: mocks.noop, readExcludeRulesFromRows_ACU: mocks.noop, renderLoopPromptsList_ACU: mocks.noop,
-  saveLoopPromptsFromUI_ACU: mocks.noop, setActivePlotEditorSettings_ACU: mocks.noop, setCurrentEditablePlotPresetState_ACU: mocks.noop,
+  persistPlotPresetSelectionState_ACU: mocks.noop, readExcludeRulesFromRows_ACU: mocks.noop, setActivePlotEditorSettings_ACU: mocks.noop, setCurrentEditablePlotPresetState_ACU: mocks.noop,
   setPlotPromptContentByIdForSettings_ACU: mocks.noop, stripPlotPresetWorldbookEntrySelectionForExport_ACU: mocks.noop,
   switchCurrentChatPlotPreset_ACU: mocks.noop,
 }));

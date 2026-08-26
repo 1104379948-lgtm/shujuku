@@ -5,7 +5,7 @@ import { handleApiResponse_ACU } from './prompt-builder';
 import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
-import { resolveApiConfigByPreset_ACU } from '../settings/api-preset-service';
+import { resolveApiConfigByPreset_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
 
 function normalizeExcludeBodyParamsForSillyTavern_ACU(raw: any): string {
   if (typeof raw !== 'string') return '';
@@ -308,6 +308,61 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
 
     const content = await handleApiResponse_ACU(res, signal);
     return content ? content.trim() : null;
+}
+
+/**
+ * Uses a configuration that was already resolved by a caller. This must not look up a preset
+ * again, because a fixed preset's fail-closed decision would otherwise race a later fallback.
+ */
+export interface ResolvedPresetCallLifecycle_ACU {
+    beforeMainApiCall?: () => void;
+    afterMainApiCall?: () => void;
+}
+
+export async function callAIWithResolvedPreset_ACU(
+    messages: any[],
+    resolved: { apiMode: ApiPresetApiMode_ACU; apiConfig: ApiPresetApiConfig_ACU; tavernProfile: string },
+    signal?: AbortSignal | null,
+    lifecycle?: ResolvedPresetCallLifecycle_ACU,
+): Promise<string | null> {
+    if (!Array.isArray(messages) || messages.length === 0) {
+        throw new Error('内部 AI 消息必须是非空数组。');
+    }
+    const maxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
+    if (resolved.apiMode === 'tavern') {
+        const response = await sendConnectionManagerRequest_ACU(resolved.tavernProfile, messages, maxTokens);
+        assertNotAborted_ACU(signal);
+        if (typeof response?.result?.choices?.[0]?.message?.content === 'string') return response.result.choices[0].message.content.trim();
+        if (typeof response?.content === 'string') return response.content.trim();
+        return null;
+    }
+    if (resolved.apiConfig.useMainApi) {
+        lifecycle?.beforeMainApiCall?.();
+        let operation: Promise<string>;
+        try {
+            // Only synchronous GENERATION_STARTED delivery can be attributed:
+            // the host event has no request ID, so keeping this window open for
+            // the whole request would let an unrelated later generation match.
+            operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false, max_tokens: maxTokens });
+        } finally {
+            lifecycle?.afterMainApiCall?.();
+        }
+        const response = await operation!;
+        assertNotAborted_ACU(signal);
+        return typeof response === 'string' ? response.trim() : null;
+    }
+    if (!resolved.apiConfig.url || !resolved.apiConfig.model) {
+        throw new Error('自定义 API 的 URL 或模型未配置。');
+    }
+    const response = await fetch('/api/backends/chat-completions/generate', {
+        method: 'POST',
+        headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, { maxTokens, stripModelPrefix: false })),
+        signal: signal || undefined,
+    });
+    if (!response.ok) throw new Error(`API 请求失败: ${response.status}`);
+    const content = await handleApiResponse_ACU(response, signal);
+    return typeof content === 'string' && content.trim() ? content.trim() : null;
 }
 
 /**

@@ -1,282 +1,174 @@
 /**
- * ContinuationPage 集成 — 智能续写页
- *
+ * ContinuationPage — 仅验证 v2 任务 UI 到 runtime composable 的派发。
+ * 宿主发送归属由 useContinuationRuntime 的独立测试覆盖。
  * @vitest-environment jsdom
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { JSDOM } from 'jsdom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createApp, nextTick, ref } from 'vue';
 
-const STORAGE_KEY = 'acu_v2_ui_state';
+const chatTick = ref(0);
+const task = ref<any>(null);
+const activeStage = ref<any>(null);
+const activeRevision = ref<any>(null);
+const activeNode = ref<any>(null);
+const activeTurn = ref<any>(null);
+const settings = ref<any>(null);
+const busy = ref(false);
+const canContinue = ref(false);
+const awaitingHostResult = ref(false);
+const originInstruction = ref('');
+const statusText = ref('尚未创建任务');
+const initialize = vi.fn(async () => undefined);
+const refresh = vi.fn();
+const createTask = vi.fn(async () => undefined);
+const continueTask = vi.fn(async () => undefined);
+const retryCurrentTurn = vi.fn(async () => undefined);
+const stopTask = vi.fn(async () => undefined);
+const replanRemaining = vi.fn(async () => undefined);
+const replanRemainingWithInstruction = vi.fn(async () => undefined);
+const acceptOutline = vi.fn(async () => true);
+const abandonAndCreate = vi.fn(async () => true);
+const saveSettings = vi.fn(async () => true);
 
-function setParent(parent: any) {
-  Object.defineProperty(window, 'parent', {
-    value: parent,
-    writable: true,
-    configurable: true,
-  });
-}
+vi.mock('../../../src/presentation-v2/composables/useContinuationRuntime', () => ({
+ useContinuationRuntime: () => ({
+    activeStage, activeRevision, activeNode, activeTurn, busy, canContinue, createTask, continueTask, initialize,
+    isAwaitingHostResult: awaitingHostResult, originInstruction, refresh,
+    replanRemaining, replanRemainingWithInstruction, retryCurrentTurn, acceptOutline,
+    abandonAndCreate, saveSettings, settings, statusText, stopTask, task,
+  }),
+}));
+vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({
+  useChatChangedTick: () => chatTick,
+}));
 
-function stopContinuationLoop(doc: Document = document): void {
-  const stopButton = Array.from(doc.querySelectorAll('button'))
-    .find(button => (button.textContent || '').includes('停止智能续写')) as HTMLButtonElement | undefined;
-  stopButton?.click();
-}
-
-function createSettings() {
-  return {
-    plotSettings: {
-      enabled: true,
-      contextTurnCount: 3,
-      contextExtractTags: '',
-      contextExtractRules: [{ start: '<content>', end: '</content>' }],
-      contextExcludeTags: '',
-      contextExcludeRules: [{ start: '<think>', end: '</think>' }],
-      loopSettings: {
-        quickReplyContent: ['继续推进剧情'],
-        currentPromptIndex: 0,
-        loopTags: 'content',
-        loopDelay: 5,
-        retryDelay: 3,
-        loopTotalDuration: 20,
-        maxRetries: 3,
-      },
-    },
-    contentOptimizationSettings: { apiPreset: '' },
-  } as any;
-}
-
-async function mountContinuationPage(settings = createSettings(), loopStateOverrides: Record<string, any> = {}) {
-  vi.resetModules();
-  document.body.innerHTML = '';
-  document.head.innerHTML = '';
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ router: { activePageId: 'continuation' } }));
-  const saveSettings = vi.fn(() => ({ saved: true }));
-  const loopState = {
-    isLooping: false,
-    isRetrying: false,
-    timerId: null,
-    retryCount: 0,
-    startTime: 0,
-    totalDuration: 0,
-    tickInterval: null,
-    awaitingReply: false,
-    ...loopStateOverrides,
+function setTask(status = 'paused', pending = false): void {
+  task.value = {
+    taskId: 'task-1', originInstruction: '让主角找到出口', status, stopReason: null,
+    activeStageId: 'stage-1', stages: [{
+      stageId: 'stage-1', stageNumber: 1, status: 'running', activeRevision: 2,
+      completedTurns: 3, chronicleRange: null, revisions: [{
+        revision: 2, reason: 'initial', frozen: true,
+        outline: { title: '逃离计划', goal: '让主角找到出口', totalTurns: 6, nodes: [] },
+      }],
+    }], timeline: [],
+    pendingHostTurn: pending ? { status: 'awaiting_generation' } : null,
   };
+  activeStage.value = task.value.stages[0];
+  activeRevision.value = task.value.stages[0].revisions[0];
+  canContinue.value = status === 'paused';
+  awaitingHostResult.value = pending;
+  statusText.value = pending ? '等待宿主正文' : status;
+}
 
-  vi.doMock('../../../src/service/runtime/state-manager', () => ({
-    settings_ACU: settings,
-    currentChatFileIdentifier_ACU: 'chat-continuation',
-    currentJsonTableData_ACU: null,
-    getCurrentIsolationKey_ACU: () => '',
-    coreApisAreReady_ACU: true,
-    loopState_ACU: loopState,
-  }));
-  vi.doMock('../../../src/service/settings/settings-service', () => ({
-    saveSettings_ACU: saveSettings,
-    setGlobalPlotEnabled_ACU: vi.fn(),
-  }));
-  vi.doMock('../../../src/service/ai/ai-service', () => ({
-    getConnectionManagerProfiles_ACU: () => [],
-    fetchAvailableModels_ACU: vi.fn(async () => ({ success: true, models: [] })),
-  }));
-  vi.doMock('../../../src/service/worldbook/pipeline', () => ({
-    getWorldbookNames_ACU: vi.fn(async () => []),
-    getLorebookEntriesByNames_ACU: vi.fn(async () => ({})),
-  }));
-  vi.doMock('../../../src/service/worldbook/worldbook-service', () => ({
-    getCurrentCharPrimaryLorebook_ACU: vi.fn(async () => ''),
-    getCharLorebooks_ACU: vi.fn(async () => ({ primary: '', additional: [] })),
-  }));
-  vi.doMock('../../../src/service/loop/loop-controller', async () => {
-    const state = await import('../../../src/service/runtime/state-manager');
-    return {
-      validateLoopStartParams_ACU: vi.fn(() => null),
-      initLoopState_ACU: vi.fn(() => {
-        state.loopState_ACU.isLooping = true;
-        state.loopState_ACU.startTime = Date.now();
-        state.loopState_ACU.totalDuration = 20 * 60 * 1000;
-        return { loopDuration: state.loopState_ACU.totalDuration };
-      }),
-      stopLoopState_ACU: vi.fn(() => {
-        state.loopState_ACU.isLooping = false;
-        if (state.loopState_ACU.timerId) {
-          clearTimeout(state.loopState_ACU.timerId);
-          state.loopState_ACU.timerId = null;
-        }
-        if (state.loopState_ACU.tickInterval) {
-          clearInterval(state.loopState_ACU.tickInterval);
-          state.loopState_ACU.tickInterval = null;
-        }
-      }),
-      getNextLoopPrompt_ACU: vi.fn(() => settings.plotSettings.loopSettings.quickReplyContent[0]),
-    };
-  });
+async function mountPage() {
+  const Page = (await import('../../../src/presentation-v2/pages/ContinuationPage.vue')).default;
+  const el = document.createElement('div');
+  document.body.appendChild(el);
+  const app = createApp(Page);
+  app.mount(el);
+  await nextTick();
+  return { app, el };
+}
 
-  const mount = await import('../../../src/presentation-v2/bootstrap/mount');
-  await mount.openAcuV2App();
-  await new Promise(r => setTimeout(r, 0));
-  return { mount, settings, saveSettings, loopState };
+function buttonByText(el: Element, text: string): HTMLButtonElement | undefined {
+  return Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.includes(text));
 }
 
 beforeEach(() => {
-  setParent(window);
-  localStorage.clear();
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
+  document.body.innerHTML = '';
+  task.value = null;
+  activeStage.value = null;
+  activeRevision.value = null;
+  activeNode.value = null;
+  activeTurn.value = null;
+  settings.value = null;
+  busy.value = false;
+  canContinue.value = false;
+  awaitingHostResult.value = false;
+  originInstruction.value = '';
+  statusText.value = '尚未创建任务';
+  chatTick.value = 0;
+  vi.clearAllMocks();
 });
 
+function setSettings(): void {
+  settings.value = {
+    stageSize: 'standard', customTurnMin: null, customTurnMax: null,
+    outlinePreview: false, autoNextStage: true, maxAutomaticStages: 6,
+    loopTags: '', loopDelaySeconds: 5, totalDurationMinutes: 0,
+    retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3,
+    contextTurnCount: 3, contextExtractRules: [], contextExcludeRules: [],
+    apiPresetMode: 'follow_plot', fixedApiPresetName: '',
+    outlinePrompt: [{ role: 'system', content: '规划', enabled: true, deletable: true }],
+    turnInstructionPrompt: [{ role: 'user', content: '续写', enabled: true, deletable: true }],
+  };
+}
+
+afterEach(() => { document.body.innerHTML = ''; });
+
 describe('ContinuationPage', () => {
-  it('渲染智能续写真实页面，不再是占位页', async () => {
-    const { mount } = await mountContinuationPage();
-
-    const page = document.querySelector('.acu-v2-continuation-page');
-    expect(page).not.toBeNull();
-    const text = page!.textContent || '';
-    expect(text).toContain('循环提示词');
-    expect(text).toContain('循环条件');
-    expect(text).toContain('运行控制');
-    expect(text).not.toContain('上下文过滤');
-    const promptTextarea = page!.querySelector('textarea') as HTMLTextAreaElement | null;
-    expect(promptTextarea?.value).toBe('继续推进剧情');
-    expect(Array.from(page!.querySelectorAll('.acu-panel__title')).map(el => el.textContent?.trim())).toEqual([
-      '循环条件',
-      '循环提示词',
-      '运行控制',
-    ]);
-    expect(text).not.toContain('阶段 0 占位页');
-    expect(text).not.toContain('外部导入');
-
-    mount.__resetAcuV2MountForTests();
+  it('显示任务创建入口，并将初始要求交给 runtime', async () => {
+    const { app, el } = await mountPage();
+    expect(el.textContent).toContain('智能续写任务');
+    expect(initialize).toHaveBeenCalledOnce();
+    expect(el.textContent).toContain('创建阶段大纲');
+    expect(el.textContent).not.toContain('循环提示词');
+    const textarea = el.querySelector('textarea')!;
+    textarea.value = '让主角找到出口';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    await nextTick();
+    buttonByText(el, '创建阶段大纲')!.click();
+    await nextTick();
+    expect(originInstruction.value).toBe('让主角找到出口');
+    expect(createTask).toHaveBeenCalledOnce();
+    app.unmount();
   });
 
-  it('每个 AcuPanel 都附常驻说明信息条', async () => {
-    const { mount } = await mountContinuationPage();
-
-    const panels = document.querySelectorAll('.acu-v2-continuation-page .acu-panel');
-    expect(panels).toHaveLength(3);
-    panels.forEach(panel => {
-      expect(panel.querySelector('.acu-panel__description-region .acu-info-banner')).not.toBeNull();
-    });
-
-    mount.__resetAcuV2MountForTests();
+  it('展示持久化任务状态并派发继续、重规划和停止操作', async () => {
+    setSettings();
+    setTask();
+    const { app, el } = await mountPage();
+    expect(el.textContent).toContain('第 1 阶段');
+    expect(el.textContent).toContain('完成轮次');
+    expect(el.textContent).toContain('让主角找到出口');
+    buttonByText(el, '继续当前轮次')!.click();
+    buttonByText(el, '重新规划剩余阶段')!.click();
+    buttonByText(el, '停止智能续写')!.click();
+    await nextTick();
+    expect(continueTask).toHaveBeenCalledOnce();
+    expect(replanRemainingWithInstruction).toHaveBeenCalledOnce();
+    expect(stopTask).toHaveBeenCalledOnce();
+    app.unmount();
   });
 
-  it('修改循环延时会写回 settings 并保存', async () => {
-    const { mount, settings, saveSettings } = await mountContinuationPage();
+  it('渲染大纲、执行回执、设置与伪 Role 提示词，并仅通过 runtime 保存设置', async () => {
+    setSettings();
+    setTask();
+    const { app, el } = await mountPage();
 
-    const delayPanel = Array.from(document.querySelectorAll('.acu-form-row'))
-      .find(row => (row.textContent || '').includes('循环延时')) as HTMLElement | undefined;
-    expect(delayPanel).not.toBeUndefined();
-    const input = delayPanel!.querySelector('input[type="number"]') as HTMLInputElement;
-    input.value = '9';
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-    await Promise.resolve();
-
-    expect(settings.plotSettings.loopSettings.loopDelay).toBe(9);
-    expect(saveSettings).toHaveBeenCalled();
-
-    mount.__resetAcuV2MountForTests();
+    expect(el.textContent).toContain('阶段大纲与执行回执');
+    expect(el.textContent).toContain('逃离计划');
+    expect(el.textContent).toContain('续写设置');
+    expect(el.textContent).toContain('伪 Role 提示词');
+    expect(el.textContent).toContain('总倒计时');
+    buttonByText(el, '保存续写设置')!.click();
+    await nextTick();
+    expect(saveSettings).toHaveBeenCalledOnce();
+    app.unmount();
   });
 
-  it('点击开始会写入酒馆输入框并触发发送按钮', async () => {
-    const { mount } = await mountContinuationPage();
 
-    const textarea = document.createElement('textarea');
-    textarea.id = 'send_textarea';
-    document.body.appendChild(textarea);
-    const sendButton = document.createElement('button');
-    sendButton.id = 'send_but';
-    const sendSpy = vi.fn();
-    sendButton.addEventListener('click', sendSpy);
-    document.body.appendChild(sendButton);
-
-    const startButton = Array.from(document.querySelectorAll('button'))
-      .find(button => (button.textContent || '').includes('开始智能续写')) as HTMLButtonElement | undefined;
-    expect(startButton).not.toBeUndefined();
-    expect(startButton!.disabled).toBe(false);
-    startButton!.click();
-    await new Promise(r => setTimeout(r, 150));
-
-    expect(textarea.value).toBe('继续推进剧情');
-    expect(sendSpy).toHaveBeenCalled();
-    expect((document.querySelector('.acu-v2-continuation-page__status') as HTMLElement).textContent || '').toContain('运行中');
-
-    stopContinuationLoop();
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('父文档挂载时点击开始会写入宿主酒馆输入框', async () => {
-    const parentDom = new JSDOM('<!doctype html><html><head></head><body></body></html>');
-    setParent(parentDom.window);
-    const { mount } = await mountContinuationPage();
-    const parentDoc = parentDom.window.document;
-
-    const textarea = parentDoc.createElement('textarea');
-    textarea.id = 'send_textarea';
-    parentDoc.body.appendChild(textarea);
-    const sendButton = parentDoc.createElement('button');
-    sendButton.id = 'send_but';
-    const sendSpy = vi.fn();
-    sendButton.addEventListener('click', sendSpy);
-    parentDoc.body.appendChild(sendButton);
-
-    const startButton = Array.from(parentDoc.querySelectorAll('button'))
-      .find(button => (button.textContent || '').includes('开始智能续写')) as HTMLButtonElement | undefined;
-    expect(startButton).not.toBeUndefined();
-    startButton!.click();
-    await new Promise(r => setTimeout(r, 150));
-
-    expect(textarea.value).toBe('继续推进剧情');
-    expect(sendSpy).toHaveBeenCalled();
-
-    stopContinuationLoop(parentDoc);
-    mount.__resetAcuV2MountForTests();
-    parentDom.window.close();
-    setParent(window);
-  });
-
-  it('打开页面时会从已有循环状态恢复倒计时', async () => {
-    const { mount } = await mountContinuationPage(createSettings(), {
-      isLooping: true,
-      startTime: Date.now() - 30_000,
-      totalDuration: 20 * 60 * 1000,
-    });
-
-    const statusText = (document.querySelector('.acu-v2-continuation-page__status') as HTMLElement).textContent || '';
-    expect(statusText).toContain('运行中');
-    expect(statusText).toContain('剩余');
-
-    stopContinuationLoop();
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('关闭新 UI 后重开会恢复倒计时显示', async () => {
-    const { mount } = await mountContinuationPage();
-
-    const textarea = document.createElement('textarea');
-    textarea.id = 'send_textarea';
-    document.body.appendChild(textarea);
-    const sendButton = document.createElement('button');
-    sendButton.id = 'send_but';
-    document.body.appendChild(sendButton);
-
-    const startButton = Array.from(document.querySelectorAll('button'))
-      .find(button => (button.textContent || '').includes('开始智能续写')) as HTMLButtonElement | undefined;
-    startButton!.click();
-    await Promise.resolve();
-
-    expect((document.querySelector('.acu-v2-continuation-page__status') as HTMLElement).textContent || '').toContain('剩余');
-
-    mount.closeAcuV2App();
-    await Promise.resolve();
-    await mount.openAcuV2App();
-    await new Promise(r => setTimeout(r, 0));
-
-    const reopenedStatusText = (document.querySelector('.acu-v2-continuation-page__status') as HTMLElement).textContent || '';
-    expect(reopenedStatusText).toContain('运行中');
-    expect(reopenedStatusText).toContain('剩余');
-
-    stopContinuationLoop();
-    mount.__resetAcuV2MountForTests();
+  it('等待宿主结果时隐藏会产生竞争的操作，并在聊天切换后刷新', async () => {
+    setTask('running', true);
+    const { app, el } = await mountPage();
+    expect(el.textContent).toContain('当前轮次正在等待宿主生成结束事件');
+    expect(buttonByText(el, '继续当前轮次')).toBeUndefined();
+    expect(buttonByText(el, '重新规划剩余阶段')).toBeUndefined();
+    expect(buttonByText(el, '停止智能续写')).toBeUndefined();
+    chatTick.value += 1;
+    await nextTick();
+    expect(refresh).toHaveBeenCalledOnce();
+    app.unmount();
   });
 });

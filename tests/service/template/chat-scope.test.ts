@@ -17,7 +17,6 @@ const {
   mockEnsureSheetOrderNumbers,
   mockCloneScopedConfigData,
   mockEnsurePlotPromptsArray,
-  mockEnsureLoopPromptsArray,
   mockEnsurePlotTasksCompat,
   mockGetPlotFinalDirectiveFromSource,
   mockSetPlotPromptContentById,
@@ -40,7 +39,6 @@ const {
   mockEnsureSheetOrderNumbers: vi.fn(() => false),
   mockCloneScopedConfigData: vi.fn((data: any) => data ? JSON.parse(JSON.stringify(data)) : null),
   mockEnsurePlotPromptsArray: vi.fn(),
-  mockEnsureLoopPromptsArray: vi.fn(),
   mockEnsurePlotTasksCompat: vi.fn(),
   mockGetPlotFinalDirectiveFromSource: vi.fn(() => ''),
   mockSetPlotPromptContentById: vi.fn(),
@@ -149,7 +147,6 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
 
 vi.mock('../../../src/service/plot/plot-logic', () => ({
   ensurePlotPromptsArray_ACU: mockEnsurePlotPromptsArray,
-  ensureLoopPromptsArray_ACU: mockEnsureLoopPromptsArray,
   ensurePlotTasksCompat_ACU: mockEnsurePlotTasksCompat,
   getPlotFinalDirectiveFromSource_ACU: mockGetPlotFinalDirectiveFromSource,
   normalizePlotPresetSelectionValue_ACU: mockNormalizePlotPresetSelectionValue,
@@ -281,6 +278,7 @@ describe('sanitizePlotSettingsSnapshotForChat_ACU', () => {
       promptPresets: ['preset1'],
       lastUsedPresetName: '预设A',
       rateMain: 5,
+      loopSettings: { quickReplyContent: ['废弃提示词'], currentPromptIndex: 2, maxRetries: 3 },
     });
     const result = sanitizePlotSettingsSnapshotForChat_ACU({ rateMain: 5 });
     expect(result).toBeDefined();
@@ -290,9 +288,9 @@ describe('sanitizePlotSettingsSnapshotForChat_ACU', () => {
     expect(result.lastUsedPresetName).toBeUndefined();
     // rateMain 应保留
     expect(result.rateMain).toBe(5);
+    expect(result.loopSettings).toEqual({ maxRetries: 3 });
     // 确保 plot-logic 的规范化函数被调用
     expect(mockEnsurePlotPromptsArray).toHaveBeenCalled();
-    expect(mockEnsureLoopPromptsArray).toHaveBeenCalled();
     expect(mockEnsurePlotTasksCompat).toHaveBeenCalled();
   });
 });

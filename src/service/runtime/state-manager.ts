@@ -183,12 +183,16 @@ export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, para
  * 事件 API 没有 generation id，因此按完成顺序（栈）配对；配合 makeFirst，避免其他插件在
  * 同一 ended 回调里新开 quiet 生成后覆盖当前正文生成的判定。
  */
-export function shouldProcessAutoTableUpdateForGenerationEnded_ACU() {
+export function consumeGenerationContextForEnded_ACU(): GenerationContext_ACU | null {
   removeExpiredGenerationContexts_ACU();
   const activeContext = generationGate_ACU.activeGenerations.pop();
   // lastGeneration 仅保留给旧调用方。已有受追踪生成全部消费后，不能重复使用最后一个
   // quiet 上下文，否则下一次无关 GENERATION_ENDED 会被持续误拦截。
-  const g = activeContext || (generationGate_ACU.generationSeq === 0 ? generationGate_ACU.lastGeneration : null);
+  return activeContext || (generationGate_ACU.generationSeq === 0 ? generationGate_ACU.lastGeneration : null);
+}
+
+export function shouldProcessAutoTableUpdateForGenerationEnded_ACU(context?: GenerationContext_ACU | null) {
+  const g = context === undefined ? consumeGenerationContextForEnded_ACU() : context;
   if (!g) return true;
   if (g.dryRun) return false;
   if (isQuietLikeGeneration_ACU(g.type, g.params)) return false;

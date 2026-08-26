@@ -12,10 +12,9 @@ import { setGlobalPlotEnabled_ACU } from '../../service/settings/settings-servic
 import { $popupInstance_ACU, $plotPromptSegmentsContainer_ACU, $plotTaskListContainer_ACU, _assignUIPlaceholders_ACU } from '../state/ui-refs';
 import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
 import { addPlotTaskFromUI_ACU, deleteCurrentPlotTaskFromUI_ACU, flushCurrentPlotTaskEditorState_ACU, getPlotPromptGroupFromUI_ACU, loadCurrentPlotTaskToUI_ACU, moveCurrentPlotTask_ACU, renderPlotPromptSegments_ACU, renderPlotTaskList_ACU, saveCurrentPlotTaskApiPresetFromUI_ACU, saveCurrentPlotTaskFromUI_ACU, schedulePlotTaskAutoSave_ACU, selectPlotTaskForEditing_ACU } from '../components/plot-editors';
-import { appendExcludeRuleRow_ACU, applyGlobalPlotPresetSelectionForEditor_ACU, applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensureLoopPromptsArray_ACU, ensurePlotTasksCompat_ACU, getActivePlotEditorSettings_ACU, getCurrentRuntimePlotPresetName_ACU, getPlotPresetBindingForChat_ACU, isDefaultPlotPresetSelection_ACU, normalizePlotPresetExcludeRules_ACU, normalizePlotPresetSelectionValue_ACU, persistPlotPresetSelectionState_ACU, readExcludeRulesFromRows_ACU, renderLoopPromptsList_ACU, saveLoopPromptsFromUI_ACU, setActivePlotEditorSettings_ACU, setCurrentEditablePlotPresetState_ACU, setPlotPromptContentByIdForSettings_ACU, stripPlotPresetWorldbookEntrySelectionForExport_ACU, switchCurrentChatPlotPreset_ACU } from '../components/optimization-ui';
+import { appendExcludeRuleRow_ACU, applyGlobalPlotPresetSelectionForEditor_ACU, applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensurePlotTasksCompat_ACU, getActivePlotEditorSettings_ACU, getCurrentRuntimePlotPresetName_ACU, getPlotPresetBindingForChat_ACU, isDefaultPlotPresetSelection_ACU, normalizePlotPresetExcludeRules_ACU, normalizePlotPresetSelectionValue_ACU, persistPlotPresetSelectionState_ACU, readExcludeRulesFromRows_ACU, setActivePlotEditorSettings_ACU, setCurrentEditablePlotPresetState_ACU, setPlotPromptContentByIdForSettings_ACU, stripPlotPresetWorldbookEntrySelectionForExport_ACU, switchCurrentChatPlotPreset_ACU } from '../components/optimization-ui';
 import { buildDefaultPlotPromptGroup_ACU } from '../../service/plot/plot-state';
 import { getCurrentChatPlotScopeState_ACU } from '../../service/template/chat-scope';
-import { startAutoLoop_ACU, stopAutoLoop_ACU } from '../triggers/auto-loop';
 import { getCurrentPlotSettingsFromUI_ACU, loadPlotPresetSelect_ACU, loadPlotSettingsToUI_ACU, savePlotPresetAsNew_ACU } from './popup-helpers';
 import { refreshPresetUIAfterSwitch_ACU } from '../components/pipeline-ui-helpers';
 import { applyWorldbookEntryFilter_ACU, applyWorldbookListFilter_ACU, getPlotWorldbookConfig_ACU, isEntryBlocked_ACU, populatePlotWorldbookEntryList_ACU, renderLazyWorldbookEntryItems_ACU, toggleLazyWorldbookEntryGroup_ACU, updateLazyWorldbookEntryCheckedState_ACU, updatePlotWorldbookSourceView_ACU } from '../components/worldbook-selector';
@@ -191,11 +190,6 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       // 剧情推进其他全局参数自动保存（不含任务私有参数）
       const plotPersistentInputs = [
         { id: 'plot-context-turn-count', key: 'contextTurnCount', type: 'number' },
-        // 注意：plot-quick-reply-content 已改为数组，不再使用单个输入框，改用循环提示词列表管理
-        { id: 'plot-loop-tags', key: 'loopSettings.loopTags', type: 'string' },
-        { id: 'plot-loop-delay', key: 'loopSettings.loopDelay', type: 'number' },
-        { id: 'plot-loop-total-duration', key: 'loopSettings.loopTotalDuration', type: 'number' },
-        { id: 'plot-max-retries', key: 'loopSettings.maxRetries', type: 'number' }
       ];
 
       plotPersistentInputs.forEach(({ id, key, type }) => {
@@ -267,58 +261,6 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         if ($row.length) $row.remove();
         plotSettings.contextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
         saveSettingsAndNotify_ACU();
-      });
-
-      // 循环提示词列表管理
-      // 确保兼容性
-      ensureLoopPromptsArray_ACU(settings_ACU.plotSettings);
-      // 初始渲染
-      renderLoopPromptsList_ACU();
-
-      // 添加提示词按钮
-      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt`, function(this: HTMLElement) {
-        const plotSettings = getActivePlotEditorSettings_ACU();
-        if (!plotSettings) return;
-        ensureLoopPromptsArray_ACU(plotSettings);
-        plotSettings.loopSettings.quickReplyContent.push('');
-        renderLoopPromptsList_ACU();
-        // 聚焦到新添加的输入框
-        setTimeout(() => {
-          const $newTextarea = $popupInstance_ACU.find('.loop-prompt-textarea').last();
-          if ($newTextarea.length) {
-            $newTextarea.focus();
-          }
-        }, 100);
-      });
-
-      // 删除提示词按钮
-      $popupInstance_ACU.on('click', '.loop-prompt-delete-btn', function(this: HTMLElement) {
-        const index = parseInt(jQuery_API_ACU(this).data('index'), 10);
-        if (isNaN(index)) return;
-
-        const plotSettings = getActivePlotEditorSettings_ACU();
-        if (!plotSettings) return;
-        ensureLoopPromptsArray_ACU(plotSettings);
-        const prompts = plotSettings.loopSettings.quickReplyContent;
-        
-        if (prompts.length > 0 && index >= 0 && index < prompts.length) {
-          prompts.splice(index, 1);
-          // 调整索引
-          if (plotSettings.loopSettings.currentPromptIndex >= prompts.length) {
-            plotSettings.loopSettings.currentPromptIndex = 0;
-          }
-          renderLoopPromptsList_ACU();
-          saveLoopPromptsFromUI_ACU();
-        }
-      });
-
-      // 提示词内容变化时自动保存（防抖）
-      let saveLoopPromptsTimeout: ReturnType<typeof setTimeout> | null = null;
-      $popupInstance_ACU.on('input', '.loop-prompt-textarea', function(this: HTMLElement) {
-        clearTimeout(saveLoopPromptsTimeout!);
-        saveLoopPromptsTimeout = setTimeout(() => {
-          saveLoopPromptsFromUI_ACU();
-        }, 500);
       });
 
       // 预设管理（全局负责管理，当前聊天仅负责切换使用）
@@ -648,34 +590,6 @@ export async function bindPlotEvents_ACU(): Promise<void> {
             }
           };
           reader.readAsText(file);
-        });
-      }
-
-      // 循环控制按钮
-      const $startLoopBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-start-loop-btn`);
-      const $stopLoopBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-stop-loop-btn`);
-
-      if ($startLoopBtn.length) {
-        $startLoopBtn.on('click', function(this: HTMLElement) {
-          const duration = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val() as string, 10);
-          if (!duration || duration <= 0) {
-            showToastr_ACU('warning', '请设置一个大于0的总倒计时 (分钟) 才能启动循环。');
-            return;
-          }
-
-          startAutoLoop_ACU();
-          jQuery_API_ACU(this).hide();
-          $stopLoopBtn.css('display', 'inline-flex').show();
-          showToastr_ACU('success', '自动化循环已启动。');
-        });
-      }
-
-      if ($stopLoopBtn.length) {
-        $stopLoopBtn.on('click', function(this: HTMLElement) {
-          stopAutoLoop_ACU();
-          jQuery_API_ACU(this).hide();
-          $startLoopBtn.css('display', 'inline-flex').show();
-          showToastr_ACU('info', '自动化循环已停止。');
         });
       }
 

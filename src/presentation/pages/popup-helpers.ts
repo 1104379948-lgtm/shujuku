@@ -2,13 +2,14 @@ import { DEFAULT_CONTENT_OPTIMIZATION_PROMPT_GROUP_ACU } from '../../shared/defa
 import { flushCurrentPlotTaskEditorState_ACU, loadCurrentPlotTaskToUI_ACU, renderPlotTaskList_ACU } from '../components/plot-editors';
 import { showToastr_ACU } from '../theme/toast';
 import { jQuery_API_ACU } from '../dom-utils';
-import { loopState_ACU, settings_ACU } from '../../service/runtime/state-manager';
+import { settings_ACU } from '../../service/runtime/state-manager';
 import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
 import { getCurrentChatPlotScopeState_ACU } from '../../service/template/chat-scope';
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { escapeHtml_ACU, renderOption_ACU } from '../../shared/html-helpers';
+import { stripLegacyLoopPromptFieldsInPlace_ACU } from '../../shared/legacy-loop-fields';
 import { normalizeExcludeRules_ACU, normalizeExtractRules_ACU } from '../../shared/utils';
-import { DEFAULT_PRESET_OPTION_VALUE_ACU, applyGlobalPlotPresetSelectionForEditor_ACU, applyPlotPresetToSettings_ACU, ensureLoopPromptsArray_ACU, ensurePlotPromptsArray_ACU, ensurePlotTasksCompat_ACU, findPlotPresetByName_ACU, getActivePlotEditorSettings_ACU, getCurrentRuntimePlotPresetName_ACU, getLegacyPromptTextsFromPromptGroup_ACU, getPlotPresetBindingForChat_ACU, getPlotPromptContentByIdFromSettings_ACU, getPlotPromptGroupFromSource_ACU, normalizePlotPresetExcludeRules_ACU, normalizePlotPresetSelectionValue_ACU, normalizePlotTasks_ACU, persistPlotPresetSelectionState_ACU, readExcludeRulesFromRows_ACU, renderExcludeRuleRows_ACU, renderLoopPromptsList_ACU, resolveActivePlotPresetName_ACU, setActivePlotEditorSettings_ACU, setCurrentEditablePlotPresetState_ACU, setPlotPromptContentByIdForSettings_ACU } from '../components/optimization-ui';
+import { DEFAULT_PRESET_OPTION_VALUE_ACU, applyGlobalPlotPresetSelectionForEditor_ACU, applyPlotPresetToSettings_ACU, ensurePlotPromptsArray_ACU, ensurePlotTasksCompat_ACU, findPlotPresetByName_ACU, getActivePlotEditorSettings_ACU, getCurrentRuntimePlotPresetName_ACU, getLegacyPromptTextsFromPromptGroup_ACU, getPlotPresetBindingForChat_ACU, getPlotPromptContentByIdFromSettings_ACU, getPlotPromptGroupFromSource_ACU, normalizePlotPresetExcludeRules_ACU, normalizePlotPresetSelectionValue_ACU, normalizePlotTasks_ACU, persistPlotPresetSelectionState_ACU, readExcludeRulesFromRows_ACU, renderExcludeRuleRows_ACU, resolveActivePlotPresetName_ACU, setActivePlotEditorSettings_ACU, setCurrentEditablePlotPresetState_ACU, setPlotPromptContentByIdForSettings_ACU } from '../components/optimization-ui';
 import { getDefaultPlotContextExcludeRules_ACU, getDefaultPlotContextExtractRules_ACU } from '../../service/runtime/helpers-remaining';
 import { $popupInstance_ACU, $plotPromptSegmentsContainer_ACU, $plotTaskListContainer_ACU, _assignUIPlaceholders_ACU } from '../state/ui-refs';
 /**
@@ -48,16 +49,6 @@ import { $popupInstance_ACU, $plotPromptSegmentsContainer_ACU, $plotTaskListCont
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val(plotSettings.rateErotic);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(plotSettings.rateCuckold);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(plotSettings.recallCount ?? 20);
-
-      // 循环设置
-      ensureLoopPromptsArray_ACU(plotSettings);
-      const loopSettings = plotSettings.loopSettings;
-      // 循环提示词现在使用数组，通过 renderLoopPromptsList_ACU 渲染
-      renderLoopPromptsList_ACU(plotSettings);
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val(loopSettings.loopTags || '');
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(loopSettings.loopDelay);
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(loopSettings.loopTotalDuration);
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val(loopSettings.maxRetries);
       $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(plotSettings.contextTurnCount);
       renderExcludeRuleRows_ACU(
         `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`,
@@ -77,9 +68,6 @@ import { $popupInstance_ACU, $plotPromptSegmentsContainer_ACU, $plotTaskListCont
           fallbackRules: getDefaultPlotContextExcludeRules_ACU(),
         },
       );
-
-      // 循环状态
-      updatePlotLoopStatusUI_ACU();
 
       // 预设选择器
       loadPlotPresetSelect_ACU();
@@ -334,30 +322,6 @@ $select.append(renderOption_ACU(preset.name, preset.name));
     }
 
     /**
-     * 更新剧情推进循环状态UI
-     */
-    function updatePlotLoopStatusUI_ACU() {
-      if (!$popupInstance_ACU) return;
-
-      const $statusText = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-status-text`);
-      const $timerDisplay = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-timer-display`);
-      const $startBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-start-loop-btn`);
-      const $stopBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-stop-loop-btn`);
-
-      if (loopState_ACU.isLooping) {
-        $statusText.text('运行中').css('color', 'var(--green)');
-        $startBtn.hide();
-        $stopBtn.show();
-        $timerDisplay.show();
-      } else {
-        $statusText.text('未运行').css('color', 'var(--red)');
-        $stopBtn.hide();
-        $startBtn.show();
-        $timerDisplay.hide().text('');
-      }
-    }
-
-    /**
      * 加载剧情预设选择器
      */
     function getPlotPresetDisplayName_ACU(presetName: string) {
@@ -479,7 +443,10 @@ $select.append(
 
       flushCurrentPlotTaskEditorState_ACU({ renderTaskList: true, persist: false });
       const activeSettings = getActivePlotEditorSettings_ACU();
+      stripLegacyLoopPromptFieldsInPlace_ACU(settings_ACU.plotSettings);
+      stripLegacyLoopPromptFieldsInPlace_ACU(activeSettings);
       const currentSettings = JSON.parse(JSON.stringify(activeSettings || settings_ACU.plotSettings || {}));
+      stripLegacyLoopPromptFieldsInPlace_ACU(currentSettings);
       ensurePlotTasksCompat_ACU(currentSettings, { syncLegacy: true });
 
       delete currentSettings.promptPresets;
@@ -500,22 +467,6 @@ $select.append(
       currentSettings.contextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`);
       currentSettings.contextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
       currentSettings.contextTurnCount = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val() as string, 10) || 3;
-      currentSettings.loopSettings = {
-        ...(currentSettings.loopSettings || {}),
-        quickReplyContent: (() => {
-          const prompts: any[] = [];
-          $popupInstance_ACU.find('.loop-prompt-textarea').each(function() {
-            const content = String(jQuery_API_ACU(this).val() || '').trim();
-            if (content) prompts.push(content);
-          });
-          return prompts;
-        })(),
-        currentPromptIndex: 0,
-        loopTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val() as string || '',
-        loopDelay: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val() as string, 10) || 5,
-        loopTotalDuration: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val() as string, 10) || 0,
-        maxRetries: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val() as string, 10) || 3,
-      };
 
       currentSettings.plotTasks = normalizePlotTasks_ACU(currentSettings);
       ensurePlotPromptsArray_ACU(currentSettings);

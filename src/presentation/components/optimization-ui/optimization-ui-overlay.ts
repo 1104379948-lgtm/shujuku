@@ -18,7 +18,7 @@ import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeEx
 import { triggerAutomaticUpdateIfNeeded_ACU } from '../../triggers/settings-ui-sync';
 import { cancelContentOptimization_ACU, contentOptimizationAbortRequested_ACU, ensureOptimizationNotCancelled_ACU, getLastOptimizationBase_ACU, optimizationProgressToast_ACU, performContentOptimization_ACU, setLastOptimizationBase_ACU, _set_optimizationProgressToast_ACU, _set_contentOptimizationAbortRequested_ACU } from '../../../service/optimization/content-optimization';
 import { applyContextTagFilters_ACU } from '../../../service/runtime/helpers-remaining';
-import { getActivePlotEditorSettings_ACU, getPlotPromptContentByIdFromSettings_ACU, setPlotPromptContentByIdForSettings_ACU, ensureLoopPromptsArray_ACU } from '../../../service/plot/plot-logic';
+import { getActivePlotEditorSettings_ACU, getPlotPromptContentByIdFromSettings_ACU, setPlotPromptContentByIdForSettings_ACU } from '../../../service/plot/plot-logic';
 
   // --- [正文优化] 构建默认提示词组 ---
   export function showOptimizationOverlay_ACU(message = '正在优化正文...') {

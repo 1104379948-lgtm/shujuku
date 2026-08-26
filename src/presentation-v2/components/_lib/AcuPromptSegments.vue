@@ -9,6 +9,12 @@
       <li v-for="(seg, index) in segments" :key="index" class="acu-prompt-segs__item">
         <header class="acu-prompt-segs__item-head">
           <span class="acu-prompt-segs__index">#{{ index + 1 }}</span>
+          <AcuCheckbox
+            v-if="showEnabled"
+            :model-value="seg.enabled !== false"
+            label="启用"
+            @update:model-value="$emit('update', index, { enabled: $event })"
+          />
           <AcuSelect
             class="acu-prompt-segs__role"
             size="sm"
@@ -77,6 +83,7 @@ import type { AcuSelectOption } from './AcuSelect.vue';
 export interface PromptSegment {
   role: string;
   content: string;
+  enabled?: boolean;
   deletable?: boolean;
   mainSlot?: 'A' | 'B' | '';
   isMain?: boolean;
@@ -98,6 +105,7 @@ const DEFAULT_SLOT_OPTIONS: AcuSelectOption[] = [
 
 <script setup lang="ts">
 import AcuButton from './AcuButton.vue';
+import AcuCheckbox from './AcuCheckbox.vue';
 import AcuIconButton from './AcuIconButton.vue';
 import AcuSelect from './AcuSelect.vue';
 import AcuTextarea from './AcuTextarea.vue';
@@ -107,6 +115,7 @@ withDefaults(defineProps<{
   roleOptions?: AcuSelectOption[];
   slotOptions?: AcuSelectOption[];
   showSlot?: boolean;
+  showEnabled?: boolean;
   allowMove?: boolean;
   rows?: number;
   emptyText?: string;
@@ -114,6 +123,7 @@ withDefaults(defineProps<{
   roleOptions: () => DEFAULT_ROLE_OPTIONS,
   slotOptions: () => DEFAULT_SLOT_OPTIONS,
   showSlot: true,
+  showEnabled: false,
   allowMove: false,
   rows: 6,
   emptyText: '暂无提示词段。点击下方按钮添加第一段。',

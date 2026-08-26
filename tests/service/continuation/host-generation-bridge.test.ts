@@ -1,0 +1,143 @@
+import { describe, expect, it, vi } from 'vitest';
+import { ContinuationHostGenerationBridge_ACU } from '../../../src/service/continuation/host-generation-bridge';
+
+const identity = { chatIdentity: 'chat-a', taskId: 'task-a', stageId: 'stage-a', revision: 1, nodeId: 'node-a', turnId: 'turn-a', attemptId: 'attempt-a' };
+
+function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; onWait?: () => void } = {}) {
+  let chat = options.chat ?? [{ is_user: true }];
+  let chatIdentity = 'chat-a';
+  let pending: any = null;
+  const retryPreparedTurn: any = { identity, instruction: { instruction: '重试后的最终普通文本' } };
+  const retryCurrentTurn = vi.fn(async () => ({ preparedTurn: retryPreparedTurn }));
+  const runtime = {
+    getChatIdentity: () => chatIdentity, getChat: () => chat, getGenerationSequence: () => 0,
+    readPendingHostTurn: () => pending ? { settings: { loopTags: options.tags ?? '<ok>' }, pending } : null,
+    retryCurrentTurn,
+    recordHostTurn: vi.fn(async ({ identity: sent, capture }) => { pending = { identity: sent, capture, retryCount: 0, status: 'awaiting_generation' }; }),
+    bindHostTurnGeneration: vi.fn(async (_identity, generationSeq) => { pending = { ...pending, capture: { ...pending.capture, generationSeq } }; }),
+    confirmCurrentTurn: vi.fn(async () => { pending = null; }),
+    rejectHostTurnForMissingTags: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
+    pauseForHostInputFailure: vi.fn(async () => { pending = { ...pending, status: 'exhausted' }; }),
+    pauseForHostResultFailure: vi.fn(async () => { pending = { ...pending, status: 'exhausted' }; }),
+  };
+  const hostInput = { send: vi.fn(() => options.send ?? true), removeLastMessage: vi.fn(async () => { chat = chat.slice(0, -1); return true; }) };
+  const bridge = new ContinuationHostGenerationBridge_ACU({ runtime, hostInput, now: () => 100, wait: vi.fn(async () => options.onWait?.()), materializationRetries: 1, materializationRetryDelayMs: 0 });
+  return { bridge, runtime, hostInput, retryCurrentTurn, setChat: (value: any[]) => { chat = value; }, setChatIdentity: (value: string) => { chatIdentity = value; } };
+}
+
+describe('ContinuationHostGenerationBridge_ACU', () => {
+  const prepared: any = { identity, instruction: { instruction: '最终普通文本' } };
+
+  it('persists identity before host send, then uniquely confirms the matching materialized reply', async () => {
+    const h = createHarness();
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await expect(h.bridge.send(prepared)).resolves.toBe(true);
+    expect(h.runtime.recordHostTurn).toHaveBeenCalledBefore(h.hostInput.send as any);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
+    await h.bridge.onGenerationEnded(9, 7);
+    expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(identity, 7);
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity);
+    expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
+  });
+
+  it('waits for a makeFirst-era AI floor to materialize before resolving the claimed host result', async () => {
+    let setChat: (value: any[]) => void;
+    const h = createHarness({ onWait: () => setChat([{ is_user: true }, { is_user: false, mes: '<ok>延迟物化', message_id: 9 }]) });
+    setChat = h.setChat;
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+
+    await h.bridge.onGenerationEnded(9, 7);
+
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity);
+  });
+
+  it('pauses instead of claiming a host send whose input adapter is unavailable', async () => {
+    const h = createHarness({ send: false });
+    await expect(h.bridge.send(prepared)).resolves.toBe(false);
+    expect(h.runtime.pauseForHostInputFailure).toHaveBeenCalledWith(identity);
+    expect(h.bridge.onGenerationStarted(7)).toBe(false);
+  });
+
+  it('retries the same attempt when the uniquely resolved reply misses required tags', async () => {
+    const h = createHarness({ tags: '<required>' });
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(h.hostInput.send.mock.calls.length === 1 ? 7 : 8); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '正文', message_id: 9 }]);
+    await h.bridge.onGenerationEnded(9, 7);
+    expect(h.runtime.rejectHostTurnForMissingTags).toHaveBeenCalledWith({ identity, messageIndex: 1 });
+    expect(h.hostInput.removeLastMessage).toHaveBeenCalledOnce();
+    expect(h.retryCurrentTurn).toHaveBeenCalledOnce();
+    expect(h.hostInput.send).toHaveBeenCalledTimes(2);
+    expect(h.hostInput.send).toHaveBeenLastCalledWith('重试后的最终普通文本');
+    expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+  });
+
+  it('pauses without retrying when the invalid reply is no longer the host tail', async () => {
+    const h = createHarness({ tags: '<required>' });
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '正文', message_id: 9 }, { is_user: true, mes: '较新的用户输入' }]);
+
+    await h.bridge.onGenerationEnded(9, 7);
+
+    expect(h.hostInput.removeLastMessage).not.toHaveBeenCalled();
+    expect(h.runtime.pauseForHostResultFailure).toHaveBeenCalledWith(identity);
+    expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
+    expect(h.retryCurrentTurn).not.toHaveBeenCalled();
+  });
+
+  it('pauses without retrying when the host cannot confirm removal of the invalid reply', async () => {
+    const h = createHarness({ tags: '<required>' });
+    h.hostInput.removeLastMessage.mockResolvedValueOnce(false);
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '正文', message_id: 9 }]);
+
+    await h.bridge.onGenerationEnded(9, 7);
+
+    expect(h.runtime.pauseForHostResultFailure).toHaveBeenCalledWith(identity);
+    expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
+    expect(h.retryCurrentTurn).not.toHaveBeenCalled();
+  });
+
+  it('pauses without retrying when a successful deletion is not reflected in the live chat', async () => {
+    const h = createHarness({ tags: '<required>' });
+    h.hostInput.removeLastMessage.mockResolvedValueOnce(true);
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '正文', message_id: 9 }]);
+
+    await h.bridge.onGenerationEnded(9, 7);
+
+    expect(h.hostInput.removeLastMessage).toHaveBeenCalledOnce();
+    expect(h.runtime.pauseForHostResultFailure).toHaveBeenCalledWith(identity);
+    expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
+    expect(h.retryCurrentTurn).not.toHaveBeenCalled();
+  });
+
+  it('does not claim or advance a host generation after the active chat changes', async () => {
+    const h = createHarness();
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
+    h.setChatIdentity('chat-b');
+
+    expect(h.bridge.claimsGenerationEnded(7)).toBe(false);
+    await h.bridge.onGenerationEnded(9, 7);
+
+    expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+    expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
+    expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the host event has ambiguous AI candidates', async () => {
+    const h = createHarness();
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>a' }, { is_user: false, mes: '<ok>b' }]);
+    await h.bridge.onGenerationEnded(99, 7);
+    expect(h.runtime.pauseForHostResultFailure).toHaveBeenCalledWith(identity);
+    expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+  });
+});

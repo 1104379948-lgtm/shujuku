@@ -8,15 +8,13 @@ import { getChatArray_ACU, saveChatToHost_ACU, setChatMessages_ACU, emitMessageU
 import { jQuery_API_ACU } from '../../dom-utils';
 import { toastr_API_ACU } from '../../../shared/host-api';
 import { $popupInstance_ACU } from '../../state/ui-refs';
-import { saveSettingsAndNotify_ACU } from '../settings-ui-helpers';
 import { buildChatPlotScopeStateFromSettings_ACU, clearCurrentChatPlotScopeState_ACU, getCurrentChatPlotScopeState_ACU, sanitizePlotSettingsSnapshotForChat_ACU, setCurrentChatPlotScopeState_ACU } from '../../../service/template/chat-scope';
-import { SCRIPT_ID_PREFIX_ACU } from '../../../shared/constants';
 import { escapeHtml_ACU } from '../../../shared/html-helpers';
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU } from '../../../shared/utils';
 import { triggerAutomaticUpdateIfNeeded_ACU } from '../../triggers/settings-ui-sync';
 import { cancelContentOptimization_ACU, contentOptimizationAbortRequested_ACU, ensureOptimizationNotCancelled_ACU, getLastOptimizationBase_ACU, optimizationProgressToast_ACU, performContentOptimization_ACU, setLastOptimizationBase_ACU, _set_optimizationProgressToast_ACU, _set_contentOptimizationAbortRequested_ACU } from '../../../service/optimization/content-optimization';
 import { applyContextTagFilters_ACU } from '../../../service/runtime/helpers-remaining';
-import { getActivePlotEditorSettings_ACU, ensureLoopPromptsArray_ACU } from '../../../service/plot/plot-logic';
+import { getActivePlotEditorSettings_ACU } from '../../../service/plot/plot-logic';
 
 
   function schedulePlotSettingsUiRefresh_ACU(plotSettingsOverride: any = null) {
@@ -90,84 +88,3 @@ import { getActivePlotEditorSettings_ACU, ensureLoopPromptsArray_ACU } from '../
     });
     return normalizeExcludeRules_ACU(collected, '');
   }
-
-
-  // --- [剧情推进] 循环提示词列表渲染和管理 ---
-  export function renderLoopPromptsList_ACU(plotSettingsOverride: any = null) {
-    const $container = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-prompts-container`);
-    if (!$container.length) return;
-
-    const plotSettings = plotSettingsOverride || getActivePlotEditorSettings_ACU();
-    if (!plotSettings) return;
-
-    ensureLoopPromptsArray_ACU(plotSettings);
-    const prompts: any[] = plotSettings.loopSettings.quickReplyContent || [];
-
-    $container.empty();
-
-    if (prompts.length === 0) {
-      $container.html('<div style="padding: 20px; text-align: center; color: var(--text_secondary); border: 1px dashed var(--border_color_light); border-radius: 6px;">暂无提示词，点击上方"添加提示词"按钮添加</div>');
-      return;
-    }
-
-    prompts.forEach((prompt: any, index: number) => {
-      const $item = jQuery_API_ACU('<div>', {
-        class: 'loop-prompt-item',
-        style: 'display: flex; gap: 8px; align-items: flex-start; padding: 10px; background: var(--background_light); border: 1px solid var(--border_color_light); border-radius: 6px;'
-      });
-      
-      const $content = jQuery_API_ACU('<div>', {
-        style: 'flex: 1; display: flex; flex-direction: column; gap: 6px;'
-      });
-      
-      $content.append(jQuery_API_ACU('<div>', {
-        style: 'display: flex; align-items: center; gap: 8px;'
-      }).append(jQuery_API_ACU('<span>', {
-        style: 'font-size: 0.85em; color: var(--text_secondary); font-weight: 500;',
-        text: `提示词 #${index + 1}`
-      })));
-      
-      const $textarea = jQuery_API_ACU('<textarea>', {
-        class: 'loop-prompt-textarea text_pole',
-        'data-index': index,
-        rows: 2,
-        placeholder: '输入循环提示词内容...',
-        style: 'resize: vertical; width: 100%;',
-        text: prompt || ''
-      });
-      $content.append($textarea);
-      
-      const $deleteBtn = jQuery_API_ACU('<button>', {
-        type: 'button',
-        class: 'loop-prompt-delete-btn button',
-        'data-index': index,
-        style: 'padding: 6px 10px; color: var(--danger); background: transparent; border: 1px solid var(--danger); border-radius: 4px; cursor: pointer; flex-shrink: 0;',
-        title: '删除此提示词',
-        html: '<i class="fa-solid fa-trash"></i>'
-      });
-      
-      $item.append($content).append($deleteBtn);
-      $container.append($item);
-    });
-  }
-
-  export function saveLoopPromptsFromUI_ACU() {
-    const plotSettings = getActivePlotEditorSettings_ACU();
-    if (!plotSettings) return;
-
-    ensureLoopPromptsArray_ACU(plotSettings);
-    const prompts: string[] = [];
-
-    $popupInstance_ACU.find('.loop-prompt-textarea').each(function() {
-      const content = String(jQuery_API_ACU(this).val() || '').trim();
-      if (content) {
-        prompts.push(content);
-      }
-    });
-
-    plotSettings.loopSettings.quickReplyContent = prompts;
-    plotSettings.loopSettings.currentPromptIndex = 0; // 重置索引
-    saveSettingsAndNotify_ACU();
-  }
-
-

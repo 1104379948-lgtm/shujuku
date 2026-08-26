@@ -47,6 +47,7 @@ vi.stubGlobal('fetch', mockFetch);
 import {
   callApi_ACU,
   callApiWithPlotPreset_ACU,
+  callAIWithResolvedPreset_ACU,
   getApiConfigByPreset_ACU,
   callAIWithPreset_ACU,
   callCustomOpenAI_ACU_Direct,
@@ -518,6 +519,64 @@ describe('callApiWithPlotPreset_ACU 温度透传', () => {
     const fetchBody = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(fetchBody.temperature).toBe(0.2);
     expect(fetchBody.top_p).toBe(0.6);
+  });
+});
+
+describe('callAIWithResolvedPreset_ACU', () => {
+  it('uses the supplied custom configuration without resolving a preset again', async () => {
+    mockHandleApiResponse.mockResolvedValue('明确配置回复');
+    mockFetch.mockResolvedValue({ ok: true });
+
+    await expect(callAIWithResolvedPreset_ACU(
+      [{ role: 'user', content: '仅使用候选配置' }],
+      { apiMode: 'custom', apiConfig: { url: 'https://resolved.example', apiKey: '', model: 'resolved-model', useMainApi: false, max_tokens: 222, temperature: 0, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: '' },
+    )).resolves.toBe('明确配置回复');
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.model).toBe('resolved-model');
+    expect(body.max_tokens).toBe(222);
+    expect(body.temperature).toBe(0);
+  });
+
+  it('uses the supplied Tavern profile rather than current global settings', async () => {
+    mockSettings.tavernProfile = 'global-profile';
+    mockSendConnectionManager.mockResolvedValue({ result: { choices: [{ message: { content: 'profile reply' } }] } });
+
+    await expect(callAIWithResolvedPreset_ACU(
+      [{ role: 'user', content: 'profile request' }],
+      { apiMode: 'tavern', apiConfig: { url: '', apiKey: '', model: '', useMainApi: false, max_tokens: 17, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: 'resolved-profile' },
+    )).resolves.toBe('profile reply');
+
+    expect(mockSendConnectionManager).toHaveBeenCalledWith('resolved-profile', expect.any(Array), 17);
+  });
+
+  it('uses generateRaw only when the supplied resolved configuration selects the main API', async () => {
+    mockGenerateRaw.mockResolvedValue('main-api reply');
+
+    await expect(callAIWithResolvedPreset_ACU(
+      [{ role: 'user', content: 'main API request' }],
+      { apiMode: 'custom', apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 33, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: '' },
+    )).resolves.toBe('main-api reply');
+
+    expect(mockGenerateRaw).toHaveBeenCalledWith(expect.objectContaining({
+      ordered_prompts: [{ role: 'user', content: 'main API request' }],
+      max_tokens: 33,
+    }));
+  });
+
+  it('opens and closes the main-API attribution window around generateRaw, including failures', async () => {
+    const beforeMainApiCall = vi.fn();
+    const afterMainApiCall = vi.fn();
+    mockGenerateRaw.mockResolvedValueOnce('main-api reply').mockRejectedValueOnce(new Error('offline'));
+    const resolved = { apiMode: 'custom' as const, apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 33, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: '' };
+
+    await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'main API request' }], resolved, undefined, { beforeMainApiCall, afterMainApiCall })).resolves.toBe('main-api reply');
+    await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'main API request' }], resolved, undefined, { beforeMainApiCall, afterMainApiCall })).rejects.toThrow('offline');
+
+    expect(beforeMainApiCall).toHaveBeenCalledTimes(2);
+    expect(afterMainApiCall).toHaveBeenCalledTimes(2);
+    expect(beforeMainApiCall.mock.invocationCallOrder[0]).toBeLessThan(mockGenerateRaw.mock.invocationCallOrder[0]);
+    expect(afterMainApiCall.mock.invocationCallOrder[1]).toBeGreaterThan(mockGenerateRaw.mock.invocationCallOrder[1]);
   });
 });
 

@@ -13,27 +13,12 @@ import { saveSettings_ACU } from '../settings/settings-service';
 import { clearCurrentChatPlotScopeState_ACU, getCurrentChatPlotScopeState_ACU, sanitizePlotSettingsSnapshotForChat_ACU } from '../template/chat-scope';
 import { cleanChatName_ACU, logDebug_ACU, logWarn_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU } from '../../shared/utils';
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
+import { stripLegacyLoopPromptFields_ACU, stripLegacyLoopPromptFieldsInPlace_ACU } from '../../shared/legacy-loop-fields';
 
 // ═══ 循环提示词/提示词组兼容 ═══
 
 export function ensureLoopPromptsArray_ACU(plotSettings: Record<string, any>) {
-    if (!plotSettings || !plotSettings.loopSettings) return;
-    const ls = plotSettings.loopSettings;
-    if (typeof ls.quickReplyContent === 'string') {
-      const oldContent = ls.quickReplyContent.trim();
-      ls.quickReplyContent = oldContent ? [oldContent] : [];
-      ls.currentPromptIndex = 0;
-      logDebug_ACU('[剧情推进] 已迁移旧版循环提示词格式（字符串 -> 数组）');
-    }
-    if (!Array.isArray(ls.quickReplyContent)) {
-      ls.quickReplyContent = [];
-    }
-    if (typeof ls.currentPromptIndex !== 'number' || ls.currentPromptIndex < 0) {
-      ls.currentPromptIndex = 0;
-    }
-    if (ls.quickReplyContent.length > 0 && ls.currentPromptIndex >= ls.quickReplyContent.length) {
-      ls.currentPromptIndex = 0;
-    }
+    stripLegacyLoopPromptFieldsInPlace_ACU(plotSettings);
 }
 
 export function ensureTagRulesCompat_ACU(targetSettings: Record<string, any>) {
@@ -455,8 +440,8 @@ export function setActivePlotEditorSettings_ACU(plotSettings: Record<string, any
       return null;
     }
     _set_activePlotEditorSettings_ACU(plotSettings);
+    stripLegacyLoopPromptFieldsInPlace_ACU(activePlotEditorSettings_ACU);
     ensurePlotPromptsArray_ACU(activePlotEditorSettings_ACU);
-    ensureLoopPromptsArray_ACU(activePlotEditorSettings_ACU);
     ensurePlotTasksCompat_ACU(activePlotEditorSettings_ACU, { syncLegacy: true });
     activePlotEditorSettings_ACU.finalSystemDirective = getPlotFinalDirectiveFromSource_ACU(activePlotEditorSettings_ACU);
     setPlotPromptContentByIdForSettings_ACU(
@@ -477,7 +462,6 @@ export function getPlotGlobalRevision_ACU() {
 function cloneDefaultPlotSettingsForPreset_ACU() {
     const defaults = JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU));
     ensurePlotPromptsArray_ACU(defaults);
-    ensureLoopPromptsArray_ACU(defaults);
     ensurePlotTasksCompat_ACU(defaults, { syncLegacy: true });
     return defaults;
 }
@@ -490,7 +474,6 @@ export function applyPlotPresetToSettings_ACU(plotSettings: Record<string, any>,
     const normalizedPreset = normalizePlotPresetExcludeRules_ACU(preset);
     const finalDirective = getPlotFinalDirectiveFromSource_ACU(normalizedPreset);
     ensurePlotPromptsArray_ACU(plotSettings);
-    ensureLoopPromptsArray_ACU(plotSettings);
     plotSettings.enabled = preservedEnabled;
     plotSettings.plotTasks = normalizePlotTasks_ACU(normalizedPreset);
     plotSettings.promptGroup = JSON.parse(JSON.stringify(getPlotPromptGroupFromSource_ACU(normalizedPreset)));
@@ -507,9 +490,10 @@ export function applyPlotPresetToSettings_ACU(plotSettings: Record<string, any>,
     plotSettings.minLength = normalizedPreset.minLength ?? 0;
     plotSettings.contextTurnCount = normalizedPreset.contextTurnCount ?? 3;
     if (normalizedPreset.loopSettings) {
+      stripLegacyLoopPromptFieldsInPlace_ACU(plotSettings);
       plotSettings.loopSettings = { ...plotSettings.loopSettings, ...normalizedPreset.loopSettings };
     }
-    ensureLoopPromptsArray_ACU(plotSettings);
+    stripLegacyLoopPromptFieldsInPlace_ACU(plotSettings);
     ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
     plotSettings.finalSystemDirective = getPlotPromptContentByIdFromSettings_ACU(plotSettings, 'finalSystemDirective') || plotSettings.finalSystemDirective || '';
     return {
@@ -523,7 +507,7 @@ export function resetPlotSettingsToDefault_ACU(plotSettings: Record<string, any>
     if (!plotSettings || typeof plotSettings !== 'object') return null;
     const preservedEnabled = plotSettings.enabled === true;
     const preservedPromptPresets = Array.isArray(plotSettings.promptPresets)
-      ? JSON.parse(JSON.stringify(plotSettings.promptPresets))
+      ? JSON.parse(JSON.stringify(plotSettings.promptPresets)).map(stripLegacyLoopPromptFields_ACU)
       : [];
     const preservedLastUsedPresetName = normalizePlotPresetSelectionValue_ACU(plotSettings.lastUsedPresetName || '');
     const preservedGlobalRevision = Number.isFinite(plotSettings.globalRevision)
@@ -537,7 +521,6 @@ export function resetPlotSettingsToDefault_ACU(plotSettings: Record<string, any>
     plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
     plotSettings.globalRevision = preservedGlobalRevision;
     ensurePlotPromptsArray_ACU(plotSettings);
-    ensureLoopPromptsArray_ACU(plotSettings);
     ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
     return plotSettings;
 }
@@ -548,7 +531,7 @@ export function replaceCurrentPlotSettingsWithSnapshot_ACU(plotSettings: Record<
     if (!normalizedSnapshot) return null;
     const preservedEnabled = plotSettings.enabled === true;
     const preservedPromptPresets = Array.isArray(plotSettings.promptPresets)
-      ? JSON.parse(JSON.stringify(plotSettings.promptPresets))
+      ? JSON.parse(JSON.stringify(plotSettings.promptPresets)).map(stripLegacyLoopPromptFields_ACU)
       : [];
     const preservedLastUsedPresetName = normalizePlotPresetSelectionValue_ACU(plotSettings.lastUsedPresetName || '');
     const preservedGlobalRevision = Number.isFinite(plotSettings.globalRevision)
@@ -562,7 +545,6 @@ export function replaceCurrentPlotSettingsWithSnapshot_ACU(plotSettings: Record<
     plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
     plotSettings.globalRevision = preservedGlobalRevision;
     ensurePlotPromptsArray_ACU(plotSettings);
-    ensureLoopPromptsArray_ACU(plotSettings);
     ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
     plotSettings.finalSystemDirective = getPlotFinalDirectiveFromSource_ACU(plotSettings);
     setPlotPromptContentByIdForSettings_ACU(plotSettings, 'finalSystemDirective', plotSettings.finalSystemDirective || '');
@@ -584,6 +566,7 @@ export function stripPlotTaskRuntimeApiPresetFields_ACU(tasks: any[]) {
 export function normalizePlotPresetExcludeRules_ACU(preset: Record<string, any> | null) {
     if (!preset || typeof preset !== 'object') return preset;
     const cloned = JSON.parse(JSON.stringify(preset));
+    stripLegacyLoopPromptFieldsInPlace_ACU(cloned);
     cloned.contextExtractRules = normalizeExtractRules_ACU(cloned.contextExtractRules, cloned.contextExtractTags || '');
     cloned.contextExcludeRules = normalizeExcludeRules_ACU(cloned.contextExcludeRules, cloned.contextExcludeTags || '');
     cloned.plotTasks = stripPlotTaskRuntimeApiPresetFields_ACU(normalizePlotTasks_ACU(cloned));
@@ -845,7 +828,6 @@ function buildPlotSettingsPreviewFromPreset_ACU(presetName: string) {
     }
     previewSettings.lastUsedPresetName = normalizedPresetName;
     ensurePlotPromptsArray_ACU(previewSettings);
-    ensureLoopPromptsArray_ACU(previewSettings);
     ensurePlotTasksCompat_ACU(previewSettings, { syncLegacy: true });
     previewSettings.finalSystemDirective = getPlotFinalDirectiveFromSource_ACU(previewSettings);
     setPlotPromptContentByIdForSettings_ACU(previewSettings, 'finalSystemDirective', previewSettings.finalSystemDirective || '');

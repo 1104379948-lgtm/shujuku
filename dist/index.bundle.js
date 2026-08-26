@@ -1606,8 +1606,6 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
             "manualSelection": []
         },
         "loopSettings": {
-            "quickReplyContent": [],
-            "currentPromptIndex": 0,
             "loopTags": "",
             "loopDelay": 5,
             "retryDelay": 3,
@@ -1791,8 +1789,6 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
             "books": {}
         },
         "loopSettings": {
-            "quickReplyContent": [],
-            "currentPromptIndex": 0,
             "loopTags": "",
             "loopDelay": 5,
             "retryDelay": 3,
@@ -36446,7 +36442,7 @@ $CONTENT
         });
     }
 
-    function isRecord_ACU$4(value) {
+    function isRecord_ACU$7(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function createResult_ACU() {
@@ -36462,7 +36458,7 @@ $CONTENT
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet_key', { sheetKey });
             return result;
         }
-        if (!isRecord_ACU$4(sheet)) {
+        if (!isRecord_ACU$7(sheet)) {
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet', { sheetKey });
             return result;
         }
@@ -36501,7 +36497,7 @@ $CONTENT
     }
     function validateCanonicalCheckpointData_ACU(data, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$4(data)) {
+        if (!isRecord_ACU$7(data)) {
             addIssue_ACU$1(result, 'data', context, 'invalid_data');
             return result;
         }
@@ -36529,7 +36525,7 @@ $CONTENT
      */
     function validateMigrationProvenanceV1_ACU(provenance) {
         const issues = [];
-        if (!isRecord_ACU$4(provenance)) {
+        if (!isRecord_ACU$7(provenance)) {
             return { valid: false, issues: ['provenance_not_object'] };
         }
         if (provenance.version !== 1)
@@ -36552,7 +36548,7 @@ $CONTENT
             issues.push('invalid_source_ai_floors');
         }
         const lastChangedBySheet = provenance.legacyLastChangedAiFloorBySheet;
-        if (!isRecord_ACU$4(lastChangedBySheet)
+        if (!isRecord_ACU$7(lastChangedBySheet)
             || Object.keys(lastChangedBySheet).some(sheetKey => !sheetKey.startsWith('sheet_') || !isNonNegativeInteger_ACU(lastChangedBySheet[sheetKey]))) {
             issues.push('invalid_last_changed_floor_by_sheet');
         }
@@ -36568,7 +36564,7 @@ $CONTENT
     }
     function validateCanonicalCheckpoint_ACU(checkpoint, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$4(checkpoint)) {
+        if (!isRecord_ACU$7(checkpoint)) {
             addIssue_ACU$1(result, 'full', context, 'checkpoint_not_object');
             return result;
         }
@@ -36589,7 +36585,7 @@ $CONTENT
             if (checkpoint.fallbackProvenance !== undefined) {
                 const provenance = checkpoint.fallbackProvenance;
                 let valid = false;
-                if (isRecord_ACU$4(provenance)) {
+                if (isRecord_ACU$7(provenance)) {
                     const rangeStart = provenance.rangeStartMessageIndex;
                     const rangeEnd = provenance.rangeEndMessageIndex;
                     const createdAt = provenance.createdAt;
@@ -39149,12 +39145,12 @@ $CONTENT
         };
     }
 
-    function isRecord_ACU$3(value) {
+    function isRecord_ACU$6(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function fingerprint_ACU(value) {
         const text = JSON.stringify(value, (_key, item) => {
-            if (!isRecord_ACU$3(item))
+            if (!isRecord_ACU$6(item))
                 return item;
             return Object.keys(item).sort().reduce((out, key) => { out[key] = item[key]; return out; }, {});
         });
@@ -39190,7 +39186,7 @@ $CONTENT
         return !!value && (canonicalPhysicalName_ACU(value) === canonicalPhysicalName_ACU(sqlName) || (!!comment && value === comment));
     }
     function resolveRequiredHeaderIndexes_ACU(result, sheetKey, sheet, header, omitLeadingRowId = false) {
-        const ddl = isRecord_ACU$3(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
+        const ddl = isRecord_ACU$6(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
         if (!ddl)
             return new Map();
         const ddlColumns = parseDDLColumnInfos_ACU(ddl).slice(omitLeadingRowId ? 1 : 0);
@@ -39336,11 +39332,11 @@ $CONTENT
      * It deliberately does not touch populated tables or malformed seed pools.
      */
     function normalizeHeaderOnlyRowIdColumns_ACU(data) {
-        if (!isRecord_ACU$3(data))
+        if (!isRecord_ACU$6(data))
             return data;
         let normalized = null;
         for (const [sheetKey, sheet] of Object.entries(data)) {
-            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$3(sheet))
+            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$6(sheet))
                 continue;
             const action = headerOnlyRowIdNormalizationAction_ACU(sheet);
             if (!action)
@@ -39372,7 +39368,7 @@ $CONTENT
             addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '无数据模板缺少 row_id，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
             return { header: ['row_id', ...header], insertsRowId: true };
         }
-        const ddl = isRecord_ACU$3(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
+        const ddl = isRecord_ACU$6(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
         const ddlText = typeof ddl === 'string' ? ddl : '';
         const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
         // 只有 DDL 明确多出首列 row_id，且其余列按顺序与业务表头对应，才允许自动插入身份列。
@@ -39393,7 +39389,7 @@ $CONTENT
     }
     function auditTableDataForUpgrade_ACU(data) {
         const result = { status: 'clean', issues: [], repairPlan: [], dataFingerprintBefore: fingerprint_ACU(data), sourceData: data };
-        if (!isRecord_ACU$3(data)) {
+        if (!isRecord_ACU$6(data)) {
             addIssue_ACU(result, { code: 'upgrade_invalid_data', message: '表格数据不是对象' });
             result.status = 'unrecoverable';
             return result;
@@ -39405,7 +39401,7 @@ $CONTENT
             return result;
         }
         for (const [sheetKey, rawSheet] of sheets) {
-            if (!isRecord_ACU$3(rawSheet)) {
+            if (!isRecord_ACU$6(rawSheet)) {
                 addIssue_ACU(result, { code: 'upgrade_invalid_data', sheetKey, message: 'sheet 不是对象' });
                 continue;
             }
@@ -39438,7 +39434,7 @@ $CONTENT
         return result;
     }
 
-    function isRecord_ACU$2(value) {
+    function isRecord_ACU$5(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function cloneData_ACU(data) {
@@ -39506,9 +39502,9 @@ $CONTENT
         const candidateData = cloneData_ACU(audit.sourceData);
         const idRemap = [];
         const overflowCells = [];
-        if (isRecord_ACU$2(candidateData) && audit.status !== 'unrecoverable') {
+        if (isRecord_ACU$5(candidateData) && audit.status !== 'unrecoverable') {
             Object.entries(candidateData).forEach(([sheetKey, sheet]) => {
-                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$2(sheet))
+                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$5(sheet))
                     return;
                 repairSheet_ACU(sheet, sheetKey, audit, idRemap, overflowCells);
             });
@@ -47774,7 +47770,7 @@ $CONTENT
     const SNAPSHOT_FORMAT_ACU = 'acu-mixed-storage-snapshot';
     const SNAPSHOT_VERSION_ACU = 1;
     const DANGEROUS_KEYS_ACU$1 = new Set(['__proto__', 'constructor', 'prototype']);
-    function isRecord_ACU$1(value) {
+    function isRecord_ACU$4(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function assertSafeJsonValue_ACU$1(value, path = '$', seen = new Set()) {
@@ -47786,7 +47782,7 @@ $CONTENT
             seen.delete(value);
             return;
         }
-        if (!isRecord_ACU$1(value))
+        if (!isRecord_ACU$4(value))
             return;
         if (seen.has(value))
             throw new Error(`Mixed storage snapshot 包含循环引用：${path}`);
@@ -60646,7 +60642,7 @@ $CONTENT
         return { content: rendered, tagCount, executedCount, rejectedCount };
     }
 
-    function clonePromptSegments_ACU(value) {
+    function clonePromptSegments_ACU$1(value) {
         return JSON.parse(JSON.stringify(value || []));
     }
     function normalizeAgentContextSettings_ACU(value) {
@@ -60666,7 +60662,7 @@ $CONTENT
     }
     function normalizeEditablePromptSegments_ACU(value, fallback) {
         if (!Array.isArray(value))
-            return clonePromptSegments_ACU(fallback);
+            return clonePromptSegments_ACU$1(fallback);
         const raw = value;
         return raw
             .map(item => item && typeof item === 'object' ? item : null)
@@ -60683,7 +60679,7 @@ $CONTENT
     function normalizePromptSegments_ACU(value, fallback) {
         const normalized = normalizeEditablePromptSegments_ACU(value, [])
             .filter(item => item.content.trim());
-        return normalized.length > 0 ? normalized : clonePromptSegments_ACU(fallback);
+        return normalized.length > 0 ? normalized : clonePromptSegments_ACU$1(fallback);
     }
     function getDefaultAgentDecisionPromptSegments_ACU() {
         return buildDefaultAgentDecisionPromptSegments_ACU();
@@ -64466,37 +64462,37 @@ $CONTENT
         return { applied: true, presetName: preset.name };
     }
     // ═══ 写操作（事务式：快照 → 修改 → 保存 → 失败回滚） ═══
-    function clone$9(value) {
+    function clone$8(value) {
         return JSON.parse(JSON.stringify(value ?? null));
     }
     function snapshotApiFields_ACU() {
         ensureApiSettingsShape_ACU();
         return {
             apiMode: settings_ACU.apiMode,
-            apiConfig: clone$9(settings_ACU.apiConfig),
+            apiConfig: clone$8(settings_ACU.apiConfig),
             tavernProfile: settings_ACU.tavernProfile,
-            apiPresets: clone$9(settings_ACU.apiPresets),
+            apiPresets: clone$8(settings_ACU.apiPresets),
             defaultApiPresetName: settings_ACU.defaultApiPresetName,
-            apiPresetBindingsByChat: clone$9(settings_ACU.apiPresetBindingsByChat),
+            apiPresetBindingsByChat: clone$8(settings_ACU.apiPresetBindingsByChat),
             tableApiPreset: settings_ACU.tableApiPreset,
             plotApiPreset: settings_ACU.plotApiPreset,
-            tableApiPresetOverridesByName: clone$9(settings_ACU.tableApiPresetOverridesByName),
-            plotTaskApiPresetOverridesById: clone$9(settings_ACU.plotTaskApiPresetOverridesById),
+            tableApiPresetOverridesByName: clone$8(settings_ACU.tableApiPresetOverridesByName),
+            plotTaskApiPresetOverridesById: clone$8(settings_ACU.plotTaskApiPresetOverridesById),
             contentOptimizationApiPreset: settings_ACU.contentOptimizationSettings?.apiPreset,
             streamingEnabled: settings_ACU.streamingEnabled,
         };
     }
     function restoreApiFields_ACU(snapshot) {
         settings_ACU.apiMode = snapshot.apiMode;
-        settings_ACU.apiConfig = clone$9(snapshot.apiConfig);
+        settings_ACU.apiConfig = clone$8(snapshot.apiConfig);
         settings_ACU.tavernProfile = snapshot.tavernProfile;
-        settings_ACU.apiPresets = clone$9(snapshot.apiPresets);
+        settings_ACU.apiPresets = clone$8(snapshot.apiPresets);
         settings_ACU.defaultApiPresetName = snapshot.defaultApiPresetName;
-        settings_ACU.apiPresetBindingsByChat = clone$9(snapshot.apiPresetBindingsByChat);
+        settings_ACU.apiPresetBindingsByChat = clone$8(snapshot.apiPresetBindingsByChat);
         settings_ACU.tableApiPreset = snapshot.tableApiPreset;
         settings_ACU.plotApiPreset = snapshot.plotApiPreset;
-        settings_ACU.tableApiPresetOverridesByName = clone$9(snapshot.tableApiPresetOverridesByName);
-        settings_ACU.plotTaskApiPresetOverridesById = clone$9(snapshot.plotTaskApiPresetOverridesById);
+        settings_ACU.tableApiPresetOverridesByName = clone$8(snapshot.tableApiPresetOverridesByName);
+        settings_ACU.plotTaskApiPresetOverridesById = clone$8(snapshot.plotTaskApiPresetOverridesById);
         if (settings_ACU.contentOptimizationSettings && typeof settings_ACU.contentOptimizationSettings === 'object') {
             settings_ACU.contentOptimizationSettings.apiPreset = snapshot.contentOptimizationApiPreset;
         }
@@ -64597,7 +64593,7 @@ $CONTENT
         const chatKey = getCurrentChatKey_ACU();
         settings_ACU.apiPresetBindingsByChat[chatKey] = { presetName: preset.name, updatedAt: Date.now() };
         settings_ACU.apiMode = preset.apiMode;
-        settings_ACU.apiConfig = clone$9(preset.apiConfig);
+        settings_ACU.apiConfig = clone$8(preset.apiConfig);
         settings_ACU.tavernProfile = preset.tavernProfile;
         return finalizeSave_ACU(snapshot);
     }
@@ -64641,7 +64637,7 @@ $CONTENT
                 updatedAt: Date.now(),
             };
             settings_ACU.apiMode = preset.apiMode;
-            settings_ACU.apiConfig = clone$9(preset.apiConfig);
+            settings_ACU.apiConfig = clone$8(preset.apiConfig);
             settings_ACU.tavernProfile = preset.tavernProfile;
         }
         const result = finalizeSave_ACU(snapshot);
@@ -64678,7 +64674,7 @@ $CONTENT
                 const fallback = findPresetByName_ACU(settings_ACU.apiPresets, fallbackName);
                 if (fallback) {
                     settings_ACU.apiMode = fallback.apiMode;
-                    settings_ACU.apiConfig = clone$9(fallback.apiConfig);
+                    settings_ACU.apiConfig = clone$8(fallback.apiConfig);
                     settings_ACU.tavernProfile = fallback.tavernProfile;
                 }
             }
@@ -64998,6 +64994,50 @@ $CONTENT
         }
         const content = await handleApiResponse_ACU(res, signal);
         return content ? content.trim() : null;
+    }
+    async function callAIWithResolvedPreset_ACU(messages, resolved, signal, lifecycle) {
+        if (!Array.isArray(messages) || messages.length === 0) {
+            throw new Error('内部 AI 消息必须是非空数组。');
+        }
+        const maxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
+        if (resolved.apiMode === 'tavern') {
+            const response = await sendConnectionManagerRequest_ACU(resolved.tavernProfile, messages, maxTokens);
+            assertNotAborted_ACU(signal);
+            if (typeof response?.result?.choices?.[0]?.message?.content === 'string')
+                return response.result.choices[0].message.content.trim();
+            if (typeof response?.content === 'string')
+                return response.content.trim();
+            return null;
+        }
+        if (resolved.apiConfig.useMainApi) {
+            lifecycle?.beforeMainApiCall?.();
+            let operation;
+            try {
+                // Only synchronous GENERATION_STARTED delivery can be attributed:
+                // the host event has no request ID, so keeping this window open for
+                // the whole request would let an unrelated later generation match.
+                operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false, max_tokens: maxTokens });
+            }
+            finally {
+                lifecycle?.afterMainApiCall?.();
+            }
+            const response = await operation;
+            assertNotAborted_ACU(signal);
+            return typeof response === 'string' ? response.trim() : null;
+        }
+        if (!resolved.apiConfig.url || !resolved.apiConfig.model) {
+            throw new Error('自定义 API 的 URL 或模型未配置。');
+        }
+        const response = await fetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, { maxTokens, stripModelPrefix: false })),
+            signal: signal || undefined,
+        });
+        if (!response.ok)
+            throw new Error(`API 请求失败: ${response.status}`);
+        const content = await handleApiResponse_ACU(response, signal);
+        return typeof content === 'string' && content.trim() ? content.trim() : null;
     }
     /**
      * 若 signal 已 abort 则抛出 AbortError，用于宿主 gateway 调用（无法强制中断）返回后立即检查。
@@ -65643,6 +65683,31 @@ $CONTENT
     function _set_optimizationProgressToast_ACU(v) { optimizationProgressToast_ACU = v; }
     function _set_contentOptimizationAbortRequested_ACU(v) { contentOptimizationAbortRequested_ACU = v; }
 
+    /** Legacy quick-reply loop fields are retired and must not be persisted again. */
+    function isRecord_ACU$3(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value);
+    }
+    function stripLegacyLoopPromptFieldsInPlace_ACU(source) {
+        if (!isRecord_ACU$3(source) || !isRecord_ACU$3(source.loopSettings))
+            return false;
+        const loopSettings = source.loopSettings;
+        const hadLegacyFields = Object.prototype.hasOwnProperty.call(loopSettings, 'quickReplyContent')
+            || Object.prototype.hasOwnProperty.call(loopSettings, 'currentPromptIndex');
+        delete loopSettings.quickReplyContent;
+        delete loopSettings.currentPromptIndex;
+        return hadLegacyFields;
+    }
+    function stripLegacyLoopPromptFields_ACU(source) {
+        if (!isRecord_ACU$3(source))
+            return source;
+        const result = { ...source };
+        if (!isRecord_ACU$3(source.loopSettings))
+            return result;
+        result.loopSettings = { ...source.loopSettings };
+        stripLegacyLoopPromptFieldsInPlace_ACU(result);
+        return result;
+    }
+
     /**
      * service/plot/plot-logic.ts — 剧情推进纯逻辑函数
      *
@@ -65651,24 +65716,7 @@ $CONTENT
      */
     // ═══ 循环提示词/提示词组兼容 ═══
     function ensureLoopPromptsArray_ACU(plotSettings) {
-        if (!plotSettings || !plotSettings.loopSettings)
-            return;
-        const ls = plotSettings.loopSettings;
-        if (typeof ls.quickReplyContent === 'string') {
-            const oldContent = ls.quickReplyContent.trim();
-            ls.quickReplyContent = oldContent ? [oldContent] : [];
-            ls.currentPromptIndex = 0;
-            logDebug_ACU('[剧情推进] 已迁移旧版循环提示词格式（字符串 -> 数组）');
-        }
-        if (!Array.isArray(ls.quickReplyContent)) {
-            ls.quickReplyContent = [];
-        }
-        if (typeof ls.currentPromptIndex !== 'number' || ls.currentPromptIndex < 0) {
-            ls.currentPromptIndex = 0;
-        }
-        if (ls.quickReplyContent.length > 0 && ls.currentPromptIndex >= ls.quickReplyContent.length) {
-            ls.currentPromptIndex = 0;
-        }
+        stripLegacyLoopPromptFieldsInPlace_ACU(plotSettings);
     }
     function ensureTagRulesCompat_ACU(targetSettings) {
         if (!targetSettings || typeof targetSettings !== 'object')
@@ -66061,8 +66109,8 @@ $CONTENT
             return null;
         }
         _set_activePlotEditorSettings_ACU(plotSettings);
+        stripLegacyLoopPromptFieldsInPlace_ACU(activePlotEditorSettings_ACU);
         ensurePlotPromptsArray_ACU(activePlotEditorSettings_ACU);
-        ensureLoopPromptsArray_ACU(activePlotEditorSettings_ACU);
         ensurePlotTasksCompat_ACU(activePlotEditorSettings_ACU, { syncLegacy: true });
         activePlotEditorSettings_ACU.finalSystemDirective = getPlotFinalDirectiveFromSource_ACU(activePlotEditorSettings_ACU);
         setPlotPromptContentByIdForSettings_ACU(activePlotEditorSettings_ACU, 'finalSystemDirective', activePlotEditorSettings_ACU.finalSystemDirective || '');
@@ -66076,7 +66124,6 @@ $CONTENT
     function cloneDefaultPlotSettingsForPreset_ACU() {
         const defaults = JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU));
         ensurePlotPromptsArray_ACU(defaults);
-        ensureLoopPromptsArray_ACU(defaults);
         ensurePlotTasksCompat_ACU(defaults, { syncLegacy: true });
         return defaults;
     }
@@ -66088,7 +66135,6 @@ $CONTENT
         const normalizedPreset = normalizePlotPresetExcludeRules_ACU(preset);
         const finalDirective = getPlotFinalDirectiveFromSource_ACU(normalizedPreset);
         ensurePlotPromptsArray_ACU(plotSettings);
-        ensureLoopPromptsArray_ACU(plotSettings);
         plotSettings.enabled = preservedEnabled;
         plotSettings.plotTasks = normalizePlotTasks_ACU(normalizedPreset);
         plotSettings.promptGroup = JSON.parse(JSON.stringify(getPlotPromptGroupFromSource_ACU(normalizedPreset)));
@@ -66105,9 +66151,10 @@ $CONTENT
         plotSettings.minLength = normalizedPreset.minLength ?? 0;
         plotSettings.contextTurnCount = normalizedPreset.contextTurnCount ?? 3;
         if (normalizedPreset.loopSettings) {
+            stripLegacyLoopPromptFieldsInPlace_ACU(plotSettings);
             plotSettings.loopSettings = { ...plotSettings.loopSettings, ...normalizedPreset.loopSettings };
         }
-        ensureLoopPromptsArray_ACU(plotSettings);
+        stripLegacyLoopPromptFieldsInPlace_ACU(plotSettings);
         ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
         plotSettings.finalSystemDirective = getPlotPromptContentByIdFromSettings_ACU(plotSettings, 'finalSystemDirective') || plotSettings.finalSystemDirective || '';
         return {
@@ -66121,7 +66168,7 @@ $CONTENT
             return null;
         const preservedEnabled = plotSettings.enabled === true;
         const preservedPromptPresets = Array.isArray(plotSettings.promptPresets)
-            ? JSON.parse(JSON.stringify(plotSettings.promptPresets))
+            ? JSON.parse(JSON.stringify(plotSettings.promptPresets)).map(stripLegacyLoopPromptFields_ACU)
             : [];
         const preservedLastUsedPresetName = normalizePlotPresetSelectionValue_ACU(plotSettings.lastUsedPresetName || '');
         const preservedGlobalRevision = Number.isFinite(plotSettings.globalRevision)
@@ -66135,7 +66182,6 @@ $CONTENT
         plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
         plotSettings.globalRevision = preservedGlobalRevision;
         ensurePlotPromptsArray_ACU(plotSettings);
-        ensureLoopPromptsArray_ACU(plotSettings);
         ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
         return plotSettings;
     }
@@ -66147,7 +66193,7 @@ $CONTENT
             return null;
         const preservedEnabled = plotSettings.enabled === true;
         const preservedPromptPresets = Array.isArray(plotSettings.promptPresets)
-            ? JSON.parse(JSON.stringify(plotSettings.promptPresets))
+            ? JSON.parse(JSON.stringify(plotSettings.promptPresets)).map(stripLegacyLoopPromptFields_ACU)
             : [];
         const preservedLastUsedPresetName = normalizePlotPresetSelectionValue_ACU(plotSettings.lastUsedPresetName || '');
         const preservedGlobalRevision = Number.isFinite(plotSettings.globalRevision)
@@ -66161,7 +66207,6 @@ $CONTENT
         plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
         plotSettings.globalRevision = preservedGlobalRevision;
         ensurePlotPromptsArray_ACU(plotSettings);
-        ensureLoopPromptsArray_ACU(plotSettings);
         ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
         plotSettings.finalSystemDirective = getPlotFinalDirectiveFromSource_ACU(plotSettings);
         setPlotPromptContentByIdForSettings_ACU(plotSettings, 'finalSystemDirective', plotSettings.finalSystemDirective || '');
@@ -66183,6 +66228,7 @@ $CONTENT
         if (!preset || typeof preset !== 'object')
             return preset;
         const cloned = JSON.parse(JSON.stringify(preset));
+        stripLegacyLoopPromptFieldsInPlace_ACU(cloned);
         cloned.contextExtractRules = normalizeExtractRules_ACU(cloned.contextExtractRules, cloned.contextExtractTags || '');
         cloned.contextExcludeRules = normalizeExcludeRules_ACU(cloned.contextExcludeRules, cloned.contextExcludeTags || '');
         cloned.plotTasks = stripPlotTaskRuntimeApiPresetFields_ACU(normalizePlotTasks_ACU(cloned));
@@ -66424,7 +66470,6 @@ $CONTENT
         }
         previewSettings.lastUsedPresetName = normalizedPresetName;
         ensurePlotPromptsArray_ACU(previewSettings);
-        ensureLoopPromptsArray_ACU(previewSettings);
         ensurePlotTasksCompat_ACU(previewSettings, { syncLegacy: true });
         previewSettings.finalSystemDirective = getPlotFinalDirectiveFromSource_ACU(previewSettings);
         setPlotPromptContentByIdForSettings_ACU(previewSettings, 'finalSystemDirective', previewSettings.finalSystemDirective || '');
@@ -71157,7 +71202,7 @@ $CONTENT
                 include_swipes: false,
             });
             if (messagesFromApi && messagesFromApi.length > 0) {
-                _set_allChatMessages_ACU(messagesFromApi.map((msg, idx) => ({ ...msg, id: idx }))); // Add simple index for now
+                _set_allChatMessages_ACU(messagesFromApi.map((msg, idx) => ({ id: idx, is_user: msg.is_user, message: msg.message }))); // Projected lightweight view: only consumed fields retained
                 logDebug_ACU(`ACU Loaded ${allChatMessages_ACU.length} messages for: ${currentChatFileIdentifier_ACU}.`);
             }
             else {
@@ -73124,13 +73169,26 @@ $CONTENT
     }
     async function putVectorIndexCachedShard_ACU(indexId, shardId, shard, checksum = '') {
         try {
-            const json = JSON.stringify(shard || {});
+            // 向量内存表示可能是 Float32Array（解码路径）。IDB 序列化路径保持不变：
+            // 写库前统一转回普通 number[]，避免结构化克隆改变既有缓存存储形态。
+            const normalizedShard = {
+                ...shard,
+                chunks: Array.isArray(shard?.chunks)
+                    ? shard.chunks.map((chunk) => ({
+                        ...chunk,
+                        vector: Array.isArray(chunk.vector) || chunk.vector instanceof Float32Array
+                            ? Array.from(chunk.vector, (value) => Number(value) || 0)
+                            : [],
+                    }))
+                    : [],
+            };
+            const json = JSON.stringify(normalizedShard);
             const now = Date.now();
             const record = {
                 key: makeKey_ACU(indexId, shardId),
                 indexId,
                 shardId,
-                shard,
+                shard: normalizedShard,
                 byteSize: new Blob([json]).size,
                 checksum,
                 lastAccessAt: now,
@@ -73261,10 +73319,26 @@ $CONTENT
             request.onerror = () => reject(request.error || new Error('打开交火向量热缓存失败'));
         });
     }
+    // 摘要向量内存可能是 Float32Array（解码路径）或 number[]（IDB/元数据回读）。
+    // IDB 序列化路径必须保持不变：写库前统一转回普通 number[]，避免结构化克隆把
+    // Float32Array 落成不同形态，破坏既有缓存读取契约。
+    function getChunkVector_ACU(chunk) {
+        if (Array.isArray(chunk?.vector))
+            return chunk.vector;
+        if (chunk?.vector instanceof Float32Array)
+            return chunk.vector;
+        return null;
+    }
+    function chunkVectorToNumberArray_ACU(chunk) {
+        const vector = getChunkVector_ACU(chunk);
+        if (!vector)
+            return [];
+        return Array.from(vector, (value) => Number(value) || 0);
+    }
     function cloneChunk_ACU(chunk) {
         return {
             ...chunk,
-            vector: Array.isArray(chunk.vector) ? chunk.vector.map((value) => Number(value) || 0) : [],
+            vector: chunkVectorToNumberArray_ACU(chunk),
             chunkKeys: Array.isArray(chunk.chunkKeys) ? [...chunk.chunkKeys] : chunk.chunkKeys,
         };
     }
@@ -73327,8 +73401,8 @@ $CONTENT
             return false;
         if (ref.checksum && record.checksum && record.checksum !== ref.checksum)
             return false;
-        const vector = Array.isArray(record.chunk.vector) ? record.chunk.vector : [];
-        return vector.length > 0 && (!ref.dimension || vector.length === ref.dimension);
+        const vector = getChunkVector_ACU(record.chunk);
+        return !!vector && vector.length > 0 && (!ref.dimension || vector.length === ref.dimension);
     }
     async function putSummaryVectorHotCacheChunks_ACU(options) {
         try {
@@ -73349,8 +73423,8 @@ $CONTENT
                     const now = Date.now();
                     options.chunks.forEach((chunk) => {
                         const chunkId = normalizeKeyPart_ACU(chunk?.chunkId);
-                        const vector = Array.isArray(chunk?.vector) ? chunk.vector : [];
-                        if (!chunkId || vector.length === 0)
+                        const vector = getChunkVector_ACU(chunk);
+                        if (!chunkId || !vector || vector.length === 0)
                             return;
                         const chunkKey = normalizeKeyPart_ACU((Array.isArray(chunk.chunkKeys) && chunk.chunkKeys[0]) || chunkId);
                         const normalizedChunk = cloneChunk_ACU({
@@ -73398,8 +73472,8 @@ $CONTENT
                 options.chunks.forEach((chunk) => {
                     const chunkId = normalizeKeyPart_ACU(chunk?.chunkId);
                     const ref = refsByChunkId.get(chunkId);
-                    const vector = Array.isArray(chunk?.vector) ? chunk.vector : [];
-                    if (!ref || vector.length === 0)
+                    const vector = getChunkVector_ACU(chunk);
+                    if (!ref || !vector || vector.length === 0)
                         return;
                     const chunkKey = normalizeKeyPart_ACU(ref.chunkKey);
                     const normalizedChunk = cloneChunk_ACU({
@@ -74281,22 +74355,32 @@ $CONTENT
     }
     function normalizeChunks_ACU$1(chunks) {
         return (Array.isArray(chunks) ? chunks : [])
-            .filter((chunk) => chunk?.chunkId && chunk?.rowKey && chunk?.text && Array.isArray(chunk.vector) && chunk.vector.length > 0)
+            .filter((chunk) => chunk?.chunkId && chunk?.rowKey && chunk?.text && isVectorLike_ACU(chunk.vector) && chunk.vector.length > 0)
             .map((chunk, index) => ({ ...chunk, sequence: index }));
     }
     const VECTOR_ENCODING_F32B64_ACU = 'f32b64';
+    /** 摘要向量内存表示：Float32Array（解码）或 number[]（兼容旧内存数据）。 */
+    function isVectorLike_ACU(value) {
+        return Array.isArray(value) || value instanceof Float32Array;
+    }
+    /** 序列化边界用：把内存向量归一为普通 number[]，不改变落盘/IDB 数组格式。 */
+    function vectorToFiniteNumberArray_ACU(vector) {
+        if (!isVectorLike_ACU(vector))
+            return [];
+        return Array.from(vector, (value) => Number(value)).filter((value) => Number.isFinite(value));
+    }
     function encodeVectorToF32B64_ACU(vector) {
-        if (!Array.isArray(vector))
+        if (!isVectorLike_ACU(vector))
             return '';
         const bytes = new Uint8Array(vector.length * 4);
         const view = new DataView(bytes.buffer);
-        vector.forEach((value, index) => {
-            const numeric = Number(value);
+        for (let index = 0; index < vector.length; index += 1) {
+            const numeric = Number(vector[index]);
             if (!Number.isFinite(numeric)) {
                 throw new Error(`交火向量包含非有限数值，拒绝编码: index=${index}`);
             }
             view.setFloat32(index * 4, numeric, true);
-        });
+        }
         let binary = '';
         const blockSize = 0x8000;
         for (let offset = 0; offset < bytes.length; offset += blockSize) {
@@ -74321,9 +74405,9 @@ $CONTENT
         for (let i = 0; i < binary.length; i += 1)
             bytes[i] = binary.charCodeAt(i) & 0xff;
         const view = new DataView(bytes.buffer);
-        const vector = [];
+        const vector = new Float32Array(bytes.length / 4);
         for (let offset = 0; offset < bytes.length; offset += 4)
-            vector.push(view.getFloat32(offset, true));
+            vector[offset / 4] = view.getFloat32(offset, true);
         return vector;
     }
     function encodeChunkVectorForStorage_ACU(chunk) {
@@ -74334,8 +74418,9 @@ $CONTENT
             chunk.vector = decodeF32B64ToVector_ACU(String(chunk.vector || ''));
             delete chunk.vectorEncoding;
         }
-        else if (Array.isArray(chunk.vector)) {
-            chunk.vector = chunk.vector.map((value) => Number(value)).filter((value) => Number.isFinite(value));
+        else if (isVectorLike_ACU(chunk.vector)) {
+            // 旧内存 number[] → 统一为 Float32Array（内存表示迁移）。
+            chunk.vector = Float32Array.from(vectorToFiniteNumberArray_ACU(chunk.vector));
         }
         return chunk;
     }
@@ -74387,7 +74472,7 @@ $CONTENT
             rowKey: chunk.rowKey,
             rowOrder: Number.isFinite(Number(chunk.rowOrder)) ? Number(chunk.rowOrder) : 0,
             text: chunk.text,
-            vector: Array.isArray(chunk.vector) ? chunk.vector.map((item) => Number(item)).filter((item) => Number.isFinite(item)) : [],
+            vector: vectorToFiniteNumberArray_ACU(chunk.vector),
             sequence: Number.isFinite(Number(chunk.sequence)) ? Number(chunk.sequence) : 0,
             embeddingModel: options.embeddingModel,
             dimension: Math.max(0, Math.floor(Number(options.dimension) || 0)),
@@ -75910,7 +75995,7 @@ $CONTENT
         return (shard.chunks || [])
             .map((chunk) => ({ ...chunk, vector: Array.isArray(chunk.vector) ? [...chunk.vector] : chunk.vector }))
             .map((chunk) => decodeChunkVectorInPlace_ACU(chunk))
-            .filter((chunk) => Array.isArray(chunk.vector) && chunk.vector.length > 0);
+            .filter((chunk) => isVectorLike_ACU(chunk.vector) && chunk.vector.length > 0);
     }
     async function loadChunksFromShardRefs_ACU(indexId, shardRefs, options = {}) {
         const refs = (Array.isArray(shardRefs) ? shardRefs : []).filter((ref) => !!ref?.shardId);
@@ -75958,7 +76043,7 @@ $CONTENT
                 const message = error instanceof Error ? error.message : String(error || '未知错误');
                 throw new Error(`交火向量索引内容块校验失败: ${sourcePath} chunk=${ref.chunkKey} ${message}`.trim());
             }
-            if (!Array.isArray(decoded.vector) || decoded.vector.length === 0) {
+            if (!isVectorLike_ACU(decoded.vector) || decoded.vector.length === 0) {
                 throw new Error(`交火向量索引内容块校验失败: ${sourcePath} chunk=${ref.chunkKey} vector_empty`);
             }
             return decoded;
@@ -76041,7 +76126,7 @@ $CONTENT
     function sortAndDedupeVectorChunks_ACU(chunks) {
         const byChunkId = new Map();
         (Array.isArray(chunks) ? chunks : []).forEach((chunk) => {
-            if (!chunk?.chunkId || !chunk.rowKey || !Array.isArray(chunk.vector) || chunk.vector.length === 0)
+            if (!chunk?.chunkId || !chunk.rowKey || !isVectorLike_ACU(chunk.vector) || chunk.vector.length === 0)
                 return;
             byChunkId.set(chunk.chunkId, { ...chunk });
         });
@@ -80846,7 +80931,11 @@ $CONTENT
                 rowKey: String(chunk.rowKey || ''),
                 rowOrder: Number.isFinite(Number(chunk.rowOrder)) ? Number(chunk.rowOrder) : 0,
                 text: String(chunk.text || ''),
-                vector: Array.isArray(chunk.vector) ? chunk.vector.map((item) => Number(item)).filter((item) => Number.isFinite(item)) : [],
+                // 统一归一为普通 number[]：state.chunks 会随聊天元数据 JSON 序列化，
+                // 不能把 Float32Array 落进持久化路径。
+                vector: Array.isArray(chunk.vector) || chunk.vector instanceof Float32Array
+                    ? Array.from(chunk.vector, (item) => Number(item)).filter((item) => Number.isFinite(item))
+                    : [],
                 sequence: Number.isFinite(Number(chunk.sequence)) ? Number(chunk.sequence) : 0,
                 sourceFingerprint: typeof chunk.sourceFingerprint === 'string' ? chunk.sourceFingerprint : undefined,
                 textHash: typeof chunk.textHash === 'string' ? chunk.textHash : undefined,
@@ -81832,8 +81921,8 @@ $CONTENT
         delete snapshot.promptPresets;
         delete snapshot.lastUsedPresetName;
         delete snapshot.enabled;
+        stripLegacyLoopPromptFieldsInPlace_ACU(snapshot);
         ensurePlotPromptsArray_ACU(snapshot);
-        ensureLoopPromptsArray_ACU(snapshot);
         ensurePlotTasksCompat_ACU(snapshot, { syncLegacy: true });
         snapshot.plotTasks = stripPlotTaskRuntimeApiPresetFields_ACU(snapshot.plotTasks);
         snapshot.finalSystemDirective = getPlotFinalDirectiveFromSource_ACU(snapshot);
@@ -81908,7 +81997,7 @@ $CONTENT
     }
 
     const ROW_ID_ALIASES = new Set(['id', 'rowid', 'row-id', 'row_id', '行号']);
-    function clone$8(value) {
+    function clone$7(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function isRowIdAlias(value) {
@@ -81921,7 +82010,7 @@ $CONTENT
         if (!guideData || typeof guideData !== 'object' || Array.isArray(guideData)) {
             return { guideData, changed: false, blockers: ['Sheet Guide 必须是对象。'] };
         }
-        const candidate = clone$8(guideData);
+        const candidate = clone$7(guideData);
         const blockers = [];
         let changed = false;
         for (const [key, sheet] of Object.entries(candidate)) {
@@ -84086,12 +84175,15 @@ $CONTENT
      * 事件 API 没有 generation id，因此按完成顺序（栈）配对；配合 makeFirst，避免其他插件在
      * 同一 ended 回调里新开 quiet 生成后覆盖当前正文生成的判定。
      */
-    function shouldProcessAutoTableUpdateForGenerationEnded_ACU() {
+    function consumeGenerationContextForEnded_ACU() {
         removeExpiredGenerationContexts_ACU();
         const activeContext = generationGate_ACU.activeGenerations.pop();
         // lastGeneration 仅保留给旧调用方。已有受追踪生成全部消费后，不能重复使用最后一个
         // quiet 上下文，否则下一次无关 GENERATION_ENDED 会被持续误拦截。
-        const g = activeContext || (generationGate_ACU.generationSeq === 0 ? generationGate_ACU.lastGeneration : null);
+        return activeContext || (generationGate_ACU.generationSeq === 0 ? generationGate_ACU.lastGeneration : null);
+    }
+    function shouldProcessAutoTableUpdateForGenerationEnded_ACU(context) {
+        const g = context === undefined ? consumeGenerationContextForEnded_ACU() : context;
         if (!g)
             return true;
         if (g.dryRun)
@@ -90208,72 +90300,6 @@ $CONTENT
         });
         return normalizeExcludeRules_ACU(collected, '');
     }
-    // --- [剧情推进] 循环提示词列表渲染和管理 ---
-    function renderLoopPromptsList_ACU(plotSettingsOverride = null) {
-        const $container = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-prompts-container`);
-        if (!$container.length)
-            return;
-        const plotSettings = plotSettingsOverride || getActivePlotEditorSettings_ACU();
-        if (!plotSettings)
-            return;
-        ensureLoopPromptsArray_ACU(plotSettings);
-        const prompts = plotSettings.loopSettings.quickReplyContent || [];
-        $container.empty();
-        if (prompts.length === 0) {
-            $container.html('<div style="padding: 20px; text-align: center; color: var(--text_secondary); border: 1px dashed var(--border_color_light); border-radius: 6px;">暂无提示词，点击上方"添加提示词"按钮添加</div>');
-            return;
-        }
-        prompts.forEach((prompt, index) => {
-            const $item = jQuery_API_ACU('<div>', {
-                class: 'loop-prompt-item',
-                style: 'display: flex; gap: 8px; align-items: flex-start; padding: 10px; background: var(--background_light); border: 1px solid var(--border_color_light); border-radius: 6px;'
-            });
-            const $content = jQuery_API_ACU('<div>', {
-                style: 'flex: 1; display: flex; flex-direction: column; gap: 6px;'
-            });
-            $content.append(jQuery_API_ACU('<div>', {
-                style: 'display: flex; align-items: center; gap: 8px;'
-            }).append(jQuery_API_ACU('<span>', {
-                style: 'font-size: 0.85em; color: var(--text_secondary); font-weight: 500;',
-                text: `提示词 #${index + 1}`
-            })));
-            const $textarea = jQuery_API_ACU('<textarea>', {
-                class: 'loop-prompt-textarea text_pole',
-                'data-index': index,
-                rows: 2,
-                placeholder: '输入循环提示词内容...',
-                style: 'resize: vertical; width: 100%;',
-                text: prompt || ''
-            });
-            $content.append($textarea);
-            const $deleteBtn = jQuery_API_ACU('<button>', {
-                type: 'button',
-                class: 'loop-prompt-delete-btn button',
-                'data-index': index,
-                style: 'padding: 6px 10px; color: var(--danger); background: transparent; border: 1px solid var(--danger); border-radius: 4px; cursor: pointer; flex-shrink: 0;',
-                title: '删除此提示词',
-                html: '<i class="fa-solid fa-trash"></i>'
-            });
-            $item.append($content).append($deleteBtn);
-            $container.append($item);
-        });
-    }
-    function saveLoopPromptsFromUI_ACU() {
-        const plotSettings = getActivePlotEditorSettings_ACU();
-        if (!plotSettings)
-            return;
-        ensureLoopPromptsArray_ACU(plotSettings);
-        const prompts = [];
-        $popupInstance_ACU.find('.loop-prompt-textarea').each(function () {
-            const content = String(jQuery_API_ACU(this).val() || '').trim();
-            if (content) {
-                prompts.push(content);
-            }
-        });
-        plotSettings.loopSettings.quickReplyContent = prompts;
-        plotSettings.loopSettings.currentPromptIndex = 0; // 重置索引
-        saveSettingsAndNotify_ACU();
-    }
 
     /**
      * presentation/components/optimization-ui/index.ts — 统一 re-export
@@ -91473,7 +91499,9 @@ $CONTENT
         const existingChunks = Array.isArray(existingState?.chunks) ? existingState.chunks : [];
         const existingChunksByRowKey = new Map();
         existingChunks.forEach((chunk) => {
-            if (!chunk?.rowKey || !chunk?.chunkId || !Array.isArray(chunk.vector) || chunk.vector.length === 0)
+            if (!chunk?.rowKey || !chunk?.chunkId
+                || (!Array.isArray(chunk.vector) && !(chunk.vector instanceof Float32Array))
+                || chunk.vector.length === 0)
                 return;
             const list = existingChunksByRowKey.get(chunk.rowKey) || [];
             list.push({ ...chunk });
@@ -91706,7 +91734,9 @@ $CONTENT
         const validRowKeys = new Set(nextRows.map((row) => row.rowKey));
         const validChunkIds = new Set(nextRows.flatMap((row) => row.chunkIds));
         const nextChunks = Array.from(nextChunksById.values())
-            .filter((chunk) => validRowKeys.has(chunk.rowKey) && validChunkIds.has(chunk.chunkId) && Array.isArray(chunk.vector) && chunk.vector.length > 0)
+            .filter((chunk) => validRowKeys.has(chunk.rowKey) && validChunkIds.has(chunk.chunkId)
+            && (Array.isArray(chunk.vector) || chunk.vector instanceof Float32Array)
+            && chunk.vector.length > 0)
             .map((chunk, index) => ({ ...chunk, sequence: index }));
         const nextState = buildLayerStateWithRows_ACU(previousState, nextRows, nextChunks, {
             snapshotMessageId: options.snapshotMessageId,
@@ -98843,15 +98873,6 @@ $CONTENT
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val(plotSettings.rateErotic);
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(plotSettings.rateCuckold);
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(plotSettings.recallCount ?? 20);
-        // 循环设置
-        ensureLoopPromptsArray_ACU(plotSettings);
-        const loopSettings = plotSettings.loopSettings;
-        // 循环提示词现在使用数组，通过 renderLoopPromptsList_ACU 渲染
-        renderLoopPromptsList_ACU(plotSettings);
-        $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val(loopSettings.loopTags || '');
-        $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(loopSettings.loopDelay);
-        $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(loopSettings.loopTotalDuration);
-        $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val(loopSettings.maxRetries);
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(plotSettings.contextTurnCount);
         renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`, normalizeExtractRules_ACU(plotSettings.contextExtractRules, plotSettings.contextExtractTags || ''), {
             startPlaceholder: '开始词（例如：<think）',
@@ -98863,8 +98884,6 @@ $CONTENT
             endPlaceholder: '结束词（例如：</thinking>）',
             fallbackRules: getDefaultPlotContextExcludeRules_ACU(),
         });
-        // 循环状态
-        updatePlotLoopStatusUI_ACU();
         // 预设选择器
         loadPlotPresetSelect_ACU();
     }
@@ -99086,29 +99105,6 @@ $CONTENT
         return segments;
     }
     /**
-     * 更新剧情推进循环状态UI
-     */
-    function updatePlotLoopStatusUI_ACU() {
-        if (!$popupInstance_ACU)
-            return;
-        const $statusText = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-status-text`);
-        const $timerDisplay = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-timer-display`);
-        const $startBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-start-loop-btn`);
-        const $stopBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-stop-loop-btn`);
-        if (loopState_ACU.isLooping) {
-            $statusText.text('运行中').css('color', 'var(--green)');
-            $startBtn.hide();
-            $stopBtn.show();
-            $timerDisplay.show();
-        }
-        else {
-            $statusText.text('未运行').css('color', 'var(--red)');
-            $stopBtn.hide();
-            $startBtn.show();
-            $timerDisplay.hide().text('');
-        }
-    }
-    /**
      * 加载剧情预设选择器
      */
     function getPlotPresetDisplayName_ACU(presetName) {
@@ -99220,7 +99216,10 @@ $CONTENT
             return {};
         flushCurrentPlotTaskEditorState_ACU({ renderTaskList: true, persist: false });
         const activeSettings = getActivePlotEditorSettings_ACU();
+        stripLegacyLoopPromptFieldsInPlace_ACU(settings_ACU.plotSettings);
+        stripLegacyLoopPromptFieldsInPlace_ACU(activeSettings);
         const currentSettings = JSON.parse(JSON.stringify(activeSettings || settings_ACU.plotSettings || {}));
+        stripLegacyLoopPromptFieldsInPlace_ACU(currentSettings);
         ensurePlotTasksCompat_ACU(currentSettings, { syncLegacy: true });
         delete currentSettings.promptPresets;
         delete currentSettings.lastUsedPresetName;
@@ -99239,23 +99238,6 @@ $CONTENT
         currentSettings.contextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`);
         currentSettings.contextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
         currentSettings.contextTurnCount = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(), 10) || 3;
-        currentSettings.loopSettings = {
-            ...(currentSettings.loopSettings || {}),
-            quickReplyContent: (() => {
-                const prompts = [];
-                $popupInstance_ACU.find('.loop-prompt-textarea').each(function () {
-                    const content = String(jQuery_API_ACU(this).val() || '').trim();
-                    if (content)
-                        prompts.push(content);
-                });
-                return prompts;
-            })(),
-            currentPromptIndex: 0,
-            loopTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val() || '',
-            loopDelay: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(), 10) || 5,
-            loopTotalDuration: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(), 10) || 0,
-            maxRetries: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val(), 10) || 3,
-        };
         currentSettings.plotTasks = normalizePlotTasks_ACU(currentSettings);
         ensurePlotPromptsArray_ACU(currentSettings);
         setPlotPromptContentByIdForSettings_ACU(currentSettings, 'mainPrompt', currentSettings.mainPrompt || '');
@@ -100961,395 +100943,31 @@ $CONTENT
             return '';
         }
     }
+    /** Writes the host textarea and reports availability instead of silently claiming success. */
     function setSendTextareaValue_ACU(text) {
         try {
             const $textarea = jQuery_API_ACU?.('#send_textarea');
+            if (!$textarea || typeof $textarea.val !== 'function' || typeof $textarea.trigger !== 'function')
+                return false;
             $textarea?.val(text);
             $textarea?.trigger('input');
+            return true;
         }
         catch {
-            // 宿主输入框在页面切换期间可能暂时不存在。
+            return false;
         }
     }
+    /** Clicks the host send button and reports availability instead of swallowing it. */
     function clickSendButton_ACU() {
         try {
-            jQuery_API_ACU?.('#send_but').click();
+            const $button = jQuery_API_ACU?.('#send_but');
+            if (!$button || typeof $button.click !== 'function')
+                return false;
+            $button.click();
+            return true;
         }
         catch {
-            // 宿主发送按钮在页面切换期间可能暂时不存在。
-        }
-    }
-
-    /**
-     * service/loop/loop-evaluator.ts — 循环生成结果评估核心逻辑
-     * 从 presentation/triggers/auto-loop.ts 的 onLoopGenerationEnded_ACU 中提取
-     *
-     * 只负责「评估 AI 回复是否满足循环条件」，不涉及 UI（toast/按钮/文本框）。
-     */
-    /**
-     * 验证循环标签是否存在于内容中
-     */
-    function validateLoopTags_ACU(content, tags) {
-        if (!tags || !tags.trim())
-            return true;
-        const tagList = tags.split(/[,，]/).map((t) => t.trim()).filter((t) => t);
-        if (tagList.length === 0)
-            return true;
-        for (const tag of tagList) {
-            if (!content.includes(tag)) {
-                logDebug_ACU(`[剧情推进] Loop validation failed: missing tag "${tag}"`);
-                return false;
-            }
-        }
-        return true;
-    }
-    /**
-     * 评估循环生成结果，决定下一步动作
-     *
-     * @param chat - 当前聊天记录数组
-     * @param loopSettings - 循环设置
-     * @param planningGuard - 规划守卫状态
-     * @returns LoopEvaluationResult 包含 action 和 reason
-     */
-    function evaluateLoopGenerationResult_ACU(chat, loopSettings, planningGuard) {
-        if (!chat || chat.length === 0) {
-            return { action: 'ignore', reason: 'Chat is empty' };
-        }
-        // 检查规划守卫
-        if (planningGuard.inProgress) {
-            return { action: 'ignore', reason: 'Planning in progress' };
-        }
-        if (planningGuard.ignoreNextGenerationEndedCount > 0) {
-            return { action: 'ignore', reason: `Ignoring planning-triggered event (${planningGuard.ignoreNextGenerationEndedCount} left)` };
-        }
-        const lastMessage = chat[chat.length - 1];
-        // 检查是否是规划层
-        if (lastMessage.is_user && lastMessage._qrf_from_planning) {
-            return { action: 'wait', reason: 'Detected planning layer, waiting for AI reply' };
-        }
-        // 最后一条是用户消息（无规划标记）
-        if (lastMessage.is_user) {
-            return { action: 'wait', reason: 'Last message is user message without planning mark, need to wait' };
-        }
-        // 检查是否来自当前角色
-        const activeChar = getCurrentCharacterFallback_ACU();
-        const activeCharName = activeChar?.name;
-        if (activeCharName && lastMessage.name && lastMessage.name !== activeCharName) {
-            return { action: 'ignore', reason: `AI reply from different character (${lastMessage.name} != ${activeCharName})` };
-        }
-        // 验证标签
-        const tagsOk = validateLoopTags_ACU(lastMessage.mes, loopSettings.loopTags);
-        if (tagsOk) {
-            return { action: 'continue', reason: 'Tags validation passed' };
-        }
-        return { action: 'retry_delete', reason: 'Tags validation failed' };
-    }
-
-    /**
-     * service/loop/loop-controller.ts — 循环控制状态机（service 层：纯业务逻辑）
-     * 从 presentation/triggers/auto-loop.ts 提取。
-     * UI 操作（写输入框、点发送按钮、更新定时器显示）通过回调传入。
-     */
-    // ============================================================\n// 核心业务函数\n// ============================================================
-    /**
-     * 验证循环启动参数
-     * 纯业务逻辑
-     * @returns null 表示验证通过，否则返回错误信息
-     */
-    function validateLoopStartParams_ACU() {
-        const plotSettings = settings_ACU.plotSettings;
-        ensureLoopPromptsArray_ACU(plotSettings);
-        const loopSettings = plotSettings.loopSettings;
-        const loopDuration = (loopSettings.loopTotalDuration || 0) * 60 * 1000;
-        if (!loopSettings.quickReplyContent || !Array.isArray(loopSettings.quickReplyContent) || loopSettings.quickReplyContent.length === 0) {
-            return '请先添加至少一个循环提示词';
-        }
-        if (loopDuration <= 0) {
-            return '请设置有效的总倒计时 (大于0分钟)';
-        }
-        return null;
-    }
-    /**
-     * 初始化循环状态
-     * 纯业务逻辑
-     */
-    function initLoopState_ACU() {
-        const plotSettings = settings_ACU.plotSettings;
-        ensureLoopPromptsArray_ACU(plotSettings);
-        const loopSettings = plotSettings.loopSettings;
-        const loopDuration = (loopSettings.loopTotalDuration || 0) * 60 * 1000;
-        loopSettings.currentPromptIndex = 0;
-        loopState_ACU.isLooping = true;
-        loopState_ACU.isRetrying = false;
-        loopState_ACU.startTime = Date.now();
-        loopState_ACU.totalDuration = loopDuration;
-        loopState_ACU.retryCount = 0;
-        logDebug_ACU('[剧情推进] Auto Loop Started. Duration: ' + loopDuration + 'ms');
-        return { loopDuration };
-    }
-    /**
-     * 停止循环状态
-     * 纯业务逻辑
-     */
-    function stopLoopState_ACU() {
-        loopState_ACU.isLooping = false;
-        loopState_ACU.isRetrying = false;
-        loopState_ACU.awaitingReply = false;
-        if (loopState_ACU.timerId) {
-            clearTimeout(loopState_ACU.timerId);
-            loopState_ACU.timerId = null;
-        }
-        if (loopState_ACU.tickInterval) {
-            clearInterval(loopState_ACU.tickInterval);
-            loopState_ACU.tickInterval = null;
-        }
-        logDebug_ACU('[剧情推进] Auto Loop Stopped.');
-    }
-    /**
-     * 获取下一个循环提示词
-     * 纯业务逻辑
-     * @returns 提示词文本，或 null 表示没有可用提示词
-     */
-    function getNextLoopPrompt_ACU() {
-        if (!loopState_ACU.isLooping)
-            return null;
-        const plotSettings = settings_ACU.plotSettings;
-        ensureLoopPromptsArray_ACU(plotSettings);
-        const loopSettings = plotSettings.loopSettings;
-        const prompts = loopSettings.quickReplyContent || [];
-        if (!prompts || prompts.length === 0) {
-            logWarn_ACU('[剧情推进] Loop prompts array is empty, stopping loop.');
-            return null;
-        }
-        const currentIndex = loopSettings.currentPromptIndex || 0;
-        const quickReplyContent = prompts[currentIndex] || prompts[0];
-        if (!quickReplyContent || !quickReplyContent.trim()) {
-            logWarn_ACU('[剧情推进] Current prompt is empty, stopping loop.');
-            return null;
-        }
-        loopSettings.currentPromptIndex = (currentIndex + 1) % prompts.length;
-        logDebug_ACU(`[剧情推进] 使用提示词 ${currentIndex + 1}/${prompts.length}: ${quickReplyContent.substring(0, 50)}...`);
-        loopState_ACU.awaitingReply = true;
-        return quickReplyContent;
-    }
-    /**
-     * 处理重试流程的业务逻辑
-     * @returns 是否应该继续重试
-     */
-    async function handleRetryLogic_ACU(shouldDeleteAiReply) {
-        loopState_ACU.isRetrying = true;
-        loopState_ACU.retryCount++;
-        const loopSettings = settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings;
-        const maxRetries = loopSettings.maxRetries ?? 3;
-        logDebug_ACU(`[剧情推进] 进入重试流程: ${loopState_ACU.retryCount}/${maxRetries}.`);
-        if (loopState_ACU.retryCount > maxRetries) {
-            return false; // 超过最大重试次数
-        }
-        if (shouldDeleteAiReply) {
-            const chat = getChatArray_ACU();
-            const last = chat?.length ? chat[chat.length - 1] : null;
-            if (last && !last.is_user) {
-                logDebug_ACU('[剧情推进] [重试] 删除缺失标签的AI楼层...');
-                try {
-                    await deleteLastMessage_ACU();
-                }
-                catch (e) {
-                    logError_ACU('[剧情推进] 删除楼层失败:', e);
-                }
-            }
-            else {
-                logDebug_ACU('[剧情推进] [重试] 不需要删除：最新楼层不是AI。');
-            }
-        }
-        return true; // 可以继续重试
-    }
-    /**
-     * 评估生成结束后的循环状态
-     * 纯业务逻辑
-     * @returns 动作指令
-     */
-    async function evaluateLoopEnd_ACU() {
-        if (!loopState_ACU.isLooping)
-            return { action: 'ignore' };
-        if (!loopState_ACU.awaitingReply)
-            return { action: 'ignore' };
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        if (!loopState_ACU.isLooping || !loopState_ACU.awaitingReply)
-            return { action: 'ignore' };
-        const loopSettings = settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings;
-        const chat = getChatArray_ACU();
-        if (!chat || chat.length === 0)
-            return { action: 'ignore' };
-        const result = evaluateLoopGenerationResult_ACU(chat, loopSettings, planningGuard_ACU);
-        if (result.reason.includes('Ignoring planning-triggered')) {
-            planningGuard_ACU.ignoreNextGenerationEndedCount--;
-        }
-        logDebug_ACU(`[剧情推进] [Loop] Evaluation result: action=${result.action}, reason=${result.reason}`);
-        const loopDelay = (loopSettings.loopDelay || 5) * 1000;
-        const retryDelay = (loopSettings.retryDelay || 3) * 1000;
-        switch (result.action) {
-            case 'ignore':
-                return { action: 'ignore' };
-            case 'wait': {
-                logWarn_ACU(`[剧情推进] [Loop] ${result.reason}，等待2s后重试检测...`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                const updatedChat = getChatArray_ACU();
-                const lastMessage = updatedChat?.length ? updatedChat[updatedChat.length - 1] : null;
-                if (!lastMessage || lastMessage.is_user) {
-                    logWarn_ACU('[剧情推进] [Loop] 未找到AI回复楼层，进入重试。');
-                    loopState_ACU.awaitingReply = false;
-                    return { action: 'retry_no_delete', retryDelay };
-                }
-                // 重新评估
-                const retryResult = evaluateLoopGenerationResult_ACU(updatedChat, loopSettings, planningGuard_ACU);
-                if (retryResult.action === 'continue') {
-                    loopState_ACU.isRetrying = false;
-                    loopState_ACU.retryCount = 0;
-                    loopState_ACU.awaitingReply = false;
-                    return { action: 'continue', loopDelay };
-                }
-                else if (retryResult.action === 'retry_delete') {
-                    loopState_ACU.awaitingReply = false;
-                    return { action: 'retry_delete', retryDelay };
-                }
-                else {
-                    loopState_ACU.awaitingReply = false;
-                    return { action: 'retry_no_delete', retryDelay };
-                }
-            }
-            case 'continue':
-                logDebug_ACU('[剧情推进] 标签检测通过。继续循环。');
-                loopState_ACU.isRetrying = false;
-                loopState_ACU.retryCount = 0;
-                loopState_ACU.awaitingReply = false;
-                return { action: 'continue', loopDelay };
-            case 'retry_delete':
-                logDebug_ACU('[剧情推进] 标签检测未通过。进入重试。');
-                loopState_ACU.awaitingReply = false;
-                return { action: 'retry_delete', retryDelay };
-            case 'retry_no_delete':
-                loopState_ACU.awaitingReply = false;
-                return { action: 'retry_no_delete', retryDelay };
-            default:
-                return { action: 'ignore' };
-        }
-    }
-
-    /**
-     * presentation/triggers/auto-loop.ts — 自动化循环 UI 壳（presentation 层）
-     * 业务逻辑委托给 service/loop/loop-controller.ts。
-     * 本文件只负责 UI 操作：写输入框、点发送按钮、更新定时器显示、toast 通知。
-     */
-    async function startAutoLoop_ACU() {
-        // [重构] 调用 service 层校验
-        const validationError = validateLoopStartParams_ACU();
-        if (validationError) {
-            showToastr_ACU('error', validationError, '无法启动循环');
-            stopAutoLoop_ACU();
-            return;
-        }
-        // [重构] 调用 service 层初始化状态
-        initLoopState_ACU();
-        // UI 更新
-        updateLoopUIStatus_ACU(true);
-        // 定时器 tick（UI 层负责显示）
-        loopState_ACU.tickInterval = setInterval(() => {
-            const elapsed = Date.now() - loopState_ACU.startTime;
-            const remaining = Math.max(0, loopState_ACU.totalDuration - elapsed);
-            if (remaining <= 0) {
-                stopAutoLoop_ACU();
-                showToastr_ACU('info', '总倒计时结束，自动化循环已停止。', '循环结束');
-                return;
-            }
-            const minutes = Math.floor(remaining / 60000);
-            const seconds = Math.floor((remaining % 60000) / 1000);
-            const formatted = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-            updateLoopTimerDisplay_ACU(formatted);
-        }, 1000);
-        triggerLoopGeneration_ACU();
-    }
-    function stopAutoLoop_ACU() {
-        // [重构] 调用 service 层停止状态
-        stopLoopState_ACU();
-        // UI 更新
-        updateLoopUIStatus_ACU(false);
-    }
-    async function triggerLoopGeneration_ACU() {
-        // [重构] 调用 service 层获取下一个提示词
-        const prompt = getNextLoopPrompt_ACU();
-        if (prompt === null) {
-            stopAutoLoop_ACU();
-            return;
-        }
-        // UI 操作：写入输入框并点击发送
-        setSendTextareaValue_ACU(prompt);
-        setTimeout(() => {
-            if (loopState_ACU.isLooping) {
-                if (typeof clickSendButton_ACU === 'function')
-                    clickSendButton_ACU();
-            }
-        }, 100);
-    }
-    async function triggerDirectRegenerateForLoop_ACU(loopSettings) {
-        loopState_ACU.awaitingReply = true;
-        if (window.TavernHelper?.triggerSlash) {
-            await window.TavernHelper.triggerSlash('/trigger await=true');
-            return;
-        }
-        if (window.original_TavernHelper_generate) {
-            window.original_TavernHelper_generate({ user_input: '' });
-            return;
-        }
-        window.TavernHelper?.generate?.({ user_input: '' });
-    }
-    async function enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply }) {
-        // [重构] 调用 service 层重试逻辑
-        const canRetry = await handleRetryLogic_ACU(shouldDeleteAiReply);
-        if (!canRetry) {
-            const maxRetries = loopSettings.maxRetries ?? 3;
-            showToastr_ACU('error', `连续失败超过 ${maxRetries} 次，自动化循环已停止。`, '循环中止');
-            stopAutoLoop_ACU();
-            return;
-        }
-        // UI 操作：延迟后触发重新生成
-        loopState_ACU.timerId = setTimeout(async () => {
-            let busyWait = 0;
-            while (window.SillyTavern?.generating && busyWait < 20) {
-                await new Promise(r => setTimeout(r, 500));
-                busyWait++;
-            }
-            try {
-                await triggerDirectRegenerateForLoop_ACU(loopSettings);
-            }
-            catch (err) {
-                logError_ACU('[剧情推进] [重试] 触发生成失败:', err);
-                if (loopState_ACU.isLooping) {
-                    await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: false });
-                }
-            }
-        }, (loopSettings.retryDelay || 3) * 1000);
-    }
-    async function onLoopGenerationEnded_ACU() {
-        // [重构] 调用 service 层评估
-        const result = await evaluateLoopEnd_ACU();
-        const loopSettings = settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings;
-        switch (result.action) {
-            case 'ignore':
-                return;
-            case 'continue':
-                loopState_ACU.timerId = setTimeout(() => {
-                    triggerLoopGeneration_ACU();
-                }, result.loopDelay || 5000);
-                return;
-            case 'retry_delete':
-                await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: true });
-                return;
-            case 'retry_no_delete':
-                await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: false });
-                return;
-            case 'wait_retry':
-                await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: false });
-                return;
+            return false;
         }
     }
 
@@ -101536,7 +101154,11 @@ $CONTENT
                 rows,
                 chunks: chunks.map((chunk) => ({
                     ...chunk,
-                    vector: Array.isArray(chunk.vector) ? chunk.vector.map((item) => Number(item)).filter((item) => Number.isFinite(item)) : [],
+                    // 统一归一为普通 number[]：state.chunks 会随聊天元数据 JSON 序列化，
+                    // 不能把 Float32Array 落进持久化路径。
+                    vector: Array.isArray(chunk.vector) || chunk.vector instanceof Float32Array
+                        ? Array.from(chunk.vector, (item) => Number(item)).filter((item) => Number.isFinite(item))
+                        : [],
                 })),
                 manifest: JSON.parse(JSON.stringify(manifest)),
             };
@@ -102095,7 +101717,7 @@ $CONTENT
     // T10：query 向量模长预计算。与 cosineSimilarity_ACU 内部的 leftNorm 算法逐位一致，
     // 外提后循环内不再重复累加 query 的平方和。
     function computeVectorNorm_ACU(vector) {
-        if (!Array.isArray(vector) || vector.length <= 0)
+        if ((!Array.isArray(vector) && !(vector instanceof Float32Array)) || vector.length <= 0)
             return 0;
         let norm = 0;
         for (const value of vector) {
@@ -102108,7 +101730,9 @@ $CONTENT
     // T2：维度不一致直接返回 0，不再截断后照常打分——截断会把混维向量静默当成相似，
     // 产生错误召回且难以察觉。维度一致的路径与改动前逐项等价。
     function cosineSimilarity_ACU(left, right, leftNorm) {
-        if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length || left.length <= 0)
+        if ((!Array.isArray(left) && !(left instanceof Float32Array))
+            || (!Array.isArray(right) && !(right instanceof Float32Array))
+            || left.length !== right.length || left.length <= 0)
             return 0;
         const length = left.length;
         let dot = 0;
@@ -102704,7 +102328,7 @@ $CONTENT
         const denseCandidates = searchableCandidates
             .map((candidate) => {
             const chunk = candidate.chunk;
-            if (!Array.isArray(chunk.vector) || chunk.vector.length === 0)
+            if ((!Array.isArray(chunk.vector) && !(chunk.vector instanceof Float32Array)) || chunk.vector.length === 0)
                 return null;
             const score = cosineSimilarity_ACU(queryVector, chunk.vector, queryNorm);
             if (score < config.summaryIndexMinScore)
@@ -102922,6 +102546,2241 @@ $CONTENT
         return result;
     }
 
+    const INTERNAL_REQUEST_TTL_MS_ACU = 60000;
+    const requestsById_ACU = new Map();
+    function purgeExpiredRequests_ACU(now = Date.now()) {
+        for (const [requestId, record] of requestsById_ACU) {
+            if (record.expiresAt <= now)
+                requestsById_ACU.delete(requestId);
+        }
+    }
+    /**
+     * Keeps host-event provenance separate from the legacy loop's mutable counter.
+     * A host generation can be claimed only after one explicit internal request was
+     * observed entering the main-API transport and then bound to one start sequence.
+     */
+    function beginContinuationInternalAiRequest_ACU(identity) {
+        purgeExpiredRequests_ACU();
+        if (requestsById_ACU.has(identity.requestId)) {
+            throw new Error(`重复的 continuation 内部请求 ID: ${identity.requestId}`);
+        }
+        requestsById_ACU.set(identity.requestId, { identity, mainApiInvocationActive: false, generationSeq: null, expiresAt: Date.now() + INTERNAL_REQUEST_TTL_MS_ACU });
+    }
+    /**
+     * Opens a synchronous attribution window around the direct generateRaw call.
+     * A later arbitrary GENERATION_STARTED is not eligible for attribution.
+     */
+    function beginContinuationInternalAiMainApiInvocation_ACU(requestId) {
+        const record = requestsById_ACU.get(requestId);
+        if (!record)
+            return;
+        record.mainApiInvocationActive = true;
+        record.expiresAt = Date.now() + INTERNAL_REQUEST_TTL_MS_ACU;
+    }
+    function endContinuationInternalAiMainApiInvocation_ACU(requestId) {
+        const record = requestsById_ACU.get(requestId);
+        if (record)
+            record.mainApiInvocationActive = false;
+    }
+    /** A result without a synchronously attributed host lifecycle is not retained for late-event guessing. */
+    function settleContinuationInternalAiRequest_ACU(requestId) {
+        const record = requestsById_ACU.get(requestId);
+        if (!record)
+            return;
+        if (record.generationSeq === null)
+            requestsById_ACU.delete(requestId);
+        else
+            record.expiresAt = Date.now() + INTERNAL_REQUEST_TTL_MS_ACU;
+    }
+    function cancelContinuationInternalAiRequest_ACU(requestId) {
+        requestsById_ACU.delete(requestId);
+    }
+    function bindContinuationInternalAiGenerationStarted_ACU(generationSeq) {
+        purgeExpiredRequests_ACU();
+        const candidates = [...requestsById_ACU.values()].filter(record => record.mainApiInvocationActive && record.generationSeq === null);
+        // The host omits request IDs. Only a synchronous invocation boundary may bind
+        // an event; nested calls remain ambiguous and are intentionally unclaimed.
+        if (candidates.length !== 1)
+            return null;
+        const record = candidates[0];
+        record.generationSeq = generationSeq;
+        record.expiresAt = Date.now() + INTERNAL_REQUEST_TTL_MS_ACU;
+        return record.identity;
+    }
+    function consumeContinuationInternalAiGenerationEnded_ACU(generationSeq) {
+        if (generationSeq === undefined)
+            return null;
+        purgeExpiredRequests_ACU();
+        const match = [...requestsById_ACU.values()].find(record => record.generationSeq === generationSeq);
+        if (!match)
+            return null;
+        requestsById_ACU.delete(match.identity.requestId);
+        return match.identity;
+    }
+    function resetContinuationInternalAiEventRegistryForTests_ACU() {
+        requestsById_ACU.clear();
+    }
+
+    let activeBridge_ACU = null;
+    /**
+     * Binds the currently mounted continuation runtime to the shared host lifecycle.
+     * The caller owns lifecycle disposal; replacing a bridge never activates two
+     * continuation consumers for one host generation.
+     */
+    function registerContinuationHostGenerationBridge_ACU(bridge) {
+        activeBridge_ACU = bridge;
+        return () => {
+            if (activeBridge_ACU === bridge)
+                activeBridge_ACU = null;
+        };
+    }
+    function getContinuationHostGenerationBridge_ACU() {
+        return activeBridge_ACU;
+    }
+    function resetContinuationHostGenerationBridgeForTests_ACU() {
+        activeBridge_ACU = null;
+    }
+
+    const CONTINUATION_SCHEMA_VERSION_ACU = 1;
+    class ContinuationValidationError_ACU extends Error {
+        constructor(error) {
+            super(error.message);
+            this.name = 'ContinuationValidationError_ACU';
+            this.error = error;
+        }
+    }
+    function createContinuationError_ACU(code, phase, message, retryable = false, details) {
+        return details === undefined ? { code, phase, message, retryable } : { code, phase, message, retryable, details };
+    }
+
+    const CONTINUATION_TURN_RANGES_ACU = {
+        short: { min: 3, max: 5 },
+        standard: { min: 6, max: 10 },
+        long: { min: 11, max: 20 },
+    };
+    const DEFAULT_OUTLINE_PROMPT_ACU = [
+        {
+            role: 'system',
+            content: '你是阶段大纲规划器。只能输出一个严格 JSON 对象，不得输出 Markdown、代码围栏、解释或额外文本。对象必须包含 schemaVersion、title、goal、totalTurns、nodes；每个节点必须包含 id、title、goal、suggestedTurns、turns；每个轮次必须包含 id、goal。schemaVersion 必须为 1，节点建议轮数总和与逐轮目标数量必须等于 totalTurns。',
+            enabled: true,
+            deletable: true,
+        },
+        {
+            role: 'user',
+            content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n已完成且不可改写的当前阶段部分：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n允许重新分配的剩余轮数：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n上一阶段纪要：\n$LAST_STAGE_CHRONICLES\n\n更早阶段概要：\n$EARLIER_STAGE_SUMMARIES\n\n最近剧情：\n$RECENT_STORY\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请据此输出严格 JSON 大纲。',
+            enabled: true,
+            deletable: true,
+        },
+    ];
+    const DEFAULT_TURN_INSTRUCTION_PROMPT_ACU = [
+        {
+            role: 'system',
+            content: '你是续写指令生成器。只输出将直接发送给 SillyTavern 的最终普通文本，不得输出分析、JSON、Markdown 围栏、伪 Role 标记、占位符名称或内部状态。',
+            enabled: true,
+            deletable: true,
+        },
+        {
+            role: 'user',
+            content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n当前阶段：\n$CURRENT_STAGE\n\n当前节点：\n$CURRENT_NODE\n\n当前轮子目标：\n$CURRENT_TURN_GOAL\n\n阶段内轮次序号：\n$TURN_NUMBER\n\n节点内轮次序号：\n$NODE_TURN_NUMBER\n\n相关世界书背景：\n$1\n\n上一阶段纪要：\n$LAST_STAGE_CHRONICLES\n\n更早阶段概要：\n$EARLIER_STAGE_SUMMARIES\n\n最近剧情：\n$RECENT_STORY\n\n请输出最终普通文本。',
+            enabled: true,
+            deletable: true,
+        },
+    ];
+    function clonePromptSegments_ACU(segments) {
+        return segments.map(segment => ({ ...segment }));
+    }
+    function buildDefaultContinuationOutlinePrompt_ACU() {
+        return clonePromptSegments_ACU(DEFAULT_OUTLINE_PROMPT_ACU);
+    }
+    function buildDefaultContinuationTurnInstructionPrompt_ACU() {
+        return clonePromptSegments_ACU(DEFAULT_TURN_INSTRUCTION_PROMPT_ACU);
+    }
+    function buildDefaultContinuationSettings_ACU() {
+        return {
+            stageSize: 'standard',
+            customTurnMin: null,
+            customTurnMax: null,
+            outlinePreview: false,
+            autoNextStage: true,
+            maxAutomaticStages: 6,
+            loopTags: '',
+            loopDelaySeconds: 5,
+            totalDurationMinutes: 0,
+            retryDelaySeconds: 3,
+            generationRetryLimit: 3,
+            internalAiRetryLimit: 3,
+            contextTurnCount: 3,
+            contextExtractRules: [],
+            contextExcludeRules: [],
+            apiPresetMode: 'follow_plot',
+            fixedApiPresetName: '',
+            outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
+            turnInstructionPrompt: buildDefaultContinuationTurnInstructionPrompt_ACU(),
+        };
+    }
+    function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
+        if (value === undefined)
+            return fallback;
+        if (typeof value !== 'number' || !Number.isInteger(value)) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_CONFIG_NOT_INTEGER', 'load', `${field} 必须是整数`, false, { field, valueType: typeof value }));
+        }
+        if (value < minimum) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_CONFIG_OUT_OF_RANGE', 'load', `${field} 超出允许范围`, false, { field, minimum, actual: value }));
+        }
+        return value;
+    }
+    /** Missing values receive the supplied default; 0 remains a valid explicit retry limit. */
+    function normalizeContinuationInternalAiRetryLimit_ACU(value, fallback = 3) {
+        return normalizeOptionalInteger_ACU(value, fallback, 0, 'internalAiRetryLimit');
+    }
+    /** Missing values receive the supplied default; 0 is rejected because auto-stage limit must be positive. */
+    function normalizeContinuationMaxAutomaticStages_ACU(value, fallback = 6) {
+        return normalizeOptionalInteger_ACU(value, fallback, 1, 'maxAutomaticStages');
+    }
+
+    const OUTLINE_KEYS_ACU = ['schemaVersion', 'title', 'goal', 'totalTurns', 'nodes'];
+    const NODE_KEYS_ACU = ['id', 'title', 'goal', 'suggestedTurns', 'turns'];
+    const TURN_KEYS_ACU = ['id', 'goal'];
+    function fail_ACU$3(code, phase, message, details) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, phase, message, false, details));
+    }
+    function isRecord_ACU$2(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function assertExactKeys_ACU(value, keys, path) {
+        for (const key of keys) {
+            if (!Object.prototype.hasOwnProperty.call(value, key)) {
+                fail_ACU$3('CONTINUATION_OUTLINE_FIELD_MISSING', 'outline_validate', `缺少必填字段：${path}.${key}`, { path: `${path}.${key}` });
+            }
+        }
+        for (const key of Object.keys(value)) {
+            if (!keys.includes(key)) {
+                fail_ACU$3('CONTINUATION_OUTLINE_UNKNOWN_FIELD', 'outline_validate', `存在未知字段：${path}.${key}`, { path: `${path}.${key}` });
+            }
+        }
+    }
+    function requireText_ACU(value, path) {
+        if (typeof value !== 'string') {
+            fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是字符串：${path}`, { path });
+        }
+        if (value.trim().length === 0) {
+            fail_ACU$3('CONTINUATION_OUTLINE_STRING_EMPTY', 'outline_validate', `字段不能为空：${path}`, { path });
+        }
+        return value;
+    }
+    function requirePositiveInteger_ACU(value, path) {
+        if (typeof value !== 'number' || !Number.isInteger(value)) {
+            fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是整数：${path}`, { path });
+        }
+        if (value <= 0) {
+            fail_ACU$3('CONTINUATION_OUTLINE_SUGGESTED_TURNS_INVALID', 'outline_validate', `字段必须为正整数：${path}`, { path });
+        }
+        return value;
+    }
+    function validateTurn_ACU(raw, path) {
+        if (!isRecord_ACU$2(raw)) {
+            fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是对象：${path}`, { path });
+        }
+        assertExactKeys_ACU(raw, TURN_KEYS_ACU, path);
+        return { id: requireText_ACU(raw.id, `${path}.id`), goal: requireText_ACU(raw.goal, `${path}.goal`) };
+    }
+    function validateNode_ACU(raw, index, turnIds) {
+        const path = `nodes[${index}]`;
+        if (!isRecord_ACU$2(raw)) {
+            fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是对象：${path}`, { path });
+        }
+        assertExactKeys_ACU(raw, NODE_KEYS_ACU, path);
+        if (!Array.isArray(raw.turns)) {
+            fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是数组：${path}.turns`, { path: `${path}.turns` });
+        }
+        const suggestedTurns = requirePositiveInteger_ACU(raw.suggestedTurns, `${path}.suggestedTurns`);
+        const turns = raw.turns.map((turn, turnIndex) => validateTurn_ACU(turn, `${path}.turns[${turnIndex}]`));
+        if (turns.length !== suggestedTurns) {
+            fail_ACU$3('CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH', 'outline_validate', `节点轮次数与 suggestedTurns 不一致：${path}`, { path, expected: suggestedTurns, actual: turns.length });
+        }
+        for (const turn of turns) {
+            if (turnIds.has(turn.id)) {
+                fail_ACU$3('CONTINUATION_OUTLINE_TURN_ID_DUPLICATE', 'outline_validate', `轮次 ID 重复：${turn.id}`, { id: turn.id });
+            }
+            turnIds.add(turn.id);
+        }
+        return { id: requireText_ACU(raw.id, `${path}.id`), title: requireText_ACU(raw.title, `${path}.title`), goal: requireText_ACU(raw.goal, `${path}.goal`), suggestedTurns, turns };
+    }
+    /** Returns the hard turn range for the selected stage size without coercing raw values. */
+    function resolveContinuationTurnRange_ACU(stageSize, customTurnMin, customTurnMax) {
+        if (stageSize === 'short' || stageSize === 'standard' || stageSize === 'long') {
+            return { ...CONTINUATION_TURN_RANGES_ACU[stageSize] };
+        }
+        if (stageSize !== 'custom') {
+            fail_ACU$3('CONTINUATION_STAGE_SIZE_INVALID', 'outline_validate', '阶段规模必须是 short、standard、long 或 custom', { valueType: typeof stageSize });
+        }
+        if (typeof customTurnMin !== 'number' || !Number.isInteger(customTurnMin) || typeof customTurnMax !== 'number' || !Number.isInteger(customTurnMax)) {
+            fail_ACU$3('CONTINUATION_CUSTOM_RANGE_INVALID', 'outline_validate', '自定义轮数范围必须由两个整数构成');
+        }
+        if (customTurnMin < 1 || customTurnMax > 50 || customTurnMin > customTurnMax) {
+            fail_ACU$3('CONTINUATION_CUSTOM_RANGE_INVALID', 'outline_validate', '自定义轮数范围必须在 1 到 50 之间且最小值不得大于最大值', { min: customTurnMin, max: customTurnMax });
+        }
+        return { min: customTurnMin, max: customTurnMax };
+    }
+    /**
+     * Validates an untrusted model payload before any serialization or cloning.
+     * The returned outline is a fresh, typed value assembled only from validated fields.
+     */
+    function validateStageOutline_ACU(raw, range) {
+        if (!isRecord_ACU$2(raw)) {
+            fail_ACU$3('CONTINUATION_OUTLINE_NOT_OBJECT', 'outline_validate', '阶段大纲必须是单一 JSON 对象');
+        }
+        assertExactKeys_ACU(raw, OUTLINE_KEYS_ACU, 'outline');
+        if (raw.schemaVersion !== CONTINUATION_SCHEMA_VERSION_ACU) {
+            fail_ACU$3('CONTINUATION_OUTLINE_SCHEMA_VERSION_INVALID', 'outline_validate', '阶段大纲 schemaVersion 必须为 1', { actual: raw.schemaVersion });
+        }
+        if (typeof raw.totalTurns !== 'number' || !Number.isInteger(raw.totalTurns)) {
+            fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', 'totalTurns 必须是整数', { path: 'outline.totalTurns' });
+        }
+        if (raw.totalTurns < range.min || raw.totalTurns > range.max) {
+            fail_ACU$3('CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE', 'outline_validate', 'totalTurns 超出当前阶段规模范围', { min: range.min, max: range.max, actual: raw.totalTurns });
+        }
+        if (!Array.isArray(raw.nodes)) {
+            fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', 'nodes 必须是数组', { path: 'outline.nodes' });
+        }
+        if (raw.nodes.length === 0) {
+            fail_ACU$3('CONTINUATION_OUTLINE_NODES_EMPTY', 'outline_validate', 'nodes 不能为空');
+        }
+        const nodeIds = new Set();
+        const turnIds = new Set();
+        const nodes = raw.nodes.map((node, index) => {
+            const validated = validateNode_ACU(node, index, turnIds);
+            if (nodeIds.has(validated.id)) {
+                fail_ACU$3('CONTINUATION_OUTLINE_NODE_ID_DUPLICATE', 'outline_validate', `节点 ID 重复：${validated.id}`, { id: validated.id });
+            }
+            nodeIds.add(validated.id);
+            return validated;
+        });
+        const summedTurns = nodes.reduce((sum, node) => sum + node.suggestedTurns, 0);
+        if (summedTurns !== raw.totalTurns) {
+            fail_ACU$3('CONTINUATION_OUTLINE_TOTAL_TURNS_MISMATCH', 'outline_validate', '节点 suggestedTurns 总和必须等于 totalTurns', { expected: raw.totalTurns, actual: summedTurns });
+        }
+        return {
+            schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
+            title: requireText_ACU(raw.title, 'outline.title'),
+            goal: requireText_ACU(raw.goal, 'outline.goal'),
+            totalTurns: raw.totalTurns,
+            nodes,
+        };
+    }
+    function flattenTurns_ACU(outline) {
+        return outline.nodes.flatMap(node => node.turns);
+    }
+    /** Ensures a replan preserves completed turns and allocates exactly the remaining quota. */
+    function validateReplannedStageOutline_ACU(raw, range, constraints) {
+        if (!Number.isInteger(constraints.completedTurns) || constraints.completedTurns < 0 || !Number.isInteger(constraints.expectedRemainingTurns) || constraints.expectedRemainingTurns < 0) {
+            fail_ACU$3('CONTINUATION_REPLAN_CONTEXT_INVALID', 'replan', '重新规划约束必须包含非负整数');
+        }
+        const previousTurns = flattenTurns_ACU(constraints.previousOutline);
+        if (constraints.completedTurns > previousTurns.length) {
+            fail_ACU$3('CONTINUATION_REPLAN_CONTEXT_INVALID', 'replan', '已完成轮数超过旧 revision 的轮次总数', { completedTurns: constraints.completedTurns, totalTurns: previousTurns.length });
+        }
+        const outline = validateStageOutline_ACU(raw, range);
+        const candidateTurns = flattenTurns_ACU(outline);
+        const completedPrefix = previousTurns.slice(0, constraints.completedTurns);
+        if (candidateTurns.length < completedPrefix.length) {
+            fail_ACU$3('CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED', 'replan', '重新规划结果缺少已完成轮次');
+        }
+        for (let index = 0; index < completedPrefix.length; index += 1) {
+            const expected = completedPrefix[index];
+            const actual = candidateTurns[index];
+            if (actual.id !== expected.id || actual.goal !== expected.goal) {
+                fail_ACU$3('CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED', 'replan', '重新规划不得修改已完成轮次', { index, expectedId: expected.id, actualId: actual.id });
+            }
+        }
+        const remainingTurns = candidateTurns.length - completedPrefix.length;
+        if (remainingTurns !== constraints.expectedRemainingTurns) {
+            fail_ACU$3('CONTINUATION_REPLAN_REMAINING_TURNS_MISMATCH', 'replan', '重新规划结果的剩余轮数不符合额度', { expected: constraints.expectedRemainingTurns, actual: remainingTurns });
+        }
+        return outline;
+    }
+
+    const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
+        '$ORIGIN_INSTRUCTION', '$1', '$LAST_STAGE_CHRONICLES', '$EARLIER_STAGE_SUMMARIES',
+        '$RECENT_STORY', '$STAGE_HISTORY', '$COMPLETED_STAGE_PART', '$REPLAN_INSTRUCTION',
+        '$TURN_RANGE', '$REMAINING_TURNS', '$CURRENT_STAGE', '$CURRENT_NODE',
+        '$CURRENT_TURN_GOAL', '$TURN_NUMBER', '$NODE_TURN_NUMBER', '$VALIDATION_ERRORS',
+    ];
+    function failPrompt_ACU(code, phase, message, details) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, phase, message, false, details));
+    }
+    function validateContinuationPromptSegments_ACU(value, phase, errorCode = 'CONTINUATION_PROMPT_INVALID') {
+        if (!Array.isArray(value))
+            failPrompt_ACU(errorCode, phase, '提示词必须是数组');
+        const result = value.map((raw, index) => {
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+                failPrompt_ACU(errorCode, phase, '提示词段必须是对象', { index });
+            const segment = raw;
+            if (Object.keys(segment).some(key => !['role', 'content', 'enabled', 'deletable', 'pinned'].includes(key)))
+                failPrompt_ACU(errorCode, phase, '提示词段包含未知字段', { index });
+            if (!['system', 'user', 'assistant'].includes(segment.role) || typeof segment.content !== 'string')
+                failPrompt_ACU(errorCode, phase, '提示词段角色或内容非法', { index });
+            if (segment.enabled !== undefined && typeof segment.enabled !== 'boolean')
+                failPrompt_ACU(errorCode, phase, '提示词段 enabled 非法', { index });
+            if (segment.deletable !== undefined && typeof segment.deletable !== 'boolean')
+                failPrompt_ACU(errorCode, phase, '提示词段 deletable 非法', { index });
+            if (segment.pinned !== undefined && typeof segment.pinned !== 'boolean')
+                failPrompt_ACU(errorCode, phase, '提示词段 pinned 非法', { index });
+            if (!segment.content.trim())
+                failPrompt_ACU(errorCode, phase, '提示词段内容不能为空', { index });
+            return { role: segment.role, content: segment.content, ...(segment.enabled === undefined ? {} : { enabled: segment.enabled }), ...(segment.deletable === undefined ? {} : { deletable: segment.deletable }), ...(segment.pinned === undefined ? {} : { pinned: segment.pinned }) };
+        });
+        if (!result.length)
+            failPrompt_ACU(errorCode, phase, '提示词不能为空');
+        return result;
+    }
+    async function renderContinuationPrompt_ACU(segments, resolvers, phase) {
+        const validated = validateContinuationPromptSegments_ACU(segments, phase);
+        const enabledSegments = validated.filter(segment => segment.enabled !== false);
+        if (!enabledSegments.length)
+            failPrompt_ACU('CONTINUATION_PROMPT_EMPTY', phase, '提示词至少需要一个启用段');
+        const usedPlaceholders = CONTINUATION_PROMPT_PLACEHOLDERS_ACU.filter(token => enabledSegments.some(segment => segment.content.includes(token)));
+        const values = new Map();
+        for (const token of usedPlaceholders)
+            values.set(token, String(await resolvers[token]?.() ?? ''));
+        const tokenPattern = new RegExp(CONTINUATION_PROMPT_PLACEHOLDERS_ACU.map(token => token.replace(/[$]/g, '\\$')).join('|'), 'g');
+        return { usedPlaceholders, messages: enabledSegments.map(segment => ({ role: segment.role, content: segment.content.replace(tokenPattern, token => values.get(token) ?? '') })) };
+    }
+    function restoreContinuationPromptDefault_ACU(settings, kind) {
+        return kind === 'outline'
+            ? { ...settings, outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU() }
+            : { ...settings, turnInstructionPrompt: buildDefaultContinuationTurnInstructionPrompt_ACU() };
+    }
+
+    const CONTINUATION_FIRST_FLOOR_FIELD_ACU = '_qrf_continuation';
+    const TASK_STATUSES_ACU = ['drafting', 'awaiting_outline_review', 'paused', 'running', 'stopping_after_inflight', 'completed', 'abandoned', 'failed'];
+    const STAGE_STATUSES_ACU = ['planning', 'awaiting_review', 'running', 'completed', 'abandoned', 'failed'];
+    const REVISION_REASONS_ACU = ['initial', 'auto_next_stage', 'manual_replan'];
+    const STOP_REASONS_ACU = ['manual', 'duration_reached', 'stage_limit_reached', 'outline_validation_failed', 'internal_ai_retry_exhausted', 'generation_retry_exhausted', 'host_input_unavailable', 'api_preset_missing', 'state_invalid', 'chat_changed', 'completed'];
+    const ERROR_PHASES_ACU = ['load', 'persist', 'outline_prompt', 'outline_call', 'outline_parse', 'outline_validate', 'turn_prompt', 'turn_call', 'host_send', 'generation_evaluate', 'replan'];
+    const ERROR_CODES_ACU = ['CONTINUATION_CONFIG_MISSING', 'CONTINUATION_CONFIG_NOT_INTEGER', 'CONTINUATION_CONFIG_OUT_OF_RANGE', 'CONTINUATION_STAGE_SIZE_INVALID', 'CONTINUATION_CUSTOM_RANGE_INVALID', 'CONTINUATION_ENVELOPE_INVALID', 'CONTINUATION_CHAT_UNAVAILABLE', 'CONTINUATION_CHAT_CHANGED', 'CONTINUATION_WRITE_GUARD_MISMATCH', 'CONTINUATION_PERSIST_FAILED', 'CONTINUATION_PROMPT_INVALID', 'CONTINUATION_PROMPT_EMPTY', 'CONTINUATION_API_PRESET_MISSING', 'CONTINUATION_MIGRATION_INVALID', 'CONTINUATION_OUTLINE_NOT_OBJECT', 'CONTINUATION_OUTLINE_UNKNOWN_FIELD', 'CONTINUATION_OUTLINE_FIELD_MISSING', 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'CONTINUATION_OUTLINE_STRING_EMPTY', 'CONTINUATION_OUTLINE_SCHEMA_VERSION_INVALID', 'CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE', 'CONTINUATION_OUTLINE_NODES_EMPTY', 'CONTINUATION_OUTLINE_NODE_ID_DUPLICATE', 'CONTINUATION_OUTLINE_TURN_ID_DUPLICATE', 'CONTINUATION_OUTLINE_SUGGESTED_TURNS_INVALID', 'CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH', 'CONTINUATION_OUTLINE_TOTAL_TURNS_MISMATCH', 'CONTINUATION_REPLAN_CONTEXT_INVALID', 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED', 'CONTINUATION_OUTLINE_JSON_INVALID', 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'CONTINUATION_OUTLINE_RETRY_EXHAUSTED', 'CONTINUATION_REVISION_FROZEN', 'CONTINUATION_TURN_INSTRUCTION_EMPTY', 'CONTINUATION_TURN_INSTRUCTION_RETRY_EXHAUSTED', 'CONTINUATION_INTERNAL_REQUEST_STALE', 'CONTINUATION_OPERATION_BUSY', 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY', 'CONTINUATION_TASK_NOT_FOUND', 'CONTINUATION_TASK_STATE_INVALID', 'CONTINUATION_HOST_INPUT_UNAVAILABLE', 'CONTINUATION_GENERATION_TAGS_MISSING'];
+    const TIMELINE_KINDS_ACU = ['task_created', 'outline_ready', 'turn_sent', 'turn_completed', 'turn_retry', 'stage_completed', 'paused', 'stopped', 'failed'];
+    function isRecord_ACU$1(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function fail_ACU$2(code, message, details, phase = 'persist') {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, phase, message, false, details));
+    }
+    function requireKeys_ACU(value, keys, path) {
+        for (const key of keys) {
+            if (!Object.prototype.hasOwnProperty.call(value, key))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `缺少持久化字段：${path}.${key}`, { path: `${path}.${key}` });
+        }
+        for (const key of Object.keys(value)) {
+            if (!keys.includes(key))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `存在未知持久化字段：${path}.${key}`, { path: `${path}.${key}` });
+        }
+    }
+    function requireString_ACU(value, path) {
+        if (typeof value !== 'string')
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `字段必须是字符串：${path}`, { path });
+        return value;
+    }
+    function requireBoolean_ACU(value, path) {
+        if (typeof value !== 'boolean')
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `字段必须是布尔值：${path}`, { path });
+        return value;
+    }
+    function requireInteger_ACU(value, path, minimum) {
+        if (typeof value !== 'number' || !Number.isInteger(value) || (minimum !== undefined && value < minimum)) {
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `字段必须是${minimum === undefined ? '' : `不小于 ${minimum} 的`}整数：${path}`, { path });
+        }
+        return value;
+    }
+    function requireEnum_ACU(value, allowed, path) {
+        if (typeof value !== 'string' || !allowed.includes(value)) {
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `字段枚举值非法：${path}`, { path });
+        }
+        return value;
+    }
+    function validateRules_ACU(value, path) {
+        if (!Array.isArray(value))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `字段必须是数组：${path}`, { path });
+        return value.map((rule, index) => {
+            if (!isRecord_ACU$1(rule))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `规则必须是对象：${path}[${index}]`, { path: `${path}[${index}]` });
+            requireKeys_ACU(rule, ['start', 'end'], `${path}[${index}]`);
+            return { start: requireString_ACU(rule.start, `${path}[${index}].start`), end: requireString_ACU(rule.end, `${path}[${index}].end`) };
+        });
+    }
+    function validateSettings_ACU(raw) {
+        if (!isRecord_ACU$1(raw))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
+        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'outlinePrompt', 'turnInstructionPrompt'];
+        requireKeys_ACU(raw, keys, 'settings');
+        if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
+        const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
+        const customTurnMax = raw.customTurnMax === null ? null : requireInteger_ACU(raw.customTurnMax, 'settings.customTurnMax', 1);
+        if (raw.stageSize === 'custom' && (customTurnMin === null || customTurnMax === null || customTurnMin > customTurnMax || customTurnMax > 50))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', '自定义轮数范围非法');
+        if (!['follow_plot', 'fixed'].includes(raw.apiPresetMode))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'apiPresetMode 非法');
+        return {
+            stageSize: raw.stageSize, customTurnMin, customTurnMax,
+            outlinePreview: requireBoolean_ACU(raw.outlinePreview, 'settings.outlinePreview'), autoNextStage: requireBoolean_ACU(raw.autoNextStage, 'settings.autoNextStage'),
+            maxAutomaticStages: requireInteger_ACU(raw.maxAutomaticStages, 'settings.maxAutomaticStages', 1), loopTags: requireString_ACU(raw.loopTags, 'settings.loopTags'),
+            loopDelaySeconds: requireInteger_ACU(raw.loopDelaySeconds, 'settings.loopDelaySeconds', 0), totalDurationMinutes: requireInteger_ACU(raw.totalDurationMinutes, 'settings.totalDurationMinutes', 0), retryDelaySeconds: requireInteger_ACU(raw.retryDelaySeconds, 'settings.retryDelaySeconds', 0),
+            generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0),
+            contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
+            apiPresetMode: raw.apiPresetMode, fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
+            outlinePrompt: validateContinuationPromptSegments_ACU(raw.outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'), turnInstructionPrompt: validateContinuationPromptSegments_ACU(raw.turnInstructionPrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
+        };
+    }
+    function validateOutline_ACU(raw, settings) {
+        const range = resolveContinuationTurnRange_ACU(settings.stageSize, settings.customTurnMin ?? undefined, settings.customTurnMax ?? undefined);
+        try {
+            return validateStageOutline_ACU(raw, range);
+        }
+        catch (error) {
+            if (error instanceof ContinuationValidationError_ACU)
+                throw error;
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', '阶段大纲无效');
+        }
+    }
+    function validateTimeline_ACU(raw) {
+        if (!Array.isArray(raw))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'timeline 必须是数组');
+        return raw.map((entry, index) => {
+            const path = `activeTask.timeline[${index}]`;
+            if (!isRecord_ACU$1(entry))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `时间线条目必须是对象：${path}`);
+            for (const key of Object.keys(entry))
+                if (!['id', 'at', 'kind', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId', 'messageIndex', 'errorCode'].includes(key))
+                    fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `时间线存在未知字段：${path}.${key}`);
+            const result = { id: requireString_ACU(entry.id, `${path}.id`), at: requireInteger_ACU(entry.at, `${path}.at`, 0), kind: requireEnum_ACU(entry.kind, TIMELINE_KINDS_ACU, `${path}.kind`) };
+            for (const key of ['stageId', 'nodeId', 'turnId', 'attemptId'])
+                if (key in entry)
+                    result[key] = requireString_ACU(entry[key], `${path}.${key}`);
+            for (const key of ['revision', 'messageIndex'])
+                if (key in entry)
+                    result[key] = requireInteger_ACU(entry[key], `${path}.${key}`, 0);
+            if ('errorCode' in entry)
+                result.errorCode = requireString_ACU(entry.errorCode, `${path}.errorCode`);
+            return result;
+        });
+    }
+    function validatePendingHostTurn_ACU(raw) {
+        if (raw === null || raw === undefined)
+            return null;
+        if (!isRecord_ACU$1(raw))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn 必须是对象或 null');
+        requireKeys_ACU(raw, ['identity', 'capture', 'retryCount', 'status'], 'activeTask.pendingHostTurn');
+        if (!isRecord_ACU$1(raw.identity))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.identity 必须是对象');
+        requireKeys_ACU(raw.identity, ['chatIdentity', 'taskId', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId'], 'activeTask.pendingHostTurn.identity');
+        if (!isRecord_ACU$1(raw.capture))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.capture 必须是对象');
+        requireKeys_ACU(raw.capture, ['capturedAt', 'capturedChatLength', 'capturedAiFloorCount', 'generationSeq'], 'activeTask.pendingHostTurn.capture');
+        return {
+            identity: {
+                chatIdentity: requireString_ACU(raw.identity.chatIdentity, 'pendingHostTurn.identity.chatIdentity'),
+                taskId: requireString_ACU(raw.identity.taskId, 'pendingHostTurn.identity.taskId'),
+                stageId: requireString_ACU(raw.identity.stageId, 'pendingHostTurn.identity.stageId'),
+                revision: requireInteger_ACU(raw.identity.revision, 'pendingHostTurn.identity.revision', 1),
+                nodeId: requireString_ACU(raw.identity.nodeId, 'pendingHostTurn.identity.nodeId'),
+                turnId: requireString_ACU(raw.identity.turnId, 'pendingHostTurn.identity.turnId'),
+                attemptId: requireString_ACU(raw.identity.attemptId, 'pendingHostTurn.identity.attemptId'),
+            },
+            capture: {
+                capturedAt: requireInteger_ACU(raw.capture.capturedAt, 'pendingHostTurn.capture.capturedAt', 0),
+                capturedChatLength: requireInteger_ACU(raw.capture.capturedChatLength, 'pendingHostTurn.capture.capturedChatLength', 0),
+                capturedAiFloorCount: requireInteger_ACU(raw.capture.capturedAiFloorCount, 'pendingHostTurn.capture.capturedAiFloorCount', 0),
+                generationSeq: raw.capture.generationSeq === null ? null : requireInteger_ACU(raw.capture.generationSeq, 'pendingHostTurn.capture.generationSeq', 1),
+            },
+            retryCount: requireInteger_ACU(raw.retryCount, 'pendingHostTurn.retryCount', 0),
+            status: requireEnum_ACU(raw.status, ['awaiting_generation', 'retry_ready', 'exhausted'], 'pendingHostTurn.status'),
+        };
+    }
+    function validateTask_ACU(raw, settings) {
+        if (!isRecord_ACU$1(raw))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'activeTask 必须是对象或 null');
+        const requiredKeys = ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'runStartedAt', 'deadlineAt', 'runStageCount', 'activeStageId', 'stages', 'timeline', 'stopReason', 'lastError'];
+        const allowedKeys = [...requiredKeys, 'pendingHostTurn'];
+        for (const key of requiredKeys)
+            if (!Object.prototype.hasOwnProperty.call(raw, key))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `缺少持久化字段：activeTask.${key}`, { path: `activeTask.${key}` });
+        for (const key of Object.keys(raw))
+            if (!allowedKeys.includes(key))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `存在未知持久化字段：activeTask.${key}`, { path: `activeTask.${key}` });
+        const status = requireEnum_ACU(raw.status, TASK_STATUSES_ACU, 'activeTask.status');
+        if (!Array.isArray(raw.stages))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'activeTask.stages 必须是数组');
+        const stageIds = new Set();
+        const stages = raw.stages.map((stage, index) => {
+            const path = `activeTask.stages[${index}]`;
+            if (!isRecord_ACU$1(stage))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `阶段必须是对象：${path}`);
+            const stageKeys = ['stageId', 'stageNumber', 'status', 'chronicleStartCount', 'chronicleEndCount', 'chronicleAddedCount', 'chronicleRange', 'activeRevision', 'revisions', 'activeNodeIndex', 'activeTurnIndex', 'completedTurns'];
+            requireKeys_ACU(stage, stageKeys, path);
+            const stageId = requireString_ACU(stage.stageId, `${path}.stageId`);
+            if (stageIds.has(stageId))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `阶段 ID 重复：${stageId}`);
+            stageIds.add(stageId);
+            const stageStatus = requireEnum_ACU(stage.status, STAGE_STATUSES_ACU, `${path}.status`);
+            if (!Array.isArray(stage.revisions) || stage.revisions.length === 0)
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `阶段 revisions 必须是非空数组：${path}`);
+            const revisionNumbers = new Set();
+            const revisions = stage.revisions.map((revision, revisionIndex) => {
+                const revisionPath = `${path}.revisions[${revisionIndex}]`;
+                if (!isRecord_ACU$1(revision))
+                    fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `revision 必须是对象：${revisionPath}`);
+                requireKeys_ACU(revision, ['revision', 'createdAt', 'reason', 'replanInstruction', 'frozen', 'outline'], revisionPath);
+                const number = requireInteger_ACU(revision.revision, `${revisionPath}.revision`, 1);
+                if (revisionNumbers.has(number))
+                    fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `revision 重复：${revisionPath}.revision`);
+                revisionNumbers.add(number);
+                return { revision: number, createdAt: requireInteger_ACU(revision.createdAt, `${revisionPath}.createdAt`, 0), reason: requireEnum_ACU(revision.reason, REVISION_REASONS_ACU, `${revisionPath}.reason`), replanInstruction: requireString_ACU(revision.replanInstruction, `${revisionPath}.replanInstruction`), frozen: requireBoolean_ACU(revision.frozen, `${revisionPath}.frozen`), outline: validateOutline_ACU(revision.outline, settings) };
+            });
+            const activeRevision = requireInteger_ACU(stage.activeRevision, `${path}.activeRevision`, 1);
+            if (!revisionNumbers.has(activeRevision))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `activeRevision 未指向现有 revision：${path}`);
+            const chronicleRange = stage.chronicleRange === null ? null : (() => { if (!isRecord_ACU$1(stage.chronicleRange))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `chronicleRange 必须是对象：${path}`); requireKeys_ACU(stage.chronicleRange, ['first', 'last'], `${path}.chronicleRange`); return { first: requireString_ACU(stage.chronicleRange.first, `${path}.chronicleRange.first`), last: requireString_ACU(stage.chronicleRange.last, `${path}.chronicleRange.last`) }; })();
+            return { stageId, stageNumber: requireInteger_ACU(stage.stageNumber, `${path}.stageNumber`, 1), status: stageStatus, chronicleStartCount: requireInteger_ACU(stage.chronicleStartCount, `${path}.chronicleStartCount`, 0), chronicleEndCount: stage.chronicleEndCount === null ? null : requireInteger_ACU(stage.chronicleEndCount, `${path}.chronicleEndCount`, 0), chronicleAddedCount: stage.chronicleAddedCount === null ? null : requireInteger_ACU(stage.chronicleAddedCount, `${path}.chronicleAddedCount`, 0), chronicleRange, activeRevision, revisions, activeNodeIndex: requireInteger_ACU(stage.activeNodeIndex, `${path}.activeNodeIndex`, 0), activeTurnIndex: requireInteger_ACU(stage.activeTurnIndex, `${path}.activeTurnIndex`, 0), completedTurns: requireInteger_ACU(stage.completedTurns, `${path}.completedTurns`, 0) };
+        });
+        const activeStageId = raw.activeStageId === null ? null : requireString_ACU(raw.activeStageId, 'activeTask.activeStageId');
+        if (activeStageId !== null && !stageIds.has(activeStageId))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'activeStageId 未指向现有阶段');
+        const stopReason = raw.stopReason === null ? null : requireEnum_ACU(raw.stopReason, STOP_REASONS_ACU, 'activeTask.stopReason');
+        const lastError = raw.lastError === null ? null : (() => {
+            if (!isRecord_ACU$1(raw.lastError))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'lastError 必须是对象');
+            const requiredErrorKeys = ['code', 'message', 'phase', 'retryable'];
+            for (const key of requiredErrorKeys)
+                if (!Object.prototype.hasOwnProperty.call(raw.lastError, key))
+                    fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `缺少持久化字段：activeTask.lastError.${key}`, { path: `activeTask.lastError.${key}` });
+            for (const key of Object.keys(raw.lastError))
+                if (![...requiredErrorKeys, 'details'].includes(key))
+                    fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `存在未知持久化字段：activeTask.lastError.${key}`, { path: `activeTask.lastError.${key}` });
+            const error = {
+                code: requireEnum_ACU(raw.lastError.code, ERROR_CODES_ACU, 'activeTask.lastError.code'),
+                message: requireString_ACU(raw.lastError.message, 'activeTask.lastError.message'),
+                phase: requireEnum_ACU(raw.lastError.phase, ERROR_PHASES_ACU, 'activeTask.lastError.phase'),
+                retryable: requireBoolean_ACU(raw.lastError.retryable, 'activeTask.lastError.retryable'),
+            };
+            if ('details' in raw.lastError) {
+                if (!isRecord_ACU$1(raw.lastError.details))
+                    fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'lastError.details 必须是对象');
+                error.details = { ...raw.lastError.details };
+            }
+            return error;
+        })();
+        return { taskId: requireString_ACU(raw.taskId, 'activeTask.taskId'), originInstruction: requireString_ACU(raw.originInstruction, 'activeTask.originInstruction'), status, createdAt: requireInteger_ACU(raw.createdAt, 'activeTask.createdAt', 0), updatedAt: requireInteger_ACU(raw.updatedAt, 'activeTask.updatedAt', 0), runStartedAt: raw.runStartedAt === null ? null : requireInteger_ACU(raw.runStartedAt, 'activeTask.runStartedAt', 0), deadlineAt: raw.deadlineAt === null ? null : requireInteger_ACU(raw.deadlineAt, 'activeTask.deadlineAt', 0), runStageCount: requireInteger_ACU(raw.runStageCount, 'activeTask.runStageCount', 0), activeStageId, stages, timeline: validateTimeline_ACU(raw.timeline), stopReason, lastError: lastError, ...('pendingHostTurn' in raw ? { pendingHostTurn: validatePendingHostTurn_ACU(raw.pendingHostTurn) } : {}) };
+    }
+    function validateContinuationEnvelope_ACU(raw, phase = 'load') {
+        try {
+            if (!isRecord_ACU$1(raw))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', '智能续写状态必须是对象');
+            requireKeys_ACU(raw, ['schemaVersion', 'settings', 'activeTask'], 'envelope');
+            if (raw.schemaVersion !== CONTINUATION_SCHEMA_VERSION_ACU)
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', '智能续写 schemaVersion 必须为 1', { actual: raw.schemaVersion });
+            const settings = validateSettings_ACU(raw.settings);
+            const activeTask = raw.activeTask === null ? null : validateTask_ACU(raw.activeTask, settings);
+            return { schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU, settings, activeTask };
+        }
+        catch (error) {
+            if (error instanceof ContinuationValidationError_ACU && error.error.phase !== phase) {
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU(error.error.code, phase, error.error.message, error.error.retryable, error.error.details));
+            }
+            throw error;
+        }
+    }
+    function getActiveRevision_ACU$1(envelope) {
+        const task = envelope?.activeTask ?? null;
+        if (!task || !task.activeStageId)
+            return null;
+        return task.stages.find(stage => stage.stageId === task.activeStageId)?.activeRevision ?? null;
+    }
+    function assertWriteGuard_ACU(envelope, guard) {
+        if (!guard)
+            return;
+        const task = envelope?.activeTask ?? null;
+        if (guard.taskId !== undefined && (task?.taskId ?? null) !== guard.taskId)
+            fail_ACU$2('CONTINUATION_WRITE_GUARD_MISMATCH', '任务身份已变化');
+        if (guard.stageId !== undefined && (task?.activeStageId ?? null) !== guard.stageId)
+            fail_ACU$2('CONTINUATION_WRITE_GUARD_MISMATCH', '阶段身份已变化');
+        if (guard.revision !== undefined && getActiveRevision_ACU$1(envelope) !== guard.revision)
+            fail_ACU$2('CONTINUATION_WRITE_GUARD_MISMATCH', 'revision 已变化');
+    }
+    function captureChatContext_ACU(guard) {
+        const chat = getChatArray_ACU();
+        const firstMessage = Array.isArray(chat) && chat[0] && typeof chat[0] === 'object' ? chat[0] : null;
+        const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
+        if (!firstMessage || !chatIdentity)
+            fail_ACU$2('CONTINUATION_CHAT_UNAVAILABLE', '当前聊天首楼不可用');
+        if (guard?.chatIdentity !== undefined && guard.chatIdentity !== chatIdentity)
+            fail_ACU$2('CONTINUATION_CHAT_CHANGED', '写入身份所属聊天已变化');
+        return { chat, firstMessage, chatIdentity };
+    }
+    function assertChatContext_ACU(context) {
+        const activeChat = getChatArray_ACU();
+        if (activeChat !== context.chat || activeChat[0] !== context.firstMessage || getActiveChatStorageIdentity_ACU(activeChat) !== context.chatIdentity) {
+            fail_ACU$2('CONTINUATION_CHAT_CHANGED', '目标聊天已切换，拒绝写入');
+        }
+    }
+    function readRawEnvelope_ACU(firstMessage) {
+        const raw = firstMessage[CONTINUATION_FIRST_FLOOR_FIELD_ACU];
+        return raw === undefined ? null : validateContinuationEnvelope_ACU(raw);
+    }
+    function restoreFirstFloorField_ACU(firstMessage, hadPreviousValue, previousValue) {
+        if (hadPreviousValue)
+            firstMessage[CONTINUATION_FIRST_FLOOR_FIELD_ACU] = previousValue;
+        else
+            delete firstMessage[CONTINUATION_FIRST_FLOOR_FIELD_ACU];
+    }
+    /**
+     * First-floor-only persistence. This module deliberately does not call any chatMetadata helper.
+     */
+    class FirstFloorContinuationStore_ACU {
+        read() {
+            const context = captureChatContext_ACU();
+            const envelope = readRawEnvelope_ACU(context.firstMessage);
+            return envelope === null ? null : derivePausedContinuationEnvelopeAfterReload_ACU(envelope);
+        }
+        /** Reads the validated persisted snapshot without applying reload recovery. Runtime state machines must use this. */
+        readPersisted() {
+            const context = captureChatContext_ACU();
+            return readRawEnvelope_ACU(context.firstMessage);
+        }
+        async replaceAtomically(candidate, guard) {
+            return this.enqueueWrite_ACU(context => this.replaceWithinQueue_ACU(candidate, guard, context), guard);
+        }
+        async updateAtomically(mutator, guard) {
+            return this.enqueueWrite_ACU(async (context) => {
+                assertChatContext_ACU(context);
+                const persisted = readRawEnvelope_ACU(context.firstMessage);
+                assertWriteGuard_ACU(persisted, guard);
+                const current = persisted === null ? null : derivePausedContinuationEnvelopeAfterReload_ACU(persisted);
+                const candidate = mutator(current);
+                await this.replaceWithinQueue_ACU(candidate, guard, context);
+            }, guard);
+        }
+        /** Updates the persisted snapshot without deriving a reload pause transition. */
+        async updatePersistedAtomically(mutator, guard) {
+            return this.enqueueWrite_ACU(async (context) => {
+                assertChatContext_ACU(context);
+                const current = readRawEnvelope_ACU(context.firstMessage);
+                assertWriteGuard_ACU(current, guard);
+                const candidate = mutator(current);
+                await this.replaceWithinQueue_ACU(candidate, guard, context);
+            }, guard);
+        }
+        async replaceWithinQueue_ACU(candidate, guard, context) {
+            assertChatContext_ACU(context);
+            const current = readRawEnvelope_ACU(context.firstMessage);
+            assertWriteGuard_ACU(current, guard);
+            const validatedCandidate = validateContinuationEnvelope_ACU(candidate, 'persist');
+            const hadPreviousValue = Object.prototype.hasOwnProperty.call(context.firstMessage, CONTINUATION_FIRST_FLOOR_FIELD_ACU);
+            const previousValue = context.firstMessage[CONTINUATION_FIRST_FLOOR_FIELD_ACU];
+            let primarySaveAttempted = false;
+            try {
+                context.firstMessage[CONTINUATION_FIRST_FLOOR_FIELD_ACU] = validatedCandidate;
+                assertChatContext_ACU(context);
+                primarySaveAttempted = true;
+                await saveChatToHostStrict_ACU();
+                assertChatContext_ACU(context);
+            }
+            catch (error) {
+                restoreFirstFloorField_ACU(context.firstMessage, hadPreviousValue, previousValue);
+                const chatStillActive = getChatArray_ACU() === context.chat && getChatArray_ACU()[0] === context.firstMessage && getActiveChatStorageIdentity_ACU(context.chat) === context.chatIdentity;
+                if (primarySaveAttempted && chatStillActive) {
+                    try {
+                        await saveChatToHostStrict_ACU();
+                    }
+                    catch (rollbackError) {
+                        fail_ACU$2('CONTINUATION_PERSIST_FAILED', '智能续写状态保存与回滚均失败', { primaryMessage: error instanceof Error ? error.message : String(error), rollbackMessage: rollbackError instanceof Error ? rollbackError.message : String(rollbackError) });
+                    }
+                }
+                if (error instanceof ContinuationValidationError_ACU)
+                    throw error;
+                fail_ACU$2('CONTINUATION_PERSIST_FAILED', '智能续写状态保存失败', { message: error instanceof Error ? error.message : String(error) });
+            }
+        }
+        enqueueWrite_ACU(operation, guard) {
+            const context = captureChatContext_ACU(guard);
+            const previous = FirstFloorContinuationStore_ACU.writeTailsByChatIdentity_ACU.get(context.chatIdentity) ?? Promise.resolve();
+            const result = previous.then(() => operation(context), () => operation(context));
+            const settled = result.catch(() => undefined);
+            FirstFloorContinuationStore_ACU.writeTailsByChatIdentity_ACU.set(context.chatIdentity, settled);
+            void settled.finally(() => {
+                if (FirstFloorContinuationStore_ACU.writeTailsByChatIdentity_ACU.get(context.chatIdentity) === settled) {
+                    FirstFloorContinuationStore_ACU.writeTailsByChatIdentity_ACU.delete(context.chatIdentity);
+                }
+            });
+            return result;
+        }
+    }
+    FirstFloorContinuationStore_ACU.writeTailsByChatIdentity_ACU = new Map();
+    function derivePausedContinuationEnvelopeAfterReload_ACU(envelope) {
+        const validated = validateContinuationEnvelope_ACU(envelope);
+        const task = validated.activeTask;
+        if (!task)
+            return validated;
+        const activeStage = task.activeStageId ? task.stages.find(stage => stage.stageId === task.activeStageId) : undefined;
+        const interruptedPlanning = activeStage?.status === 'planning';
+        if (!interruptedPlanning && !['running', 'stopping_after_inflight', 'drafting'].includes(task.status))
+            return validated;
+        const stages = interruptedPlanning
+            ? task.stages.map(stage => stage.stageId === activeStage.stageId ? { ...stage, status: 'failed' } : stage)
+            : task.stages;
+        const lastError = interruptedPlanning
+            ? createContinuationError_ACU('CONTINUATION_TASK_STATE_INVALID', 'load', '重载中断了阶段规划；请手动重新规划剩余阶段', false)
+            : task.lastError;
+        return { ...validated, activeTask: { ...task, status: 'paused', updatedAt: Date.now(), stages, lastError } };
+    }
+    function readLegacyNonNegativeInteger_ACU(value, fallback) {
+        return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : fallback;
+    }
+    function readLegacyRules_ACU(value) {
+        if (!Array.isArray(value))
+            return [];
+        return value.filter(isRecord_ACU$1).flatMap(rule => typeof rule.start === 'string' && typeof rule.end === 'string' ? [{ start: rule.start, end: rule.end }] : []);
+    }
+    /** One-way migration: retained settings only; prompt rotation fields are intentionally excluded. */
+    function buildLegacyContinuationMigration_ACU(legacyPlotSettings) {
+        const settings = buildDefaultContinuationSettings_ACU();
+        if (!isRecord_ACU$1(legacyPlotSettings))
+            return { settings, didMigrate: false };
+        const loopSettings = isRecord_ACU$1(legacyPlotSettings.loopSettings) ? legacyPlotSettings.loopSettings : {};
+        settings.loopTags = typeof loopSettings.loopTags === 'string' ? loopSettings.loopTags : settings.loopTags;
+        settings.loopDelaySeconds = readLegacyNonNegativeInteger_ACU(loopSettings.loopDelay, settings.loopDelaySeconds);
+        settings.retryDelaySeconds = readLegacyNonNegativeInteger_ACU(loopSettings.retryDelay, settings.retryDelaySeconds);
+        settings.totalDurationMinutes = readLegacyNonNegativeInteger_ACU(loopSettings.loopTotalDuration, settings.totalDurationMinutes);
+        settings.generationRetryLimit = readLegacyNonNegativeInteger_ACU(loopSettings.maxRetries, settings.generationRetryLimit);
+        settings.contextTurnCount = readLegacyNonNegativeInteger_ACU(legacyPlotSettings.contextTurnCount, settings.contextTurnCount);
+        settings.contextExtractRules = readLegacyRules_ACU(legacyPlotSettings.contextExtractRules);
+        settings.contextExcludeRules = readLegacyRules_ACU(legacyPlotSettings.contextExcludeRules);
+        return { settings, didMigrate: true };
+    }
+    /** Builds a first-floor candidate from the explicitly supplied legacy plot settings. */
+    function buildMigratedContinuationEnvelope_ACU(legacyPlotSettings) {
+        const migration = buildLegacyContinuationMigration_ACU(legacyPlotSettings);
+        return {
+            envelope: { schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU, settings: migration.settings, activeTask: null },
+            didMigrate: migration.didMigrate,
+        };
+    }
+    function stripLegacyContinuationLoopFields_ACU(source) {
+        return stripLegacyLoopPromptFields_ACU(source);
+    }
+
+    /**
+     * Executes one continuation-owned internal request with explicit provenance.
+     * It never writes host input or continuation state; callers must gate returned
+     * text again before scheduling a later side effect.
+     */
+    async function callContinuationInternalAi_ACU(messages, preset, identity, signal) {
+        beginContinuationInternalAiRequest_ACU(identity);
+        try {
+            return await callAIWithResolvedPreset_ACU(messages, preset, signal, {
+                beforeMainApiCall: () => beginContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
+                afterMainApiCall: () => endContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
+            });
+        }
+        finally {
+            // A bound host lifecycle remains registered until its matching ended event.
+            // An unbound request is removed, so later unrelated events are never claimed.
+            settleContinuationInternalAiRequest_ACU(identity.requestId);
+        }
+    }
+
+    const defaultDependencies_ACU$3 = {
+        getFollowPlotPresetName: () => getCurrentRuntimePlotPresetName_ACU(),
+        resolvePreset: resolveApiConfigByPreset_ACU,
+    };
+    function failPreset_ACU(phase, reason) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_API_PRESET_MISSING', phase, reason === 'empty' ? '固定智能续写 API 预设不能为空' : '智能续写 API 预设不存在或已失效', false, { reason }));
+    }
+    function resolveContinuationApiPreset_ACU(settings, phase, dependencies = defaultDependencies_ACU$3) {
+        if (settings.apiPresetMode === 'fixed') {
+            const presetName = settings.fixedApiPresetName.trim();
+            if (!presetName)
+                failPreset_ACU(phase, 'empty');
+            const resolved = dependencies.resolvePreset(presetName);
+            if (!resolved.resolved)
+                failPreset_ACU(phase, 'missing');
+            return { presetName, source: 'fixed', reason: 'fixed_preset', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
+        }
+        if (settings.apiPresetMode !== 'follow_plot') {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_CONFIG_MISSING', phase, '智能续写 API 预设模式非法', false));
+        }
+        const presetName = dependencies.getFollowPlotPresetName().trim();
+        const resolved = dependencies.resolvePreset(presetName);
+        if (presetName && !resolved.resolved)
+            failPreset_ACU(phase, 'missing');
+        return { presetName, source: 'follow_plot', reason: presetName ? 'plot_preset' : 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
+    }
+
+    const defaultDependencies_ACU$2 = {
+        resolveApiPreset: resolveContinuationApiPreset_ACU,
+        callInternalAi: callContinuationInternalAi_ACU,
+    };
+    function toPlannerError_ACU(error) {
+        if (error instanceof ContinuationValidationError_ACU)
+            return error.error;
+        return createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'outline_call', '阶段大纲内部 AI 调用失败', true);
+    }
+    function compactValidationError_ACU(error) {
+        return `${error.code}@${error.phase}`;
+    }
+    function isRetryableOutlineError_ACU(error) {
+        if (error.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' || error.code === 'CONTINUATION_OUTLINE_JSON_INVALID')
+            return true;
+        if (error.phase === 'outline_validate')
+            return true;
+        return error.code === 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED'
+            || error.code === 'CONTINUATION_REPLAN_REMAINING_TURNS_MISMATCH';
+    }
+    function parseOutlinePayload_ACU(raw) {
+        if (typeof raw !== 'string' || !raw.trim()) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_OUTLINE_JSON_INVALID', 'outline_parse', '阶段大纲返回为空或不是 JSON 对象', true));
+        }
+        try {
+            return JSON.parse(raw);
+        }
+        catch {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_OUTLINE_JSON_INVALID', 'outline_parse', '阶段大纲必须是单一严格 JSON 对象', true));
+        }
+    }
+    class ContinuationOutlinePlanner_ACU {
+        constructor(dependencies = defaultDependencies_ACU$2) {
+            this.dependencies = dependencies;
+        }
+        async plan(request, apiDependencies) {
+            const range = resolveContinuationTurnRange_ACU(request.settings.stageSize, request.settings.customTurnMin ?? undefined, request.settings.customTurnMax ?? undefined);
+            const preset = this.dependencies.resolveApiPreset(request.settings, request.reason === 'manual_replan' ? 'replan' : 'outline_call', apiDependencies);
+            const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
+            let lastError = null;
+            for (let attempt = 0; attempt <= retries; attempt += 1) {
+                try {
+                    const identity = request.createInternalRequestIdentity(attempt);
+                    const isCurrent = request.isInternalRequestCurrent;
+                    if (!isCurrent(identity)) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
+                    }
+                    const resolvers = { ...request.resolvers };
+                    if (attempt > 0 && lastError)
+                        resolvers.$VALIDATION_ERRORS = () => compactValidationError_ACU(lastError);
+                    const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
+                    const raw = await this.dependencies.callInternalAi(rendered.messages, preset, identity);
+                    if (!isCurrent(identity)) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
+                    }
+                    const payload = parseOutlinePayload_ACU(raw);
+                    const outline = request.replanConstraints
+                        ? validateReplannedStageOutline_ACU(payload, range, request.replanConstraints)
+                        : validateStageOutline_ACU(payload, range);
+                    return { outline, attempts: attempt + 1, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason }, requiresReview: request.settings.outlinePreview };
+                }
+                catch (error) {
+                    lastError = toPlannerError_ACU(error);
+                    if (!isRetryableOutlineError_ACU(lastError))
+                        throw error;
+                }
+            }
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_OUTLINE_RETRY_EXHAUSTED', lastError?.phase ?? 'outline_call', '阶段大纲生成重试次数已耗尽', false, { attempts: retries + 1, lastErrorCode: lastError?.code ?? 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' }));
+        }
+    }
+    function createPlannedStageRevision_ACU(outline, revision, reason, replanInstruction = '', createdAt = Date.now()) {
+        return { revision, createdAt, reason, replanInstruction, frozen: false, outline };
+    }
+    /** Revalidates a user-edited preview before it becomes eligible for execution. */
+    function acceptPlannedStageRevision_ACU(revision, settings, replanConstraints) {
+        if (revision.frozen) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_REVISION_FROZEN', 'replan', '已冻结的阶段 revision 不可编辑', false));
+        }
+        const range = resolveContinuationTurnRange_ACU(settings.stageSize, settings.customTurnMin ?? undefined, settings.customTurnMax ?? undefined);
+        const outline = replanConstraints
+            ? validateReplannedStageOutline_ACU(revision.outline, range, replanConstraints)
+            : validateStageOutline_ACU(revision.outline, range);
+        return freezePlannedStageRevision_ACU({ ...revision, outline });
+    }
+    function freezePlannedStageRevision_ACU(revision) {
+        return { ...revision, frozen: true, outline: { ...revision.outline, nodes: revision.outline.nodes.map(node => ({ ...node, turns: node.turns.map(turn => ({ ...turn })) })) } };
+    }
+
+    const leasesByChat_ACU = new Map();
+    const epochsByChat_ACU = new Map();
+    function fail_ACU$1(code, message) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'persist', message, false));
+    }
+    function cloneOutline_ACU(outline) {
+        return { ...outline, nodes: outline.nodes.map(node => ({ ...node, turns: node.turns.map(turn => ({ ...turn })) })) };
+    }
+    function guardForTask_ACU(chatIdentity, task) {
+        const stage = task?.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) : null;
+        return task
+            ? { chatIdentity, taskId: task.taskId, stageId: task.activeStageId, revision: stage?.activeRevision }
+            : { chatIdentity };
+    }
+    function getActiveStage_ACU(task) {
+        const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) : null;
+        if (!stage)
+            fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '任务缺少活动阶段');
+        return stage;
+    }
+    function getActiveRevision_ACU(stage) {
+        const revision = stage.revisions.find(item => item.revision === stage.activeRevision);
+        if (!revision)
+            fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '阶段缺少活动 revision');
+        return revision;
+    }
+    function taskResult_ACU(envelope, planning) {
+        if (!envelope.activeTask)
+            fail_ACU$1('CONTINUATION_TASK_NOT_FOUND', '当前聊天没有智能续写任务');
+        return { envelope, task: envelope.activeTask, ...(planning ? { planning } : {}) };
+    }
+    function normalizeOriginInstruction_ACU(value) {
+        if (typeof value !== 'string' || !value.trim())
+            fail_ACU$1('CONTINUATION_ORIGIN_INSTRUCTION_EMPTY', '初始续写要求不能为空');
+        return value.trim();
+    }
+    function stageForOutline_ACU(stageId, stageNumber, revision, snapshot, status) {
+        return { stageId, stageNumber, status, chronicleStartCount: snapshot.count, chronicleEndCount: null, chronicleAddedCount: null, chronicleRange: null, activeRevision: revision.revision, revisions: [revision], activeNodeIndex: 0, activeTurnIndex: 0, completedTurns: 0 };
+    }
+    function identityMatchesCurrentTurn_ACU(task, identity) {
+        if (task.taskId !== identity.taskId || task.activeStageId !== identity.stageId)
+            return false;
+        const stage = task.stages.find(item => item.stageId === identity.stageId);
+        if (!stage || stage.activeRevision !== identity.revision)
+            return false;
+        const revision = stage.revisions.find(item => item.revision === stage.activeRevision);
+        const node = revision?.outline.nodes[stage.activeNodeIndex];
+        const turn = node?.turns[stage.activeTurnIndex];
+        if (node?.id !== identity.nodeId || turn?.id !== identity.turnId)
+            return false;
+        const pending = task.pendingHostTurn;
+        return !pending || (pending.identity.chatIdentity === identity.chatIdentity
+            && pending.identity.taskId === identity.taskId && pending.identity.stageId === identity.stageId
+            && pending.identity.revision === identity.revision && pending.identity.nodeId === identity.nodeId
+            && pending.identity.turnId === identity.turnId && pending.identity.attemptId === identity.attemptId);
+    }
+    function advanceConfirmedTurn_ACU(task, snapshot, now, timeline) {
+        const stage = getActiveStage_ACU(task);
+        const revision = getActiveRevision_ACU(stage);
+        const node = revision.outline.nodes[stage.activeNodeIndex];
+        const turn = node?.turns[stage.activeTurnIndex];
+        if (!node || !turn)
+            fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '已确认轮次的阶段游标无效');
+        const completedTurns = stage.completedTurns + 1;
+        const isFinalTurn = completedTurns === revision.outline.totalTurns;
+        const nextStage = isFinalTurn
+            ? { ...stage, status: 'completed', completedTurns, chronicleEndCount: snapshot?.count ?? stage.chronicleEndCount, chronicleAddedCount: snapshot ? snapshot.count - stage.chronicleStartCount : stage.chronicleAddedCount, chronicleRange: snapshot?.range ?? stage.chronicleRange }
+            : stage.activeTurnIndex + 1 < node.turns.length
+                ? { ...stage, activeTurnIndex: stage.activeTurnIndex + 1, completedTurns }
+                : { ...stage, activeNodeIndex: stage.activeNodeIndex + 1, activeTurnIndex: 0, completedTurns };
+        const entries = [...task.timeline, timeline('turn_completed', now, { stageId: stage.stageId, revision: stage.activeRevision, nodeId: node.id, turnId: turn.id })];
+        if (isFinalTurn)
+            entries.push(timeline('stage_completed', now, { stageId: stage.stageId, revision: stage.activeRevision }));
+        return { ...task, updatedAt: now, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item), timeline: entries };
+    }
+    class ContinuationOrchestrator_ACU {
+        constructor(dependencies) {
+            this.dependencies = dependencies;
+        }
+        async createTask(input) {
+            const originInstruction = normalizeOriginInstruction_ACU(input.originInstruction);
+            return this.withLease_ACU(async (chatIdentity, lease) => {
+                const existing = this.dependencies.store.readPersisted()?.activeTask ?? null;
+                if (existing && !['completed', 'abandoned', 'failed'].includes(existing.status)) {
+                    fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前聊天已有未完成的智能续写任务');
+                }
+                const now = this.dependencies.now();
+                const taskId = this.dependencies.allocateId('task');
+                const stageId = this.dependencies.allocateId('stage');
+                const draft = {
+                    taskId, originInstruction, status: 'drafting', createdAt: now, updatedAt: now, runStartedAt: null, deadlineAt: null,
+                    runStageCount: 1, activeStageId: stageId, stages: [], timeline: [], stopReason: null, lastError: null,
+                };
+                const context = { envelope: this.baseEnvelope_ACU(), task: draft, stage: null, reason: 'initial', replanInstruction: '' };
+                const planned = await this.planOutline_ACU(context, chatIdentity, lease, stageId, 1);
+                const snapshot = await this.dependencies.readChronicleSnapshot();
+                this.assertLeaseCurrent_ACU(chatIdentity, lease);
+                const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'initial', '', now);
+                const needsReview = planned.requiresReview;
+                const stage = stageForOutline_ACU(stageId, 1, needsReview ? revision : acceptPlannedStageRevision_ACU(revision, context.envelope.settings), snapshot, needsReview ? 'awaiting_review' : 'running');
+                const candidate = {
+                    schemaVersion: context.envelope.schemaVersion,
+                    settings: context.envelope.settings,
+                    activeTask: {
+                        ...draft,
+                        status: needsReview ? 'awaiting_outline_review' : 'paused',
+                        stages: [stage],
+                        timeline: [this.timeline_ACU('task_created', now, { stageId }), this.timeline_ACU('outline_ready', now, { stageId, revision: 1 })],
+                    },
+                };
+                await this.dependencies.store.replaceAtomically(candidate, guardForTask_ACU(chatIdentity, existing));
+                return taskResult_ACU(candidate, this.planningSummary_ACU(planned));
+            });
+        }
+        async acceptOutline(input = {}) {
+            return this.withLease_ACU(async (chatIdentity) => {
+                let result = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    const stage = getActiveStage_ACU(task);
+                    const revision = getActiveRevision_ACU(stage);
+                    if (task.status !== 'awaiting_outline_review' || stage.status !== 'awaiting_review' || revision.frozen) {
+                        fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前任务没有可确认的大纲预览');
+                    }
+                    const previous = revision.reason === 'manual_replan'
+                        ? stage.revisions.find(item => item.revision === revision.revision - 1)
+                        : null;
+                    const constraints = previous
+                        ? { previousOutline: previous.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: previous.outline.totalTurns - stage.completedTurns }
+                        : undefined;
+                    const accepted = acceptPlannedStageRevision_ACU({ ...revision, outline: cloneOutline_ACU(input.outline ?? revision.outline) }, envelope.settings, constraints);
+                    const now = this.dependencies.now();
+                    const nextStage = { ...stage, status: 'running', revisions: stage.revisions.map(item => item.revision === accepted.revision ? accepted : item) };
+                    result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item) } };
+                    return result;
+                }, { chatIdentity });
+                return taskResult_ACU(result);
+            });
+        }
+        async replaceSettings(input) {
+            return this.withLease_ACU(async (chatIdentity) => {
+                let result = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    if (envelope.activeTask?.status === 'running' || envelope.activeTask?.status === 'stopping_after_inflight') {
+                        fail_ACU$1('CONTINUATION_OPERATION_BUSY', '宿主生成进行中，不能修改智能续写设置');
+                    }
+                    result = { ...envelope, settings: input.settings };
+                    return result;
+                }, { chatIdentity });
+                return result;
+            });
+        }
+        async continueTask() {
+            return this.withLease_ACU(async (chatIdentity, lease) => {
+                let started = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    if (task.pendingHostTurn?.status === 'awaiting_generation') {
+                        fail_ACU$1('CONTINUATION_OPERATION_BUSY', '当前轮次正在等待宿主生成结果');
+                    }
+                    if (task.pendingHostTurn?.status === 'exhausted')
+                        fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前轮次正文重试已耗尽');
+                    if (task.status === 'awaiting_outline_review' || task.status === 'stopping_after_inflight' || task.status === 'abandoned' || task.status === 'completed' || task.status === 'failed') {
+                        fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前任务不可继续');
+                    }
+                    if (task.stopReason !== null) {
+                        fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可继续');
+                    }
+                    const stage = getActiveStage_ACU(task);
+                    if (stage.status === 'completed')
+                        return envelope;
+                    if (stage.status !== 'running' || !getActiveRevision_ACU(stage).frozen)
+                        fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前阶段不可继续');
+                    const now = this.dependencies.now();
+                    if (task.deadlineAt !== null && now >= task.deadlineAt) {
+                        started = this.stopEnvelope_ACU(envelope, 'duration_reached', now);
+                        return started;
+                    }
+                    const deadlineAt = task.deadlineAt ?? (envelope.settings.totalDurationMinutes > 0 ? now + envelope.settings.totalDurationMinutes * 60000 : null);
+                    started = { ...envelope, activeTask: { ...task, status: 'running', runStartedAt: task.runStartedAt ?? now, deadlineAt, stopReason: null, lastError: null, updatedAt: now } };
+                    return started;
+                }, { chatIdentity });
+                const task = started.activeTask;
+                if (task.status !== 'running')
+                    return taskResult_ACU(started);
+                const stage = getActiveStage_ACU(task);
+                try {
+                    const retryAttempt = task.pendingHostTurn?.status === 'retry_ready' ? task.pendingHostTurn.identity : undefined;
+                    const preparedTurn = await this.dependencies.executionEngine.prepareCurrentTurnInstruction(() => this.isLeaseCurrent_ACU(chatIdentity, lease), retryAttempt);
+                    return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started), preparedTurn };
+                }
+                catch (error) {
+                    await this.pauseAfterTurnPreparationFailure_ACU(chatIdentity, task.taskId, stage.stageId, stage.activeRevision, error);
+                    throw error;
+                }
+            });
+        }
+        async retryCurrentTurn() {
+            return this.continueTask();
+        }
+        /** Persists the host attribution boundary before the adapter writes the host textarea. */
+        async recordHostTurn(input) {
+            const chatIdentity = this.requireChatIdentity_ACU();
+            if (input.identity.chatIdentity !== chatIdentity) {
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'host_send', '宿主发送所属聊天已变化', false));
+            }
+            return this.withLease_ACU(async () => {
+                let result = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    const existing = task.pendingHostTurn;
+                    if (task.status !== 'running' || !identityMatchesCurrentTurn_ACU(task, input.identity)
+                        || (existing !== undefined && existing !== null && existing.status !== 'retry_ready')) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'host_send', '待发送正文已不属于当前轮次', false));
+                    }
+                    const retryCount = existing?.status === 'retry_ready' ? existing.retryCount : 0;
+                    const now = this.dependencies.now();
+                    result = {
+                        ...envelope,
+                        activeTask: {
+                            ...task,
+                            updatedAt: now,
+                            pendingHostTurn: { identity: input.identity, capture: input.capture, retryCount, status: 'awaiting_generation' },
+                            timeline: [...task.timeline, this.timeline_ACU('turn_sent', now, { stageId: input.identity.stageId, revision: input.identity.revision, nodeId: input.identity.nodeId, turnId: input.identity.turnId, attemptId: input.identity.attemptId })],
+                        },
+                    };
+                    return result;
+                }, { chatIdentity });
+                return taskResult_ACU(result);
+            });
+        }
+        async pauseForHostInputFailure(identity) {
+            return this.pauseHostTurn_ACU(identity, 'CONTINUATION_HOST_INPUT_UNAVAILABLE', '酒馆输入框或发送按钮不可用', 'host_input_unavailable');
+        }
+        /** Binds a generation sequence only after the host bridge observed a synchronous send-start event. */
+        async bindHostTurnGeneration(identity, generationSeq) {
+            const chatIdentity = this.requireChatIdentity_ACU();
+            if (identity.chatIdentity !== chatIdentity)
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'host_send', '宿主生成所属聊天已变化', false));
+            await this.withLease_ACU(async () => {
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    const pending = task.pendingHostTurn;
+                    if (!pending || pending.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, identity) || pending.capture.generationSeq !== null) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'host_send', '宿主生成开始事件不属于当前轮次', false));
+                    }
+                    return { ...envelope, activeTask: { ...task, pendingHostTurn: { ...pending, capture: { ...pending.capture, generationSeq } } } };
+                }, { chatIdentity });
+            });
+        }
+        /** Read-only bridge input; it never derives reload state or writes the envelope. */
+        readPendingHostTurn() {
+            const envelope = this.dependencies.store.readPersisted();
+            const task = envelope?.activeTask;
+            if (!envelope || !task || !task.pendingHostTurn || task.pendingHostTurn.status === 'exhausted')
+                return null;
+            if (task.pendingHostTurn.identity.chatIdentity !== this.dependencies.getChatIdentity())
+                return null;
+            return { settings: envelope.settings, pending: task.pendingHostTurn };
+        }
+        async pauseForHostResultFailure(identity) {
+            return this.pauseHostTurn_ACU(identity, 'CONTINUATION_TASK_STATE_INVALID', '宿主正文无法唯一归属当前轮次', 'state_invalid');
+        }
+        async rejectHostTurnForMissingTags(input) {
+            const chatIdentity = this.requireChatIdentity_ACU();
+            if (input.identity.chatIdentity !== chatIdentity) {
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文结果所属聊天已变化', false));
+            }
+            return this.withLease_ACU(async () => {
+                let result = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    const pending = task.pendingHostTurn;
+                    if (task.status !== 'running' || !pending || pending.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, input.identity)) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '标签校验结果已不属于当前轮次', false));
+                    }
+                    const now = this.dependencies.now();
+                    const error = createContinuationError_ACU('CONTINUATION_GENERATION_TAGS_MISSING', 'generation_evaluate', '宿主正文缺少必需标签', true, { messageIndex: input.messageIndex });
+                    if (pending.retryCount >= envelope.settings.generationRetryLimit) {
+                        result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: 'generation_retry_exhausted', lastError: { ...error, retryable: false }, pendingHostTurn: { ...pending, status: 'exhausted' }, timeline: [...task.timeline, this.timeline_ACU('failed', now, { stageId: input.identity.stageId, revision: input.identity.revision, nodeId: input.identity.nodeId, turnId: input.identity.turnId, attemptId: input.identity.attemptId, messageIndex: input.messageIndex, errorCode: error.code })] } };
+                        return result;
+                    }
+                    result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, lastError: error, pendingHostTurn: { ...pending, retryCount: pending.retryCount + 1, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, { stageId: input.identity.stageId, revision: input.identity.revision, nodeId: input.identity.nodeId, turnId: input.identity.turnId, attemptId: input.identity.attemptId, messageIndex: input.messageIndex, errorCode: error.code })] } };
+                    return result;
+                }, { chatIdentity });
+                return taskResult_ACU(result);
+            });
+        }
+        /** T9 calls this only after uniquely attributing a successful host generation to identity. */
+        async confirmCurrentTurn(identity) {
+            const chatIdentity = this.requireChatIdentity_ACU();
+            if (identity.chatIdentity !== chatIdentity) {
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文结果所属聊天已变化', false));
+            }
+            return this.withLease_ACU(async (_currentChatIdentity, lease) => {
+                const preEnvelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+                const preTask = this.requireTask_ACU(preEnvelope);
+                if (preTask.status !== 'running' || preTask.pendingHostTurn?.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(preTask, identity)) {
+                    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文结果已不属于当前轮次', false));
+                }
+                const preStage = getActiveStage_ACU(preTask);
+                const preRevision = getActiveRevision_ACU(preStage);
+                const isFinalTurn = preStage.completedTurns + 1 === preRevision.outline.totalTurns;
+                const chronicleSnapshot = isFinalTurn ? await this.dependencies.readChronicleSnapshot() : null;
+                this.assertLeaseCurrent_ACU(chatIdentity, lease);
+                let advanced = null;
+                let mustPlanNextStage = false;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    if (task.status !== 'running' || task.pendingHostTurn?.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, identity)) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文结果已不属于当前轮次', false));
+                    }
+                    const now = this.dependencies.now();
+                    const stage = getActiveStage_ACU(task);
+                    const isLastTurn = stage.completedTurns + 1 === getActiveRevision_ACU(stage).outline.totalTurns;
+                    const progressed = advanceConfirmedTurn_ACU(task, chronicleSnapshot, now, this.timeline_ACU.bind(this));
+                    const completedTurn = { ...progressed, pendingHostTurn: null };
+                    if (!isLastTurn) {
+                        advanced = { ...envelope, activeTask: completedTurn };
+                        return advanced;
+                    }
+                    if (task.deadlineAt !== null && now >= task.deadlineAt) {
+                        advanced = this.stopEnvelope_ACU({ ...envelope, activeTask: completedTurn }, 'duration_reached', now);
+                        return advanced;
+                    }
+                    if (task.runStageCount >= envelope.settings.maxAutomaticStages) {
+                        advanced = this.stopEnvelope_ACU({ ...envelope, activeTask: completedTurn }, 'stage_limit_reached', now);
+                        return advanced;
+                    }
+                    if (!envelope.settings.autoNextStage) {
+                        advanced = { ...envelope, activeTask: { ...completedTurn, status: 'paused', updatedAt: now } };
+                        return advanced;
+                    }
+                    mustPlanNextStage = true;
+                    advanced = { ...envelope, activeTask: { ...completedTurn, status: 'paused', updatedAt: now } };
+                    return advanced;
+                }, { chatIdentity });
+                if (!mustPlanNextStage)
+                    return taskResult_ACU(advanced);
+                return this.planNextStage_ACU(chatIdentity, lease, advanced);
+            });
+        }
+        async startNextStage() {
+            return this.withLease_ACU(async (chatIdentity, lease) => {
+                const current = this.dependencies.store.readPersisted();
+                const envelope = this.requireEnvelope_ACU(current);
+                const task = this.requireTask_ACU(envelope);
+                const stage = getActiveStage_ACU(task);
+                if (task.status !== 'paused' || stage.status !== 'completed' || task.stopReason !== null) {
+                    fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前任务不可创建下一阶段');
+                }
+                return this.planNextStage_ACU(chatIdentity, lease, envelope);
+            });
+        }
+        async stopTask() {
+            const chatIdentity = this.requireChatIdentity_ACU();
+            const task = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted()));
+            const guard = guardForTask_ACU(chatIdentity, task);
+            this.invalidateLease_ACU(chatIdentity);
+            return this.withLease_ACU(async () => {
+                let stopped = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    stopped = this.stopEnvelope_ACU(envelope, 'manual', this.dependencies.now());
+                    return stopped;
+                }, guard);
+                return taskResult_ACU(stopped);
+            });
+        }
+        async replanRemaining(input = {}) {
+            const replanInstruction = typeof input.instruction === 'string' ? input.instruction.trim() : '';
+            const chatIdentity = this.requireChatIdentity_ACU();
+            const sourceTask = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted()));
+            const sourceGuard = guardForTask_ACU(chatIdentity, sourceTask);
+            this.invalidateLease_ACU(chatIdentity);
+            return this.withLease_ACU(async (_identity, lease) => {
+                let planningEnvelope = null;
+                let planningContext = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    const stage = getActiveStage_ACU(task);
+                    const previous = getActiveRevision_ACU(stage);
+                    if (!['running', 'paused', 'failed'].includes(task.status) || !['running', 'failed'].includes(stage.status)) {
+                        fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前阶段不可重新规划');
+                    }
+                    if (task.stopReason !== null) {
+                        fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可重新规划');
+                    }
+                    const nextRevision = previous.revision + 1;
+                    const pending = createPlannedStageRevision_ACU(cloneOutline_ACU(previous.outline), nextRevision, 'manual_replan', replanInstruction, this.dependencies.now());
+                    const nextStage = { ...stage, status: 'planning', activeRevision: nextRevision, revisions: [...stage.revisions, pending] };
+                    const nextTask = { ...task, status: 'paused', updatedAt: this.dependencies.now(), stopReason: null, lastError: null, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item) };
+                    planningEnvelope = { ...envelope, activeTask: nextTask };
+                    planningContext = { envelope: planningEnvelope, task: nextTask, stage: nextStage, reason: 'manual_replan', replanInstruction };
+                    return planningEnvelope;
+                }, sourceGuard);
+                const context = planningContext;
+                const stage = context.stage;
+                const previous = stage.revisions.find(item => item.revision === stage.activeRevision - 1);
+                const constraints = { previousOutline: previous.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: previous.outline.totalTurns - stage.completedTurns };
+                try {
+                    const planned = await this.planOutline_ACU(context, chatIdentity, lease, stage.stageId, stage.activeRevision, constraints);
+                    this.assertLeaseCurrent_ACU(chatIdentity, lease);
+                    let completed = null;
+                    await this.dependencies.store.updatePersistedAtomically(current => {
+                        const envelope = this.requireEnvelope_ACU(current);
+                        const task = this.requireTask_ACU(envelope);
+                        const activeStage = getActiveStage_ACU(task);
+                        if (task.taskId !== context.task.taskId || activeStage.stageId !== stage.stageId || activeStage.activeRevision !== stage.activeRevision || activeStage.status !== 'planning') {
+                            fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '重新规划结果已失效');
+                        }
+                        const pending = getActiveRevision_ACU(activeStage);
+                        const accepted = planned.requiresReview ? { ...pending, outline: cloneOutline_ACU(planned.outline) } : acceptPlannedStageRevision_ACU({ ...pending, outline: cloneOutline_ACU(planned.outline) }, envelope.settings, constraints);
+                        const nextStage = { ...activeStage, status: (planned.requiresReview ? 'awaiting_review' : 'running'), revisions: activeStage.revisions.map(item => item.revision === accepted.revision ? accepted : item) };
+                        completed = { ...envelope, activeTask: { ...task, status: planned.requiresReview ? 'awaiting_outline_review' : 'paused', updatedAt: this.dependencies.now(), stages: task.stages.map(item => item.stageId === nextStage.stageId ? nextStage : item), timeline: [...task.timeline, this.timeline_ACU('outline_ready', this.dependencies.now(), { stageId: nextStage.stageId, revision: accepted.revision })] } };
+                        return completed;
+                    }, guardForTask_ACU(chatIdentity, context.task));
+                    return taskResult_ACU(completed, this.planningSummary_ACU(planned));
+                }
+                catch (error) {
+                    await this.pauseAfterPlanningFailure_ACU(chatIdentity, context.task.taskId, stage.stageId, stage.activeRevision, error);
+                    throw error;
+                }
+            });
+        }
+        async abandonAndCreate(input) {
+            if (input.confirmAbandon !== true) {
+                fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '放弃当前任务并新建必须经过明确确认');
+            }
+            const chatIdentity = this.requireChatIdentity_ACU();
+            const sourceTask = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted()));
+            const sourceGuard = guardForTask_ACU(chatIdentity, sourceTask);
+            this.invalidateLease_ACU(chatIdentity);
+            await this.withLease_ACU(async () => {
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    return { ...envelope, activeTask: { ...task, status: 'abandoned', updatedAt: this.dependencies.now(), stopReason: 'manual', timeline: [...task.timeline, this.timeline_ACU('stopped', this.dependencies.now())] } };
+                }, sourceGuard);
+            });
+            return this.createTask(input);
+        }
+        async planNextStage_ACU(chatIdentity, lease, sourceEnvelope) {
+            const sourceTask = this.requireTask_ACU(sourceEnvelope);
+            const sourceStage = getActiveStage_ACU(sourceTask);
+            if (sourceTask.deadlineAt !== null && this.dependencies.now() >= sourceTask.deadlineAt) {
+                const stopped = this.stopEnvelope_ACU(sourceEnvelope, 'duration_reached', this.dependencies.now());
+                await this.dependencies.store.replaceAtomically(stopped, guardForTask_ACU(chatIdentity, sourceTask));
+                return taskResult_ACU(stopped);
+            }
+            if (sourceTask.runStageCount >= sourceEnvelope.settings.maxAutomaticStages) {
+                const stopped = this.stopEnvelope_ACU(sourceEnvelope, 'stage_limit_reached', this.dependencies.now());
+                await this.dependencies.store.replaceAtomically(stopped, guardForTask_ACU(chatIdentity, sourceTask));
+                return taskResult_ACU(stopped);
+            }
+            const snapshot = await this.dependencies.readChronicleSnapshot();
+            this.assertLeaseCurrent_ACU(chatIdentity, lease);
+            const nextStageId = this.dependencies.allocateId('stage');
+            let planningContext = null;
+            await this.dependencies.store.updatePersistedAtomically(current => {
+                const envelope = this.requireEnvelope_ACU(current);
+                const task = this.requireTask_ACU(envelope);
+                const completedStage = getActiveStage_ACU(task);
+                if (task.taskId !== sourceTask.taskId || completedStage.stageId !== sourceStage.stageId || completedStage.status !== 'completed' || task.status !== 'paused' || task.stopReason !== null) {
+                    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '下一阶段规划前提已失效', false));
+                }
+                const previousRevision = getActiveRevision_ACU(completedStage);
+                const pendingRevision = createPlannedStageRevision_ACU(cloneOutline_ACU(previousRevision.outline), 1, 'auto_next_stage', '', this.dependencies.now());
+                const nextStage = stageForOutline_ACU(nextStageId, task.runStageCount + 1, pendingRevision, snapshot, 'planning');
+                const nextTask = { ...task, status: 'drafting', updatedAt: this.dependencies.now(), activeStageId: nextStageId, runStageCount: task.runStageCount + 1, stages: [...task.stages, nextStage], stopReason: null, lastError: null };
+                const candidate = { ...envelope, activeTask: nextTask };
+                planningContext = { envelope: candidate, task: nextTask, stage: nextStage, reason: 'auto_next_stage', replanInstruction: '' };
+                return candidate;
+            }, guardForTask_ACU(chatIdentity, sourceTask));
+            const context = planningContext;
+            try {
+                const planned = await this.planOutline_ACU(context, chatIdentity, lease, nextStageId, 1);
+                this.assertLeaseCurrent_ACU(chatIdentity, lease);
+                let completed = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    const stage = getActiveStage_ACU(task);
+                    if (task.taskId !== context.task.taskId || task.status !== 'drafting' || stage.stageId !== nextStageId || stage.status !== 'planning' || stage.activeRevision !== 1) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '下一阶段规划结果已失效', false));
+                    }
+                    const pending = getActiveRevision_ACU(stage);
+                    const accepted = planned.requiresReview
+                        ? { ...pending, outline: cloneOutline_ACU(planned.outline) }
+                        : acceptPlannedStageRevision_ACU({ ...pending, outline: cloneOutline_ACU(planned.outline) }, envelope.settings);
+                    const nextStage = { ...stage, status: (planned.requiresReview ? 'awaiting_review' : 'running'), revisions: stage.revisions.map(item => item.revision === 1 ? accepted : item) };
+                    completed = { ...envelope, activeTask: { ...task, status: planned.requiresReview ? 'awaiting_outline_review' : 'paused', updatedAt: this.dependencies.now(), stages: task.stages.map(item => item.stageId === nextStageId ? nextStage : item), timeline: [...task.timeline, this.timeline_ACU('outline_ready', this.dependencies.now(), { stageId: nextStageId, revision: 1 })] } };
+                    return completed;
+                }, guardForTask_ACU(chatIdentity, context.task));
+                return taskResult_ACU(completed, this.planningSummary_ACU(planned));
+            }
+            catch (error) {
+                await this.pauseAfterPlanningFailure_ACU(chatIdentity, context.task.taskId, nextStageId, 1, error);
+                throw error;
+            }
+        }
+        async planOutline_ACU(context, chatIdentity, lease, stageId, revision, replanConstraints) {
+            return this.dependencies.planner.plan({
+                settings: context.envelope.settings,
+                reason: context.reason,
+                replanInstruction: context.replanInstruction,
+                replanConstraints,
+                resolvers: this.dependencies.createOutlineResolvers(context),
+                createInternalRequestIdentity: attempt => ({ source: 'outline', requestId: this.dependencies.allocateId('outline-request'), chatIdentity, taskId: context.task.taskId, stageId, revision, attemptId: `outline-${attempt}` }),
+                isInternalRequestCurrent: identity => this.isLeaseCurrent_ACU(chatIdentity, lease) && identity.chatIdentity === chatIdentity && identity.taskId === context.task.taskId && identity.stageId === stageId && identity.revision === revision,
+            });
+        }
+        async pauseAfterPlanningFailure_ACU(chatIdentity, taskId, stageId, revision, error) {
+            const lastError = error instanceof ContinuationValidationError_ACU ? error.error : createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'outline_call', '阶段规划失败', false);
+            try {
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    const stage = getActiveStage_ACU(task);
+                    if (task.taskId !== taskId || task.stopReason !== null || stage.stageId !== stageId || stage.activeRevision !== revision || stage.status !== 'planning')
+                        return envelope;
+                    return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: this.dependencies.now(), lastError, stages: task.stages.map(item => item.stageId === stageId ? { ...item, status: 'failed' } : item), timeline: [...task.timeline, this.timeline_ACU('failed', this.dependencies.now(), { stageId, revision, errorCode: lastError.code })] } };
+                }, { chatIdentity });
+            }
+            catch { /* Preserve the primary planning error; persistence failures remain visible on the next guarded operation. */ }
+        }
+        async pauseAfterTurnPreparationFailure_ACU(chatIdentity, taskId, stageId, revision, error) {
+            const lastError = error instanceof ContinuationValidationError_ACU ? error.error : createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'turn_call', '每轮指令生成失败', false);
+            try {
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    const stage = getActiveStage_ACU(task);
+                    if (task.taskId !== taskId || task.status !== 'running' || stage.stageId !== stageId || stage.activeRevision !== revision || stage.status !== 'running')
+                        return envelope;
+                    return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: this.dependencies.now(), lastError, timeline: [...task.timeline, this.timeline_ACU('failed', this.dependencies.now(), { stageId, revision, errorCode: lastError.code })] } };
+                }, { chatIdentity });
+            }
+            catch { /* Preserve the primary generator error; a later guarded operation exposes persistence failure. */ }
+        }
+        planningSummary_ACU(result) {
+            return { attempts: result.attempts, apiPreset: result.apiPreset, requiresReview: result.requiresReview };
+        }
+        baseEnvelope_ACU() {
+            return this.dependencies.store.readPersisted() ?? { schemaVersion: 1, settings: buildDefaultContinuationSettings_ACU(), activeTask: null };
+        }
+        requireEnvelope_ACU(value) {
+            if (!value)
+                return { schemaVersion: 1, settings: buildDefaultContinuationSettings_ACU(), activeTask: null };
+            return value;
+        }
+        requireTask_ACU(envelope) {
+            if (!envelope.activeTask)
+                fail_ACU$1('CONTINUATION_TASK_NOT_FOUND', '当前聊天没有智能续写任务');
+            return envelope.activeTask;
+        }
+        stopEnvelope_ACU(envelope, reason, now) {
+            const task = this.requireTask_ACU(envelope);
+            return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: reason, timeline: [...task.timeline, this.timeline_ACU('stopped', now)] } };
+        }
+        async pauseHostTurn_ACU(identity, code, message, stopReason) {
+            const chatIdentity = this.requireChatIdentity_ACU();
+            if (identity.chatIdentity !== chatIdentity)
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'host_send', '宿主发送所属聊天已变化', false));
+            return this.withLease_ACU(async () => {
+                let result = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    if (!task.pendingHostTurn || task.pendingHostTurn.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, identity)) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'host_send', '宿主发送失败已不属于当前轮次', false));
+                    }
+                    const now = this.dependencies.now();
+                    const error = createContinuationError_ACU(code, 'host_send', message, false);
+                    result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason, lastError: error, pendingHostTurn: { ...task.pendingHostTurn, status: 'exhausted' }, timeline: [...task.timeline, this.timeline_ACU('failed', now, { stageId: identity.stageId, revision: identity.revision, nodeId: identity.nodeId, turnId: identity.turnId, attemptId: identity.attemptId, errorCode: error.code })] } };
+                    return result;
+                }, { chatIdentity });
+                return taskResult_ACU(result);
+            });
+        }
+        timeline_ACU(kind, at, fields = {}) {
+            return { id: this.dependencies.allocateId('timeline'), at, kind, ...fields };
+        }
+        requireChatIdentity_ACU() {
+            const identity = this.dependencies.getChatIdentity();
+            if (!identity)
+                fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前聊天身份不可用');
+            return identity;
+        }
+        async withLease_ACU(work) {
+            const chatIdentity = this.requireChatIdentity_ACU();
+            if (leasesByChat_ACU.has(chatIdentity))
+                fail_ACU$1('CONTINUATION_OPERATION_BUSY', '当前聊天已有智能续写操作正在执行');
+            const lease = { id: this.dependencies.allocateId('lease'), epoch: epochsByChat_ACU.get(chatIdentity) ?? 0 };
+            leasesByChat_ACU.set(chatIdentity, lease);
+            try {
+                return await work(chatIdentity, lease);
+            }
+            finally {
+                if (leasesByChat_ACU.get(chatIdentity) === lease)
+                    leasesByChat_ACU.delete(chatIdentity);
+            }
+        }
+        invalidateLease_ACU(chatIdentity) {
+            epochsByChat_ACU.set(chatIdentity, (epochsByChat_ACU.get(chatIdentity) ?? 0) + 1);
+            leasesByChat_ACU.delete(chatIdentity);
+        }
+        isLeaseCurrent_ACU(chatIdentity, lease) {
+            return this.dependencies.getChatIdentity() === chatIdentity && (epochsByChat_ACU.get(chatIdentity) ?? 0) === lease.epoch && leasesByChat_ACU.get(chatIdentity) === lease;
+        }
+        assertLeaseCurrent_ACU(chatIdentity, lease) {
+            if (!this.isLeaseCurrent_ACU(chatIdentity, lease)) {
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '智能续写操作已失效', false));
+            }
+        }
+    }
+
+    function fail_ACU(code, message) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'turn_call', message, false));
+    }
+    function currentSnapshot_ACU(envelope) {
+        const task = envelope?.activeTask;
+        if (!task)
+            fail_ACU('CONTINUATION_TASK_NOT_FOUND', '当前聊天没有智能续写任务');
+        if (task.status !== 'running' || !task.activeStageId)
+            fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前任务不允许生成每轮指令');
+        const stage = task.stages.find(item => item.stageId === task.activeStageId);
+        if (!stage || stage.status !== 'running')
+            fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段不允许生成每轮指令');
+        const revision = stage.revisions.find(item => item.revision === stage.activeRevision);
+        if (!revision || !revision.frozen)
+            fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段大纲尚未冻结');
+        const node = revision.outline.nodes[stage.activeNodeIndex];
+        const turn = node?.turns[stage.activeTurnIndex];
+        if (!node || !turn)
+            fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段游标无效');
+        const previousTurns = revision.outline.nodes.slice(0, stage.activeNodeIndex).reduce((total, item) => total + item.turns.length, 0) + stage.activeTurnIndex;
+        if (stage.completedTurns !== previousTurns)
+            fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段游标与已完成轮数不一致');
+        return { envelope, task, stage, revision, node, turn, turnNumber: previousTurns + 1, nodeTurnNumber: stage.activeTurnIndex + 1 };
+    }
+    class StageExecutionEngine_ACU {
+        constructor(dependencies) {
+            this.dependencies = dependencies;
+        }
+        async prepareCurrentTurnInstruction(isLeaseCurrent = () => true, existingAttempt) {
+            const snapshot = currentSnapshot_ACU(this.dependencies.readEnvelope());
+            const identity = existingAttempt ?? {
+                chatIdentity: this.dependencies.getChatIdentity(), taskId: snapshot.task.taskId, stageId: snapshot.stage.stageId,
+                revision: snapshot.revision.revision, nodeId: snapshot.node.id, turnId: snapshot.turn.id, attemptId: this.dependencies.allocateId('attempt'),
+            };
+            if (identity.chatIdentity !== this.dependencies.getChatIdentity() || identity.taskId !== snapshot.task.taskId
+                || identity.stageId !== snapshot.stage.stageId || identity.revision !== snapshot.revision.revision
+                || identity.nodeId !== snapshot.node.id || identity.turnId !== snapshot.turn.id) {
+                fail_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '正文重试身份已不属于当前阶段游标');
+            }
+            const isCurrent = (candidate) => {
+                if (!isLeaseCurrent()
+                    || candidate.chatIdentity !== identity.chatIdentity || candidate.taskId !== identity.taskId
+                    || candidate.stageId !== identity.stageId || candidate.revision !== identity.revision
+                    || candidate.nodeId !== identity.nodeId || candidate.turnId !== identity.turnId
+                    || candidate.attemptId !== identity.attemptId)
+                    return false;
+                try {
+                    const current = currentSnapshot_ACU(this.dependencies.readEnvelope());
+                    return current.task.taskId === identity.taskId && current.stage.stageId === identity.stageId
+                        && current.revision.revision === identity.revision && current.node.id === identity.nodeId
+                        && current.turn.id === identity.turnId;
+                }
+                catch {
+                    return false;
+                }
+            };
+            const instruction = await this.dependencies.generator.generate({
+                settings: snapshot.envelope.settings,
+                createInternalRequestIdentity: () => ({ ...identity, requestId: this.dependencies.allocateId('turn-request'), source: 'turn_instruction' }),
+                isInternalRequestCurrent: isCurrent,
+                resolvers: this.dependencies.createResolvers(snapshot),
+            });
+            return { identity, instruction };
+        }
+    }
+
+    const defaultDependencies_ACU$1 = {
+        resolveApiPreset: resolveContinuationApiPreset_ACU,
+        callInternalAi: callContinuationInternalAi_ACU,
+    };
+    function asTurnInstructionError_ACU(error) {
+        if (error instanceof ContinuationValidationError_ACU)
+            return error.error;
+        return createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'turn_call', '每轮指令内部 AI 调用失败', true);
+    }
+    function isRetryableTurnInstructionError_ACU(error) {
+        return error.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' || error.code === 'CONTINUATION_TURN_INSTRUCTION_EMPTY';
+    }
+    function staleRequestError_ACU(message) {
+        return new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'turn_call', message, false));
+    }
+    /** Generates only the final plain-text host instruction; it performs no host-input side effect. */
+    class ContinuationTurnInstructionGenerator_ACU {
+        constructor(dependencies = defaultDependencies_ACU$1) {
+            this.dependencies = dependencies;
+        }
+        async generate(request, apiDependencies) {
+            const preset = this.dependencies.resolveApiPreset(request.settings, 'turn_call', apiDependencies);
+            const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
+            let lastError = null;
+            for (let attempt = 0; attempt <= retries; attempt += 1) {
+                try {
+                    const identity = request.createInternalRequestIdentity(attempt);
+                    if (!request.isInternalRequestCurrent(identity))
+                        throw staleRequestError_ACU('每轮指令内部请求已失效');
+                    const rendered = await renderContinuationPrompt_ACU(request.settings.turnInstructionPrompt, request.resolvers ?? {}, 'turn_prompt');
+                    const instruction = (await this.dependencies.callInternalAi(rendered.messages, preset, identity, request.signal))?.trim() ?? '';
+                    if (!request.isInternalRequestCurrent(identity))
+                        throw staleRequestError_ACU('每轮指令内部结果已失效');
+                    if (!instruction) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_TURN_INSTRUCTION_EMPTY', 'turn_call', '每轮指令内部 AI 返回为空', true));
+                    }
+                    return { instruction, attempts: attempt + 1, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
+                }
+                catch (error) {
+                    lastError = asTurnInstructionError_ACU(error);
+                    if (!isRetryableTurnInstructionError_ACU(lastError))
+                        throw error;
+                }
+            }
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_TURN_INSTRUCTION_RETRY_EXHAUSTED', 'turn_call', '每轮指令生成重试次数已耗尽', false, { attempts: retries + 1, lastErrorCode: lastError?.code ?? 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' }));
+        }
+    }
+
+    const AM_CODE_PATTERN_ACU = /^AM\d+$/i;
+    function normalizeAmCode_ACU(value) {
+        const code = String(value ?? '').trim().toUpperCase();
+        return AM_CODE_PATTERN_ACU.test(code) ? code : null;
+    }
+    function extractAmCodes_ACU(entry) {
+        const keyValues = Array.isArray(entry.keys)
+            ? entry.keys
+            : typeof entry.keys === 'string'
+                ? entry.keys.split(/[,，]/)
+                : [];
+        return [...new Set(keyValues
+                .map(normalizeAmCode_ACU)
+                .filter((code) => code !== null))];
+    }
+    function normalizeGeneratedComment_ACU(entry, isolationPrefix) {
+        const raw = String(entry.comment ?? entry.name ?? '').trim();
+        return isolationPrefix && raw.startsWith(isolationPrefix) ? raw.slice(isolationPrefix.length) : raw;
+    }
+    function isSummaryEntryComment_ACU(comment) {
+        return /^(?:总结条目|小总结条目)\d+$/.test(comment);
+    }
+    function isGeneratedEntryComment_ACU(comment) {
+        return comment.startsWith('TavernDB-ACU-')
+            || comment.startsWith('总结条目')
+            || comment.startsWith('小总结条目')
+            || comment.startsWith('重要人物条目');
+    }
+    function compareAmCodes_ACU(left, right) {
+        const leftDigits = left.slice(2).replace(/^0+/, '') || '0';
+        const rightDigits = right.slice(2).replace(/^0+/, '') || '0';
+        return leftDigits.length - rightDigits.length || leftDigits.localeCompare(rightDigits);
+    }
+    function isWithinRange_ACU(code, range) {
+        return compareAmCodes_ACU(code, range.first) >= 0 && compareAmCodes_ACU(code, range.last) <= 0;
+    }
+    function normalizeRange_ACU(range) {
+        const first = normalizeAmCode_ACU(range?.first);
+        const last = normalizeAmCode_ACU(range?.last);
+        if (!first || !last || compareAmCodes_ACU(first, last) > 0)
+            return null;
+        return { first, last };
+    }
+    function sortSummaryRows_ACU(rows) {
+        return [...rows].sort((left, right) => compareAmCodes_ACU(left.codes[0], right.codes[0]) || left.order - right.order);
+    }
+    async function resolveRelevantBookNames_ACU() {
+        const config = getCurrentWorldbookConfig_ACU();
+        if (config?.source === 'manual') {
+            const manualSelection = Array.isArray(config.manualSelection)
+                ? config.manualSelection
+                : [];
+            return [...new Set(manualSelection
+                    .map((name) => String(name ?? '').trim())
+                    .filter(Boolean))];
+        }
+        return (await getCurrentCharacterWorldbookBinding_ACU()).orderedNames;
+    }
+    const defaultDependencies_ACU = {
+        resolveRelevantBookNames: resolveRelevantBookNames_ACU,
+        resolveInjectionTarget: getInjectionTargetLorebook_ACU,
+        getIsolationPrefix: getIsolationPrefix_ACU,
+        buildRelevantWorldbookContent: buildCombinedWorldbookContentByStrategy_ACU,
+        readLorebookEntries: getLorebookEntriesByNames_ACU,
+        logReadFailure: phase => logWarn_ACU('[Continuation] 世界书只读失败。', { phase, error: { category: 'read_failed' } }),
+    };
+    /**
+     * Continuation 的只读世界书 seam。它只读取当前注入目标世界书，绝不调度剧情任务或写入宿主状态。
+     */
+    class ContinuationWorldbookContext_ACU {
+        constructor(dependencies = defaultDependencies_ACU) {
+            this.dependencies = dependencies;
+        }
+        async readRelevantBackground(scanText) {
+            try {
+                const bookNames = await this.dependencies.resolveRelevantBookNames();
+                if (!bookNames.length)
+                    return '';
+                const isolationPrefix = this.dependencies.getIsolationPrefix();
+                return await this.dependencies.buildRelevantWorldbookContent({
+                    logPrefix: '[Continuation]',
+                    bookNames,
+                    baseScanText: typeof scanText === 'string' ? scanText : '',
+                    excludeEntry: (entry) => isGeneratedEntryComment_ACU(normalizeGeneratedComment_ACU(entry, isolationPrefix)),
+                    formatEntry: (entry) => String(entry.content ?? '').trim(),
+                });
+            }
+            catch {
+                this.dependencies.logReadFailure('background');
+                return '';
+            }
+        }
+        async readLastStageChronicles(range) {
+            const normalizedRange = normalizeRange_ACU(range);
+            if (!normalizedRange)
+                return '';
+            const rows = await this.readSummaryRows();
+            return sortSummaryRows_ACU(rows.filter(row => row.codes.some(code => isWithinRange_ACU(code, normalizedRange))))
+                .map(row => row.content)
+                .join('\n\n');
+        }
+        async readEarlierStageSummaries(ranges) {
+            const normalizedRanges = ranges.map(normalizeRange_ACU).filter((range) => range !== null);
+            if (!normalizedRanges.length)
+                return '';
+            const rows = await this.readSummaryRows();
+            return sortSummaryRows_ACU(rows.filter(row => row.codes.some(code => normalizedRanges.some(range => isWithinRange_ACU(code, range)))))
+                .map(row => `${row.codes.join(', ')}\n${row.content}`)
+                .join('\n\n');
+        }
+        async readChronicleSnapshot() {
+            const codes = [...new Set((await this.readSummaryRows()).flatMap(row => row.codes))].sort(compareAmCodes_ACU);
+            return { count: codes.length, range: codes.length ? { first: codes[0], last: codes[codes.length - 1] } : null };
+        }
+        async readSummaryRows() {
+            try {
+                const target = await this.dependencies.resolveInjectionTarget();
+                if (!target)
+                    return [];
+                const entries = this.dependencies.readLorebookEntries([target]);
+                const isolationPrefix = this.dependencies.getIsolationPrefix();
+                const rows = (await entries)[target] ?? [];
+                return rows.flatMap((raw, order) => {
+                    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+                        return [];
+                    const entry = raw;
+                    if (!isSummaryEntryComment_ACU(normalizeGeneratedComment_ACU(entry, isolationPrefix)))
+                        return [];
+                    const codes = extractAmCodes_ACU(entry);
+                    const content = String(entry.content ?? '').trim();
+                    return codes.length && content ? [{ codes, content, order }] : [];
+                });
+            }
+            catch {
+                this.dependencies.logReadFailure('history');
+                return [];
+            }
+        }
+    }
+
+    /**
+     * service/loop/loop-evaluator.ts — 循环生成结果评估核心逻辑
+     * 从 presentation/triggers/auto-loop.ts 的 onLoopGenerationEnded_ACU 中提取
+     *
+     * 只负责「评估 AI 回复是否满足循环条件」，不涉及 UI（toast/按钮/文本框）。
+     */
+    /**
+     * 验证循环标签是否存在于内容中
+     */
+    function validateLoopTags_ACU(content, tags) {
+        if (!tags || !tags.trim())
+            return true;
+        const tagList = tags.split(/[,，]/).map((t) => t.trim()).filter((t) => t);
+        if (tagList.length === 0)
+            return true;
+        for (const tag of tagList) {
+            if (!content.includes(tag)) {
+                logDebug_ACU(`[剧情推进] Loop validation failed: missing tag "${tag}"`);
+                return false;
+            }
+        }
+        return true;
+    }
+    /**
+     * 评估循环生成结果，决定下一步动作
+     *
+     * @param chat - 当前聊天记录数组
+     * @param loopSettings - 循环设置
+     * @param planningGuard - 规划守卫状态
+     * @returns LoopEvaluationResult 包含 action 和 reason
+     */
+    function evaluateLoopGenerationResult_ACU(chat, loopSettings, planningGuard) {
+        if (!chat || chat.length === 0) {
+            return { action: 'ignore', reason: 'Chat is empty' };
+        }
+        // 检查规划守卫
+        if (planningGuard.inProgress) {
+            return { action: 'ignore', reason: 'Planning in progress' };
+        }
+        if (planningGuard.ignoreNextGenerationEndedCount > 0) {
+            return { action: 'ignore', reason: `Ignoring planning-triggered event (${planningGuard.ignoreNextGenerationEndedCount} left)` };
+        }
+        const lastMessage = chat[chat.length - 1];
+        // 检查是否是规划层
+        if (lastMessage.is_user && lastMessage._qrf_from_planning) {
+            return { action: 'wait', reason: 'Detected planning layer, waiting for AI reply' };
+        }
+        // 最后一条是用户消息（无规划标记）
+        if (lastMessage.is_user) {
+            return { action: 'wait', reason: 'Last message is user message without planning mark, need to wait' };
+        }
+        // 检查是否来自当前角色
+        const activeChar = getCurrentCharacterFallback_ACU();
+        const activeCharName = activeChar?.name;
+        if (activeCharName && lastMessage.name && lastMessage.name !== activeCharName) {
+            return { action: 'ignore', reason: `AI reply from different character (${lastMessage.name} != ${activeCharName})` };
+        }
+        // 验证标签
+        const tagsOk = validateLoopTags_ACU(lastMessage.mes, loopSettings.loopTags);
+        if (tagsOk) {
+            return { action: 'continue', reason: 'Tags validation passed' };
+        }
+        return { action: 'retry_delete', reason: 'Tags validation failed' };
+    }
+
+    /**
+     * The only bridge that may couple a prepared continuation turn to host input
+     * and GENERATION_* events. It deliberately fails closed when lifecycle events
+     * cannot be synchronously paired with the click it initiated.
+     */
+    class ContinuationHostGenerationBridge_ACU {
+        constructor(dependencies) {
+            this.dependencies = dependencies;
+            this.sendingIdentity = null;
+            this.startedByChat = new Map();
+        }
+        async send(prepared) {
+            const runtime = this.dependencies.runtime;
+            if (prepared.identity.chatIdentity !== runtime.getChatIdentity())
+                return false;
+            const chat = runtime.getChat();
+            const capture = {
+                capturedAt: this.dependencies.now(),
+                capturedChatLength: Array.isArray(chat) ? chat.length : 0,
+                capturedAiFloorCount: Array.isArray(chat) ? chat.filter(message => message && !message.is_user && message?.extra?.type !== 'narrator').length : 0,
+                generationSeq: null,
+            };
+            await runtime.recordHostTurn({ identity: prepared.identity, capture });
+            this.sendingIdentity = prepared.identity;
+            try {
+                if (!this.dependencies.hostInput.send(prepared.instruction.instruction)) {
+                    await runtime.pauseForHostInputFailure(prepared.identity);
+                    return false;
+                }
+                return true;
+            }
+            finally {
+                this.sendingIdentity = null;
+            }
+        }
+        onGenerationStarted(sequence) {
+            const identity = this.sendingIdentity;
+            const runtime = this.dependencies.runtime;
+            if (!identity || identity.chatIdentity !== runtime.getChatIdentity())
+                return false;
+            const pending = runtime.readPendingHostTurn();
+            if (!pending || pending.pending.identity.attemptId !== identity.attemptId || pending.pending.capture.generationSeq !== null)
+                return false;
+            this.startedByChat.set(identity.chatIdentity, { identity, sequence, bind: runtime.bindHostTurnGeneration(identity, sequence) });
+            return true;
+        }
+        claimsGenerationEnded(sequence) {
+            if (sequence === undefined)
+                return false;
+            const current = this.startedByChat.get(this.dependencies.runtime.getChatIdentity());
+            return !!current && current.sequence === sequence;
+        }
+        async onGenerationEnded(eventMessageId, sequence) {
+            if (!this.claimsGenerationEnded(sequence))
+                return;
+            const chatIdentity = this.dependencies.runtime.getChatIdentity();
+            const started = this.startedByChat.get(chatIdentity);
+            this.startedByChat.delete(chatIdentity);
+            try {
+                await started.bind;
+                const snapshot = this.dependencies.runtime.readPendingHostTurn();
+                if (!snapshot || snapshot.pending.identity.attemptId !== started.identity.attemptId || snapshot.pending.capture.generationSeq !== sequence)
+                    return;
+                const messageIndex = await this.resolveMessageIndex_ACU(eventMessageId, snapshot.pending.capture, chatIdentity);
+                if (messageIndex === null) {
+                    await this.dependencies.runtime.pauseForHostResultFailure(started.identity);
+                    return;
+                }
+                const message = this.dependencies.runtime.getChat()[messageIndex];
+                if (!message || !validateLoopTags_ACU(String(message.mes ?? ''), snapshot.settings.loopTags)) {
+                    // The legacy evaluator's retry_delete decision applies only to the exact
+                    // reply just attributed to this attempt. The host exposes only a
+                    // delete-last primitive, so never risk deleting a newer user/AI floor.
+                    const chatBeforeRemoval = this.dependencies.runtime.getChat();
+                    if (messageIndex !== chatBeforeRemoval.length - 1 || !await this.dependencies.hostInput.removeLastMessage()) {
+                        await this.dependencies.runtime.pauseForHostResultFailure(started.identity);
+                        return;
+                    }
+                    const chatAfterRemoval = this.dependencies.runtime.getChat();
+                    if (chatAfterRemoval.length !== messageIndex) {
+                        await this.dependencies.runtime.pauseForHostResultFailure(started.identity);
+                        return;
+                    }
+                    await this.dependencies.runtime.rejectHostTurnForMissingTags({ identity: started.identity, messageIndex });
+                    const afterReject = this.dependencies.runtime.readPendingHostTurn();
+                    if (afterReject?.pending.status === 'retry_ready' && afterReject.pending.identity.attemptId === started.identity.attemptId) {
+                        await this.retryCurrentHostTurn_ACU(snapshot.settings.retryDelaySeconds ?? 0);
+                    }
+                    return;
+                }
+                await this.dependencies.runtime.confirmCurrentTurn(started.identity);
+            }
+            catch {
+                // A bridge failure must not leave an attributable turn indefinitely running.
+                // The guarded fallback preserves a stale/persistence error when it can no
+                // longer safely write the original task identity.
+                try {
+                    await this.dependencies.runtime.pauseForHostResultFailure(started.identity);
+                }
+                catch {
+                    // No safe write remains after a stale or persistence failure.
+                }
+            }
+        }
+        async resolveMessageIndex_ACU(eventMessageId, capture, chatIdentity) {
+            if (!Number.isInteger(eventMessageId))
+                return null;
+            const intent = { eventMessageId: eventMessageId, chatKey: chatIdentity, isolationKey: '', capturedAt: capture.capturedAt, capturedChatLength: capture.capturedChatLength, capturedAiFloorCount: capture.capturedAiFloorCount, generationSeq: capture.generationSeq ?? undefined };
+            for (let attempt = 0; attempt <= this.dependencies.materializationRetries; attempt += 1) {
+                if (this.dependencies.runtime.getChatIdentity() !== chatIdentity)
+                    return null;
+                const result = resolveGeneratedAiMessageIndex_ACU({ liveChat: this.dependencies.runtime.getChat(), intent });
+                if (result.kind === 'resolved')
+                    return result.messageIndex;
+                if (result.kind !== 'pending_materialization' || attempt === this.dependencies.materializationRetries)
+                    return null;
+                await this.dependencies.wait(this.dependencies.materializationRetryDelayMs);
+            }
+            return null;
+        }
+        async retryCurrentHostTurn_ACU(retryDelaySeconds) {
+            await this.dependencies.wait(Math.max(0, retryDelaySeconds) * 1000);
+            const result = await this.dependencies.runtime.retryCurrentTurn();
+            if (result.preparedTurn)
+                await this.send(result.preparedTurn);
+        }
+    }
+
+    class SillyTavernHostTurnAdapter_ACU {
+        send(instruction) {
+            if (typeof instruction !== 'string' || !instruction.trim())
+                return false;
+            if (!setSendTextareaValue_ACU(instruction))
+                return false;
+            return clickSendButton_ACU();
+        }
+        async removeLastMessage() {
+            try {
+                if (typeof SillyTavern_API_ACU?.deleteLastMessage !== 'function')
+                    return false;
+                await SillyTavern_API_ACU.deleteLastMessage();
+                return true;
+            }
+            catch {
+                return false;
+            }
+        }
+    }
+
+    /**
+     * Production host composition for a continuation orchestrator.
+     * Registration is intentionally explicit: no UI or bootstrap path may create a
+     * second concurrent continuation dispatcher by importing this module.
+     */
+    function createSillyTavernContinuationHostBridge_ACU(orchestrator) {
+        const getChat = () => Array.isArray(SillyTavern_API_ACU?.chat) ? SillyTavern_API_ACU.chat : [];
+        const getChatIdentity = () => String(getActiveChatStorageIdentity_ACU(getChat()) ?? '');
+        return new ContinuationHostGenerationBridge_ACU({
+            runtime: {
+                getChatIdentity,
+                getChat,
+                getGenerationSequence: () => 0,
+                readPendingHostTurn: () => orchestrator.readPendingHostTurn(),
+                retryCurrentTurn: () => orchestrator.retryCurrentTurn(),
+                recordHostTurn: input => orchestrator.recordHostTurn(input),
+                bindHostTurnGeneration: (identity, generationSeq) => orchestrator.bindHostTurnGeneration(identity, generationSeq),
+                confirmCurrentTurn: identity => orchestrator.confirmCurrentTurn(identity),
+                rejectHostTurnForMissingTags: input => orchestrator.rejectHostTurnForMissingTags(input),
+                pauseForHostInputFailure: identity => orchestrator.pauseForHostInputFailure(identity),
+                pauseForHostResultFailure: identity => orchestrator.pauseForHostResultFailure(identity),
+            },
+            hostInput: new SillyTavernHostTurnAdapter_ACU(),
+            now: () => Date.now(),
+            wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+            materializationRetries: 3,
+            materializationRetryDelayMs: 100,
+        });
+    }
+
+    let runtime_ACU = null;
+    let idSequence_ACU = 0;
+    function allocateContinuationId_ACU(prefix) {
+        idSequence_ACU += 1;
+        const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        return `${prefix}-${random}-${idSequence_ACU}`;
+    }
+    function readRecentStory_ACU(limit) {
+        return getChatArray_ACU()
+            .filter(message => message && !message.is_user && message?.extra?.type !== 'narrator')
+            .slice(-Math.max(0, limit))
+            .map(message => String(message.mes ?? '').trim())
+            .filter(Boolean)
+            .join('\n\n');
+    }
+    function serializeStageHistory_ACU(task) {
+        return JSON.stringify(task.stages.map(stage => ({
+            stageId: stage.stageId,
+            stageNumber: stage.stageNumber,
+            status: stage.status,
+            activeRevision: stage.activeRevision,
+            completedTurns: stage.completedTurns,
+            chronicleRange: stage.chronicleRange,
+            revisions: stage.revisions.map(revision => ({ revision: revision.revision, frozen: revision.frozen, outline: revision.outline })),
+        })));
+    }
+    function previousStages_ACU(task, activeStage) {
+        if (!activeStage)
+            return [];
+        return task.stages.filter(stage => stage.stageNumber < activeStage.stageNumber && stage.status === 'completed');
+    }
+    function completedPrefix_ACU(stage, revision) {
+        if (!stage || !revision || stage.completedTurns <= 0)
+            return '';
+        let remaining = stage.completedTurns;
+        return JSON.stringify(revision.outline.nodes.flatMap(node => {
+            const turns = node.turns.slice(0, Math.max(0, Math.min(remaining, node.turns.length)));
+            remaining -= turns.length;
+            return turns.length ? [{ id: node.id, title: node.title, goal: node.goal, turns }] : [];
+        }));
+    }
+    function buildResolvers_ACU(task, stage, revision, worldbook, current) {
+        const previous = previousStages_ACU(task, stage);
+        const lastStage = previous.length ? previous[previous.length - 1] : null;
+        const earlier = previous.slice(0, -1);
+        const recentStory = () => readRecentStory_ACU(task ? 3 : 0);
+        const background = () => worldbook.readRelevantBackground(`${task.originInstruction}\n${recentStory()}`);
+        return {
+            $ORIGIN_INSTRUCTION: () => task.originInstruction,
+            $1: background,
+            $RECENT_STORY: recentStory,
+            $STAGE_HISTORY: () => serializeStageHistory_ACU(task),
+            $LAST_STAGE_CHRONICLES: () => worldbook.readLastStageChronicles(lastStage?.chronicleRange),
+            $EARLIER_STAGE_SUMMARIES: () => worldbook.readEarlierStageSummaries(earlier.map(item => item.chronicleRange)),
+            $COMPLETED_STAGE_PART: () => completedPrefix_ACU(stage, revision),
+            $REPLAN_INSTRUCTION: () => revision?.replanInstruction ?? '',
+            $REMAINING_TURNS: () => revision ? String(revision.outline.totalTurns - (stage?.completedTurns ?? 0)) : '',
+            $CURRENT_STAGE: () => stage && revision ? `阶段 ${stage.stageNumber}: ${revision.outline.title}\n${revision.outline.goal}` : '',
+            $CURRENT_NODE: () => current ? `${current.node.title}\n${current.node.goal}` : '',
+            $CURRENT_TURN_GOAL: () => current?.turn.goal ?? '',
+            $TURN_NUMBER: () => current ? String(current.turnNumber) : '',
+            $NODE_TURN_NUMBER: () => current ? String(current.nodeTurnNumber) : '',
+        };
+    }
+    function getChatIdentity_ACU() {
+        return getActiveChatStorageIdentity_ACU(getChatArray_ACU());
+    }
+    function hasLegacyContinuationLoopFields_ACU(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value))
+            return false;
+        const loopSettings = value.loopSettings;
+        if (!loopSettings || typeof loopSettings !== 'object' || Array.isArray(loopSettings))
+            return false;
+        return Object.prototype.hasOwnProperty.call(loopSettings, 'quickReplyContent')
+            || Object.prototype.hasOwnProperty.call(loopSettings, 'currentPromptIndex');
+    }
+    async function migrateLegacySettings_ACU(store) {
+        const existing = store.readPersisted();
+        const legacyPlotSettings = settings_ACU?.plotSettings;
+        if (!existing) {
+            const migration = buildMigratedContinuationEnvelope_ACU(legacyPlotSettings);
+            if (!migration.didMigrate)
+                return null;
+            await store.replaceAtomically(migration.envelope);
+        }
+        if (!hasLegacyContinuationLoopFields_ACU(legacyPlotSettings))
+            return store.read();
+        const stripped = stripLegacyContinuationLoopFields_ACU(legacyPlotSettings);
+        if (stripped && typeof stripped === 'object' && !Array.isArray(stripped)) {
+            const previous = settings_ACU.plotSettings;
+            settings_ACU.plotSettings = stripped;
+            try {
+                if (!saveSettings_ACU().saved)
+                    settings_ACU.plotSettings = previous;
+            }
+            catch (error) {
+                settings_ACU.plotSettings = previous;
+                throw error;
+            }
+        }
+        return store.read();
+    }
+    function createRuntime_ACU() {
+        const store = new FirstFloorContinuationStore_ACU();
+        const worldbook = new ContinuationWorldbookContext_ACU();
+        const planner = new ContinuationOutlinePlanner_ACU();
+        const generator = new ContinuationTurnInstructionGenerator_ACU();
+        const executionEngine = new StageExecutionEngine_ACU({
+            readEnvelope: () => store.readPersisted(),
+            getChatIdentity: getChatIdentity_ACU,
+            allocateId: allocateContinuationId_ACU,
+            createResolvers: snapshot => buildResolvers_ACU(snapshot.task, snapshot.stage, snapshot.revision, worldbook, snapshot),
+            generator,
+        });
+        const orchestrator = new ContinuationOrchestrator_ACU({
+            store,
+            planner,
+            executionEngine,
+            getChatIdentity: getChatIdentity_ACU,
+            now: () => Date.now(),
+            allocateId: allocateContinuationId_ACU,
+            readChronicleSnapshot: () => worldbook.readChronicleSnapshot(),
+            createOutlineResolvers: (context) => {
+                const stage = context.stage;
+                const revision = stage?.revisions.find(item => item.revision === stage.activeRevision) ?? null;
+                return buildResolvers_ACU(context.task, stage, revision, worldbook);
+            },
+        });
+        const bridge = createSillyTavernContinuationHostBridge_ACU(orchestrator);
+        const unregister = registerContinuationHostGenerationBridge_ACU(bridge);
+        return {
+            orchestrator,
+            bridge,
+            initialize: () => migrateLegacySettings_ACU(store),
+            read: () => store.read(),
+            dispose: () => {
+                unregister();
+                if (runtime_ACU?.orchestrator === orchestrator)
+                    runtime_ACU = null;
+            },
+        };
+    }
+    function getContinuationRuntime_ACU() {
+        if (!runtime_ACU)
+            runtime_ACU = createRuntime_ACU();
+        return runtime_ACU;
+    }
+    function resetContinuationRuntimeForTests_ACU() {
+        runtime_ACU?.dispose();
+        runtime_ACU = null;
+        idSequence_ACU = 0;
+    }
+
     // init.ts — 初始化编排（presentation 层：负责事件绑定、UI 初始化、模块串联）
     // 从 05_core_tail.js 迁入
     // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
@@ -103016,6 +104875,9 @@ $CONTENT
             logDebug_ACU('AutoCardUpdater Initialization successful! Core APIs loaded.');
             showToastr_ACU('success', '数据库自动更新脚本已加载！', '脚本启动');
             loadSettings_ACU();
+            // Register the bridge before generation events are subscribed. Runtime
+            // migration remains page-owned so no chat persistence is touched at startup.
+            getContinuationRuntime_ACU();
             if (SillyTavern_API_ACU &&
                 SillyTavern_API_ACU.eventSource &&
                 typeof SillyTavern_API_ACU.eventSource.on === 'function' &&
@@ -103054,11 +104916,6 @@ $CONTENT
                     await resetScriptStateForNewChat_ACU(chatFileName);
                     // [触发门控] generationGate 重置已搬到 service 层的 resetScriptStateForNewChat_ACU 中
                     // [触发门控] 每次切换聊天都尝试安装一次 capture 钩子（防止 DOM 重新渲染导致丢失）          installSendIntentCaptureHooks_ACU();
-                    // [剧情推进] 切换聊天时停止循环并加载预设
-                    if (loopState_ACU.isLooping) {
-                        stopAutoLoop_ACU();
-                        showToastr_ACU('info', '切换聊天，自动化循环已停止。');
-                    }
                     await loadPresetAndCleanCharacterData_ACU();
                     // [剧情推进] TavernHelper钩子：拦截直接的JS调用
                     if (!window.original_TavernHelper_generate_ACU) {
@@ -103088,12 +104945,6 @@ $CONTENT
                                 // [重构] 调用 service 层编排函数，传入 UI 规划回调
                                 const result = await orchestrateTavernHelperHook_ACU(options, runOptimizationLogicWithUI_ACU);
                                 switch (result.action) {
-                                    case 'loop_retry': {
-                                        const loopSettings = settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings;
-                                        loopState_ACU.awaitingReply = false;
-                                        await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: false });
-                                        return;
-                                    }
                                     case 'planned': {
                                         // UI 操作：写回 options
                                         if (result.writeBack) {
@@ -103228,7 +105079,11 @@ $CONTENT
                 if (SillyTavern_API_ACU.eventTypes.GENERATION_STARTED) {
                     SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STARTED, (type, params, dryRun) => {
                         try {
-                            recordGenerationContext_ACU(type, params, dryRun);
+                            const context = recordGenerationContext_ACU(type, params, dryRun);
+                            bindContinuationInternalAiGenerationStarted_ACU(context.seq);
+                            // Only a bridge that synchronously initiated the host click may claim this sequence.
+                            // All other lifecycle events remain unavailable to continuation.
+                            getContinuationHostGenerationBridge_ACU()?.onGenerationStarted(context.seq);
                         }
                         catch (e) { }
                     });
@@ -103244,6 +105099,19 @@ $CONTENT
                 if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
                     const onGenerationEnded = (message_id) => {
                         logDebug_ACU(`ACU GENERATION_ENDED event for message_id: ${message_id}`);
+                        const generationContext = consumeGenerationContextForEnded_ACU();
+                        const internalRequest = consumeContinuationInternalAiGenerationEnded_ACU(generationContext?.seq);
+                        if (internalRequest) {
+                            logDebug_ACU(`ACU 忽略 continuation 内部 ${internalRequest.source} GENERATION_ENDED: ${internalRequest.requestId}`);
+                            return;
+                        }
+                        const continuationBridge = getContinuationHostGenerationBridge_ACU();
+                        if (continuationBridge?.claimsGenerationEnded(generationContext?.seq)) {
+                            // The bridge owns this exact host generation and performs its own
+                            // bounded materialization/identity checks before any cursor change.
+                            void continuationBridge.onGenerationEnded(message_id, generationContext?.seq);
+                            return;
+                        }
                         // [触发修复] 原子捕获完整意图快照：事件参数只作为锚点，不承诺是 AI 数组下标。
                         // makeFirst 可能早于宿主把本轮 AI 回复追加进 chat，因此必须记录捕获时边界，
                         // 由 resolveGeneratedAiMessageIndex_ACU 在防抖回调中按唯一候选规则解析。
@@ -103263,7 +105131,7 @@ $CONTENT
                                 generationSeq: generationGate_ACU.generationSeq > 0 ? generationGate_ACU.generationSeq : undefined,
                             }
                             : undefined;
-                        if (shouldProcessAutoTableUpdateForGenerationEnded_ACU()) {
+                        if (shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext)) {
                             handleNewMessageDebounced_ACU('GENERATION_ENDED', autoFillIntent);
                         }
                         else {
@@ -103279,9 +105147,6 @@ $CONTENT
                                 lastGenerationType: generationGate_ACU.lastGeneration?.type,
                             });
                         }
-                        // [剧情推进] 保存Plot到消息和循环检测
-                        // savePlotToLatestMessage_ACU(); // Moved to runOptimizationLogic_ACU
-                        onLoopGenerationEnded_ACU();
                     };
                     if (typeof SillyTavern_API_ACU.eventSource.makeFirst === 'function') {
                         SillyTavern_API_ACU.eventSource.makeFirst(SillyTavern_API_ACU.eventTypes.GENERATION_ENDED, onGenerationEnded);
@@ -103385,12 +105250,6 @@ $CONTENT
                                     if (getSendTextareaValue_ACU() === s1.originalMessage)
                                         setSendTextareaValue_ACU('');
                                     break;
-                                case 'loop_retry': {
-                                    const loopSettings = settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings;
-                                    loopState_ACU.awaitingReply = false;
-                                    await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: false });
-                                    break;
-                                }
                                 // 'skipped' — 不做额外操作
                             }
                             return; // 策略1匹配，不再执行策略2
@@ -105170,7 +107029,7 @@ $CONTENT
 
     // Chat metadata stores scope/guide outside message fields, so both containers are snapshotted explicitly below.
     const MESSAGE_FIELDS = ['TavernDB_ACU_IsolatedData', 'TavernDB_ACU_Data', 'TavernDB_ACU_SummaryData', 'TavernDB_ACU_IndependentData', 'TavernDB_ACU_Identity', 'TavernDB_ACU_ModifiedKeys', 'TavernDB_ACU_UpdateGroupKeys', 'TavernDB_ACU_TableHeaderGuide', '_acu_local_template_base_state_seeded'];
-    function clone$7(value) { return value === undefined ? value : JSON.parse(JSON.stringify(value)); }
+    function clone$6(value) { return value === undefined ? value : JSON.parse(JSON.stringify(value)); }
     function prepareTemplate(templateData) {
         if (!templateData || typeof templateData !== 'object' || Array.isArray(templateData))
             throw new Error('初始化模板必须是对象。');
@@ -105190,11 +107049,11 @@ $CONTENT
         const result = {};
         for (const [key, value] of Object.entries(normalizedTemplateData))
             if (!key.startsWith('sheet_'))
-                result[key] = clone$7(value);
+                result[key] = clone$6(value);
         entries.forEach(([oldKey, source], index) => {
             if (!source || typeof source !== 'object' || Array.isArray(source))
                 throw new Error(`初始化模板 Sheet 无效：${oldKey}`);
-            const sheet = clone$7(source);
+            const sheet = clone$6(source);
             if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0]) || sheet.content[0][0] !== 'row_id')
                 throw new Error(`初始化模板 Sheet 缺少 row_id 表头：${oldKey}`);
             if (sheet.content.slice(1).some((row) => !Array.isArray(row)))
@@ -105224,7 +107083,7 @@ $CONTENT
         return { templateData: result, normalizationAudit: normalization.audits };
     }
     function snapshotMessages(chat) {
-        return chat.filter(message => message && typeof message === 'object').map(message => ({ message, fields: MESSAGE_FIELDS.map(field => ({ field, had: Object.prototype.hasOwnProperty.call(message, field), value: clone$7(message[field]) })) }));
+        return chat.filter(message => message && typeof message === 'object').map(message => ({ message, fields: MESSAGE_FIELDS.map(field => ({ field, had: Object.prototype.hasOwnProperty.call(message, field), value: clone$6(message[field]) })) }));
     }
     function restoreMessages(snapshots) {
         for (const snapshot of snapshots)
@@ -105267,8 +107126,8 @@ $CONTENT
                 const firstMessage = chat[0];
                 const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
                 const messageSnapshots = snapshotMessages(chat);
-                const previousScope = clone$7(peekChatScopedConfigContainer_ACU(chat));
-                const previousGuide = clone$7(peekChatSheetGuideContainer_ACU(chat));
+                const previousScope = clone$6(peekChatScopedConfigContainer_ACU(chat));
+                const previousGuide = clone$6(peekChatSheetGuideContainer_ACU(chat));
                 let primarySaveAttempted = false;
                 try {
                     for (const message of chat) {
@@ -105315,8 +107174,8 @@ $CONTENT
                         throw new Error('目标聊天已切换，已取消初始化提交。');
                     primarySaveAttempted = true;
                     await saveChatToHostStrict_ACU();
-                    _set_currentJsonTableData_ACU(clone$7(prepared));
-                    return { saved: true, messageIndex: targetIndex, runtimeReady: true, normalizedTemplateData: clone$7(prepared), normalizationAudit };
+                    _set_currentJsonTableData_ACU(clone$6(prepared));
+                    return { saved: true, messageIndex: targetIndex, runtimeReady: true, normalizedTemplateData: clone$6(prepared), normalizationAudit };
                 }
                 catch (error) {
                     restoreMessages(messageSnapshots);
@@ -107808,7 +109667,7 @@ $CONTENT
         return normalizeAgentContextSettings_ACU(next);
     }
     function getAgentPromptSegmentsForApi_ACU(value, fallback) {
-        return clonePromptSegments_ACU(normalizeEditablePromptSegments_ACU(value, fallback));
+        return clonePromptSegments_ACU$1(normalizeEditablePromptSegments_ACU(value, fallback));
     }
     function normalizeAgentPromptSegmentsForApi_ACU(value, fallback) {
         if (!Array.isArray(value))
@@ -128754,7 +130613,7 @@ Expected function or array of functions, received type ${typeof value}.`
      * 所有写操作委托 service/api-preset-service，不再直接改 settings_ACU。
      * 保存失败时 service 已回滚内存，store 同步恢复快照并传播失败结果。
      */
-    function clone$6(value) {
+    function clone$5(value) {
         return JSON.parse(JSON.stringify(value ?? null));
     }
     function getCurrentConfigAsPreset(name) {
@@ -128837,7 +130696,7 @@ Expected function or array of functions, received type ${typeof value}.`
             refreshFromSettings() {
                 ensureApiSettingsShape_ACU();
                 this.currentChatKey = getCurrentChatKey_ACU();
-                this.presets = clone$6(settings_ACU.apiPresets);
+                this.presets = clone$5(settings_ACU.apiPresets);
                 const defaultName = findPresetByName_ACU(this.presets, settings_ACU.defaultApiPresetName)
                     ? settings_ACU.defaultApiPresetName
                     : '';
@@ -130179,7 +132038,7 @@ Expected function or array of functions, received type ${typeof value}.`
     // 引用字段的写入必须走 service（校验预设存在），删除/重命名预设时
     // 由 api-preset-service 原子清理，本模块只负责单点写入。
     // ═══════════════════════════════════════════════════════════════
-    function clone$5(value) {
+    function clone$4(value) {
         return JSON.parse(JSON.stringify(value ?? null));
     }
     function ensureContentOptimizationShape_ACU() {
@@ -130203,7 +132062,7 @@ Expected function or array of functions, received type ${typeof value}.`
             case 'optimization':
                 return { contentOptimizationApiPreset: settings_ACU.contentOptimizationSettings.apiPreset };
             case 'vector_keyword':
-                return { vectorKeywordApiPreset: clone$5(getCurrentVectorMemoryConfig_ACU().keywordApiPreset) };
+                return { vectorKeywordApiPreset: clone$4(getCurrentVectorMemoryConfig_ACU().keywordApiPreset) };
         }
     }
     function restoreRefFields_ACU(target, snapshot, taskId = '') {
@@ -130290,10 +132149,10 @@ Expected function or array of functions, received type ${typeof value}.`
      * Vue 组件只读写本 store；旧 settings_ACU 与 service 调用集中在这里。
      * 与 api-preset-store 一致：单下拉、当前活动 / 全局默认、抽屉里增删改。
      */
-    function clone$4(value) {
+    function clone$3(value) {
         return JSON.parse(JSON.stringify(value ?? null));
     }
-    function ensureSettingsShape$2() {
+    function ensureSettingsShape$1() {
         if (!settings_ACU || typeof settings_ACU !== 'object')
             return;
         if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object') {
@@ -130315,7 +132174,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     }
     function readPresetList() {
-        ensureSettingsShape$2();
+        ensureSettingsShape$1();
         const rawList = settings_ACU.plotSettings.promptPresets;
         if (!Array.isArray(rawList))
             return [];
@@ -130329,7 +132188,7 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!name || seen.has(name))
                 continue;
             seen.add(name);
-            out.push({ name, raw: clone$4(normalized) });
+            out.push({ name, raw: clone$3(normalized) });
         }
         return out;
     }
@@ -130375,10 +132234,10 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     function getDefaultPlotPresetRawForV2() {
         const normalized = normalizePlotPresetExcludeRules_ACU({
-            ...clone$4(DEFAULT_PLOT_SETTINGS_ACU),
+            ...clone$3(DEFAULT_PLOT_SETTINGS_ACU),
             name: '',
         });
-        return clone$4(normalized && typeof normalized === 'object' ? normalized : { name: '', plotTasks: [] });
+        return clone$3(normalized && typeof normalized === 'object' ? normalized : { name: '', plotTasks: [] });
     }
     const usePlotPresetStore = defineStore('acu-v2-plot-presets', {
         state: () => ({
@@ -130412,7 +132271,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
         actions: {
             refreshFromSettings() {
-                ensureSettingsShape$2();
+                ensureSettingsShape$1();
                 const plot = settings_ACU.plotSettings;
                 this.enabled = plot.enabled === true;
                 this.presets = readPresetList();
@@ -130515,7 +132374,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const normalized = normalizePlotPresetExcludeRules_ACU({ ...preset.raw, name: newName });
                 if (!normalized)
                     return false;
-                ensureSettingsShape$2();
+                ensureSettingsShape$1();
                 const plot = settings_ACU.plotSettings;
                 const list = plot.promptPresets || [];
                 const oldName = String(originalName || '').trim();
@@ -130561,7 +132420,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const target = String(name || '').trim();
                 if (!target)
                     return false;
-                ensureSettingsShape$2();
+                ensureSettingsShape$1();
                 const plot = settings_ACU.plotSettings;
                 const list = plot.promptPresets || [];
                 const before = list.length;
@@ -130580,7 +132439,7 @@ Expected function or array of functions, received type ${typeof value}.`
             },
             /** 重置当前 plotSettings 到 defaults（仅运行时，不动 promptPresets）。 */
             resetCurrentToDefaults() {
-                ensureSettingsShape$2();
+                ensureSettingsShape$1();
                 const plot = settings_ACU.plotSettings;
                 resetPlotSettingsToDefault_ACU(plot);
                 saveSettings_ACU();
@@ -130598,7 +132457,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const presetPayloads = normalizeImportedPresetPayloads(parsed);
                 if (presetPayloads.length === 0)
                     return null;
-                ensureSettingsShape$2();
+                ensureSettingsShape$1();
                 const plot = settings_ACU.plotSettings;
                 const list = plot.promptPresets || [];
                 let firstImportedName = '';
@@ -130986,7 +132845,7 @@ Expected function or array of functions, received type ${typeof value}.`
         autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
         tableMaxRetries: 3,
     };
-    function clone$3(value) {
+    function clone$2(value) {
         return JSON.parse(JSON.stringify(value ?? null));
     }
     function normalizeNumber(key, value) {
@@ -131284,13 +133143,13 @@ Expected function or array of functions, received type ${typeof value}.`
             const key = currentPromptSettingKey();
             let result;
             if (key === "charCardPrompt") {
-                result = setCharCardPrompt_ACU(clone$3(prepared));
+                result = setCharCardPrompt_ACU(clone$2(prepared));
             }
             else {
                 // strictJson 提示词：写入对应字段，保存失败回滚。
                 const field = key;
                 const snapshot = settings_ACU[field];
-                settings_ACU[field] = clone$3(prepared);
+                settings_ACU[field] = clone$2(prepared);
                 const saveResult = saveSettings_ACU();
                 if (!saveResult.saved) {
                     settings_ACU[field] = snapshot;
@@ -133318,6 +135177,7 @@ Expected function or array of functions, received type ${typeof value}.`
             roleOptions: { default: () => DEFAULT_ROLE_OPTIONS },
             slotOptions: { default: () => DEFAULT_SLOT_OPTIONS },
             showSlot: { type: Boolean, default: true },
+            showEnabled: { type: Boolean, default: false },
             allowMove: { type: Boolean, default: false },
             rows: { default: 6 },
             emptyText: { default: '暂无提示词段。点击下方按钮添加第一段。' }
@@ -133330,14 +135190,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 const value = raw === 'A' || raw === 'B' ? raw : '';
                 emit('update', index, { mainSlot: value });
             }
-            const __returned__ = { DEFAULT_ROLE_OPTIONS, DEFAULT_SLOT_OPTIONS, emit, onSlot, AcuButton, AcuIconButton, AcuSelect, AcuTextarea };
+            const __returned__ = { DEFAULT_ROLE_OPTIONS, DEFAULT_SLOT_OPTIONS, emit, onSlot, AcuButton, AcuCheckbox, AcuIconButton, AcuSelect, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-prompt-segs[data-v-ce4803b5] { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add[data-v-ce4803b5] { display: flex; justify-content: center; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add-btn[data-v-ce4803b5] { max-width: 100%; white-space: normal;\n}\n.acu-prompt-segs__list[data-v-ce4803b5] {\n  list-style: none; margin: 0; padding: 0;\n  display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-ce4803b5] {\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent; padding: 0 0 12px;\n  display: flex; flex-direction: column; gap: 8px;\n  min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-ce4803b5]:last-child {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-prompt-segs__item-head[data-v-ce4803b5] {\n  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__index[data-v-ce4803b5] {\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n  min-width: 26px;\n  font-family: var(--acu-font-mono);\n}\n.acu-prompt-segs__role[data-v-ce4803b5] { flex: 1 1 110px; min-width: 0; max-width: 180px;\n}\n.acu-prompt-segs__slot[data-v-ce4803b5] { flex: 1 1 120px; min-width: 0; max-width: 200px;\n}\n.acu-prompt-segs__actions[data-v-ce4803b5] {\n  margin-left: auto;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  flex-wrap: wrap;\n  min-width: 0;\n}\n.acu-prompt-segs[data-v-ce4803b5] .acu-textarea,\n.acu-prompt-segs[data-v-ce4803b5] textarea {\n  width: 100%;\n  min-width: 0;\n  max-width: 100%;\n  box-sizing: border-box;\n}\n.acu-prompt-segs__empty[data-v-ce4803b5] {\n  padding: 10px 0; text-align: center;\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  overflow-wrap: anywhere;\n}\n@media (max-width: 480px) {\n.acu-prompt-segs__item-head[data-v-ce4803b5] { align-items: stretch;\n}\n.acu-prompt-segs__index[data-v-ce4803b5] { flex: 0 0 100%;\n}\n.acu-prompt-segs__role[data-v-ce4803b5],\n  .acu-prompt-segs__slot[data-v-ce4803b5] { flex-basis: 100%; max-width: 100%;\n}\n.acu-prompt-segs__actions[data-v-ce4803b5] { width: 100%; margin-left: 0; justify-content: flex-end;\n}\n}\n", "src/presentation-v2/components/_lib/AcuPromptSegments.vue#style-0-ce4803b5");
-    var AcuPromptSegments_vue_vue_type_style_index_0_scoped_ce4803b5_lang = null;
+    injectSfcStyle("\n.acu-prompt-segs[data-v-7a7ca5ef] { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add[data-v-7a7ca5ef] { display: flex; justify-content: center; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add-btn[data-v-7a7ca5ef] { max-width: 100%; white-space: normal;\n}\n.acu-prompt-segs__list[data-v-7a7ca5ef] {\n  list-style: none; margin: 0; padding: 0;\n  display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-7a7ca5ef] {\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent; padding: 0 0 12px;\n  display: flex; flex-direction: column; gap: 8px;\n  min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-7a7ca5ef]:last-child {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-prompt-segs__item-head[data-v-7a7ca5ef] {\n  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__index[data-v-7a7ca5ef] {\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n  min-width: 26px;\n  font-family: var(--acu-font-mono);\n}\n.acu-prompt-segs__role[data-v-7a7ca5ef] { flex: 1 1 110px; min-width: 0; max-width: 180px;\n}\n.acu-prompt-segs__slot[data-v-7a7ca5ef] { flex: 1 1 120px; min-width: 0; max-width: 200px;\n}\n.acu-prompt-segs__actions[data-v-7a7ca5ef] {\n  margin-left: auto;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  flex-wrap: wrap;\n  min-width: 0;\n}\n.acu-prompt-segs[data-v-7a7ca5ef] .acu-textarea,\n.acu-prompt-segs[data-v-7a7ca5ef] textarea {\n  width: 100%;\n  min-width: 0;\n  max-width: 100%;\n  box-sizing: border-box;\n}\n.acu-prompt-segs__empty[data-v-7a7ca5ef] {\n  padding: 10px 0; text-align: center;\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  overflow-wrap: anywhere;\n}\n@media (max-width: 480px) {\n.acu-prompt-segs__item-head[data-v-7a7ca5ef] { align-items: stretch;\n}\n.acu-prompt-segs__index[data-v-7a7ca5ef] { flex: 0 0 100%;\n}\n.acu-prompt-segs__role[data-v-7a7ca5ef],\n  .acu-prompt-segs__slot[data-v-7a7ca5ef] { flex-basis: 100%; max-width: 100%;\n}\n.acu-prompt-segs__actions[data-v-7a7ca5ef] { width: 100%; margin-left: 0; justify-content: flex-end;\n}\n}\n", "src/presentation-v2/components/_lib/AcuPromptSegments.vue#style-0-7a7ca5ef");
+    var AcuPromptSegments_vue_vue_type_style_index_0_scoped_7a7ca5ef_lang = null;
 
     const _hoisted_1$K = { class: "acu-prompt-segs" };
     const _hoisted_2$D = { class: "acu-prompt-segs__add" };
@@ -133385,6 +135245,12 @@ Expected function or array of functions, received type ${typeof value}.`
 						1
 						/* TEXT */
 					),
+					$props.showEnabled ? (openBlock(), createBlock($setup["AcuCheckbox"], {
+						key: 0,
+						"model-value": seg.enabled !== false,
+						label: "启用",
+						"onUpdate:modelValue": ($event) => _ctx.$emit("update", index, { enabled: $event })
+					}, null, 8, ["model-value", "onUpdate:modelValue"])) : createCommentVNode("v-if", true),
 					createVNode($setup["AcuSelect"], {
 						class: "acu-prompt-segs__role",
 						size: "sm",
@@ -133397,7 +135263,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"onUpdate:modelValue"
 					]),
 					$props.showSlot ? (openBlock(), createBlock($setup["AcuSelect"], {
-						key: 0,
+						key: 1,
 						class: "acu-prompt-segs__slot",
 						size: "sm",
 						options: $props.slotOptions,
@@ -133487,7 +135353,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})])
 	]);
     }
-    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-ce4803b5"]]);
+    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-7a7ca5ef"]]);
 
     var _sfc_main$K = /*@__PURE__*/ defineComponent({
         __name: 'PlotPromptSegments',
@@ -133597,7 +135463,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_9$f = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_10$e = { class: "acu-v2-plot-task-editor__section" };
     const _hoisted_11$d = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_12$9 = {
+    const _hoisted_12$a = {
 	key: 1,
 	class: "acu-v2-plot-task-editor__empty"
     };
@@ -133840,7 +135706,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			onMove: _cache[21] || (_cache[21] = (index, delta) => _ctx.$emit("segment-move", index, delta)),
 			onUpdate: _cache[22] || (_cache[22] = (index, patch) => _ctx.$emit("segment-update", index, patch))
 		}, null, 8, ["segments"])])
-	])) : (openBlock(), createElementBlock("div", _hoisted_12$9, " 请在上方选择一个任务进行编辑。 "));
+	])) : (openBlock(), createElementBlock("div", _hoisted_12$a, " 请在上方选择一个任务进行编辑。 "));
     }
     var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-0d30f745"]]);
 
@@ -137844,7 +139710,7 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     let deferLogRefresh = false;
-    function clone$2(value) {
+    function clone$1(value) {
         return JSON.parse(JSON.stringify(value ?? null));
     }
     function safeReadSnapshot() {
@@ -139640,6 +141506,12 @@ Expected function or array of functions, received type ${typeof value}.`
                     // 使 TOCTOU 防护延伸到 UI 复检之后的异步窗口。
                     executionSnapshot: { sheetKeys: snapshotRuntimeKeys },
                 });
+                if (result.dataCommitted === true) {
+                    try {
+                        topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
+                    }
+                    catch (_) { }
+                }
                 if (result.outcome === 'sync_pending') {
                     showCatchUpSyncPending();
                 }
@@ -142258,13 +144130,13 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_9$9 = { class: "acu-agent-advanced__grid" };
     const _hoisted_10$9 = { class: "acu-agent-advanced__section" };
     const _hoisted_11$9 = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_12$8 = { class: "acu-agent-advanced__grid" };
-    const _hoisted_13$6 = { class: "acu-agent-advanced__section" };
-    const _hoisted_14$6 = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_15$6 = { class: "acu-agent-advanced__prompt-scope" };
-    const _hoisted_16$6 = { class: "acu-agent-advanced__prompt-actions" };
-    const _hoisted_17$5 = { class: "acu-agent-advanced__prompt-head" };
-    const _hoisted_18$5 = { class: "acu-agent-advanced__prompt-head" };
+    const _hoisted_12$9 = { class: "acu-agent-advanced__grid" };
+    const _hoisted_13$7 = { class: "acu-agent-advanced__section" };
+    const _hoisted_14$7 = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_15$7 = { class: "acu-agent-advanced__prompt-scope" };
+    const _hoisted_16$7 = { class: "acu-agent-advanced__prompt-actions" };
+    const _hoisted_17$6 = { class: "acu-agent-advanced__prompt-head" };
+    const _hoisted_18$6 = { class: "acu-agent-advanced__prompt-head" };
     function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.open,
@@ -142394,7 +144266,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				toDisplayString($setup.plotCopy.agentControl.skillifySettings.description),
 				1
 				/* TEXT */
-			)])]), createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuFormRow"], {
+			)])]), createBaseVNode("div", _hoisted_12$9, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.skillifySettings.maxConcurrency.label,
 				hint: $setup.plotCopy.agentControl.skillifySettings.maxConcurrency.hint
 			}, {
@@ -142409,8 +144281,8 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value", "disabled"])]),
 				_: 1
 			}, 8, ["label", "hint"])])]),
-			createBaseVNode("section", _hoisted_13$6, [
-				createBaseVNode("header", _hoisted_14$6, [createBaseVNode("div", null, [
+			createBaseVNode("section", _hoisted_13$7, [
+				createBaseVNode("header", _hoisted_14$7, [createBaseVNode("div", null, [
 					createBaseVNode(
 						"h4",
 						null,
@@ -142427,12 +144299,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					),
 					createBaseVNode(
 						"p",
-						_hoisted_15$6,
+						_hoisted_15$7,
 						toDisplayString($setup.plotCopy.agentControl.prompts.scopeHint),
 						1
 						/* TEXT */
 					)
-				]), createBaseVNode("div", _hoisted_16$6, [createVNode($setup["AcuButton"], {
+				]), createBaseVNode("div", _hoisted_16$7, [createVNode($setup["AcuButton"], {
 					size: "sm",
 					disabled: !$setup.canSavePrompts,
 					onClick: $setup.savePromptsToCurrentWorldbook
@@ -142505,7 +144377,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					Fragment,
 					{ key: 1 },
 					[
-						createBaseVNode("div", _hoisted_17$5, [createBaseVNode(
+						createBaseVNode("div", _hoisted_17$6, [createBaseVNode(
 							"h5",
 							null,
 							toDisplayString($setup.plotCopy.agentControl.prompts.decisionTitle),
@@ -142534,7 +144406,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							onMove: _cache[3] || (_cache[3] = (index, delta) => $setup.movePromptSegment("decision", index, delta)),
 							onUpdate: _cache[4] || (_cache[4] = (index, patch) => $setup.updatePromptSegment("decision", index, patch))
 						}, null, 8, ["segments", "empty-text"]),
-						createBaseVNode("div", _hoisted_18$5, [createBaseVNode(
+						createBaseVNode("div", _hoisted_18$6, [createBaseVNode(
 							"h5",
 							null,
 							toDisplayString($setup.plotCopy.agentControl.prompts.skillifyTitle),
@@ -142972,7 +144844,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const target = index + delta;
         if (index < 0 || index >= segments.length || target < 0 || target >= segments.length)
             return segments;
-        const next = clonePromptSegments_ACU(segments);
+        const next = clonePromptSegments_ACU$1(segments);
         const [item] = next.splice(index, 1);
         next.splice(target, 0, item);
         return next;
@@ -143069,8 +144941,8 @@ Expected function or array of functions, received type ${typeof value}.`
             maxSkillifyConcurrency.value = normalizeMaxSkillifyConcurrency_ACU(control.maxSkillifyConcurrency) ?? 3;
             worldbookScope.value = cloneWorldbookScope_ACU(control.worldbookScope);
             contextSettings.value = cloneContextSettings_ACU(normalizeAgentContextSettings_ACU(control.contextSettings));
-            agentDecisionPromptSegments.value = clonePromptSegments_ACU(control.agentDecisionPromptSegments);
-            agentSkillifyPromptSegments.value = clonePromptSegments_ACU(control.agentSkillifyPromptSegments);
+            agentDecisionPromptSegments.value = clonePromptSegments_ACU$1(control.agentDecisionPromptSegments);
+            agentSkillifyPromptSegments.value = clonePromptSegments_ACU$1(control.agentSkillifyPromptSegments);
         }
         async function refresh() {
             const [result, nextSnapshot] = await Promise.all([
@@ -143241,7 +145113,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         async function addPromptSegment(kind, position) {
             const current = kind === 'decision' ? agentDecisionPromptSegments.value : agentSkillifyPromptSegments.value;
-            const next = clonePromptSegments_ACU(current);
+            const next = clonePromptSegments_ACU$1(current);
             const segment = { role: 'user', content: '', deletable: true };
             if (position === 'top')
                 next.unshift(segment);
@@ -143253,7 +145125,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const current = kind === 'decision' ? agentDecisionPromptSegments.value : agentSkillifyPromptSegments.value;
             if (index < 0 || index >= current.length)
                 return;
-            const next = clonePromptSegments_ACU(current);
+            const next = clonePromptSegments_ACU$1(current);
             next[index] = { ...next[index], ...patch };
             await setPromptSegments(kind, next);
         }
@@ -143261,7 +145133,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const current = kind === 'decision' ? agentDecisionPromptSegments.value : agentSkillifyPromptSegments.value;
             if (index < 0 || index >= current.length || current[index]?.deletable === false)
                 return;
-            const next = clonePromptSegments_ACU(current);
+            const next = clonePromptSegments_ACU$1(current);
             next.splice(index, 1);
             await setPromptSegments(kind, next);
         }
@@ -143653,544 +145525,1038 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     var AgentPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-02722bdf"]]);
 
-    function setSendTextareaValue(text) {
-        const input = getAcuHostDocument().querySelector('#send_textarea');
-        if (!input)
-            return false;
-        input.value = text;
-        const EventCtor = input.ownerDocument.defaultView?.Event ?? Event;
-        input.dispatchEvent(new EventCtor('input', { bubbles: true }));
-        return true;
+    function errorMessage_ACU(error) {
+        if (error instanceof ContinuationValidationError_ACU)
+            return error.error.message;
+        return error instanceof Error ? error.message : '智能续写操作失败';
     }
-    function clickSendButton() {
-        const button = getAcuHostDocument().querySelector('#send_but');
-        if (!button)
-            return false;
-        button.click();
-        return true;
-    }
-    function useContinuationLoop() {
+    function useContinuationRuntime() {
         const toast = useToastStore();
-        const running = ref(loopState_ACU.isLooping);
-        const timerText = ref('');
-        let displayInterval = null;
-        function refreshStatus() {
-            running.value = loopState_ACU.isLooping;
-        }
-        function getRemainingMs() {
-            if (!loopState_ACU.isLooping || !loopState_ACU.startTime || !loopState_ACU.totalDuration) {
-                return null;
+        const runtime = getContinuationRuntime_ACU();
+        const envelope = ref(null);
+        const fallbackSettings = buildDefaultContinuationSettings_ACU();
+        const busy = ref(false);
+        const originInstruction = ref('');
+        let initialization = null;
+        function refresh() {
+            try {
+                envelope.value = runtime.read();
             }
-            return Math.max(0, loopState_ACU.totalDuration - (Date.now() - loopState_ACU.startTime));
-        }
-        function clearDisplayTick() {
-            if (displayInterval) {
-                acuClearInterval(displayInterval);
-                displayInterval = null;
+            catch (error) {
+                envelope.value = null;
+                toast.error(errorMessage_ACU(error), { muteable: false });
             }
         }
-        function updateTimer() {
-            refreshStatus();
-            const remaining = getRemainingMs();
-            if (remaining === null) {
-                timerText.value = '';
-                return;
-            }
-            if (remaining <= 0) {
-                stop();
-                toast.info('总时长已结束，智能续写已停止。', { muteable: false });
-                return;
-            }
-            const minutes = Math.floor(remaining / 60000);
-            const seconds = Math.floor((remaining % 60000) / 1000);
-            timerText.value = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        async function initialize() {
+            if (initialization)
+                return initialization;
+            busy.value = true;
+            const currentInitialization = runtime.initialize()
+                .then(() => refresh())
+                .catch(error => {
+                toast.error(errorMessage_ACU(error), { muteable: false });
+                refresh();
+            })
+                .finally(() => {
+                busy.value = false;
+                if (initialization === currentInitialization)
+                    initialization = null;
+            });
+            initialization = currentInitialization;
+            return initialization;
         }
-        function startDisplayTick() {
-            clearDisplayTick();
-            updateTimer();
-            if (getRemainingMs() !== null) {
-                displayInterval = acuSetInterval(updateTimer, 1000);
-            }
-        }
-        function ensureDurationGuardTick() {
-            if (loopState_ACU.tickInterval)
-                return;
-            loopState_ACU.tickInterval = acuSetInterval(() => {
-                const remaining = getRemainingMs();
-                if (remaining === null) {
-                    if (loopState_ACU.tickInterval) {
-                        acuClearInterval(loopState_ACU.tickInterval);
-                        loopState_ACU.tickInterval = null;
-                    }
-                    return;
+        async function run_ACU(action) {
+            if (busy.value)
+                return false;
+            busy.value = true;
+            try {
+                const result = await action();
+                if ('preparedTurn' in result && result.preparedTurn) {
+                    const sent = await runtime.bridge.send(result.preparedTurn);
+                    if (!sent)
+                        toast.error('宿主输入不可用，智能续写已暂停。', { muteable: false });
                 }
-                if (remaining <= 0) {
-                    stopLoopState_ACU();
-                }
-            }, 1000);
-        }
-        function syncFromLoopState() {
-            refreshStatus();
-            if (getRemainingMs() === null) {
-                clearDisplayTick();
-                timerText.value = '';
-                return;
+                envelope.value = 'envelope' in result ? result.envelope : result;
+                refresh();
+                return true;
             }
-            ensureDurationGuardTick();
-            startDisplayTick();
-        }
-        function triggerNextPrompt() {
-            const prompt = getNextLoopPrompt_ACU();
-            if (prompt === null) {
-                stop();
-                toast.error('没有可用的循环提示词，智能续写已停止。', { muteable: false });
-                return;
+            catch (error) {
+                toast.error(errorMessage_ACU(error), { muteable: false });
+                refresh();
+                return false;
             }
-            if (!setSendTextareaValue(prompt)) {
-                stop();
-                toast.error('找不到酒馆输入框，请确认当前页面可以正常发送消息。', { muteable: false });
-                return;
+            finally {
+                busy.value = false;
             }
-            acuSetTimeout(() => {
-                if (!loopState_ACU.isLooping)
-                    return;
-                if (!clickSendButton()) {
-                    stop();
-                    toast.error('找不到发送按钮，智能续写已停止。', { muteable: false });
-                }
-            }, 100);
         }
-        function start() {
-            const validationError = validateLoopStartParams_ACU();
-            if (validationError) {
-                toast.error(validationError);
-                stopLoopState_ACU();
-                refreshStatus();
-                return;
-            }
-            initLoopState_ACU();
-            toast.success('智能续写已启动。', { muteable: false });
-            refreshStatus();
-            ensureDurationGuardTick();
-            startDisplayTick();
-            triggerNextPrompt();
+        const task = computed(() => envelope.value?.activeTask ?? null);
+        const settings = computed(() => envelope.value?.settings ?? fallbackSettings);
+        const activeStage = computed(() => task.value?.activeStageId
+            ? task.value.stages.find(stage => stage.stageId === task.value?.activeStageId) ?? null
+            : null);
+        const activeRevision = computed(() => activeStage.value
+            ? activeStage.value.revisions.find(revision => revision.revision === activeStage.value?.activeRevision) ?? null
+            : null);
+        const activeNode = computed(() => activeRevision.value?.outline.nodes[activeStage.value?.activeNodeIndex ?? -1] ?? null);
+        const activeTurn = computed(() => activeNode.value?.turns[activeStage.value?.activeTurnIndex ?? -1] ?? null);
+        const canContinue = computed(() => !!task.value
+            && task.value.status === 'paused'
+            && task.value.stopReason === null
+            && activeStage.value?.status === 'running');
+        const isAwaitingHostResult = computed(() => task.value?.status === 'running' && task.value.pendingHostTurn?.status === 'awaiting_generation');
+        const statusText = computed(() => task.value
+            ? (isAwaitingHostResult.value ? '等待宿主正文' : task.value.status)
+            : '尚未创建任务');
+        async function createTask() {
+            await run_ACU(() => runtime.orchestrator.createTask({ originInstruction: originInstruction.value }));
+            if (task.value)
+                originInstruction.value = '';
         }
-        function stop() {
-            stopLoopState_ACU();
-            clearDisplayTick();
-            timerText.value = '';
-            refreshStatus();
+        async function continueTask() {
+            await run_ACU(() => runtime.orchestrator.continueTask());
         }
-        onBeforeUnmount(() => {
-            clearDisplayTick();
-            refreshStatus();
-        });
+        async function stopTask() {
+            await run_ACU(() => runtime.orchestrator.stopTask());
+        }
+        async function replanRemaining() {
+            await run_ACU(() => runtime.orchestrator.replanRemaining());
+        }
+        async function replanRemainingWithInstruction(instruction) {
+            return run_ACU(() => runtime.orchestrator.replanRemaining({ instruction }));
+        }
+        async function retryCurrentTurn() {
+            await run_ACU(() => runtime.orchestrator.retryCurrentTurn());
+        }
+        async function acceptOutline(outline) {
+            return run_ACU(() => runtime.orchestrator.acceptOutline({ outline }));
+        }
+        async function abandonAndCreate(newOriginInstruction) {
+            const succeeded = await run_ACU(() => runtime.orchestrator.abandonAndCreate({ originInstruction: newOriginInstruction, confirmAbandon: true }));
+            if (succeeded)
+                originInstruction.value = '';
+            return succeeded;
+        }
+        async function saveSettings(settings) {
+            return run_ACU(() => runtime.orchestrator.replaceSettings({ settings }));
+        }
         return {
-            running,
-            timerText,
-            statusText: computed(() => (running.value ? '运行中' : '未运行')),
-            start,
-            stop,
-            refreshStatus,
-            syncFromLoopState,
+            activeStage,
+            activeNode,
+            activeRevision,
+            activeTurn,
+            abandonAndCreate,
+            acceptOutline,
+            busy,
+            canContinue,
+            createTask,
+            continueTask,
+            initialize,
+            isAwaitingHostResult,
+            originInstruction,
+            refresh,
+            replanRemaining,
+            replanRemainingWithInstruction,
+            retryCurrentTurn,
+            saveSettings,
+            statusText,
+            settings,
+            stopTask,
+            task,
         };
     }
-
-    const continuationCopy = {
-        panels: {
-            conditions: {
-                title: "循环条件",
-                description: "控制续写条件与续写时间。",
-            },
-            prompts: {
-                title: "循环提示词",
-                description: "按顺序自动发送，队列结束后将从头循环。为空无法启动，请确保至少一条可发送内容。",
-            },
-            controls: {
-                title: "运行控制",
-                description: "启动后自动填入下一条提示词并发送，每次 AI 回复后继续。停止仅停止后续，不影响已发送内容。",
-            },
-        },
-    };
-
-    /**
-     * continuation-store — 智能续写页设置边界
-     *
-     * 旧 UI 将智能续写挂在剧情推进页内部；v2 拆成独立一级页。
-     * 这里仍读写同一份 plotSettings.loopSettings，保证运行时逻辑兼容。
-     */
-    function clone$1(value) {
-        return JSON.parse(JSON.stringify(value ?? null));
-    }
-    function toNonNegativeNumber(value, fallback) {
-        const n = Number(value);
-        if (!Number.isFinite(n) || n < 0)
-            return fallback;
-        return n;
-    }
-    function toPositiveNumber(value, fallback) {
-        const n = Number(value);
-        if (!Number.isFinite(n) || n <= 0)
-            return fallback;
-        return n;
-    }
-    function ensureSettingsShape$1() {
-        if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object') {
-            settings_ACU.plotSettings = clone$1(DEFAULT_PLOT_SETTINGS_ACU);
-        }
-        const plot = settings_ACU.plotSettings;
-        if (!plot.loopSettings || typeof plot.loopSettings !== 'object') {
-            plot.loopSettings = clone$1(DEFAULT_PLOT_SETTINGS_ACU.loopSettings);
-        }
-        plot.contextTurnCount = toNonNegativeNumber(plot.contextTurnCount, DEFAULT_PLOT_SETTINGS_ACU.contextTurnCount ?? 3);
-        plot.contextExtractRules = normalizeExtractRules_ACU(plot.contextExtractRules, plot.contextExtractTags || '');
-        plot.contextExcludeRules = normalizeExcludeRules_ACU(plot.contextExcludeRules, plot.contextExcludeTags || '');
-        ensureLoopPromptsArray_ACU(plot);
-        return plot;
-    }
-    function readLoopSettings() {
-        const plot = ensureSettingsShape$1();
-        return plot.loopSettings;
-    }
-    function saveAndRefresh(store) {
-        saveSettings_ACU();
-        store.refreshFromSettings();
-    }
-    function syncContentReplaceGate() {
-        useRouterStore().syncFeatureGate(FEATURE_GATE_CONTENT_REPLACE, syncContentReplaceAvailability());
-    }
-    const useContinuationStore = defineStore('acu-v2-continuation', {
-        state: () => ({
-            prompts: [],
-            loopTags: '',
-            loopDelay: 5,
-            loopTotalDuration: 0,
-            maxRetries: 3,
-            contextTurnCount: 3,
-            contextExtractRules: [],
-            contextExcludeRules: [],
-        }),
-        getters: {
-            hasPrompt(state) {
-                return state.prompts.some(p => p.trim().length > 0);
-            },
-            promptCount(state) {
-                return state.prompts.length;
-            },
-        },
-        actions: {
-            refreshFromSettings() {
-                const plot = ensureSettingsShape$1();
-                const loop = plot.loopSettings;
-                this.prompts = Array.isArray(loop.quickReplyContent) ? loop.quickReplyContent.map((p) => String(p ?? '')) : [];
-                this.loopTags = String(loop.loopTags || '');
-                this.loopDelay = toNonNegativeNumber(loop.loopDelay, DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.loopDelay ?? 5);
-                this.loopTotalDuration = toNonNegativeNumber(loop.loopTotalDuration, DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.loopTotalDuration ?? 0);
-                this.maxRetries = toNonNegativeNumber(loop.maxRetries, DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
-                this.contextTurnCount = toNonNegativeNumber(plot.contextTurnCount, DEFAULT_PLOT_SETTINGS_ACU.contextTurnCount ?? 3);
-                this.contextExtractRules = clone$1(plot.contextExtractRules || []);
-                this.contextExcludeRules = clone$1(plot.contextExcludeRules || []);
-            },
-            addPrompt() {
-                const loop = readLoopSettings();
-                loop.quickReplyContent.push('');
-                saveAndRefresh(this);
-            },
-            removePrompt(index) {
-                const loop = readLoopSettings();
-                if (index < 0 || index >= loop.quickReplyContent.length)
-                    return;
-                loop.quickReplyContent.splice(index, 1);
-                loop.currentPromptIndex = 0;
-                saveAndRefresh(this);
-            },
-            setPrompt(index, value) {
-                const loop = readLoopSettings();
-                if (index < 0 || index >= loop.quickReplyContent.length)
-                    return;
-                loop.quickReplyContent[index] = String(value ?? '');
-                loop.currentPromptIndex = 0;
-                saveAndRefresh(this);
-            },
-            setLoopTags(value) {
-                const loop = readLoopSettings();
-                loop.loopTags = String(value ?? '');
-                saveAndRefresh(this);
-            },
-            setLoopDelay(value) {
-                const loop = readLoopSettings();
-                loop.loopDelay = toNonNegativeNumber(value, DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.loopDelay ?? 5);
-                saveAndRefresh(this);
-            },
-            setLoopTotalDuration(value) {
-                const loop = readLoopSettings();
-                loop.loopTotalDuration = toPositiveNumber(value, 0);
-                saveAndRefresh(this);
-            },
-            setMaxRetries(value) {
-                const loop = readLoopSettings();
-                loop.maxRetries = toNonNegativeNumber(value, DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
-                syncContentReplaceGate();
-                saveAndRefresh(this);
-            },
-            setContextTurnCount(value) {
-                const plot = ensureSettingsShape$1();
-                plot.contextTurnCount = toNonNegativeNumber(value, DEFAULT_PLOT_SETTINGS_ACU.contextTurnCount ?? 3);
-                saveAndRefresh(this);
-            },
-            setContextExtractRules(value) {
-                const plot = ensureSettingsShape$1();
-                plot.contextExtractRules = normalizeExtractRules_ACU(value, '');
-                delete plot.contextExtractTags;
-                saveAndRefresh(this);
-            },
-            setContextExcludeRules(value) {
-                const plot = ensureSettingsShape$1();
-                plot.contextExcludeRules = normalizeExcludeRules_ACU(value, '');
-                delete plot.contextExcludeTags;
-                saveAndRefresh(this);
-            },
-        },
-    });
 
     var _sfc_main$l = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationPage',
         setup(__props, { expose: __expose }) {
             __expose();
-            const store = useContinuationStore();
-            const loop = useContinuationLoop();
-            function refreshAll() {
-                store.refreshFromSettings();
-                loop.syncFromLoopState();
+            const runtime = useContinuationRuntime();
+            const settingsDraft = ref(null);
+            const outlineDraft = ref('');
+            const outlineDraftError = ref('');
+            const settingsError = ref('');
+            const replacementInstruction = ref('');
+            const confirmAbandon = ref(false);
+            const replanInstruction = ref('');
+            const clock = ref(Date.now());
+            let countdownTimer;
+            const deadlineText = computed(() => {
+                const deadlineAt = runtime.task.value?.deadlineAt;
+                if (deadlineAt === null || deadlineAt === undefined)
+                    return '未设置';
+                const remainingSeconds = Math.max(0, Math.ceil((deadlineAt - clock.value) / 1000));
+                const hours = Math.floor(remainingSeconds / 3600);
+                const minutes = Math.floor((remainingSeconds % 3600) / 60);
+                const seconds = remainingSeconds % 60;
+                return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            });
+            const continuationRoleOptions = [
+                { value: 'system', label: 'SYSTEM' },
+                { value: 'user', label: 'USER' },
+                { value: 'assistant', label: 'ASSISTANT' },
+            ];
+            function cloneSettings(settings) {
+                return {
+                    ...settings,
+                    contextExtractRules: settings.contextExtractRules.map(rule => ({ ...rule })),
+                    contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
+                    outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
+                    turnInstructionPrompt: settings.turnInstructionPrompt.map(segment => ({ ...segment })),
+                };
             }
-            onMounted(refreshAll);
-            watch(useChatChangedTick(), refreshAll);
-            const __returned__ = { store, loop, refreshAll, AcuButton, AcuFormRow, AcuIconButton, AcuInput, AcuPanel, AcuPanelGrid, AcuTextarea, get continuationCopy() { return continuationCopy; } };
+            function syncOutlineDraft() {
+                outlineDraft.value = runtime.activeRevision.value
+                    ? JSON.stringify(runtime.activeRevision.value.outline, null, 2)
+                    : '';
+                outlineDraftError.value = '';
+            }
+            function parseOutlineDraft() {
+                try {
+                    const parsed = JSON.parse(outlineDraft.value);
+                    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+                        throw new Error('大纲必须是 JSON 对象');
+                    return parsed;
+                }
+                catch (error) {
+                    outlineDraftError.value = error instanceof Error ? error.message : '大纲 JSON 无法解析';
+                    return null;
+                }
+            }
+            async function acceptOutlineDraft() {
+                const outline = parseOutlineDraft();
+                if (!outline)
+                    return;
+                if (await runtime.acceptOutline(outline))
+                    syncOutlineDraft();
+            }
+            async function replan() {
+                const succeeded = await runtime.replanRemainingWithInstruction(replanInstruction.value);
+                if (succeeded)
+                    replanInstruction.value = '';
+            }
+            async function abandonAndCreate() {
+                if (!confirmAbandon.value || !replacementInstruction.value.trim())
+                    return;
+                if (await runtime.abandonAndCreate(replacementInstruction.value)) {
+                    replacementInstruction.value = '';
+                    confirmAbandon.value = false;
+                }
+            }
+            function requiredInteger(value, label) {
+                const numeric = typeof value === 'number' ? value : Number(value);
+                if (!Number.isInteger(numeric))
+                    throw new Error(`${label} 必须是整数`);
+                return numeric;
+            }
+            function normalizeSettingsDraft() {
+                if (!settingsDraft.value)
+                    throw new Error('续写设置尚未加载');
+                const source = settingsDraft.value;
+                const customTurnMin = source.stageSize === 'custom' ? requiredInteger(source.customTurnMin, '最少轮次') : null;
+                const customTurnMax = source.stageSize === 'custom' ? requiredInteger(source.customTurnMax, '最多轮次') : null;
+                if (source.stageSize === 'custom' && (customTurnMin < 1 || customTurnMax < customTurnMin || customTurnMax > 50)) {
+                    throw new Error('自定义阶段轮次必须是 1 到 50 的递增整数范围');
+                }
+                const normalized = {
+                    ...cloneSettings(source),
+                    customTurnMin,
+                    customTurnMax,
+                    maxAutomaticStages: requiredInteger(source.maxAutomaticStages, '自动阶段上限'),
+                    generationRetryLimit: requiredInteger(source.generationRetryLimit, '正文重试次数'),
+                    internalAiRetryLimit: requiredInteger(source.internalAiRetryLimit, '内部 AI 重试次数'),
+                    loopDelaySeconds: requiredInteger(source.loopDelaySeconds, '轮次延迟'),
+                    retryDelaySeconds: requiredInteger(source.retryDelaySeconds, '重试延迟'),
+                    totalDurationMinutes: requiredInteger(source.totalDurationMinutes, '总时长'),
+                    contextTurnCount: requiredInteger(source.contextTurnCount, '最近剧情轮数'),
+                };
+                if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.contextTurnCount < 0) {
+                    throw new Error('续写设置中的数值不能低于允许范围');
+                }
+                if (normalized.apiPresetMode === 'fixed' && !normalized.fixedApiPresetName.trim())
+                    throw new Error('固定 API 预设名称不能为空');
+                return normalized;
+            }
+            async function saveSettings() {
+                try {
+                    const candidate = normalizeSettingsDraft();
+                    if (await runtime.saveSettings(candidate)) {
+                        settingsDraft.value = cloneSettings(candidate);
+                        settingsError.value = '';
+                    }
+                }
+                catch (error) {
+                    settingsError.value = error instanceof Error ? error.message : '续写设置无效';
+                }
+            }
+            function addPrompt(key) {
+                if (!settingsDraft.value)
+                    return;
+                settingsDraft.value[key].push({ role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true });
+            }
+            function deletePrompt(key, index) {
+                if (!settingsDraft.value || settingsDraft.value[key][index]?.deletable === false)
+                    return;
+                settingsDraft.value[key].splice(index, 1);
+            }
+            function movePrompt(key, index, delta) {
+                const prompts = settingsDraft.value?.[key];
+                const target = index + delta;
+                if (!prompts || target < 0 || target >= prompts.length)
+                    return;
+                [prompts[index], prompts[target]] = [prompts[target], prompts[index]];
+            }
+            function updatePrompt(key, index, patch) {
+                const current = settingsDraft.value?.[key][index];
+                if (current)
+                    settingsDraft.value[key][index] = { ...current, ...patch };
+            }
+            function restorePrompt(kind) {
+                if (!settingsDraft.value)
+                    return;
+                settingsDraft.value = restoreContinuationPromptDefault_ACU(settingsDraft.value, kind);
+            }
+            onMounted(() => {
+                void runtime.initialize();
+                countdownTimer = setInterval(() => { clock.value = Date.now(); }, 1000);
+            });
+            onBeforeUnmount(() => {
+                if (countdownTimer !== undefined)
+                    clearInterval(countdownTimer);
+            });
+            watch(useChatChangedTick(), runtime.refresh);
+            watch(runtime.settings, settings => { settingsDraft.value = settings ? cloneSettings(settings) : null; }, { immediate: true });
+            watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
+            const __returned__ = { runtime, settingsDraft, outlineDraft, outlineDraftError, settingsError, replacementInstruction, confirmAbandon, replanInstruction, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, deadlineText, continuationRoleOptions, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, replan, abandonAndCreate, requiredInteger, normalizeSettingsDraft, saveSettings, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, AcuButton, AcuCheckbox, AcuInput, AcuPanel, AcuPromptSegments, AcuRulePairList, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-5dab53f4] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-continuation-page__side-stack[data-v-5dab53f4] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\r\n  min-width: 0;\n}\n.acu-v2-continuation-page__prompt-toolbar[data-v-5dab53f4],\r\n.acu-v2-continuation-page__prompt-head[data-v-5dab53f4],\r\n.acu-v2-continuation-page__actions[data-v-5dab53f4],\r\n.acu-v2-continuation-page__status[data-v-5dab53f4] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\n}\n.acu-v2-continuation-page__prompt-toolbar[data-v-5dab53f4] {\r\n  justify-content: space-between;\n}\n.acu-v2-continuation-page__meta[data-v-5dab53f4],\r\n.acu-v2-continuation-page__empty[data-v-5dab53f4],\r\n.acu-v2-continuation-page__timer[data-v-5dab53f4] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__empty[data-v-5dab53f4] {\r\n  margin: 0;\r\n  padding: 10px 0;\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-continuation-page__prompt-list[data-v-5dab53f4] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-v2-continuation-page__prompt-item[data-v-5dab53f4] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  padding: 0 0 12px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-continuation-page__prompt-item[data-v-5dab53f4]:last-child {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-continuation-page__prompt-head[data-v-5dab53f4] {\r\n  justify-content: space-between;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 500;\n}\n.acu-v2-continuation-page__number-grid[data-v-5dab53f4] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 12px;\n}\n.acu-v2-continuation-page__status[data-v-5dab53f4] {\r\n  min-height: 38px;\r\n  padding: 8px 0 8px 10px;\r\n  border: 0;\r\n  border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-continuation-page__status-label[data-v-5dab53f4] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__status strong[data-v-5dab53f4] {\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-page__status strong.is-running[data-v-5dab53f4] {\r\n  color: var(--acu-success);\n}\n.acu-v2-continuation-page__actions[data-v-5dab53f4] {\r\n  justify-content: flex-end;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-5dab53f4] {\r\n    padding: 14px;\n}\n.acu-v2-continuation-page__number-grid[data-v-5dab53f4] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-5dab53f4");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_5dab53f4_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-1d3e7a9c] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__actions[data-v-1d3e7a9c] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__status-grid[data-v-1d3e7a9c] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0;\n}\n.acu-v2-continuation-page__status-grid div[data-v-1d3e7a9c] { border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent); padding-left: 10px;\n}\n.acu-v2-continuation-page__status-grid dt[data-v-1d3e7a9c] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__status-grid dd[data-v-1d3e7a9c] { margin: 3px 0 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-page__instruction[data-v-1d3e7a9c], .acu-v2-continuation-page__notice[data-v-1d3e7a9c] { margin: 14px 0 0; color: var(--acu-text-2); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__notice[data-v-1d3e7a9c] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-page__error[data-v-1d3e7a9c] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-1d3e7a9c] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__stage[data-v-1d3e7a9c], .acu-v2-continuation-page__revision[data-v-1d3e7a9c] { margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-page__stage > summary[data-v-1d3e7a9c], .acu-v2-continuation-page__revision > summary[data-v-1d3e7a9c] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__outline[data-v-1d3e7a9c], .acu-v2-continuation-page__timeline[data-v-1d3e7a9c] { display: grid; gap: 8px; padding-left: 22px; color: var(--acu-text-2);\n}\n.acu-v2-continuation-page__settings-grid[data-v-1d3e7a9c] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-1d3e7a9c] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-1d3e7a9c] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-1d3e7a9c] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-1d3e7a9c] { padding: 14px;\n}\n.acu-v2-continuation-page__status-grid[data-v-1d3e7a9c] { grid-template-columns: repeat(2, minmax(0, 1fr));\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-1d3e7a9c] { grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-1d3e7a9c");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_1d3e7a9c_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-continuation-page" };
-    const _hoisted_2$j = { class: "acu-v2-continuation-page__number-grid" };
-    const _hoisted_3$g = { class: "acu-v2-continuation-page__side-stack" };
-    const _hoisted_4$d = { class: "acu-v2-continuation-page__prompt-toolbar" };
-    const _hoisted_5$c = { class: "acu-v2-continuation-page__meta" };
-    const _hoisted_6$b = {
+    const _hoisted_2$j = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_3$g = { class: "acu-v2-continuation-page__status-grid" };
+    const _hoisted_4$d = { class: "acu-v2-continuation-page__instruction" };
+    const _hoisted_5$c = {
 	key: 0,
-	class: "acu-v2-continuation-page__prompt-list"
+	class: "acu-v2-continuation-page__instruction"
     };
-    const _hoisted_7$9 = { class: "acu-v2-continuation-page__prompt-head" };
-    const _hoisted_8$9 = {
+    const _hoisted_6$b = {
 	key: 1,
-	class: "acu-v2-continuation-page__empty"
+	class: "acu-v2-continuation-page__instruction"
     };
-    const _hoisted_9$8 = { class: "acu-v2-continuation-page__status" };
+    const _hoisted_7$9 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_8$9 = {
+	key: 0,
+	class: "acu-v2-continuation-page__notice"
+    };
+    const _hoisted_9$8 = ["open"];
     const _hoisted_10$8 = {
 	key: 0,
-	class: "acu-v2-continuation-page__timer"
+	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_11$8 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_11$8 = ["open"];
+    const _hoisted_12$8 = { class: "acu-v2-continuation-page__meta" };
+    const _hoisted_13$6 = { class: "acu-v2-continuation-page__outline" };
+    const _hoisted_14$6 = { class: "acu-v2-continuation-page__timeline" };
+    const _hoisted_15$6 = { key: 0 };
+    const _hoisted_16$6 = {
+	key: 0,
+	class: "acu-v2-continuation-page__error"
+    };
+    const _hoisted_17$5 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_18$5 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_19$5 = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_20$4 = { key: 0 };
+    const _hoisted_21$4 = { key: 1 };
+    const _hoisted_22$3 = { key: 2 };
+    const _hoisted_23$3 = { class: "acu-v2-continuation-page__toggles" };
+    const _hoisted_24$3 = {
+	key: 0,
+	class: "acu-v2-continuation-page__error"
+    };
+    const _hoisted_25$3 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_26$3 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_27$3 = { class: "acu-v2-continuation-page__actions" };
     function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$l, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-continuation-page__grid" }, {
-		default: withCtx(() => [createVNode($setup["AcuPanel"], {
-			title: $setup.continuationCopy.panels.conditions.title,
-			description: $setup.continuationCopy.panels.conditions.description
+	return openBlock(), createElementBlock("section", _hoisted_1$l, [
+		createVNode($setup["AcuPanel"], {
+			title: "智能续写任务",
+			description: "阶段大纲、轮次游标和宿主生成归属均以当前聊天首楼的续写状态为准。"
 		}, {
-			default: withCtx(() => [createVNode($setup["AcuFormRow"], {
-				label: "标签检查",
-				hint: "检查回复中是否出现指定标签文本，缺一项自动重试。多个标签逗号分隔，留空不检查。"
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					"model-value": $setup.store.loopTags,
-					type: "text",
-					placeholder: "例如: content, thinking",
-					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.store.setLoopTags(String($event)))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			}), createBaseVNode("div", _hoisted_2$j, [
-				createVNode($setup["AcuFormRow"], {
-					label: "循环延时",
-					hint: "单位秒数，每次成功续写后等待时间。"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						"model-value": $setup.store.loopDelay,
-						type: "number",
-						min: 0,
-						step: 1,
-						onChange: _cache[1] || (_cache[1] = ($event) => $setup.store.setLoopDelay($event))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				}),
-				createVNode($setup["AcuFormRow"], {
-					label: "总时长",
-					hint: "单位分钟，须大于0。"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						"model-value": $setup.store.loopTotalDuration,
-						type: "number",
-						min: 0,
-						step: 1,
-						onChange: _cache[2] || (_cache[2] = ($event) => $setup.store.setLoopTotalDuration($event))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				}),
-				createVNode($setup["AcuFormRow"], {
-					label: "失败上限",
-					hint: "失败时重试次数上限。"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						"model-value": $setup.store.maxRetries,
-						type: "number",
-						min: 0,
-						step: 1,
-						onChange: _cache[3] || (_cache[3] = ($event) => $setup.store.setMaxRetries($event))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				}),
-				createVNode($setup["AcuFormRow"], {
-					label: "AI 上下文",
-					hint: "仅统计AI最新N个楼层回复，不统计用户输入。"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						"model-value": $setup.store.contextTurnCount,
-						type: "number",
-						min: 0,
-						max: 20,
-						step: 1,
-						onChange: _cache[4] || (_cache[4] = ($event) => $setup.store.setContextTurnCount($event))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				})
-			])]),
-			_: 1
-		}, 8, ["title", "description"]), createBaseVNode("div", _hoisted_3$g, [createVNode($setup["AcuPanel"], {
-			title: $setup.continuationCopy.panels.prompts.title,
-			description: $setup.continuationCopy.panels.prompts.description
-		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_4$d, [createBaseVNode(
-				"span",
-				_hoisted_5$c,
-				toDisplayString($setup.store.promptCount ? `${$setup.store.promptCount} 条提示词` : "暂无提示词"),
-				1
-				/* TEXT */
-			), createVNode($setup["AcuButton"], {
-				size: "sm",
-				onClick: $setup.store.addPrompt
-			}, {
-				default: withCtx(() => [..._cache[5] || (_cache[5] = [createBaseVNode(
-					"i",
-					{ class: "fa-solid fa-plus" },
-					null,
-					-1
-					/* CACHED */
-				), createTextVNode(
-					" 添加提示词 ",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}, 8, ["onClick"])]), $setup.store.prompts.length ? (openBlock(), createElementBlock("div", _hoisted_6$b, [(openBlock(true), createElementBlock(
+			default: withCtx(() => [!$setup.runtime.task.value ? (openBlock(), createElementBlock(
 				Fragment,
-				null,
-				renderList($setup.store.prompts, (prompt, index) => {
-					return openBlock(), createElementBlock("div", {
-						key: index,
-						class: "acu-v2-continuation-page__prompt-item"
-					}, [createBaseVNode("div", _hoisted_7$9, [createBaseVNode(
-						"span",
-						null,
-						"提示词 " + toDisplayString(index + 1),
+				{ key: 0 },
+				[createVNode($setup["AcuTextarea"], {
+					"model-value": $setup.runtime.originInstruction.value,
+					rows: 5,
+					disabled: $setup.runtime.busy.value,
+					placeholder: "输入本次智能续写的初始剧情要求...",
+					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.runtime.originInstruction.value = $event)
+				}, null, 8, ["model-value", "disabled"]), createBaseVNode("div", _hoisted_2$j, [createVNode($setup["AcuButton"], {
+					variant: "primary",
+					loading: $setup.runtime.busy.value,
+					disabled: !$setup.runtime.originInstruction.value.trim(),
+					onClick: $setup.runtime.createTask
+				}, {
+					default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
+						"创建阶段大纲",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, [
+					"loading",
+					"disabled",
+					"onClick"
+				])])],
+				64
+				/* STABLE_FRAGMENT */
+			)) : (openBlock(), createElementBlock(
+				Fragment,
+				{ key: 1 },
+				[
+					createBaseVNode("dl", _hoisted_3$g, [
+						createBaseVNode("div", null, [_cache[33] || (_cache[33] = createBaseVNode(
+							"dt",
+							null,
+							"任务状态",
+							-1
+							/* CACHED */
+						)), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtime.statusText.value),
+							1
+							/* TEXT */
+						)]),
+						createBaseVNode("div", null, [_cache[34] || (_cache[34] = createBaseVNode(
+							"dt",
+							null,
+							"当前阶段",
+							-1
+							/* CACHED */
+						)), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtime.activeStage.value ? `第 ${$setup.runtime.activeStage.value.stageNumber} 阶段` : "无"),
+							1
+							/* TEXT */
+						)]),
+						createBaseVNode("div", null, [_cache[35] || (_cache[35] = createBaseVNode(
+							"dt",
+							null,
+							"完成轮次",
+							-1
+							/* CACHED */
+						)), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtime.activeStage.value?.completedTurns ?? 0),
+							1
+							/* TEXT */
+						)]),
+						createBaseVNode("div", null, [_cache[36] || (_cache[36] = createBaseVNode(
+							"dt",
+							null,
+							"大纲 revision",
+							-1
+							/* CACHED */
+						)), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtime.activeStage.value?.activeRevision ?? "-"),
+							1
+							/* TEXT */
+						)]),
+						createBaseVNode("div", null, [_cache[37] || (_cache[37] = createBaseVNode(
+							"dt",
+							null,
+							"总倒计时",
+							-1
+							/* CACHED */
+						)), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.deadlineText),
+							1
+							/* TEXT */
+						)])
+					]),
+					createBaseVNode(
+						"p",
+						_hoisted_4$d,
+						toDisplayString($setup.runtime.task.value.originInstruction),
 						1
 						/* TEXT */
-					), createVNode($setup["AcuIconButton"], {
-						icon: "fa-solid fa-trash-can",
+					),
+					$setup.runtime.activeNode.value ? (openBlock(), createElementBlock(
+						"p",
+						_hoisted_5$c,
+						"当前节点：" + toDisplayString($setup.runtime.activeNode.value.title),
+						1
+						/* TEXT */
+					)) : createCommentVNode("v-if", true),
+					$setup.runtime.activeTurn.value ? (openBlock(), createElementBlock(
+						"p",
+						_hoisted_6$b,
+						"当前轮次目标：" + toDisplayString($setup.runtime.activeTurn.value.goal),
+						1
+						/* TEXT */
+					)) : createCommentVNode("v-if", true)
+				],
+				64
+				/* STABLE_FRAGMENT */
+			))]),
+			_: 1
+		}),
+		createVNode($setup["AcuPanel"], {
+			title: "运行控制",
+			description: "继续时仅发送本轮内部 AI 生成的最终普通文本；宿主结果未被唯一归属前不会推进游标。"
+		}, {
+			default: withCtx(() => [
+				createBaseVNode("div", _hoisted_7$9, [
+					$setup.runtime.canContinue.value ? (openBlock(), createBlock($setup["AcuButton"], {
+						key: 0,
+						variant: "primary",
+						loading: $setup.runtime.busy.value,
+						onClick: $setup.runtime.continueTask
+					}, {
+						default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
+							"继续当前轮次",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["loading", "onClick"])) : createCommentVNode("v-if", true),
+					$setup.runtime.task.value?.pendingHostTurn?.status === "retry_ready" ? (openBlock(), createBlock($setup["AcuButton"], {
+						key: 1,
+						variant: "primary",
+						loading: $setup.runtime.busy.value,
+						onClick: $setup.runtime.retryCurrentTurn
+					}, {
+						default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
+							"重试当前轮次",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["loading", "onClick"])) : createCommentVNode("v-if", true),
+					$setup.runtime.task.value && !$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createBlock($setup["AcuButton"], {
+						key: 2,
+						loading: $setup.runtime.busy.value,
+						onClick: $setup.replan
+					}, {
+						default: withCtx(() => [..._cache[40] || (_cache[40] = [createTextVNode(
+							"重新规划剩余阶段",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["loading"])) : createCommentVNode("v-if", true),
+					$setup.runtime.task.value && !$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createBlock($setup["AcuButton"], {
+						key: 3,
 						variant: "danger",
-						size: "sm",
-						title: "删除此提示词",
-						onClick: ($event) => $setup.store.removePrompt(index)
-					}, null, 8, ["onClick"])]), createVNode($setup["AcuTextarea"], {
-						"model-value": prompt,
-						rows: 4,
-						placeholder: "输入本轮要发送给主 AI 的续写提示...",
-						"onUpdate:modelValue": ($event) => $setup.store.setPrompt(index, $event)
-					}, null, 8, ["model-value", "onUpdate:modelValue"])]);
+						loading: $setup.runtime.busy.value,
+						onClick: $setup.runtime.stopTask
+					}, {
+						default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
+							"停止智能续写",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["loading", "onClick"])) : createCommentVNode("v-if", true)
+				]),
+				$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createElementBlock("p", _hoisted_8$9, " 当前轮次正在等待宿主生成结束事件，不能重复发送或重规划。 ")) : createCommentVNode("v-if", true),
+				$setup.runtime.task.value && !$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createBlock($setup["AcuTextarea"], {
+					key: 1,
+					"model-value": $setup.replanInstruction,
+					rows: 3,
+					placeholder: "可选：说明本次重新规划要调整的方向...",
+					"onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => $setup.replanInstruction = $event)
+				}, null, 8, ["model-value"])) : createCommentVNode("v-if", true)
+			]),
+			_: 1
+		}),
+		$setup.runtime.task.value ? (openBlock(), createBlock($setup["AcuPanel"], {
+			key: 0,
+			title: "阶段大纲与执行回执",
+			description: "阶段历史默认折叠；当前阶段与其当前 revision 展开。"
+		}, {
+			default: withCtx(() => [(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($setup.runtime.task.value.stages, (stage) => {
+					return openBlock(), createElementBlock("details", {
+						key: stage.stageId,
+						class: "acu-v2-continuation-page__stage",
+						open: stage.stageId === $setup.runtime.task.value.activeStageId
+					}, [
+						createBaseVNode(
+							"summary",
+							null,
+							"第 " + toDisplayString(stage.stageNumber) + " 阶段 · " + toDisplayString(stage.status) + " · " + toDisplayString(stage.completedTurns) + " / " + toDisplayString(stage.revisions.find((item) => item.revision === stage.activeRevision)?.outline.totalTurns ?? 0) + " 轮",
+							1
+							/* TEXT */
+						),
+						stage.chronicleRange ? (openBlock(), createElementBlock(
+							"p",
+							_hoisted_10$8,
+							"AM 范围：" + toDisplayString(stage.chronicleRange.first) + " → " + toDisplayString(stage.chronicleRange.last),
+							1
+							/* TEXT */
+						)) : createCommentVNode("v-if", true),
+						(openBlock(true), createElementBlock(
+							Fragment,
+							null,
+							renderList(stage.revisions, (revision) => {
+								return openBlock(), createElementBlock("details", {
+									key: revision.revision,
+									class: "acu-v2-continuation-page__revision",
+									open: revision.revision === stage.activeRevision
+								}, [
+									createBaseVNode(
+										"summary",
+										null,
+										"revision " + toDisplayString(revision.revision) + " · " + toDisplayString(revision.reason) + " · " + toDisplayString(revision.frozen ? "已冻结" : "待确认"),
+										1
+										/* TEXT */
+									),
+									createBaseVNode(
+										"p",
+										_hoisted_12$8,
+										toDisplayString(revision.outline.title) + "：" + toDisplayString(revision.outline.goal),
+										1
+										/* TEXT */
+									),
+									createBaseVNode("ol", _hoisted_13$6, [(openBlock(true), createElementBlock(
+										Fragment,
+										null,
+										renderList(revision.outline.nodes, (node) => {
+											return openBlock(), createElementBlock("li", { key: node.id }, [
+												createBaseVNode(
+													"strong",
+													null,
+													toDisplayString(node.title),
+													1
+													/* TEXT */
+												),
+												createTextVNode(
+													"：" + toDisplayString(node.goal) + " ",
+													1
+													/* TEXT */
+												),
+												createBaseVNode("ol", null, [(openBlock(true), createElementBlock(
+													Fragment,
+													null,
+													renderList(node.turns, (turn) => {
+														return openBlock(), createElementBlock(
+															"li",
+															{ key: turn.id },
+															toDisplayString(turn.goal),
+															1
+															/* TEXT */
+														);
+													}),
+													128
+													/* KEYED_FRAGMENT */
+												))])
+											]);
+										}),
+										128
+										/* KEYED_FRAGMENT */
+									))])
+								], 8, _hoisted_11$8);
+							}),
+							128
+							/* KEYED_FRAGMENT */
+						))
+					], 8, _hoisted_9$8);
 				}),
 				128
 				/* KEYED_FRAGMENT */
-			))])) : (openBlock(), createElementBlock("p", _hoisted_8$9, " 请先添加一条内容，再启动智能续写。 "))]),
+			)), createBaseVNode("ol", _hoisted_14$6, [(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($setup.runtime.task.value.timeline, (entry) => {
+					return openBlock(), createElementBlock("li", { key: entry.id }, [createTextVNode(
+						toDisplayString(new Date(entry.at).toLocaleString()) + " · " + toDisplayString(entry.kind),
+						1
+						/* TEXT */
+					), entry.errorCode ? (openBlock(), createElementBlock(
+						"span",
+						_hoisted_15$6,
+						" · " + toDisplayString(entry.errorCode),
+						1
+						/* TEXT */
+					)) : createCommentVNode("v-if", true)]);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))])]),
 			_: 1
-		}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
-			title: $setup.continuationCopy.panels.controls.title,
-			description: $setup.continuationCopy.panels.controls.description
+		})) : createCommentVNode("v-if", true),
+		$setup.runtime.task.value && $setup.runtime.task.value.status === "awaiting_outline_review" && $setup.runtime.activeRevision.value ? (openBlock(), createBlock($setup["AcuPanel"], {
+			key: 1,
+			title: "大纲预览",
+			description: "保存前会在领域层重新执行严格 Schema 与 revision 校验；页面不直接写入聊天数组。"
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_9$8, [
-				_cache[6] || (_cache[6] = createBaseVNode(
-					"span",
-					{ class: "acu-v2-continuation-page__status-label" },
-					"循环状态",
+			default: withCtx(() => [
+				createVNode($setup["AcuTextarea"], {
+					"model-value": $setup.outlineDraft,
+					rows: 16,
+					"onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.outlineDraft = $event)
+				}, null, 8, ["model-value"]),
+				$setup.outlineDraftError ? (openBlock(), createElementBlock(
+					"p",
+					_hoisted_16$6,
+					toDisplayString($setup.outlineDraftError),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true),
+				createBaseVNode("div", _hoisted_17$5, [createVNode($setup["AcuButton"], {
+					variant: "primary",
+					loading: $setup.runtime.busy.value,
+					onClick: $setup.acceptOutlineDraft
+				}, {
+					default: withCtx(() => [..._cache[42] || (_cache[42] = [createTextVNode(
+						"确认大纲并继续",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, ["loading"])])
+			]),
+			_: 1
+		})) : createCommentVNode("v-if", true),
+		$setup.runtime.task.value && !$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createBlock($setup["AcuPanel"], {
+			key: 2,
+			title: "放弃并新建",
+			description: "未完成任务默认只能继续；放弃必须显式确认。"
+		}, {
+			default: withCtx(() => [
+				createVNode($setup["AcuTextarea"], {
+					"model-value": $setup.replacementInstruction,
+					rows: 3,
+					placeholder: "输入新任务的初始剧情要求...",
+					"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.replacementInstruction = $event)
+				}, null, 8, ["model-value"]),
+				createVNode($setup["AcuCheckbox"], {
+					modelValue: $setup.confirmAbandon,
+					"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.confirmAbandon = $event),
+					label: "我确认放弃当前未完成任务并创建新任务"
+				}, null, 8, ["modelValue"]),
+				createBaseVNode("div", _hoisted_18$5, [createVNode($setup["AcuButton"], {
+					variant: "danger",
+					disabled: !$setup.confirmAbandon || !$setup.replacementInstruction.trim(),
+					loading: $setup.runtime.busy.value,
+					onClick: $setup.abandonAndCreate
+				}, {
+					default: withCtx(() => [..._cache[43] || (_cache[43] = [createTextVNode(
+						"放弃并创建新任务",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, ["disabled", "loading"])])
+			]),
+			_: 1
+		})) : createCommentVNode("v-if", true),
+		$setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
+			key: 3,
+			title: "续写设置",
+			description: "设置先在页面草稿中编辑；点击保存后才经首楼权威状态落盘。宿主生成进行中不能保存。"
+		}, {
+			default: withCtx(() => [
+				createBaseVNode("div", _hoisted_19$5, [
+					createBaseVNode("label", null, [_cache[45] || (_cache[45] = createTextVNode(
+						"阶段规模",
+						-1
+						/* CACHED */
+					)), withDirectives(createBaseVNode(
+						"select",
+						{ "onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.settingsDraft.stageSize = $event) },
+						[..._cache[44] || (_cache[44] = [
+							createBaseVNode(
+								"option",
+								{ value: "short" },
+								"短（3–5）",
+								-1
+								/* CACHED */
+							),
+							createBaseVNode(
+								"option",
+								{ value: "standard" },
+								"标准（6–10）",
+								-1
+								/* CACHED */
+							),
+							createBaseVNode(
+								"option",
+								{ value: "long" },
+								"长（11–20）",
+								-1
+								/* CACHED */
+							),
+							createBaseVNode(
+								"option",
+								{ value: "custom" },
+								"自定义",
+								-1
+								/* CACHED */
+							)
+						])],
+						512
+						/* NEED_PATCH */
+					), [[vModelSelect, $setup.settingsDraft.stageSize]])]),
+					$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createElementBlock("label", _hoisted_20$4, [_cache[46] || (_cache[46] = createTextVNode(
+						"最少轮次",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.customTurnMin,
+						"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.settingsDraft.customTurnMin = $event),
+						type: "number",
+						min: 1,
+						max: 50
+					}, null, 8, ["modelValue"])])) : createCommentVNode("v-if", true),
+					$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createElementBlock("label", _hoisted_21$4, [_cache[47] || (_cache[47] = createTextVNode(
+						"最多轮次",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.customTurnMax,
+						"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settingsDraft.customTurnMax = $event),
+						type: "number",
+						min: 1,
+						max: 50
+					}, null, 8, ["modelValue"])])) : createCommentVNode("v-if", true),
+					createBaseVNode("label", null, [_cache[48] || (_cache[48] = createTextVNode(
+						"自动阶段上限",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.maxAutomaticStages,
+						"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
+						type: "number",
+						min: 1
+					}, null, 8, ["modelValue"])]),
+					createBaseVNode("label", null, [_cache[49] || (_cache[49] = createTextVNode(
+						"正文重试次数",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.generationRetryLimit,
+						"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
+						type: "number",
+						min: 0
+					}, null, 8, ["modelValue"])]),
+					createBaseVNode("label", null, [_cache[50] || (_cache[50] = createTextVNode(
+						"内部 AI 重试次数",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.internalAiRetryLimit,
+						"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
+						type: "number",
+						min: 0
+					}, null, 8, ["modelValue"])]),
+					createBaseVNode("label", null, [_cache[51] || (_cache[51] = createTextVNode(
+						"轮次延迟（秒）",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.loopDelaySeconds,
+						"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
+						type: "number",
+						min: 0
+					}, null, 8, ["modelValue"])]),
+					createBaseVNode("label", null, [_cache[52] || (_cache[52] = createTextVNode(
+						"重试延迟（秒）",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.retryDelaySeconds,
+						"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
+						type: "number",
+						min: 0
+					}, null, 8, ["modelValue"])]),
+					createBaseVNode("label", null, [_cache[53] || (_cache[53] = createTextVNode(
+						"总时长（分钟，0 为不设总时长）",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.totalDurationMinutes,
+						"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.totalDurationMinutes = $event),
+						type: "number",
+						min: 0
+					}, null, 8, ["modelValue"])]),
+					createBaseVNode("label", null, [_cache[54] || (_cache[54] = createTextVNode(
+						"最近剧情轮数",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.contextTurnCount,
+						"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.contextTurnCount = $event),
+						type: "number",
+						min: 0
+					}, null, 8, ["modelValue"])]),
+					createBaseVNode("label", null, [_cache[55] || (_cache[55] = createTextVNode(
+						"循环标签",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.loopTags,
+						"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.loopTags = $event),
+						type: "text"
+					}, null, 8, ["modelValue"])]),
+					createBaseVNode("label", null, [_cache[57] || (_cache[57] = createTextVNode(
+						"API 预设",
+						-1
+						/* CACHED */
+					)), withDirectives(createBaseVNode(
+						"select",
+						{ "onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.apiPresetMode = $event) },
+						[..._cache[56] || (_cache[56] = [createBaseVNode(
+							"option",
+							{ value: "follow_plot" },
+							"跟随剧情预设",
+							-1
+							/* CACHED */
+						), createBaseVNode(
+							"option",
+							{ value: "fixed" },
+							"固定预设",
+							-1
+							/* CACHED */
+						)])],
+						512
+						/* NEED_PATCH */
+					), [[vModelSelect, $setup.settingsDraft.apiPresetMode]])]),
+					$setup.settingsDraft.apiPresetMode === "fixed" ? (openBlock(), createElementBlock("label", _hoisted_22$3, [_cache[58] || (_cache[58] = createTextVNode(
+						"固定预设名称",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuInput"], {
+						modelValue: $setup.settingsDraft.fixedApiPresetName,
+						"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.fixedApiPresetName = $event),
+						type: "text"
+					}, null, 8, ["modelValue"])])) : createCommentVNode("v-if", true)
+				]),
+				createBaseVNode("div", _hoisted_23$3, [createVNode($setup["AcuCheckbox"], {
+					modelValue: $setup.settingsDraft.outlinePreview,
+					"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.outlinePreview = $event),
+					label: "创建后先预览大纲"
+				}, null, 8, ["modelValue"]), createVNode($setup["AcuCheckbox"], {
+					modelValue: $setup.settingsDraft.autoNextStage,
+					"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.autoNextStage = $event),
+					label: "自动规划下一阶段"
+				}, null, 8, ["modelValue"])]),
+				createVNode($setup["AcuRulePairList"], {
+					modelValue: $setup.settingsDraft.contextExtractRules,
+					"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
+					label: "上下文提取规则"
+				}, null, 8, ["modelValue"]),
+				createVNode($setup["AcuRulePairList"], {
+					modelValue: $setup.settingsDraft.contextExcludeRules,
+					"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
+					label: "上下文排除规则"
+				}, null, 8, ["modelValue"]),
+				$setup.settingsError ? (openBlock(), createElementBlock(
+					"p",
+					_hoisted_24$3,
+					toDisplayString($setup.settingsError),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true),
+				createBaseVNode("div", _hoisted_25$3, [createVNode($setup["AcuButton"], {
+					variant: "primary",
+					loading: $setup.runtime.busy.value,
+					onClick: $setup.saveSettings
+				}, {
+					default: withCtx(() => [..._cache[59] || (_cache[59] = [createTextVNode(
+						"保存续写设置",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, ["loading"])])
+			]),
+			_: 1
+		})) : createCommentVNode("v-if", true),
+		$setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
+			key: 4,
+			title: "伪 Role 提示词",
+			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。"
+		}, {
+			default: withCtx(() => [
+				_cache[62] || (_cache[62] = createBaseVNode(
+					"h3",
+					null,
+					"阶段大纲提示词",
 					-1
 					/* CACHED */
 				)),
-				createBaseVNode(
-					"strong",
-					{ class: normalizeClass({ "is-running": $setup.loop.running.value }) },
-					toDisplayString($setup.loop.statusText.value),
-					3
-					/* TEXT, CLASS */
-				),
-				$setup.loop.timerText.value ? (openBlock(), createElementBlock(
-					"span",
-					_hoisted_10$8,
-					"剩余 " + toDisplayString($setup.loop.timerText.value),
-					1
-					/* TEXT */
-				)) : createCommentVNode("v-if", true)
-			]), createBaseVNode("div", _hoisted_11$8, [!$setup.loop.running.value ? (openBlock(), createBlock($setup["AcuButton"], {
-				key: 0,
-				variant: "primary",
-				disabled: !$setup.store.hasPrompt || $setup.store.loopTotalDuration <= 0,
-				onClick: $setup.loop.start
-			}, {
-				default: withCtx(() => [..._cache[7] || (_cache[7] = [createBaseVNode(
-					"i",
-					{ class: "fa-solid fa-play" },
+				createVNode($setup["AcuPromptSegments"], {
+					segments: $setup.settingsDraft.outlinePrompt,
+					"role-options": $setup.continuationRoleOptions,
+					"show-slot": false,
+					"show-enabled": true,
+					"allow-move": true,
+					onAdd: _cache[22] || (_cache[22] = ($event) => $setup.addPrompt("outlinePrompt")),
+					onDelete: _cache[23] || (_cache[23] = (index) => $setup.deletePrompt("outlinePrompt", index)),
+					onMove: _cache[24] || (_cache[24] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
+					onUpdate: _cache[25] || (_cache[25] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
+				}, null, 8, ["segments"]),
+				createBaseVNode("div", _hoisted_26$3, [createVNode($setup["AcuButton"], { onClick: _cache[26] || (_cache[26] = ($event) => $setup.restorePrompt("outline")) }, {
+					default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
+						"恢复大纲提示词默认值",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				})]),
+				_cache[63] || (_cache[63] = createBaseVNode(
+					"h3",
 					null,
+					"轮次指令提示词",
 					-1
 					/* CACHED */
-				), createTextVNode(
-					" 开始智能续写 ",
+				)),
+				createVNode($setup["AcuPromptSegments"], {
+					segments: $setup.settingsDraft.turnInstructionPrompt,
+					"role-options": $setup.continuationRoleOptions,
+					"show-slot": false,
+					"show-enabled": true,
+					"allow-move": true,
+					onAdd: _cache[27] || (_cache[27] = ($event) => $setup.addPrompt("turnInstructionPrompt")),
+					onDelete: _cache[28] || (_cache[28] = (index) => $setup.deletePrompt("turnInstructionPrompt", index)),
+					onMove: _cache[29] || (_cache[29] = (index, delta) => $setup.movePrompt("turnInstructionPrompt", index, delta)),
+					onUpdate: _cache[30] || (_cache[30] = (index, patch) => $setup.updatePrompt("turnInstructionPrompt", index, patch))
+				}, null, 8, ["segments"]),
+				createBaseVNode("div", _hoisted_27$3, [createVNode($setup["AcuButton"], { onClick: _cache[31] || (_cache[31] = ($event) => $setup.restorePrompt("turn_instruction")) }, {
+					default: withCtx(() => [..._cache[61] || (_cache[61] = [createTextVNode(
+						"恢复轮次指令默认值",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				})]),
+				_cache[64] || (_cache[64] = createBaseVNode(
+					"p",
+					{ class: "acu-v2-continuation-page__meta" },
+					"可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$CURRENT_STAGE、$CURRENT_NODE、$CURRENT_TURN_GOAL、$TURN_NUMBER、$NODE_TURN_NUMBER、$VALIDATION_ERRORS。",
 					-1
 					/* CACHED */
-				)])]),
-				_: 1
-			}, 8, ["disabled", "onClick"])) : (openBlock(), createBlock($setup["AcuButton"], {
-				key: 1,
-				variant: "danger",
-				onClick: $setup.loop.stop
-			}, {
-				default: withCtx(() => [..._cache[8] || (_cache[8] = [createBaseVNode(
-					"i",
-					{ class: "fa-solid fa-stop" },
-					null,
-					-1
-					/* CACHED */
-				), createTextVNode(
-					" 停止智能续写 ",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}, 8, ["onClick"]))])]),
+				))
+			]),
 			_: 1
-		}, 8, ["title", "description"])])]),
-		_: 1
-	})]);
+		})) : createCommentVNode("v-if", true)
+	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-5dab53f4"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-1d3e7a9c"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
