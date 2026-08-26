@@ -114,7 +114,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
     const invalidRole = buildEnvelope_ACU() as any;
     invalidRole.settings.outlinePrompt = [{ role: 'tool', content: 'invalid', deletable: true }];
     const invalidContent = buildEnvelope_ACU() as any;
-    invalidContent.settings.turnInstructionPrompt = [{ role: 'user', content: '   ', deletable: true }];
+    invalidContent.settings.agentPrompts.main = [{ role: 'user', content: '   ', deletable: true }];
 
     for (const envelope of [invalidRole, invalidContent]) {
       const chat: any[] = [{ _qrf_continuation: envelope }];

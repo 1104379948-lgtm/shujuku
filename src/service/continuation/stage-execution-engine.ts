@@ -1,6 +1,6 @@
-import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationInternalAiRequestIdentity_ACU, type ContinuationSettings_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type StageNode_ACU, type StageRevision_ACU, type StageTurn_ACU, type TurnAttemptIdentity_ACU } from './model';
-import { ContinuationTurnInstructionGenerator_ACU, type ContinuationTurnInstructionResult_ACU } from './turn-instruction-generator';
-import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
+import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationInternalAiRequestIdentity_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type StageNode_ACU, type StageRevision_ACU, type StageTurn_ACU, type TurnAttemptIdentity_ACU } from './model';
+import type { ContinuationAgentTurnPlanResult_ACU } from './agent/agent-model';
+import type { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
 
 export interface ContinuationExecutionSnapshot_ACU {
   envelope: ContinuationEnvelope_ACU;
@@ -15,15 +15,14 @@ export interface ContinuationExecutionSnapshot_ACU {
 
 export interface ContinuationPreparedTurnInstruction_ACU {
   identity: TurnAttemptIdentity_ACU;
-  instruction: ContinuationTurnInstructionResult_ACU;
+  instruction: ContinuationAgentTurnPlanResult_ACU;
 }
 
 export interface StageExecutionEngineDependencies_ACU {
   readEnvelope: () => ContinuationEnvelope_ACU | null;
   getChatIdentity: () => string;
   allocateId: (prefix: string) => string;
-  createResolvers: (snapshot: ContinuationExecutionSnapshot_ACU) => Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
-  generator: ContinuationTurnInstructionGenerator_ACU;
+  planner: ContinuationAgentTurnPlanner_ACU;
 }
 
 function fail_ACU(code: 'CONTINUATION_TASK_NOT_FOUND' | 'CONTINUATION_TASK_STATE_INVALID' | 'CONTINUATION_INTERNAL_REQUEST_STALE', message: string): never {
@@ -52,6 +51,7 @@ export class StageExecutionEngine_ACU {
   async prepareCurrentTurnInstruction(
     isLeaseCurrent: () => boolean = () => true,
     existingAttempt?: TurnAttemptIdentity_ACU,
+    reviseOutline?: (replanInstruction: string) => Promise<void>,
   ): Promise<ContinuationPreparedTurnInstruction_ACU> {
     const snapshot = currentSnapshot_ACU(this.dependencies.readEnvelope());
     const identity: TurnAttemptIdentity_ACU = existingAttempt ?? {
@@ -78,11 +78,12 @@ export class StageExecutionEngine_ACU {
         return false;
       }
     };
-    const instruction = await this.dependencies.generator.generate({
+    const instruction = await this.dependencies.planner.plan({
       settings: snapshot.envelope.settings,
+      snapshot,
       createInternalRequestIdentity: () => ({ ...identity, requestId: this.dependencies.allocateId('turn-request'), source: 'turn_instruction' }),
       isInternalRequestCurrent: isCurrent,
-      resolvers: this.dependencies.createResolvers(snapshot),
+      reviseOutline,
     });
     return { identity, instruction };
   }

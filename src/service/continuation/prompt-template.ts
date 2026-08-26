@@ -5,20 +5,30 @@ import {
   type ContinuationPromptSegment_ACU,
   type ContinuationSettings_ACU,
 } from './model';
+import { buildDefaultContinuationOutlinePrompt_ACU } from './defaults';
 import {
-  buildDefaultContinuationOutlinePrompt_ACU,
-  buildDefaultContinuationTurnInstructionPrompt_ACU,
-} from './defaults';
+  buildDefaultAgentBeatPlannerPrompt_ACU,
+  buildDefaultAgentMainPrompt_ACU,
+  buildDefaultAgentMainlinePlannerPrompt_ACU,
+  buildDefaultAgentMaintainerPrompt_ACU,
+  buildDefaultAgentReviewerPrompt_ACU,
+} from './agent/agent-defaults';
 
 export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
   '$ORIGIN_INSTRUCTION', '$1', '$LAST_STAGE_CHRONICLES', '$EARLIER_STAGE_SUMMARIES',
   '$RECENT_STORY', '$STAGE_HISTORY', '$COMPLETED_STAGE_PART', '$REPLAN_INSTRUCTION',
   '$TURN_RANGE', '$REMAINING_TURNS', '$CURRENT_STAGE', '$CURRENT_NODE',
   '$CURRENT_TURN_GOAL', '$TURN_NUMBER', '$NODE_TURN_NUMBER', '$VALIDATION_ERRORS',
+  // 以下为 Agent 续写链路专用占位符。$TABLE:<表名> 形式的动态读集不在此列，
+  // 它只作为读集标识符，由解析器汇入 $AGENT_READ_MATERIALS。
+  '$HISTORY_ANCHOR', '$UNSETTLED_RANGE', '$AGENT_CATALOG', '$MODULE_CATALOG',
+  '$TABLE_CATALOG', '$TABLE_GLOBAL', '$TABLE_CHARACTERS', '$TABLE_CHRONICLES',
+  '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$BUDGET', '$TOOL_RESULTS',
+  '$AGENT_READ_MATERIALS', '$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$USER_INTENT', '$OUTLINE_WINDOW',
 ] as const;
 
 export type ContinuationPromptPlaceholder_ACU = typeof CONTINUATION_PROMPT_PLACEHOLDERS_ACU[number];
-export type ContinuationPromptKind_ACU = 'outline' | 'turn_instruction';
+export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer';
 type PlaceholderResolver_ACU = () => string | Promise<string | null | undefined> | null | undefined;
 
 function failPrompt_ACU(code: 'CONTINUATION_ENVELOPE_INVALID' | 'CONTINUATION_PROMPT_INVALID' | 'CONTINUATION_PROMPT_EMPTY', phase: ContinuationErrorPhase_ACU, message: string, details?: Record<string, unknown>): never {
@@ -53,8 +63,19 @@ export async function renderContinuationPrompt_ACU(segments: unknown, resolvers:
   return { usedPlaceholders, messages: enabledSegments.map(segment => ({ role: segment.role, content: segment.content.replace(tokenPattern, token => values.get(token as ContinuationPromptPlaceholder_ACU) ?? '') })) };
 }
 
+/**
+ * 把指定提示词组恢复为默认值。
+ * @param settings 当前设置草稿
+ * @param kind 要恢复的提示词组
+ * @returns 新的设置对象，只替换目标提示词组
+ */
 export function restoreContinuationPromptDefault_ACU(settings: ContinuationSettings_ACU, kind: ContinuationPromptKind_ACU): ContinuationSettings_ACU {
-  return kind === 'outline'
-    ? { ...settings, outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU() }
-    : { ...settings, turnInstructionPrompt: buildDefaultContinuationTurnInstructionPrompt_ACU() };
+  if (kind === 'outline') return { ...settings, outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU() };
+  const agentPrompts = { ...settings.agentPrompts };
+  if (kind === 'agent_main') agentPrompts.main = buildDefaultAgentMainPrompt_ACU();
+  if (kind === 'agent_maintainer') agentPrompts.maintainer = buildDefaultAgentMaintainerPrompt_ACU();
+  if (kind === 'agent_mainline') agentPrompts.mainlinePlanner = buildDefaultAgentMainlinePlannerPrompt_ACU();
+  if (kind === 'agent_beat') agentPrompts.beatPlanner = buildDefaultAgentBeatPlannerPrompt_ACU();
+  if (kind === 'agent_reviewer') agentPrompts.reviewer = buildDefaultAgentReviewerPrompt_ACU();
+  return { ...settings, agentPrompts };
 }

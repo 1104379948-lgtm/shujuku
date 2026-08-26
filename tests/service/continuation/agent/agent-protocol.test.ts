@@ -1,0 +1,126 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  compactAgentProtocolError_ACU,
+  extractFirstJsonObject_ACU,
+  parseAgentJsonPayload_ACU,
+  parseAgentMainAction_ACU,
+  parseAgentMaintainerOutput_ACU,
+  parseAgentPlannerOutput_ACU,
+  parseAgentReviewerOutput_ACU,
+} from '../../../../src/service/continuation/agent/agent-protocol';
+import { AGENT_PREFILLS_ACU } from '../../../../src/service/continuation/agent/agent-defaults';
+
+describe('Agent 文本协议 JSON 提取', () => {
+  it('剥掉 Markdown 围栏与前后解释文本', () => {
+    const raw = '好的，我的决策如下：\n```json\n{"action":"finalize","instruction":"写下去"}\n```\n以上。';
+    expect(extractFirstJsonObject_ACU(raw)).toBe('{"action":"finalize","instruction":"写下去"}');
+  });
+
+  it('不会被字符串内的花括号与转义引号骗过', () => {
+    const raw = '{"instruction":"他说 \\"进来 {吧}\\"","action":"finalize"}';
+    expect(JSON.parse(extractFirstJsonObject_ACU(raw)!)).toMatchObject({ action: 'finalize' });
+  });
+
+  it('没有配平对象时返回 null', () => {
+    expect(extractFirstJsonObject_ACU('{"action":"finalize"')).toBeNull();
+    expect(extractFirstJsonObject_ACU('没有任何 JSON')).toBeNull();
+  });
+
+  it('同时容忍完整重新输出与仅续写预填充两种形态', () => {
+    const full = parseAgentJsonPayload_ACU('{"thought":"够了","action":"finalize","instruction":"写"}', AGENT_PREFILLS_ACU.main);
+    expect(full).toMatchObject({ action: 'finalize' });
+
+    const continued = parseAgentJsonPayload_ACU('够了",\n  "action": "finalize",\n  "instruction": "写"\n}', AGENT_PREFILLS_ACU.main);
+    expect(continued).toMatchObject({ thought: '够了', action: 'finalize', instruction: '写' });
+  });
+
+  it('空返回与无 JSON 返回都按协议错误处理', () => {
+    expect(() => parseAgentJsonPayload_ACU('   ')).toThrowError(/返回为空/);
+    expect(() => parseAgentJsonPayload_ACU('我拒绝输出 JSON')).toThrowError(/不包含可解析的 JSON/);
+  });
+});
+
+describe('主 Agent 动作解析', () => {
+  it('delegate 需要非空派工列表，且每项都要有代理名与任务', () => {
+    const action = parseAgentMainAction_ACU({ action: 'delegate', thought: '先结算', delegations: [{ agentName: 'hook-cognition-maintainer', prompt: '结算未处理正文', reads: ['$HISTORY_UNSETTLED'], writes: ['$HOOKS_LEDGER'] }] }, true);
+    expect(action).toMatchObject({ kind: 'delegate' });
+
+    expect(() => parseAgentMainAction_ACU({ action: 'delegate', delegations: [] }, true)).toThrowError(/非空的 delegations/);
+    expect(() => parseAgentMainAction_ACU({ action: 'delegate', delegations: [{ prompt: '干活' }] }, true)).toThrowError(/agentName 不能为空/);
+  });
+
+  it('预算最后一轮禁用 delegate', () => {
+    expect(() => parseAgentMainAction_ACU({ action: 'delegate', delegations: [{ agentName: 'mainline-planner', prompt: '策划' }] }, false)).toThrowError(/预算最后一轮/);
+  });
+
+  it('finalize 必须给出 instruction，constraints 缺省为 null', () => {
+    expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '本轮指导', summary: '要点' }, true)).toMatchObject({ kind: 'finalize', constraints: null });
+    expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '本轮指导', constraints: { current: ['红线一'], retired: [] } }, true))
+      .toMatchObject({ constraints: { current: ['红线一'], retired: [] } });
+    expect(() => parseAgentMainAction_ACU({ action: 'finalize' }, true)).toThrowError(/非空 instruction/);
+  });
+
+  it('revise_outline 与 block 都必须带明确理由', () => {
+    expect(parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改慢一点' }, true)).toMatchObject({ kind: 'revise_outline' });
+    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline' }, true)).toThrowError(/replanInstruction/);
+    expect(parseAgentMainAction_ACU({ action: 'block', reason: '关键资料缺失', unresolved: ['缺角色表'] }, true)).toMatchObject({ kind: 'block', unresolved: ['缺角色表'] });
+    expect(() => parseAgentMainAction_ACU({ action: 'block' }, true)).toThrowError(/必须提供 reason/);
+  });
+
+  it('未知动作直接拒绝', () => {
+    expect(() => parseAgentMainAction_ACU({ action: 'write_story' }, true)).toThrowError(/action 必须是/);
+  });
+});
+
+describe('子代理输出解析', () => {
+  it('维护类输出保留写集事务并把非法枚举收敛到安全默认值', () => {
+    const output = parseAgentMaintainerOutput_ACU({
+      summary: '结算完成',
+      delta: {
+        expectedRevisions: { hooks: 2, infoGap: '坏值' },
+        hooks: [{ action: 'upsert', id: 'H1', summary: '内容', status: '瞎写', importance: '瞎写', plantedIndex: -3 }],
+        infoGap: [{ action: 'upsert', id: 'E1', topic: '主题', revealStatus: '瞎写', revealIndex: 4, characterKnowledge: [{ name: '林瑶', knows: '不知' }, { knows: '缺名字' }] }],
+        constraintProposals: ['建议登记红线', ''],
+      },
+      needMore: ['$TABLE_CHRONICLES'],
+    });
+
+    expect(output.delta.expectedRevisions).toEqual({ hooks: 2 });
+    expect(output.delta.hooks[0]).toMatchObject({ status: 'planted', importance: 'mid', plantedIndex: -1 });
+    expect(output.delta.infoGap[0].revealStatus).toBe('unrevealed');
+    expect(output.delta.infoGap[0].characterKnowledge).toEqual([{ name: '林瑶', knows: '不知' }]);
+    expect(output.delta.constraintProposals).toEqual(['建议登记红线']);
+    expect(output.needMore).toEqual(['$TABLE_CHRONICLES']);
+  });
+
+  it('维护类的非法 action 与非数组 delta 都被拒绝', () => {
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { hooks: [{ action: 'delete', id: 'H1' }] } })).toThrowError(/upsert 或 retire/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { infoGap: '不是数组' } })).toThrowError(/必须是数组/);
+  });
+
+  it('策划类要么给建议，要么申请补充资料', () => {
+    expect(parseAgentPlannerOutput_ACU({ summary: '要点', recommendation: '这样推进', mustPreserve: ['林瑶有伤'], risks: ['提前回收'] }))
+      .toMatchObject({ recommendation: '这样推进', mustPreserve: ['林瑶有伤'] });
+    expect(parseAgentPlannerOutput_ACU({ needMore: ['$HOOKS_LEDGER'] })).toMatchObject({ recommendation: '', needMore: ['$HOOKS_LEDGER'] });
+    expect(() => parseAgentPlannerOutput_ACU({ summary: '只有摘要' })).toThrowError(/必须给出 recommendation/);
+  });
+
+  it('审查类判词非法时优先走补充资料而不是硬失败', () => {
+    expect(parseAgentReviewerOutput_ACU({ verdict: 'revise', reason: '与 H1 冲突', fixes: ['改为部分回收'] }))
+      .toMatchObject({ verdict: 'revise', fixes: ['改为部分回收'] });
+    expect(parseAgentReviewerOutput_ACU({ verdict: '说不清', needMore: ['$ACTIVE_CONSTRAINTS'] })).toMatchObject({ verdict: 'revise', needMore: ['$ACTIVE_CONSTRAINTS'] });
+    expect(() => parseAgentReviewerOutput_ACU({ verdict: '说不清' })).toThrowError(/verdict 必须是/);
+  });
+});
+
+describe('协议错误压缩', () => {
+  it('把校验错误压成带错误码的单行原因串', () => {
+    try {
+      parseAgentMainAction_ACU({ action: 'write_story' }, true);
+    } catch (error) {
+      expect(compactAgentProtocolError_ACU(error)).toContain('CONTINUATION_AGENT_PROTOCOL_INVALID');
+    }
+    expect(compactAgentProtocolError_ACU(new Error('普通错误'))).toBe('普通错误');
+  });
+});

@@ -5,7 +5,7 @@ import { buildMigratedContinuationEnvelope_ACU, stripLegacyContinuationLoopField
 import { ContinuationOrchestrator_ACU, type ContinuationPlanningContext_ACU } from './continuation-orchestrator';
 import { ContinuationOutlinePlanner_ACU } from './outline-planner';
 import { StageExecutionEngine_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
-import { ContinuationTurnInstructionGenerator_ACU } from './turn-instruction-generator';
+import { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
 import { ContinuationWorldbookContext_ACU } from './worldbook-context';
 import { createSillyTavernContinuationHostBridge_ACU } from './sillytavern-host-bridge';
 import { registerContinuationHostGenerationBridge_ACU } from './host-generation-bridge-registry';
@@ -131,13 +131,12 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
   const store = new FirstFloorContinuationStore_ACU();
   const worldbook = new ContinuationWorldbookContext_ACU();
   const planner = new ContinuationOutlinePlanner_ACU();
-  const generator = new ContinuationTurnInstructionGenerator_ACU();
+  const agentPlanner = new ContinuationAgentTurnPlanner_ACU();
   const executionEngine = new StageExecutionEngine_ACU({
     readEnvelope: () => store.readPersisted(),
     getChatIdentity: getChatIdentity_ACU,
     allocateId: allocateContinuationId_ACU,
-    createResolvers: snapshot => buildResolvers_ACU(snapshot.task, snapshot.stage, snapshot.revision, worldbook, snapshot),
-    generator,
+    planner: agentPlanner,
   });
   const orchestrator = new ContinuationOrchestrator_ACU({
     store,

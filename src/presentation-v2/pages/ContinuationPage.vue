@@ -181,21 +181,36 @@
       <h3>阶段大纲提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.outlinePrompt" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('outlinePrompt')" @delete="index => deletePrompt('outlinePrompt', index)" @move="(index, delta) => movePrompt('outlinePrompt', index, delta)" @update="(index, patch) => updatePrompt('outlinePrompt', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('outline')">恢复大纲提示词默认值</AcuButton></div>
-      <h3>轮次指令提示词</h3>
-      <AcuPromptSegments :segments="settingsDraft.turnInstructionPrompt" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('turnInstructionPrompt')" @delete="index => deletePrompt('turnInstructionPrompt', index)" @move="(index, delta) => movePrompt('turnInstructionPrompt', index, delta)" @update="(index, patch) => updatePrompt('turnInstructionPrompt', index, patch)" />
-      <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('turn_instruction')">恢复轮次指令默认值</AcuButton></div>
-      <p class="acu-v2-continuation-page__meta">可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$CURRENT_STAGE、$CURRENT_NODE、$CURRENT_TURN_GOAL、$TURN_NUMBER、$NODE_TURN_NUMBER、$VALIDATION_ERRORS。</p>
+      <p class="acu-v2-continuation-page__meta">大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$VALIDATION_ERRORS。</p>
+
+      <h3>主 Agent 提示词</h3>
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.main" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('main')" @delete="index => deletePrompt('main', index)" @move="(index, delta) => movePrompt('main', index, delta)" @update="(index, patch) => updatePrompt('main', index, patch)" />
+      <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_main')">恢复主 Agent 默认值</AcuButton></div>
+      <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记真实历史插入位置，该段本身不发送。删掉它会让真实历史退回到序列最前面。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$OUTLINE_WINDOW、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET、$TOOL_RESULTS。</p>
+
+      <h3>伏笔与认知维护子代理提示词</h3>
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.maintainer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('maintainer')" @delete="index => deletePrompt('maintainer', index)" @move="(index, delta) => movePrompt('maintainer', index, delta)" @update="(index, patch) => updatePrompt('maintainer', index, patch)" />
+      <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_maintainer')">恢复维护子代理默认值</AcuButton></div>
+
+      <h3>主线推进策划子代理提示词</h3>
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.mainlinePlanner" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('mainlinePlanner')" @delete="index => deletePrompt('mainlinePlanner', index)" @move="(index, delta) => movePrompt('mainlinePlanner', index, delta)" @update="(index, patch) => updatePrompt('mainlinePlanner', index, patch)" />
+      <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_mainline')">恢复主线策划默认值</AcuButton></div>
+
+      <h3>伏笔与节拍策划子代理提示词</h3>
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.beatPlanner" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('beatPlanner')" @delete="index => deletePrompt('beatPlanner', index)" @move="(index, delta) => movePrompt('beatPlanner', index, delta)" @update="(index, patch) => updatePrompt('beatPlanner', index, patch)" />
+      <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_beat')">恢复节拍策划默认值</AcuButton></div>
+
+      <h3>连续性审查子代理提示词</h3>
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.reviewer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('reviewer')" @delete="index => deletePrompt('reviewer', index)" @move="(index, delta) => movePrompt('reviewer', index, delta)" @update="(index, patch) => updatePrompt('reviewer', index, patch)" />
+      <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_reviewer')">恢复审查子代理默认值</AcuButton></div>
+      <p class="acu-v2-continuation-page__meta">子代理可用占位符：$AGENT_READ_MATERIALS（按授权读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（本次写入权限）。</p>
     </AcuPanel>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import {
-  buildDefaultContinuationOutlinePrompt_ACU,
-  buildDefaultContinuationTurnInstructionPrompt_ACU,
-} from '../../service/continuation/defaults';
-import { restoreContinuationPromptDefault_ACU } from '../../service/continuation/prompt-template';
+import { restoreContinuationPromptDefault_ACU, type ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template';
 import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU, StageOutline_ACU } from '../../service/continuation/model';
 import AcuButton from '../components/_lib/AcuButton.vue';
 import AcuCheckbox from '../components/_lib/AcuCheckbox.vue';
@@ -263,7 +278,13 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
     contextExtractRules: settings.contextExtractRules.map(rule => ({ ...rule })),
     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
-    turnInstructionPrompt: settings.turnInstructionPrompt.map(segment => ({ ...segment })),
+    agentPrompts: {
+      main: settings.agentPrompts.main.map(segment => ({ ...segment })),
+      maintainer: settings.agentPrompts.maintainer.map(segment => ({ ...segment })),
+      mainlinePlanner: settings.agentPrompts.mainlinePlanner.map(segment => ({ ...segment })),
+      beatPlanner: settings.agentPrompts.beatPlanner.map(segment => ({ ...segment })),
+      reviewer: settings.agentPrompts.reviewer.map(segment => ({ ...segment })),
+    },
   };
 }
 
@@ -349,31 +370,39 @@ async function saveSettings(): Promise<void> {
   }
 }
 
-type PromptKey = 'outlinePrompt' | 'turnInstructionPrompt';
+type PromptKey = 'outlinePrompt' | 'main' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer';
+
+/** 取出指定提示词组的数组。大纲组在设置根层，五组 Agent 提示词在 agentPrompts 下。 */
+function promptList(key: PromptKey): ContinuationPromptSegment_ACU[] | null {
+  if (!settingsDraft.value) return null;
+  if (key === 'outlinePrompt') return settingsDraft.value.outlinePrompt;
+  return settingsDraft.value.agentPrompts[key];
+}
 
 function addPrompt(key: PromptKey): void {
-  if (!settingsDraft.value) return;
-  settingsDraft.value[key].push({ role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true });
+  promptList(key)?.push({ role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true });
 }
 
 function deletePrompt(key: PromptKey, index: number): void {
-  if (!settingsDraft.value || settingsDraft.value[key][index]?.deletable === false) return;
-  settingsDraft.value[key].splice(index, 1);
+  const prompts = promptList(key);
+  if (!prompts || prompts[index]?.deletable === false) return;
+  prompts.splice(index, 1);
 }
 
 function movePrompt(key: PromptKey, index: number, delta: -1 | 1): void {
-  const prompts = settingsDraft.value?.[key];
+  const prompts = promptList(key);
   const target = index + delta;
   if (!prompts || target < 0 || target >= prompts.length) return;
   [prompts[index], prompts[target]] = [prompts[target], prompts[index]];
 }
 
 function updatePrompt(key: PromptKey, index: number, patch: Partial<ContinuationPromptSegment_ACU>): void {
-  const current = settingsDraft.value?.[key][index];
-  if (current) settingsDraft.value![key][index] = { ...current, ...patch };
+  const prompts = promptList(key);
+  const current = prompts?.[index];
+  if (prompts && current) prompts[index] = { ...current, ...patch };
 }
 
-function restorePrompt(kind: 'outline' | 'turn_instruction'): void {
+function restorePrompt(kind: ContinuationPromptKind_ACU): void {
   if (!settingsDraft.value) return;
   settingsDraft.value = restoreContinuationPromptDefault_ACU(settingsDraft.value, kind);
 }

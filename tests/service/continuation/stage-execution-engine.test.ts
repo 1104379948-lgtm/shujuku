@@ -22,17 +22,18 @@ function envelope() {
 describe('StageExecutionEngine_ACU', () => {
   it('binds every internal retry to one durable turn attempt identity', async () => {
     const identities: any[] = [];
-    const generator = { generate: vi.fn(async request => {
+    const planner = { plan: vi.fn(async request => {
       const first = request.createInternalRequestIdentity(0);
       const retry = request.createInternalRequestIdentity(1);
       identities.push(first, retry);
       expect(request.isInternalRequestCurrent(first)).toBe(true);
       expect(request.isInternalRequestCurrent(retry)).toBe(true);
+      expect(request.snapshot.turn.goal).toBe('轮次 1');
       return { instruction: '最终文本', attempts: 2, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } };
     }) };
     const engine = new StageExecutionEngine_ACU({
       readEnvelope: envelope, getChatIdentity: () => 'chat-a', allocateId: prefix => prefix === 'attempt' ? 'attempt-a' : 'request-a',
-      createResolvers: () => ({ $CURRENT_TURN_GOAL: () => '轮次 1' }), generator: generator as any,
+      planner: planner as any,
     });
 
     const prepared = await engine.prepareCurrentTurnInstruction();
@@ -43,7 +44,7 @@ describe('StageExecutionEngine_ACU', () => {
 
   it('marks an in-flight instruction stale when the lease is revoked', async () => {
     let current = true;
-    const generator = { generate: vi.fn(async request => {
+    const planner = { plan: vi.fn(async request => {
       const identity = request.createInternalRequestIdentity(0);
       current = false;
       expect(request.isInternalRequestCurrent(identity)).toBe(false);
@@ -51,9 +52,24 @@ describe('StageExecutionEngine_ACU', () => {
     }) };
     const engine = new StageExecutionEngine_ACU({
       readEnvelope: envelope, getChatIdentity: () => 'chat-a', allocateId: prefix => `${prefix}-a`,
-      createResolvers: () => ({}), generator: generator as any,
+      planner: planner as any,
     });
 
     await expect(engine.prepareCurrentTurnInstruction(() => current)).rejects.toThrow('stale');
+  });
+
+  it('forwards the outline revision callback to the planner', async () => {
+    const revised: string[] = [];
+    const planner = { plan: vi.fn(async request => {
+      await request.reviseOutline?.('把剩余节点改成慢推进');
+      return { instruction: '最终文本', attempts: 1, apiPreset: { presetName: '', source: 'current', reason: 'current_configuration' } };
+    }) };
+    const engine = new StageExecutionEngine_ACU({
+      readEnvelope: envelope, getChatIdentity: () => 'chat-a', allocateId: prefix => `${prefix}-a`,
+      planner: planner as any,
+    });
+
+    await engine.prepareCurrentTurnInstruction(() => true, undefined, async instruction => { revised.push(instruction); });
+    expect(revised).toEqual(['把剩余节点改成慢推进']);
   });
 });

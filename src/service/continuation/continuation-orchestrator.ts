@@ -222,7 +222,11 @@ export class ContinuationOrchestrator_ACU {
       const stage = getActiveStage_ACU(task);
       try {
         const retryAttempt = task.pendingHostTurn?.status === 'retry_ready' ? task.pendingHostTurn.identity : undefined;
-        const preparedTurn = await this.dependencies.executionEngine.prepareCurrentTurnInstruction(() => this.isLeaseCurrent_ACU(chatIdentity, lease), retryAttempt);
+        const preparedTurn = await this.dependencies.executionEngine.prepareCurrentTurnInstruction(
+          () => this.isLeaseCurrent_ACU(chatIdentity, lease),
+          retryAttempt,
+          async replanInstruction => { await this.replanWithinLease_ACU(chatIdentity, lease, replanInstruction); },
+        );
         return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started!), preparedTurn };
       } catch (error) {
         await this.pauseAfterTurnPreparationFailure_ACU(chatIdentity, task.taskId, stage.stageId, stage.activeRevision, error);
@@ -416,10 +420,23 @@ export class ContinuationOrchestrator_ACU {
   async replanRemaining(input: ReplanContinuationInput_ACU = {}): Promise<ContinuationOrchestratorResult_ACU> {
     const replanInstruction = typeof input.instruction === 'string' ? input.instruction.trim() : '';
     const chatIdentity = this.requireChatIdentity_ACU();
+    this.invalidateLease_ACU(chatIdentity);
+    return this.withLease_ACU((_identity, lease) => this.replanWithinLease_ACU(chatIdentity, lease, replanInstruction));
+  }
+
+  /**
+   * 重新规划当前阶段剩余部分的事务内核，不涉及租约获取或作废。
+   * 已持有租约的调用方（如 Agent 主循环的 revise_outline）直接复用这里，
+   * 因为 withLease_ACU 不可重入，嵌套获取会被判为「已有操作正在执行」。
+   * @param chatIdentity 当前聊天身份
+   * @param lease 调用方已持有的租约
+   * @param replanInstruction 重规划补充要求
+   * @returns 重规划后的任务结果
+   */
+  async replanWithinLease_ACU(chatIdentity: string, lease: Lease_ACU, replanInstruction: string): Promise<ContinuationOrchestratorResult_ACU> {
     const sourceTask = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted()));
     const sourceGuard = guardForTask_ACU(chatIdentity, sourceTask);
-    this.invalidateLease_ACU(chatIdentity);
-    return this.withLease_ACU(async (_identity, lease) => {
+    {
       let planningEnvelope: ContinuationEnvelope_ACU | null = null;
       let planningContext: ContinuationPlanningContext_ACU | null = null;
       await this.dependencies.store.updatePersistedAtomically(current => {
@@ -467,7 +484,7 @@ export class ContinuationOrchestrator_ACU {
         await this.pauseAfterPlanningFailure_ACU(chatIdentity, context.task.taskId, stage.stageId, stage.activeRevision, error);
         throw error;
       }
-    });
+    }
   }
 
   async abandonAndCreate(input: CreateContinuationTaskInput_ACU & { confirmAbandon?: boolean }): Promise<ContinuationOrchestratorResult_ACU> {

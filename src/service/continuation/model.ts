@@ -6,7 +6,7 @@ export type ContinuationStageStatus_ACU = 'planning' | 'awaiting_review' | 'runn
 export type ContinuationRevisionReason_ACU = 'initial' | 'auto_next_stage' | 'manual_replan';
 export type ContinuationInternalCallStatus_ACU = 'idle' | 'planning_outline' | 'generating_turn_instruction' | 'retry_waiting' | 'failed';
 export type ContinuationStopReason_ACU = 'manual' | 'duration_reached' | 'stage_limit_reached' | 'outline_validation_failed' | 'internal_ai_retry_exhausted' | 'generation_retry_exhausted' | 'host_input_unavailable' | 'api_preset_missing' | 'state_invalid' | 'chat_changed' | 'completed';
-export type ContinuationErrorPhase_ACU = 'load' | 'persist' | 'outline_prompt' | 'outline_call' | 'outline_parse' | 'outline_validate' | 'turn_prompt' | 'turn_call' | 'host_send' | 'generation_evaluate' | 'replan';
+export type ContinuationErrorPhase_ACU = 'load' | 'persist' | 'outline_prompt' | 'outline_call' | 'outline_parse' | 'outline_validate' | 'turn_prompt' | 'turn_call' | 'host_send' | 'generation_evaluate' | 'replan' | 'agent_loop' | 'agent_delegate' | 'agent_persist';
 
 export type ContinuationErrorCode_ACU =
   | 'CONTINUATION_CONFIG_MISSING'
@@ -51,7 +51,14 @@ export type ContinuationErrorCode_ACU =
   | 'CONTINUATION_TASK_NOT_FOUND'
   | 'CONTINUATION_TASK_STATE_INVALID'
   | 'CONTINUATION_HOST_INPUT_UNAVAILABLE'
-  | 'CONTINUATION_GENERATION_TAGS_MISSING';
+  | 'CONTINUATION_GENERATION_TAGS_MISSING'
+  | 'CONTINUATION_AGENT_PROTOCOL_INVALID'
+  | 'CONTINUATION_AGENT_ITERATIONS_EXHAUSTED'
+  | 'CONTINUATION_AGENT_BLOCKED'
+  | 'CONTINUATION_AGENT_SUBAGENT_FAILED'
+  | 'CONTINUATION_AGENT_WRITE_REJECTED'
+  | 'CONTINUATION_AGENT_OUTLINE_REPLANNED'
+  | 'CONTINUATION_AGENT_SNAPSHOT_INVALID';
 
 export interface ContinuationError_ACU {
   code: ContinuationErrorCode_ACU;
@@ -87,6 +94,19 @@ export interface ContinuationPromptSegment_ACU {
   deletable?: boolean;
   pinned?: boolean;
 }
+
+/** 一组 Agent 提示词。每个 key 对应一个内部请求的伪 role + 预填充提示词组。 */
+export interface ContinuationAgentPrompts_ACU {
+  main: ContinuationPromptSegment_ACU[];
+  maintainer: ContinuationPromptSegment_ACU[];
+  mainlinePlanner: ContinuationPromptSegment_ACU[];
+  beatPlanner: ContinuationPromptSegment_ACU[];
+  reviewer: ContinuationPromptSegment_ACU[];
+}
+
+export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'] as const;
+
+export type ContinuationAgentPromptKey_ACU = typeof CONTINUATION_AGENT_PROMPT_KEYS_ACU[number];
 
 export interface ContinuationTurnRange_ACU {
   min: number;
@@ -133,7 +153,8 @@ export interface ContinuationSettings_ACU {
   apiPresetMode: 'current' | 'fixed';
   fixedApiPresetName: string;
   outlinePrompt: ContinuationPromptSegment_ACU[];
-  turnInstructionPrompt: ContinuationPromptSegment_ACU[];
+  agentPrompts: ContinuationAgentPrompts_ACU;
+  promptForceDefaultVersion?: string;
 }
 
 export interface ContinuationEnvelope_ACU {
@@ -208,7 +229,7 @@ export interface ContinuationPendingHostTurn_ACU {
   status: 'awaiting_generation' | 'retry_ready' | 'exhausted';
 }
 
-export type ContinuationInternalAiSource_ACU = 'outline' | 'turn_instruction';
+export type ContinuationInternalAiSource_ACU = 'outline' | 'turn_instruction' | 'agent_main' | 'agent_subagent';
 
 /**
  * Request-scoped provenance for an internal AI call. It deliberately contains

@@ -105,7 +105,13 @@ function setSettings(): void {
     contextTurnCount: 3, contextExtractRules: [], contextExcludeRules: [],
     apiPresetMode: 'current', fixedApiPresetName: '',
     outlinePrompt: [{ role: 'system', content: '规划', enabled: true, deletable: true }],
-    turnInstructionPrompt: [{ role: 'user', content: '续写', enabled: true, deletable: true }],
+    agentPrompts: {
+      main: [{ role: 'system', content: '主控', enabled: true, deletable: true }],
+      maintainer: [{ role: 'system', content: '维护', enabled: true, deletable: true }],
+      mainlinePlanner: [{ role: 'system', content: '主线', enabled: true, deletable: true }],
+      beatPlanner: [{ role: 'system', content: '节拍', enabled: true, deletable: true }],
+      reviewer: [{ role: 'system', content: '审查', enabled: true, deletable: true }],
+    },
   };
 }
 

@@ -1,0 +1,133 @@
+import { describe, expect, it } from 'vitest';
+
+import { renderAgentModuleCatalog_ACU, renderAgentSubagentCatalog_ACU, findAgentSubagentDefinition_ACU } from '../../../../src/service/continuation/agent/agent-catalog';
+import { renderAgentTableByAliases_ACU, renderAgentTableByName_ACU, renderAgentTableCatalog_ACU } from '../../../../src/service/continuation/agent/agent-tables';
+import {
+  renderAgentReadMaterials_ACU,
+  renderAgentUnsettledHistory_ACU,
+  resolveAgentReadToken_ACU,
+  resolveAgentWriteTokens_ACU,
+  type AgentResolveContext_ACU,
+} from '../../../../src/service/continuation/agent/agent-placeholder-resolver';
+import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
+
+const tableData_ACU = {
+  mate: { ignored: true },
+  s0: { name: '全局数据表', content: [['键', '值'], ['当前地点', '禁区外围']] },
+  s1: { name: '角色表', content: [['姓名', '状态'], ['林瑶', '右臂有伤']] },
+  s2: { name: '纪要表', content: [['时间', '事件']] },
+  s3: { name: '自定义道具表', content: [['道具', '归属'], ['黑色晶屑', '主角']] },
+};
+
+function context_ACU(): AgentResolveContext_ACU {
+  return {
+    chat: [{ mes: '第零楼', is_user: true }, { mes: '第一楼' }, { mes: '第二楼', is_user: true }],
+    moduleSnapshot: buildEmptyAgentModuleSnapshot_ACU(),
+    settledThroughIndex: 0,
+    execution: {
+      envelope: {} as any,
+      task: { taskId: 't', originInstruction: '推进剧情' } as any,
+      stage: { stageNumber: 2 } as any,
+      revision: { outline: { title: '禁区', goal: '进入禁区', totalTurns: 6 } } as any,
+      node: { id: 'n1', title: '试探', goal: '试探守门人', turns: [{ id: 'turn-1', goal: '第一轮' }, { id: 'turn-2', goal: '第二轮' }] } as any,
+      turn: { id: 'turn-2', goal: '第二轮' } as any,
+      turnNumber: 2,
+      nodeTurnNumber: 2,
+    },
+    originInstruction: '推进剧情',
+    recentTurnCount: 2,
+    tableData: tableData_ACU,
+  };
+}
+
+describe('Agent 目录渲染', () => {
+  it('子代理目录暴露职责与读写权限，但不含内部提示词', () => {
+    const catalog = renderAgentSubagentCatalog_ACU();
+    expect(catalog).toContain('hook-cognition-maintainer');
+    expect(catalog).toContain('continuity-reviewer');
+    expect(catalog).toContain('无（只返回建议）');
+    expect(catalog).not.toContain('你只输出一个 JSON 对象');
+  });
+
+  it('资料模块目录说明谁能写，长期约束标注仅主 Agent 可登记', () => {
+    const catalog = renderAgentModuleCatalog_ACU();
+    expect(catalog).toContain('$HOOKS_LEDGER');
+    expect(catalog).toContain('$ACTIVE_CONSTRAINTS');
+    expect(catalog).toContain('仅主 Agent 裁决后登记');
+  });
+
+  it('未知代理名查不到定义', () => {
+    expect(findAgentSubagentDefinition_ACU('hook-cognition-maintainer')?.kind).toBe('maintain');
+    expect(findAgentSubagentDefinition_ACU('不存在的代理')).toBeNull();
+  });
+});
+
+describe('Agent 表格只读投影', () => {
+  it('按别名命中三张保底表', () => {
+    expect(renderAgentTableByAliases_ACU('global', tableData_ACU)).toContain('禁区外围');
+    expect(renderAgentTableByAliases_ACU('characters', tableData_ACU)).toContain('林瑶');
+    expect(renderAgentTableByAliases_ACU('chronicles', tableData_ACU)).toContain('该表暂无数据行');
+  });
+
+  it('表缺失时如实标注并阻止据此推断', () => {
+    const text = renderAgentTableByAliases_ACU('characters', { s0: tableData_ACU.s0 });
+    expect(text).toContain('不存在角色表');
+    expect(text).toContain('请勿据此推断');
+  });
+
+  it('同类多张表全部列出而不是猜一张', () => {
+    const text = renderAgentTableByAliases_ACU('characters', { a: tableData_ACU.s1, b: { name: '人物表', content: [['姓名'], ['另一张']] } });
+    expect(text).toContain('命中 2 张同名或同类表');
+  });
+
+  it('目录列出全部实际存在的表并给出读集写法，mate 不算表', () => {
+    const catalog = renderAgentTableCatalog_ACU(tableData_ACU);
+    expect(catalog).toContain('$TABLE:自定义道具表');
+    expect(catalog).not.toContain('mate');
+    expect(renderAgentTableByName_ACU('自定义道具表', tableData_ACU)).toContain('黑色晶屑');
+    expect(renderAgentTableByName_ACU('不存在表', tableData_ACU)).toContain('不存在名为');
+  });
+});
+
+describe('Agent 读写集解析', () => {
+  it('未结算历史从水位之后开始逐楼列出', () => {
+    const text = renderAgentUnsettledHistory_ACU(context_ACU());
+    expect(text).toContain('【楼层 1｜AI】');
+    expect(text).toContain('【楼层 2｜用户】');
+    expect(text).not.toContain('第零楼');
+  });
+
+  it('水位已到最后一楼时如实说明没有未结算内容', () => {
+    expect(renderAgentUnsettledHistory_ACU({ ...context_ACU(), settledThroughIndex: 2 })).toContain('没有尚未结算的真实历史');
+  });
+
+  it('大纲窗口标出本轮位置并声明大纲只是计划', () => {
+    const text = resolveAgentReadToken_ACU('$OUTLINE_WINDOW', context_ACU()).text;
+    expect(text).toContain('← 本轮');
+    expect(text).toContain('大纲是计划，不是已经发生的事实');
+  });
+
+  it('$TABLE:<表名> 形式的动态读集直接解析成该表内容', () => {
+    const resolved = resolveAgentReadToken_ACU('$TABLE:自定义道具表', context_ACU());
+    expect(resolved.title).toContain('自定义道具表');
+    expect(resolved.text).toContain('黑色晶屑');
+  });
+
+  it('未知读集 token 明确告知不可读而不是静默返回空', () => {
+    expect(resolveAgentReadToken_ACU('$NOT_A_TOKEN', context_ACU()).text).toContain('不是可读资料接口');
+  });
+
+  it('材料块按分节汇总并去重，空读集如实标注', () => {
+    const materials = renderAgentReadMaterials_ACU(['$HOOKS_LEDGER', '$HOOKS_LEDGER', '$TABLE_CHARACTERS'], context_ACU());
+    expect(materials.match(/### /g)).toHaveLength(2);
+    expect(materials).toContain('伏笔账本');
+    expect(materials).toContain('林瑶');
+    expect(renderAgentReadMaterials_ACU([], context_ACU())).toContain('信息不足');
+  });
+
+  it('写集 token 映射到模块名，越权与非法 token 都拒绝', () => {
+    expect(resolveAgentWriteTokens_ACU(['$HOOKS_LEDGER', '$INFO_GAP', '$HOOKS_LEDGER'], ['hooks', 'infoGap'])).toEqual(['hooks', 'infoGap']);
+    expect(() => resolveAgentWriteTokens_ACU(['$ACTIVE_CONSTRAINTS'], ['hooks'])).toThrowError(/无权写入/);
+    expect(() => resolveAgentWriteTokens_ACU(['$RANDOM'], ['hooks'])).toThrowError(/不是可写资料模块/);
+  });
+});

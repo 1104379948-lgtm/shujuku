@@ -75,12 +75,18 @@ describe('continuation prompt templates', () => {
   it('restores only the selected prompt default', () => {
     const settings = buildDefaultContinuationSettings_ACU();
     settings.outlinePrompt = [{ role: 'user', content: 'custom outline', deletable: true }];
-    settings.turnInstructionPrompt = [{ role: 'user', content: 'custom turn', deletable: true }];
-    const restored = restoreContinuationPromptDefault_ACU(settings, 'outline');
+    settings.agentPrompts.main = [{ role: 'user', content: 'custom main', deletable: true }];
+    settings.agentPrompts.reviewer = [{ role: 'user', content: 'custom reviewer', deletable: true }];
+    const restoredOutline = restoreContinuationPromptDefault_ACU(settings, 'outline');
 
-    expect(restored.outlinePrompt[0].content).toContain('严格 JSON 对象');
-    expect(restored.turnInstructionPrompt).toEqual(settings.turnInstructionPrompt);
-    expect(restored).toMatchObject({ apiPresetMode: 'current', maxAutomaticStages: 6 });
+    expect(restoredOutline.outlinePrompt[0].content).toContain('严格的 JSON 对象');
+    expect(restoredOutline.agentPrompts.main[0].content).toBe('custom main');
+    expect(restoredOutline.agentPrompts.reviewer[0].content).toBe('custom reviewer');
+    expect(restoredOutline).toMatchObject({ apiPresetMode: 'current', maxAutomaticStages: 6 });
+
+    const restoredMain = restoreContinuationPromptDefault_ACU(restoredOutline, 'agent_main');
+    expect(restoredMain.agentPrompts.main[0].content).toContain('主控 Agent');
+    expect(restoredMain.agentPrompts.reviewer[0].content).toBe('custom reviewer');
   });
 });
 

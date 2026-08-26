@@ -145,11 +145,17 @@ describe('Continuation defaults', () => {
     expect(first.maxAutomaticStages).toBe(6);
     expect(first.internalAiRetryLimit).toBe(3);
     expect(first.apiPresetMode).toBe('current');
-    expect(first.outlinePrompt[0].content).toContain('严格 JSON 对象');
-    expect(first.turnInstructionPrompt[0].content).toContain('最终普通文本');
+    expect(first.outlinePrompt[0].content).toContain('严格的 JSON 对象');
+    expect(first.agentPrompts.main[0].content).toContain('主控 Agent');
+    expect(first.agentPrompts.maintainer[0].content).toContain('伏笔与认知维护子代理');
+    expect(first.agentPrompts.mainlinePlanner[0].content).toContain('主线推进策划子代理');
+    expect(first.agentPrompts.beatPlanner[0].content).toContain('伏笔与节拍策划子代理');
+    expect(first.agentPrompts.reviewer[0].content).toContain('连续性审查子代理');
 
     first.outlinePrompt[0].content = 'modified';
+    first.agentPrompts.main[0].content = 'modified';
     expect(second.outlinePrompt[0].content).not.toBe('modified');
+    expect(second.agentPrompts.main[0].content).not.toBe('modified');
   });
 
   it('distinguishes missing settings, explicit zero, and invalid numeric values', () => {
