@@ -11,8 +11,10 @@ import {
   type AgentConstraintEntry_ACU,
   type AgentHookDeltaItem_ACU,
   type AgentHookEntry_ACU,
+  type AgentHookPatch_ACU,
   type AgentInfoGapDeltaItem_ACU,
   type AgentInfoGapEntry_ACU,
+  type AgentInfoGapPatch_ACU,
   type AgentModuleDelta_ACU,
   type AgentModuleRevisions_ACU,
   type AgentModuleSnapshot_ACU,
@@ -25,8 +27,8 @@ function reject_ACU(message: string, details?: Record<string, unknown>): never {
 
 function collectTouchedModules_ACU(delta: AgentModuleDelta_ACU): AgentWritableModule_ACU[] {
   const touched: AgentWritableModule_ACU[] = [];
-  if (delta.hooks.length) touched.push('hooks');
-  if (delta.infoGap.length) touched.push('infoGap');
+  if (delta.hooks.length || delta.hookPatches.length) touched.push('hooks');
+  if (delta.infoGap.length || delta.infoGapPatches.length) touched.push('infoGap');
   return touched;
 }
 
@@ -94,6 +96,24 @@ function applyHookDelta_ACU(existing: AgentHookEntry_ACU[], items: AgentHookDelt
   return [...byId.values()];
 }
 
+function applyHookPatches_ACU(entries: AgentHookEntry_ACU[], patches: AgentHookPatch_ACU[], settledIndex: number): AgentHookEntry_ACU[] {
+  const byId = new Map(entries.map(entry => [entry.id, entry]));
+  for (const patch of patches) {
+    const current = byId.get(patch.id);
+    if (!current) reject_ACU(`patch 的伏笔不存在：${patch.id}`, { id: patch.id });
+    if (current.retired) reject_ACU(`伏笔 ${patch.id} 已退役，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
+    byId.set(patch.id, {
+      ...current,
+      summary: patch.summary ?? current.summary,
+      status: patch.status ?? current.status,
+      importance: patch.importance ?? current.importance,
+      plannedPayoff: patch.plannedPayoff ?? current.plannedPayoff,
+      updatedIndex: settledIndex,
+    });
+  }
+  return [...byId.values()];
+}
+
 function applyInfoGapDelta_ACU(existing: AgentInfoGapEntry_ACU[], items: AgentInfoGapDeltaItem_ACU[], settledIndex: number): AgentInfoGapEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
   for (const item of items) {
@@ -129,6 +149,33 @@ function applyInfoGapDelta_ACU(existing: AgentInfoGapEntry_ACU[], items: AgentIn
   return [...byId.values()];
 }
 
+function applyInfoGapPatches_ACU(entries: AgentInfoGapEntry_ACU[], patches: AgentInfoGapPatch_ACU[]): AgentInfoGapEntry_ACU[] {
+  const byId = new Map(entries.map(entry => [entry.id, entry]));
+  for (const patch of patches) {
+    const current = byId.get(patch.id);
+    if (!current) reject_ACU(`patch 的信息差条目不存在：${patch.id}`, { id: patch.id });
+    if (current.retired) reject_ACU(`信息差条目 ${patch.id} 已退役，不可 patch`, { id: patch.id });
+    const merged: AgentInfoGapEntry_ACU = {
+      ...current,
+      topic: patch.topic ?? current.topic,
+      objectiveFact: patch.objectiveFact ?? current.objectiveFact,
+      readerKnown: patch.readerKnown ?? current.readerKnown,
+      characterKnowledge: patch.characterKnowledge ?? current.characterKnowledge,
+      revealStatus: patch.revealStatus ?? current.revealStatus,
+      revealIndex: 'revealIndex' in patch ? patch.revealIndex! : current.revealIndex,
+    };
+    // 合并结果必须满足与 upsert 相同的一致性规则：把计划写成事实的典型症状在 patch 路径同样要拦。
+    if (merged.revealStatus === 'unrevealed' && merged.revealIndex !== null) {
+      reject_ACU(`信息差条目 ${patch.id} patch 后标记为未揭示，揭示楼层必须同时清空（revealIndex 传 null）`, { id: patch.id, revealIndex: merged.revealIndex });
+    }
+    if (merged.revealStatus !== 'unrevealed' && merged.revealIndex === null) {
+      reject_ACU(`信息差条目 ${patch.id} patch 后已揭示，必须给出揭示楼层`, { id: patch.id });
+    }
+    byId.set(patch.id, merged);
+  }
+  return [...byId.values()];
+}
+
 /**
  * 把一份子代理写集事务应用到快照上。
  * @param snapshot 当前快照
@@ -147,15 +194,19 @@ export function applyAgentModuleDelta_ACU(
   assertExpectedRevisions_ACU(delta, snapshot);
   const touched = collectTouchedModules_ACU(delta);
   if (!touched.length) return snapshot;
-  const hooks = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
-  const infoGap = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
+  const hooksTouched = delta.hooks.length > 0 || delta.hookPatches.length > 0;
+  const infoGapTouched = delta.infoGap.length > 0 || delta.infoGapPatches.length > 0;
+  let hooks = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
+  if (delta.hookPatches.length) hooks = applyHookPatches_ACU(hooks, delta.hookPatches, settledIndex);
+  let infoGap = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
+  if (delta.infoGapPatches.length) infoGap = applyInfoGapPatches_ACU(infoGap, delta.infoGapPatches);
   return {
     ...snapshot,
     hooks,
     infoGap,
     revisions: {
-      hooks: snapshot.revisions.hooks + (delta.hooks.length ? 1 : 0),
-      infoGap: snapshot.revisions.infoGap + (delta.infoGap.length ? 1 : 0),
+      hooks: snapshot.revisions.hooks + (hooksTouched ? 1 : 0),
+      infoGap: snapshot.revisions.infoGap + (infoGapTouched ? 1 : 0),
       constraints: snapshot.revisions.constraints,
     },
   };

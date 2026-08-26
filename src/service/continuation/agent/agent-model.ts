@@ -139,7 +139,23 @@ export interface AgentBlockAction_ACU {
   unresolved: string[];
 }
 
-export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU;
+/**
+ * 大纲句级编辑操作。运行时替模型收尾结构一致性（重算 suggestedTurns/totalTurns），
+ * 模型只表达意图；已完成轮次与当前轮的保护由校验层强制。
+ */
+export type AgentOutlineEditOp_ACU =
+  | { op: 'set_turn_goal'; turnId: string; goal: string }
+  | { op: 'insert_turn'; nodeId: string; afterTurnId: string | null; goal: string }
+  | { op: 'remove_turn'; turnId: string }
+  | { op: 'set_node_goal'; nodeId: string; goal: string };
+
+export interface AgentOutlineEditAction_ACU {
+  kind: 'edit_outline';
+  thought: string;
+  edits: AgentOutlineEditOp_ACU[];
+}
+
+export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentOutlineEditAction_ACU | AgentBlockAction_ACU;
 
 /** 运行时硬边界。预留最后一轮让主 Agent 有机会正常交付而不是被突然掐断。 */
 export interface AgentRunBudget_ACU {
@@ -167,12 +183,34 @@ export interface AgentDelegationOutcome_ACU {
   rejectedReason: string;
 }
 
-/** 子代理维护类输出解析后的写集事务。 */
+/** 子代理维护类输出解析后的写集事务。patch 只带要改的字段，合并结果仍过全量一致性校验。 */
 export interface AgentModuleDelta_ACU {
   expectedRevisions: Partial<AgentModuleRevisions_ACU>;
   hooks: AgentHookDeltaItem_ACU[];
+  hookPatches: AgentHookPatch_ACU[];
   infoGap: AgentInfoGapDeltaItem_ACU[];
+  infoGapPatches: AgentInfoGapPatch_ACU[];
   constraintProposals: string[];
+}
+
+/** 伏笔条目的句级修补：只有显式出现的字段会被修改。 */
+export interface AgentHookPatch_ACU {
+  id: string;
+  summary?: string;
+  status?: AgentHookStatus_ACU;
+  importance?: AgentHookImportance_ACU;
+  plannedPayoff?: string;
+}
+
+/** 信息差条目的句级修补：只有显式出现的字段会被修改。 */
+export interface AgentInfoGapPatch_ACU {
+  id: string;
+  topic?: string;
+  objectiveFact?: string;
+  readerKnown?: string;
+  characterKnowledge?: AgentCharacterKnowledge_ACU[];
+  revealStatus?: AgentRevealStatus_ACU;
+  revealIndex?: number | null;
 }
 
 export interface AgentHookDeltaItem_ACU {
@@ -241,6 +279,8 @@ export interface ContinuationAgentTurnPlanRequest_ACU {
   isInternalRequestCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
   /** 大纲操作回调，由编排器在租约内执行。正文重试轮不注入，此时大纲派工被拒绝回灌。 */
   applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU>;
+  /** 大纲句级编辑回调，由编排器在租约内执行。正文重试轮不注入。 */
+  applyOutlineEdits?: (edits: AgentOutlineEditOp_ACU[]) => Promise<{ summary: string }>;
   signal?: AbortSignal | null;
 }
 

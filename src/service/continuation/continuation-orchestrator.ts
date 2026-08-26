@@ -1,9 +1,10 @@
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
-import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
+import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
+import { resolveContinuationTurnRange_ACU, validateReplannedStageOutline_ACU } from './outline-schema';
 import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
-import type { AgentOutlineOpResult_ACU } from './agent/agent-model';
+import type { AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU } from './agent/agent-model';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
 
 export interface ContinuationChronicleSnapshot_ACU { count: number; range: { first: string; last: string } | null; }
@@ -38,6 +39,54 @@ function fail_ACU(code: 'CONTINUATION_OPERATION_BUSY' | 'CONTINUATION_ORIGIN_INS
 
 function cloneOutline_ACU(outline: StageOutline_ACU): StageOutline_ACU {
   return { ...outline, nodes: outline.nodes.map(node => ({ ...node, turns: node.turns.map(turn => ({ ...turn })) })) };
+}
+
+function rejectOutlineEdit_ACU(message: string, details?: Record<string, unknown>): never {
+  throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', message, false, details));
+}
+
+/**
+ * 把一批句级编辑应用到大纲副本上，并替模型收尾结构一致性（重算 suggestedTurns 与 totalTurns）。
+ * 只做定位与变换，前缀保护、当前轮保护与范围校验由调用方统一执行。
+ * @param outline 当前冻结大纲
+ * @param edits 编辑操作列表
+ * @param allocateId 新增轮次的 ID 分配器
+ * @returns 编辑后的新大纲对象
+ */
+function applyOutlineEditOps_ACU(outline: StageOutline_ACU, edits: readonly AgentOutlineEditOp_ACU[], allocateId: (prefix: string) => string): StageOutline_ACU {
+  const draft = cloneOutline_ACU(outline);
+  for (const edit of edits) {
+    if (edit.op === 'set_turn_goal') {
+      const turn = draft.nodes.flatMap(node => node.turns).find(item => item.id === edit.turnId);
+      if (!turn) rejectOutlineEdit_ACU(`set_turn_goal 找不到轮次：${edit.turnId}`, { turnId: edit.turnId });
+      turn.goal = edit.goal;
+      continue;
+    }
+    if (edit.op === 'set_node_goal') {
+      const node = draft.nodes.find(item => item.id === edit.nodeId);
+      if (!node) rejectOutlineEdit_ACU(`set_node_goal 找不到节点：${edit.nodeId}`, { nodeId: edit.nodeId });
+      node.goal = edit.goal;
+      continue;
+    }
+    if (edit.op === 'insert_turn') {
+      const node = draft.nodes.find(item => item.id === edit.nodeId);
+      if (!node) rejectOutlineEdit_ACU(`insert_turn 找不到节点：${edit.nodeId}`, { nodeId: edit.nodeId });
+      const newTurn = { id: allocateId('turn'), goal: edit.goal };
+      if (edit.afterTurnId === null) {
+        node.turns.unshift(newTurn);
+        continue;
+      }
+      const anchor = node.turns.findIndex(item => item.id === edit.afterTurnId);
+      if (anchor < 0) rejectOutlineEdit_ACU(`insert_turn 的 afterTurnId 不在节点 ${edit.nodeId} 内：${edit.afterTurnId}`, { nodeId: edit.nodeId, afterTurnId: edit.afterTurnId });
+      node.turns.splice(anchor + 1, 0, newTurn);
+      continue;
+    }
+    const node = draft.nodes.find(item => item.turns.some(turn => turn.id === edit.turnId));
+    if (!node) rejectOutlineEdit_ACU(`remove_turn 找不到轮次：${edit.turnId}`, { turnId: edit.turnId });
+    node.turns = node.turns.filter(turn => turn.id !== edit.turnId);
+  }
+  const nodes = draft.nodes.map(node => ({ ...node, suggestedTurns: node.turns.length }));
+  return { ...draft, nodes, totalTurns: nodes.reduce((sum, node) => sum + node.turns.length, 0) };
 }
 
 function guardForTask_ACU(chatIdentity: string, task: ContinuationTask_ACU | null): ContinuationWriteGuard_ACU {
@@ -219,6 +268,7 @@ export class ContinuationOrchestrator_ACU {
           () => this.isLeaseCurrent_ACU(chatIdentity, lease),
           retryAttempt,
           async instruction => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult,
+          async edits => this.applyOutlineEditsWithinLease_ACU(chatIdentity, lease, edits, 'running'),
         );
         return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started!), preparedTurn };
       } catch (error) {
@@ -427,6 +477,54 @@ export class ContinuationOrchestrator_ACU {
     if (stage.status === 'completed') return this.continueOutlineOp_ACU(chatIdentity, lease, envelope, task, stage, instruction, endStatus);
     if (stage.status === 'running' || stage.status === 'failed') return this.reviseOutlineOp_ACU(chatIdentity, lease, envelope, task, stage, instruction, endStatus);
     fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段状态不允许大纲操作');
+  }
+
+  /**
+   * 大纲句级编辑事务：主 Agent 通过工具直接增删改未完成部分的句子，不发大纲 AI 调用。
+   * 结构一致性由运行时收尾（重算 suggestedTurns/totalTurns），完成前缀与当前轮由校验强制保护，
+   * 编辑结果生成下一个 revision 并立即冻结。校验失败抛 CONTINUATION_AGENT_WRITE_REJECTED，
+   * 由主循环拒绝回灌而不是中止本轮。
+   */
+  async applyOutlineEditsWithinLease_ACU(chatIdentity: string, _lease: Lease_ACU, edits: readonly AgentOutlineEditOp_ACU[], endStatus: 'running' | 'paused'): Promise<{ summary: string }> {
+    const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+    const task = this.requireTask_ACU(envelope);
+    if (task.stopReason !== null) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可编辑大纲');
+    const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+    if (!stage || stage.status !== 'running') {
+      throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '当前没有可编辑的执行中大纲；请先派工 outline-architect 创建或继续大纲', false));
+    }
+    const current = getActiveRevision_ACU(stage);
+    if (!current.frozen) {
+      throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '当前大纲尚未冻结（可能等待确认），不可编辑', false));
+    }
+    const edited = applyOutlineEditOps_ACU(current.outline, edits, this.dependencies.allocateId);
+    const oldCursorTurn = current.outline.nodes.flatMap(node => node.turns)[stage.completedTurns] ?? null;
+    const newFlattened = edited.nodes.flatMap(node => node.turns);
+    const newCursorTurn = newFlattened[stage.completedTurns] ?? null;
+    if (!oldCursorTurn || !newCursorTurn || newCursorTurn.id !== oldCursorTurn.id) {
+      throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '编辑不能移除或替换当前正在执行的轮次（可以改它的目标句）', false, { cursorTurnId: oldCursorTurn?.id ?? null }));
+    }
+    const range = resolveContinuationTurnRange_ACU(envelope.settings.stageSize, envelope.settings.customTurnMin ?? undefined, envelope.settings.customTurnMax ?? undefined);
+    const validated = validateReplannedStageOutline_ACU(edited, range, {
+      previousOutline: current.outline,
+      completedTurns: stage.completedTurns,
+      expectedRemainingTurns: newFlattened.length - stage.completedTurns,
+    });
+    const nextRevisionNumber = current.revision + 1;
+    const summary = `已按工具编辑改写大纲（${edits.length} 处，revision ${nextRevisionNumber}，共 ${validated.totalTurns} 轮）`;
+    await this.dependencies.store.updatePersistedAtomically(currentEnvelope => {
+      const env = this.requireEnvelope_ACU(currentEnvelope);
+      const t = this.requireTask_ACU(env);
+      const activeStage = getActiveStage_ACU(t);
+      if (t.taskId !== task.taskId || activeStage.stageId !== stage.stageId || activeStage.activeRevision !== current.revision || t.stopReason !== null) {
+        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '大纲编辑结果已失效');
+      }
+      const at = this.dependencies.now();
+      const revision = freezePlannedStageRevision_ACU(createPlannedStageRevision_ACU(validated, nextRevisionNumber, 'manual_replan', `Agent 工具编辑：${edits.length} 处`, at));
+      const nextStage = { ...activeStage, activeRevision: nextRevisionNumber, revisions: [...activeStage.revisions, revision] };
+      return { ...env, activeTask: { ...t, status: endStatus, updatedAt: at, lastError: null, stages: t.stages.map(item => item.stageId === nextStage.stageId ? nextStage : item), timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStage.stageId, revision: nextRevisionNumber })] } };
+    }, guardForTask_ACU(chatIdentity, task));
+    return { summary };
   }
 
   /** 创建首个阶段大纲。单阶段事务：先规划后一次性落盘，失败不留任何中间状态。 */

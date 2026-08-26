@@ -35,6 +35,7 @@ import {
   type AgentDelegation_ACU,
   type AgentDelegationOutcome_ACU,
   type AgentModuleSnapshot_ACU,
+  type AgentOutlineEditOp_ACU,
   type AgentRunBudget_ACU,
   type ContinuationAgentTurnPlanRequest_ACU,
   type ContinuationAgentTurnPlanResult_ACU,
@@ -208,11 +209,15 @@ export class ContinuationAgentTurnPlanner_ACU {
         const round = await this.callMainAgent(request, preset, history, context, ledger, budget, iteration, allowDelegate);
         totalAttempts += round.attempts;
         const action = round.action;
-        logAgentSession_ACU({
-          kind: 'main_action',
-          title: `迭代 ${iteration} · ${action.kind === 'delegate' ? `派工 ${action.delegations.length} 项` : action.kind === 'finalize' ? '交付写作指导' : '阻断本轮'}`,
-          detail: action.thought,
-        });
+        const actionLabel = action.kind === 'delegate' ? `派工 ${action.delegations.length} 项`
+          : action.kind === 'edit_outline' ? `工具编辑大纲 ${action.edits.length} 处`
+          : action.kind === 'finalize' ? '交付写作指导' : '阻断本轮';
+        logAgentSession_ACU({ kind: 'main_action', title: `迭代 ${iteration} · ${actionLabel}`, detail: action.thought });
+
+        if (action.kind === 'edit_outline') {
+          await this.runOutlineEdits(action.edits, request, context, ledger);
+          continue;
+        }
 
         if (action.kind === 'finalize') {
           if (action.constraints) {
@@ -301,6 +306,34 @@ export class ContinuationAgentTurnPlanner_ACU {
     }
 
     failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', `主 Agent 连续 ${retries + 1} 次返回不符合协议：${lastReason}`, { lastReason });
+  }
+
+  /**
+   * 执行大纲句级编辑工具。校验失败拒绝回灌，让主 Agent 自己修正而不是中止本轮；
+   * 只有非校验类异常才上抛终止。
+   */
+  private async runOutlineEdits(
+    edits: AgentOutlineEditOp_ACU[],
+    request: ContinuationAgentTurnPlanRequest_ACU,
+    context: AgentResolveContext_ACU,
+    ledger: AgentRunLedger_ACU,
+  ): Promise<void> {
+    const label = 'outline-edit(工具)';
+    if (!request.applyOutlineEdits) {
+      ledger.outcomes.push({ agentName: label, ok: false, summary: '', detail: '', rejectedReason: '正文重试轮次不允许修改大纲，请基于现有大纲交付或阻断' });
+      logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑被拒绝', detail: '正文重试轮次不允许修改大纲', ok: false });
+      return;
+    }
+    try {
+      const result = await request.applyOutlineEdits(edits);
+      ledger.outcomes.push({ agentName: label, ok: true, summary: result.summary, detail: result.summary, rejectedReason: '' });
+      logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑大纲完成', detail: result.summary });
+      context.execution = request.readContext();
+    } catch (error) {
+      if (!(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_WRITE_REJECTED') throw error;
+      ledger.outcomes.push({ agentName: label, ok: false, summary: '', detail: '', rejectedReason: error.error.message });
+      logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑被拒绝', detail: error.error.message, ok: false });
+    }
   }
 
   private renderUnsettledRange_ACU(context: AgentResolveContext_ACU): string {

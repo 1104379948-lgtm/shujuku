@@ -15,8 +15,11 @@ import {
   AGENT_REVIEW_VERDICTS_ACU,
   type AgentDelegation_ACU,
   type AgentHookDeltaItem_ACU,
+  type AgentHookPatch_ACU,
   type AgentInfoGapDeltaItem_ACU,
+  type AgentInfoGapPatch_ACU,
   type AgentMainAction_ACU,
+  type AgentOutlineEditOp_ACU,
   type AgentMaintainerOutput_ACU,
   type AgentModuleDelta_ACU,
   type AgentPlannerOutput_ACU,
@@ -147,6 +150,43 @@ function parseDelegations_ACU(value: unknown): AgentDelegation_ACU[] {
   });
 }
 
+/** 单次 edit_outline 动作里最多允许的编辑操作数。 */
+const OUTLINE_EDIT_LIMIT_ACU = 12;
+
+function parseOutlineEdits_ACU(value: unknown): AgentOutlineEditOp_ACU[] {
+  if (!Array.isArray(value) || !value.length) failProtocol_ACU('edit_outline 动作必须提供非空的 edits 数组');
+  if (value.length > OUTLINE_EDIT_LIMIT_ACU) failProtocol_ACU(`一次 edit_outline 最多 ${OUTLINE_EDIT_LIMIT_ACU} 处编辑；更大的改动请派工 outline-architect`);
+  return value.map((raw, index) => {
+    if (!isRecord_ACU(raw)) failProtocol_ACU(`edits[${index}] 必须是对象`);
+    const op = readText_ACU(raw.op);
+    if (op === 'set_turn_goal') {
+      const turnId = readText_ACU(raw.turnId);
+      const goal = readText_ACU(raw.goal);
+      if (!turnId || !goal) failProtocol_ACU(`edits[${index}] set_turn_goal 需要 turnId 与非空 goal`);
+      return { op, turnId, goal };
+    }
+    if (op === 'insert_turn') {
+      const nodeId = readText_ACU(raw.nodeId);
+      const goal = readText_ACU(raw.goal);
+      const afterTurnId = readText_ACU(raw.afterTurnId) || null;
+      if (!nodeId || !goal) failProtocol_ACU(`edits[${index}] insert_turn 需要 nodeId 与非空 goal`);
+      return { op, nodeId, afterTurnId, goal };
+    }
+    if (op === 'remove_turn') {
+      const turnId = readText_ACU(raw.turnId);
+      if (!turnId) failProtocol_ACU(`edits[${index}] remove_turn 需要 turnId`);
+      return { op, turnId };
+    }
+    if (op === 'set_node_goal') {
+      const nodeId = readText_ACU(raw.nodeId);
+      const goal = readText_ACU(raw.goal);
+      if (!nodeId || !goal) failProtocol_ACU(`edits[${index}] set_node_goal 需要 nodeId 与非空 goal`);
+      return { op, nodeId, goal };
+    }
+    failProtocol_ACU(`edits[${index}].op 必须是 set_turn_goal / insert_turn / remove_turn / set_node_goal 之一，实际收到：${op || '(空)'}`);
+  });
+}
+
 /**
  * 解析主 Agent 的一次协议动作。
  * @param payload 已解析的 JSON 载荷
@@ -159,6 +199,9 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
   if (action === 'delegate') {
     if (!allowDelegate) failProtocol_ACU('本轮为预算最后一轮，已禁用 delegate，必须输出 finalize 或 block');
     return { kind: 'delegate', thought, delegations: parseDelegations_ACU(payload.delegations) };
+  }
+  if (action === 'edit_outline') {
+    return { kind: 'edit_outline', thought, edits: parseOutlineEdits_ACU(payload.edits) };
   }
   if (action === 'finalize') {
     const instruction = readText_ACU(payload.instruction);
@@ -174,19 +217,73 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
     if (!reason) failProtocol_ACU('block 动作必须提供 reason');
     return { kind: 'block', thought, reason, unresolved: readTextList_ACU(payload.unresolved) };
   }
-  failProtocol_ACU(`action 必须是 delegate / finalize / block 之一，实际收到：${action || '(空)'}`);
+  failProtocol_ACU(`action 必须是 delegate / edit_outline / finalize / block 之一，实际收到：${action || '(空)'}`);
 }
 
-function parseHookItems_ACU(value: unknown): AgentHookDeltaItem_ACU[] {
-  if (value === undefined || value === null) return [];
+function parseCharacterKnowledge_ACU(value: unknown): AgentInfoGapDeltaItem_ACU['characterKnowledge'] {
+  const knowledge = Array.isArray(value) ? value : [];
+  return knowledge.flatMap(item => {
+    if (!isRecord_ACU(item)) return [];
+    const name = readText_ACU(item.name);
+    return name ? [{ name, knows: readText_ACU(item.knows) }] : [];
+  });
+}
+
+function parseHookPatch_ACU(raw: Record<string, unknown>, index: number): AgentHookPatch_ACU {
+  const id = readText_ACU(raw.id);
+  if (!id) failProtocol_ACU(`delta.hooks[${index}] 的 patch 需要 id`);
+  const patch: AgentHookPatch_ACU = { id };
+  if (typeof raw.summary === 'string' && raw.summary.trim()) patch.summary = raw.summary.trim();
+  const status = readText_ACU(raw.status);
+  if (status) {
+    if (!(AGENT_HOOK_STATUSES_ACU as readonly string[]).includes(status)) failProtocol_ACU(`delta.hooks[${index}] 的 patch.status 非法：${status}`);
+    patch.status = status as AgentHookPatch_ACU['status'];
+  }
+  const importance = readText_ACU(raw.importance);
+  if (importance) {
+    if (!(AGENT_HOOK_IMPORTANCES_ACU as readonly string[]).includes(importance)) failProtocol_ACU(`delta.hooks[${index}] 的 patch.importance 非法：${importance}`);
+    patch.importance = importance as AgentHookPatch_ACU['importance'];
+  }
+  if (typeof raw.plannedPayoff === 'string') patch.plannedPayoff = raw.plannedPayoff.trim();
+  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.hooks[${index}] 的 patch 至少要带一个要修改的字段`);
+  return patch;
+}
+
+function parseInfoGapPatch_ACU(raw: Record<string, unknown>, index: number): AgentInfoGapPatch_ACU {
+  const id = readText_ACU(raw.id);
+  if (!id) failProtocol_ACU(`delta.infoGap[${index}] 的 patch 需要 id`);
+  const patch: AgentInfoGapPatch_ACU = { id };
+  if (typeof raw.topic === 'string' && raw.topic.trim()) patch.topic = raw.topic.trim();
+  if (typeof raw.objectiveFact === 'string') patch.objectiveFact = raw.objectiveFact.trim();
+  if (typeof raw.readerKnown === 'string') patch.readerKnown = raw.readerKnown.trim();
+  if (Array.isArray(raw.characterKnowledge)) patch.characterKnowledge = parseCharacterKnowledge_ACU(raw.characterKnowledge);
+  const revealStatus = readText_ACU(raw.revealStatus);
+  if (revealStatus) {
+    if (!(AGENT_REVEAL_STATUSES_ACU as readonly string[]).includes(revealStatus)) failProtocol_ACU(`delta.infoGap[${index}] 的 patch.revealStatus 非法：${revealStatus}`);
+    patch.revealStatus = revealStatus as AgentInfoGapPatch_ACU['revealStatus'];
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, 'revealIndex')) {
+    if (raw.revealIndex === null) patch.revealIndex = null;
+    else if (typeof raw.revealIndex === 'number' && Number.isInteger(raw.revealIndex) && raw.revealIndex >= 0) patch.revealIndex = raw.revealIndex;
+    else failProtocol_ACU(`delta.infoGap[${index}] 的 patch.revealIndex 必须是非负整数或 null`);
+  }
+  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.infoGap[${index}] 的 patch 至少要带一个要修改的字段`);
+  return patch;
+}
+
+function parseHookItems_ACU(value: unknown): { items: AgentHookDeltaItem_ACU[]; patches: AgentHookPatch_ACU[] } {
+  if (value === undefined || value === null) return { items: [], patches: [] };
   if (!Array.isArray(value)) failProtocol_ACU('delta.hooks 必须是数组');
-  return value.map((raw, index) => {
+  const items: AgentHookDeltaItem_ACU[] = [];
+  const patches: AgentHookPatch_ACU[] = [];
+  value.forEach((raw, index) => {
     if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.hooks[${index}] 必须是对象`);
     const action = readText_ACU(raw.action);
-    if (action !== 'upsert' && action !== 'retire') failProtocol_ACU(`delta.hooks[${index}].action 必须是 upsert 或 retire`);
+    if (action === 'patch') { patches.push(parseHookPatch_ACU(raw, index)); return; }
+    if (action !== 'upsert' && action !== 'retire') failProtocol_ACU(`delta.hooks[${index}].action 必须是 upsert / patch / retire`);
     const status = readText_ACU(raw.status);
     const importance = readText_ACU(raw.importance);
-    return {
+    items.push({
       action,
       id: readText_ACU(raw.id),
       summary: readText_ACU(raw.summary),
@@ -195,35 +292,35 @@ function parseHookItems_ACU(value: unknown): AgentHookDeltaItem_ACU[] {
       plantedIndex: typeof raw.plantedIndex === 'number' && Number.isInteger(raw.plantedIndex) && raw.plantedIndex >= 0 ? raw.plantedIndex : -1,
       plannedPayoff: readText_ACU(raw.plannedPayoff),
       reason: readText_ACU(raw.reason),
-    };
+    });
   });
+  return { items, patches };
 }
 
-function parseInfoGapItems_ACU(value: unknown): AgentInfoGapDeltaItem_ACU[] {
-  if (value === undefined || value === null) return [];
+function parseInfoGapItems_ACU(value: unknown): { items: AgentInfoGapDeltaItem_ACU[]; patches: AgentInfoGapPatch_ACU[] } {
+  if (value === undefined || value === null) return { items: [], patches: [] };
   if (!Array.isArray(value)) failProtocol_ACU('delta.infoGap 必须是数组');
-  return value.map((raw, index) => {
+  const items: AgentInfoGapDeltaItem_ACU[] = [];
+  const patches: AgentInfoGapPatch_ACU[] = [];
+  value.forEach((raw, index) => {
     if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.infoGap[${index}] 必须是对象`);
     const action = readText_ACU(raw.action);
-    if (action !== 'upsert' && action !== 'retire') failProtocol_ACU(`delta.infoGap[${index}].action 必须是 upsert 或 retire`);
+    if (action === 'patch') { patches.push(parseInfoGapPatch_ACU(raw, index)); return; }
+    if (action !== 'upsert' && action !== 'retire') failProtocol_ACU(`delta.infoGap[${index}].action 必须是 upsert / patch / retire`);
     const revealStatus = readText_ACU(raw.revealStatus);
-    const knowledge = Array.isArray(raw.characterKnowledge) ? raw.characterKnowledge : [];
-    return {
+    items.push({
       action,
       id: readText_ACU(raw.id),
       topic: readText_ACU(raw.topic),
       objectiveFact: readText_ACU(raw.objectiveFact),
       readerKnown: readText_ACU(raw.readerKnown),
-      characterKnowledge: knowledge.flatMap(item => {
-        if (!isRecord_ACU(item)) return [];
-        const name = readText_ACU(item.name);
-        return name ? [{ name, knows: readText_ACU(item.knows) }] : [];
-      }),
+      characterKnowledge: parseCharacterKnowledge_ACU(raw.characterKnowledge),
       revealStatus: ((AGENT_REVEAL_STATUSES_ACU as readonly string[]).includes(revealStatus) ? revealStatus : 'unrevealed') as AgentInfoGapDeltaItem_ACU['revealStatus'],
       revealIndex: typeof raw.revealIndex === 'number' && Number.isInteger(raw.revealIndex) && raw.revealIndex >= 0 ? raw.revealIndex : null,
       reason: readText_ACU(raw.reason),
-    };
+    });
   });
+  return { items, patches };
 }
 
 function parseExpectedRevisions_ACU(value: unknown): AgentModuleDelta_ACU['expectedRevisions'] {
@@ -243,12 +340,16 @@ function parseExpectedRevisions_ACU(value: unknown): AgentModuleDelta_ACU['expec
  */
 export function parseAgentMaintainerOutput_ACU(payload: Record<string, unknown>): AgentMaintainerOutput_ACU {
   const rawDelta = isRecord_ACU(payload.delta) ? payload.delta : {};
+  const hooks = parseHookItems_ACU(rawDelta.hooks);
+  const infoGap = parseInfoGapItems_ACU(rawDelta.infoGap);
   return {
     summary: readText_ACU(payload.summary),
     delta: {
       expectedRevisions: parseExpectedRevisions_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions),
-      hooks: parseHookItems_ACU(rawDelta.hooks),
-      infoGap: parseInfoGapItems_ACU(rawDelta.infoGap),
+      hooks: hooks.items,
+      hookPatches: hooks.patches,
+      infoGap: infoGap.items,
+      infoGapPatches: infoGap.patches,
       constraintProposals: readTextList_ACU(rawDelta.constraintProposals),
     },
     needMore: readTextList_ACU(payload.needMore),

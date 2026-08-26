@@ -1,5 +1,5 @@
 import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationInternalAiRequestIdentity_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type StageNode_ACU, type StageRevision_ACU, type StageTurn_ACU, type TurnAttemptIdentity_ACU } from './model';
-import type { AgentOutlineOpResult_ACU, ContinuationAgentTurnPlanResult_ACU } from './agent/agent-model';
+import type { AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU, ContinuationAgentTurnPlanResult_ACU } from './agent/agent-model';
 import type { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
 
 /** 严格执行快照：只在铸造宿主归属身份时使用，要求大纲游标完整且已冻结。 */
@@ -93,12 +93,14 @@ export class StageExecutionEngine_ACU {
    * @param isLeaseCurrent 租约有效性检查
    * @param existingAttempt 正文重试轮的既有身份；提供时禁止大纲操作且游标必须原样
    * @param applyOutline 大纲操作回调，由编排器在租约内执行
+   * @param applyOutlineEdits 大纲句级编辑回调，由编排器在租约内执行
    * @returns 最终身份与写作指导
    */
   async prepareCurrentTurnInstruction(
     isLeaseCurrent: () => boolean = () => true,
     existingAttempt?: TurnAttemptIdentity_ACU,
     applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU>,
+    applyOutlineEdits?: (edits: AgentOutlineEditOp_ACU[]) => Promise<{ summary: string }>,
   ): Promise<ContinuationPreparedTurnInstruction_ACU> {
     const chatIdentity = this.dependencies.getChatIdentity();
     const initial = currentAgentContext_ACU(this.dependencies.readEnvelope());
@@ -133,6 +135,7 @@ export class StageExecutionEngine_ACU {
       },
       isInternalRequestCurrent: isCurrent,
       applyOutline: existingAttempt ? undefined : applyOutline,
+      applyOutlineEdits: existingAttempt ? undefined : applyOutlineEdits,
     });
 
     // 循环结束后按最终游标铸造身份：finalize 已由循环保证游标存在，这里的严格快照是最后防线。

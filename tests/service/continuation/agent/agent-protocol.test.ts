@@ -91,6 +91,42 @@ describe('主 Agent 动作解析', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'finalize' }, true)).toThrowError(/非空 instruction/);
   });
 
+  it('edit_outline 按操作种类校验必填字段', () => {
+    const action = parseAgentMainAction_ACU({
+      action: 'edit_outline',
+      thought: '微调',
+      edits: [
+        { op: 'set_turn_goal', turnId: 'turn-3', goal: '让守门人先露破绽' },
+        { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-3', goal: '巡查队提前到场' },
+        { op: 'remove_turn', turnId: 'turn-5' },
+        { op: 'set_node_goal', nodeId: 'node-1', goal: '试探但不揭穿' },
+      ],
+    }, true);
+    expect(action).toMatchObject({ kind: 'edit_outline' });
+    expect((action as any).edits).toHaveLength(4);
+
+    expect(() => parseAgentMainAction_ACU({ action: 'edit_outline', edits: [] }, true)).toThrowError(/非空的 edits/);
+    expect(() => parseAgentMainAction_ACU({ action: 'edit_outline', edits: [{ op: 'set_turn_goal', turnId: 'turn-1' }] }, true)).toThrowError(/需要 turnId 与非空 goal/);
+    expect(() => parseAgentMainAction_ACU({ action: 'edit_outline', edits: [{ op: 'rewrite_all' }] }, true)).toThrowError(/op 必须是/);
+  });
+
+  it('维护类的 patch 只收显式字段，至少要带一个可改字段', () => {
+    const output = parseAgentMaintainerOutput_ACU({
+      summary: '微调',
+      delta: {
+        hooks: [{ action: 'patch', id: 'H1', summary: '新句子' }],
+        infoGap: [{ action: 'patch', id: 'E1', revealStatus: 'partial', revealIndex: 5 }],
+      },
+    });
+    expect(output.delta.hookPatches).toEqual([{ id: 'H1', summary: '新句子' }]);
+    expect(output.delta.infoGapPatches).toEqual([{ id: 'E1', revealStatus: 'partial', revealIndex: 5 }]);
+    expect(output.delta.hooks).toHaveLength(0);
+
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { hooks: [{ action: 'patch', id: 'H1' }] } })).toThrowError(/至少要带一个要修改的字段/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { hooks: [{ action: 'patch', summary: '缺 id' }] } })).toThrowError(/patch 需要 id/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { infoGap: [{ action: 'patch', id: 'E1', revealStatus: '瞎写' }] } })).toThrowError(/revealStatus 非法/);
+  });
+
   it('block 必须带明确理由', () => {
     expect(parseAgentMainAction_ACU({ action: 'block', reason: '关键资料缺失', unresolved: ['缺角色表'] }, true)).toMatchObject({ kind: 'block', unresolved: ['缺角色表'] });
     expect(() => parseAgentMainAction_ACU({ action: 'block' }, true)).toThrowError(/必须提供 reason/);
@@ -98,7 +134,7 @@ describe('主 Agent 动作解析', () => {
 
   it('未知动作直接拒绝，revise_outline 已退役不再是合法动作', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'write_story' }, true)).toThrowError(/action 必须是/);
-    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 delegate \/ finalize \/ block/);
+    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 delegate \/ edit_outline \/ finalize \/ block/);
   });
 });
 
@@ -124,7 +160,7 @@ describe('子代理输出解析', () => {
   });
 
   it('维护类的非法 action 与非数组 delta 都被拒绝', () => {
-    expect(() => parseAgentMaintainerOutput_ACU({ delta: { hooks: [{ action: 'delete', id: 'H1' }] } })).toThrowError(/upsert 或 retire/);
+    expect(() => parseAgentMaintainerOutput_ACU({ delta: { hooks: [{ action: 'delete', id: 'H1' }] } })).toThrowError(/upsert \/ patch \/ retire/);
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { infoGap: '不是数组' } })).toThrowError(/必须是数组/);
   });
 

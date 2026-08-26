@@ -247,6 +247,54 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(planner).toHaveBeenCalledTimes(1);
   });
 
+  it('applies sentence-level outline edits as a frozen next revision without an AI call', async () => {
+    const { orchestrator, planner, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    expect(planner).toHaveBeenCalledTimes(1);
+
+    const result = await (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
+      { op: 'set_turn_goal', turnId: 'turn-2', goal: '守门人先露出破绽' },
+      { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-3', goal: '巡查队提前到场' },
+    ], 'running');
+    expect(result.summary).toContain('2 处');
+    expect(planner).toHaveBeenCalledTimes(1);
+
+    const stage = store.readPersisted()!.activeTask!.stages[0];
+    expect(stage.activeRevision).toBe(2);
+    expect(stage).toMatchObject({ activeNodeIndex: 0, activeTurnIndex: 0, completedTurns: 0 });
+    const revision = stage.revisions.find(item => item.revision === 2)!;
+    expect(revision.frozen).toBe(true);
+    const turns = revision.outline.nodes.flatMap(node => node.turns);
+    expect(turns).toHaveLength(7);
+    expect(turns[1].goal).toBe('守门人先露出破绽');
+    expect(turns[3].goal).toBe('巡查队提前到场');
+    expect(revision.outline.totalTurns).toBe(7);
+    expect(revision.outline.nodes[0].suggestedTurns).toBe(7);
+  });
+
+  it('outline edits cannot touch completed turns, remove the cursor turn, or leave the stage-size range', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+
+    await expectCode(() => (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
+      { op: 'remove_turn', turnId: 'turn-1' },
+    ], 'running'), 'CONTINUATION_AGENT_WRITE_REJECTED');
+
+    // 标准阶段规模下限为 6：删一轮使总轮数掉出范围。
+    await expectCode(() => (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
+      { op: 'remove_turn', turnId: 'turn-6' },
+    ], 'running'), 'CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE');
+
+    await confirmTurns(orchestrator, store, 1);
+    await orchestrator.continueTask();
+    await expectCode(() => (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
+      { op: 'set_turn_goal', turnId: 'turn-1', goal: '篡改已完成轮次' },
+    ], 'running'), 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED');
+    expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(1);
+  });
+
   it('requires explicit confirmation before abandoning the current task', async () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });

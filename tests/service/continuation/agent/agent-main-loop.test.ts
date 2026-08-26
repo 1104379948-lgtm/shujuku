@@ -59,6 +59,7 @@ function harness_ACU(options: {
   isCurrent?: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
   context?: () => any;
   applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU> | AgentOutlineOpResult_ACU;
+  applyOutlineEdits?: (edits: any[]) => Promise<{ summary: string }> | { summary: string };
   withoutApplyOutline?: boolean;
   apiPresetMode?: 'current' | 'fixed';
 }): Harness_ACU {
@@ -103,6 +104,12 @@ function harness_ACU(options: {
           outlineCalls.push(instruction);
           const handler = options.applyOutline ?? (() => ({ op: 'revise' as const, requiresReview: false, stopped: null, summary: '已改写大纲' }));
           return handler(instruction);
+        },
+    applyOutlineEdits: options.withoutApplyOutline
+      ? undefined
+      : async edits => {
+          const handler = options.applyOutlineEdits ?? (() => ({ summary: `已按工具编辑改写大纲（${edits.length} 处）` }));
+          return handler(edits);
         },
   };
 
@@ -287,6 +294,46 @@ describe('大纲子代理派工', () => {
     const result = await h.planner.plan(h.request);
     expect(result.instruction).toBe('基于现有大纲交付');
     expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('正文重试轮次不允许改写大纲');
+  });
+
+  it('edit_outline 工具编辑成功后结果回灌，同循环继续交付', async () => {
+    const received: any[] = [];
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"edit_outline","thought":"只需微调","edits":[{"op":"set_turn_goal","turnId":"turn-2","goal":"守门人先露破绽"}]}',
+        '{"action":"finalize","instruction":"按微调后的目标写"}',
+      ],
+      applyOutlineEdits: edits => { received.push(...edits); return { summary: '已按工具编辑改写大纲（1 处）' }; },
+    });
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('按微调后的目标写');
+    expect(received).toEqual([{ op: 'set_turn_goal', turnId: 'turn-2', goal: '守门人先露破绽' }]);
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('已按工具编辑改写大纲');
+  });
+
+  it('edit_outline 校验被拒时拒绝回灌而不中止，重试轮则直接拒绝', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"edit_outline","edits":[{"op":"remove_turn","turnId":"turn-1"}]}',
+        '{"action":"finalize","instruction":"保持原大纲交付"}',
+      ],
+      applyOutlineEdits: () => {
+        throw new ContinuationValidationError_ACU({ code: 'CONTINUATION_AGENT_WRITE_REJECTED', phase: 'agent_loop', message: '编辑不能移除当前轮次', retryable: false } as any);
+      },
+    });
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('保持原大纲交付');
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('编辑不能移除当前轮次');
+
+    const retryRun = harness_ACU({
+      withoutApplyOutline: true,
+      mainReplies: [
+        '{"action":"edit_outline","edits":[{"op":"set_turn_goal","turnId":"turn-2","goal":"改"}]}',
+        '{"action":"finalize","instruction":"交付"}',
+      ],
+    });
+    await retryRun.planner.plan(retryRun.request);
+    expect(retryRun.mainCalls[1].map(message => message.content).join('\n')).toContain('正文重试轮次不允许修改大纲');
   });
 
   it('大纲操作先于同波次其他派工执行，普通派工照常并发', async () => {

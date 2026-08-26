@@ -16,7 +16,7 @@ function baseSnapshot_ACU(): AgentModuleSnapshot_ACU {
 }
 
 function delta_ACU(patch: Partial<AgentModuleDelta_ACU> = {}): AgentModuleDelta_ACU {
-  return { expectedRevisions: {}, hooks: [], infoGap: [], constraintProposals: [], ...patch };
+  return { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], constraintProposals: [], ...patch };
 }
 
 function hookItem_ACU(patch: Record<string, unknown> = {}) {
@@ -80,6 +80,43 @@ describe('Agent 写集事务', () => {
 
     const missingIndex = delta_ACU({ expectedRevisions: { infoGap: 3 }, infoGap: [infoGapItem_ACU({ revealStatus: 'partial' })] });
     expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), missingIndex, ['infoGap'], 6)).toThrowError(/必须给出揭示楼层/);
+  });
+
+  it('patch 只改给定字段并保留其余字段，版本号照常递增', () => {
+    const applied = applyAgentModuleDelta_ACU(
+      baseSnapshot_ACU(),
+      delta_ACU({ hookPatches: [{ id: 'H1', summary: '封印裂缝开始渗出黑雾' }] }),
+      ['hooks'],
+      7,
+    );
+    expect(applied.hooks[0]).toMatchObject({
+      summary: '封印裂缝开始渗出黑雾',
+      status: 'planted',
+      importance: 'high',
+      plannedPayoff: '第三阶段回收',
+      updatedIndex: 7,
+    });
+    expect(applied.revisions.hooks).toBe(3);
+  });
+
+  it('patch 不存在或已退役的条目整份拒绝', () => {
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ hookPatches: [{ id: 'H9', summary: '改' }] }), ['hooks'], 7))
+      .toThrowError(/patch 的伏笔不存在/);
+
+    const withRetired = baseSnapshot_ACU();
+    withRetired.hooks[0] = { ...withRetired.hooks[0], retired: true, retiredReason: '已回收' };
+    expect(() => applyAgentModuleDelta_ACU(withRetired, delta_ACU({ hookPatches: [{ id: 'H1', summary: '改' }] }), ['hooks'], 7))
+      .toThrowError(/已退役，不可 patch/);
+  });
+
+  it('信息差 patch 的合并结果必须满足揭示状态一致性', () => {
+    const revealed = baseSnapshot_ACU();
+    revealed.infoGap[0] = { ...revealed.infoGap[0], revealStatus: 'partial', revealIndex: 4 };
+    expect(() => applyAgentModuleDelta_ACU(revealed, delta_ACU({ infoGapPatches: [{ id: 'E1', revealStatus: 'unrevealed' }] }), ['infoGap'], 7))
+      .toThrowError(/揭示楼层必须同时清空/);
+
+    const fixed = applyAgentModuleDelta_ACU(revealed, delta_ACU({ infoGapPatches: [{ id: 'E1', revealStatus: 'unrevealed', revealIndex: null }] }), ['infoGap'], 7);
+    expect(fixed.infoGap[0]).toMatchObject({ revealStatus: 'unrevealed', revealIndex: null, topic: '守门人身份' });
   });
 
   it('空 delta 原样返回同一份快照，不产生无意义的版本递增', () => {
