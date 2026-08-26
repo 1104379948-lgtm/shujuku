@@ -5,9 +5,12 @@ import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/a
 import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import { ContinuationValidationError_ACU, type ContinuationInternalAiRequestIdentity_ACU } from '../../../../src/service/continuation/model';
-import type { AgentModuleSnapshot_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
+import { resetAgentSessionLogForTests_ACU } from '../../../../src/service/continuation/agent/agent-session-log';
+import type { AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
 
 const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test' };
+
+beforeEach(() => { resetAgentSessionLogForTests_ACU(); });
 
 const chat_ACU = () => ([
   { mes: '我要进禁区', is_user: true },
@@ -16,10 +19,21 @@ const chat_ACU = () => ([
   { mes: '守门人挡在门后，右手藏着黑色晶屑。', is_user: false },
 ]);
 
+const preOutlineContext_ACU = () => ({
+  envelope: {} as any,
+  task: { taskId: 'task-1', originInstruction: '推进主角进入禁区' } as any,
+  stage: null,
+  revision: null,
+  node: null,
+  turn: null,
+  turnNumber: null,
+  nodeTurnNumber: null,
+});
+
 const execution_ACU = () => ({
   envelope: {} as any,
   task: { taskId: 'task-1', originInstruction: '推进主角进入禁区' } as any,
-  stage: { stageNumber: 2 } as any,
+  stage: { stageNumber: 2, status: 'running' } as any,
   revision: { outline: { title: '禁区试探', goal: '进入禁区', totalTurns: 6 } } as any,
   node: { id: 'node-1', title: '试探守门人', goal: '试探而不揭穿', turns: [{ id: 'turn-1', goal: '推门' }, { id: 'turn-2', goal: '试探' }] } as any,
   turn: { id: 'turn-2', goal: '试探' } as any,
@@ -33,7 +47,8 @@ interface Harness_ACU {
   mainCalls: Array<Array<{ role: string; content: string }>>;
   subCalls: Array<Array<{ role: string; content: string }>>;
   written: Array<{ index: number; snapshot: AgentModuleSnapshot_ACU }>;
-  reviseCalls: string[];
+  outlineCalls: string[];
+  setContext: (factory: () => any) => void;
 }
 
 function harness_ACU(options: {
@@ -42,18 +57,20 @@ function harness_ACU(options: {
   budget?: Partial<AgentRunBudget_ACU>;
   snapshot?: AgentModuleSnapshot_ACU;
   isCurrent?: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
-  withReviseOutline?: boolean;
+  context?: () => any;
+  applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU> | AgentOutlineOpResult_ACU;
+  withoutApplyOutline?: boolean;
   apiPresetMode?: 'current' | 'fixed';
-  outlinePreview?: boolean;
 }): Harness_ACU {
   const mainReplies = [...options.mainReplies];
   const subReplies = [...(options.subReplies ?? [])];
   const mainCalls: Array<Array<{ role: string; content: string }>> = [];
   const subCalls: Array<Array<{ role: string; content: string }>> = [];
   const written: Array<{ index: number; snapshot: AgentModuleSnapshot_ACU }> = [];
-  const reviseCalls: string[] = [];
+  const outlineCalls: string[] = [];
   const chat = chat_ACU();
   let snapshot = options.snapshot ?? buildEmptyAgentModuleSnapshot_ACU();
+  let contextFactory = options.context ?? execution_ACU;
 
   const subagentRuntime = new AgentSubagentRuntime_ACU({
     resolveApiPreset: (() => preset_ACU) as any,
@@ -74,17 +91,22 @@ function harness_ACU(options: {
   settings.internalAiRetryLimit = 1;
   settings.apiPresetMode = options.apiPresetMode ?? 'fixed';
   settings.fixedApiPresetName = 'p1';
-  settings.outlinePreview = options.outlinePreview ?? false;
 
   const request: ContinuationAgentTurnPlanRequest_ACU = {
     settings,
-    snapshot: execution_ACU(),
+    readContext: () => contextFactory(),
     createInternalRequestIdentity: attempt => ({ taskId: 'task-1', stageId: 'stage-1', turnId: 'turn-2', attemptId: `a-${attempt}`, source: 'turn_instruction' }) as any,
     isInternalRequestCurrent: options.isCurrent ?? (() => true),
-    reviseOutline: options.withReviseOutline ? async instruction => { reviseCalls.push(instruction); } : undefined,
+    applyOutline: options.withoutApplyOutline
+      ? undefined
+      : async instruction => {
+          outlineCalls.push(instruction);
+          const handler = options.applyOutline ?? (() => ({ op: 'revise' as const, requiresReview: false, stopped: null, summary: '已改写大纲' }));
+          return handler(instruction);
+        },
   };
 
-  return { planner, request, mainCalls, subCalls, written, reviseCalls };
+  return { planner, request, mainCalls, subCalls, written, outlineCalls, setContext: factory => { contextFactory = factory; } };
 }
 
 function lastMessage_ACU(messages: Array<{ role: string; content: string }>): { role: string; content: string } {
@@ -209,24 +231,84 @@ describe('主 Agent 循环收敛', () => {
   });
 });
 
-describe('大纲改写', () => {
-  it('先执行改写回调，再抛出不可重试的重规划信号', async () => {
-    const h = harness_ACU({ mainReplies: ['{"action":"revise_outline","replanInstruction":"节奏放慢，多给两轮"}'], withReviseOutline: true });
-    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_OUTLINE_REPLANNED', retryable: false } });
-    expect(h.reviseCalls).toEqual(['节奏放慢，多给两轮']);
+describe('大纲子代理派工', () => {
+  it('无大纲时 finalize 被拒绝；派工 outline-architect 创建成功后同循环内继续并交付', async () => {
+    const h = harness_ACU({
+      context: preOutlineContext_ACU,
+      mainReplies: [
+        '{"action":"finalize","instruction":"直接写"}',
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"围绕禁区试探创建首个阶段"}]}',
+        '{"action":"finalize","instruction":"按新大纲第一轮写"}',
+      ],
+      applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建第 1 阶段大纲「禁区试探」（共 6 轮）' }),
+    });
+    // create 成功后运行时读到的上下文切换为有大纲状态。
+    const original = h.request.applyOutline!;
+    h.request.applyOutline = async instruction => { const result = await original(instruction); h.setContext(execution_ACU); return result; };
+
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('按新大纲第一轮写');
+    expect(h.outlineCalls).toEqual(['围绕禁区试探创建首个阶段']);
+    // 第一次 finalize 因无大纲被协议层拒绝并回灌。
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('不能 finalize');
+    // 大纲操作结果回灌给下一次迭代。
+    expect(h.mainCalls[2].map(message => message.content).join('\n')).toContain('已创建第 1 阶段大纲');
   });
 
-  it('开了大纲预览时明确告知新大纲待确认，而不是笼统说重新开始', async () => {
-    const h = harness_ACU({ mainReplies: ['{"action":"revise_outline","replanInstruction":"改"}'], withReviseOutline: true, outlinePreview: true });
+  it('大纲操作产出待确认的新大纲时以重规划信号中止', async () => {
+    const h = harness_ACU({
+      mainReplies: ['{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"节奏放慢"}]}'],
+      applyOutline: () => ({ op: 'revise', requiresReview: true, stopped: null, summary: '新大纲待确认' }),
+    });
     await expect(h.planner.plan(h.request)).rejects.toMatchObject({
-      error: { code: 'CONTINUATION_AGENT_OUTLINE_REPLANNED', message: expect.stringContaining('等待你确认'), details: { requiresReview: true } },
+      error: { code: 'CONTINUATION_AGENT_OUTLINE_REPLANNED', retryable: false, message: expect.stringContaining('确认') },
+    });
+    expect(h.outlineCalls).toEqual(['节奏放慢']);
+  });
+
+  it('继续大纲遇到阶段上限时任务已停止，循环立即中止', async () => {
+    const h = harness_ACU({
+      mainReplies: ['{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"继续下一阶段"}]}'],
+      applyOutline: () => ({ op: 'continue', requiresReview: false, stopped: 'stage_limit_reached', summary: '阶段数已达上限，任务已停止，不再创建下一阶段' }),
+    });
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({
+      error: { code: 'CONTINUATION_TASK_STATE_INVALID', details: { stopped: 'stage_limit_reached' } },
     });
   });
 
-  it('上下文不支持改写时拒绝该动作，而不是静默忽略', async () => {
-    const h = harness_ACU({ mainReplies: ['{"action":"revise_outline","replanInstruction":"改"}'] });
-    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID' } });
-    expect(h.reviseCalls).toEqual([]);
+  it('正文重试轮次不允许改写大纲，拒绝原因回灌后仍可正常交付', async () => {
+    const h = harness_ACU({
+      withoutApplyOutline: true,
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"改大纲"}]}',
+        '{"action":"finalize","instruction":"基于现有大纲交付"}',
+      ],
+    });
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('基于现有大纲交付');
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('正文重试轮次不允许改写大纲');
+  });
+
+  it('大纲操作先于同波次其他派工执行，普通派工照常并发', async () => {
+    const order: string[] = [];
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"mainline-planner","prompt":"主线","reads":["$OUTLINE_WINDOW"]},{"agentName":"outline-architect","prompt":"先修大纲"}]}',
+        '{"action":"finalize","instruction":"指导"}',
+      ],
+      subReplies: ['{"summary":"主线","recommendation":"推进"}'],
+      applyOutline: () => { order.push('outline'); return { op: 'revise', requiresReview: false, stopped: null, summary: '已改写大纲' }; },
+    });
+    const planner = h.request;
+    const originalIsCurrent = planner.isInternalRequestCurrent;
+    planner.isInternalRequestCurrent = identity => { if (identity.source === 'agent_subagent') order.push('subagent'); return originalIsCurrent(identity); };
+
+    await h.planner.plan(h.request);
+    expect(order[0]).toBe('outline');
+    expect(order).toContain('subagent');
+    const feedback = h.mainCalls[1].map(message => message.content).join('\n');
+    expect(feedback).toContain('已改写大纲');
+    expect(feedback).toContain('mainline-planner');
   });
 });
 

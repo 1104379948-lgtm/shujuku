@@ -3,16 +3,35 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FirstFloorContinuationStore_ACU } from '../../../src/service/continuation/continuation-store';
 import { ContinuationOrchestrator_ACU } from '../../../src/service/continuation/continuation-orchestrator';
 import { buildDefaultContinuationSettings_ACU } from '../../../src/service/continuation/defaults';
-import { ContinuationValidationError_ACU } from '../../../src/service/continuation/model';
+import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../../../src/service/continuation/model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
 const outline = { schemaVersion: 1 as const, title: '阶段', goal: '目标', totalTurns: 6, nodes: [{ id: 'node-1', title: '节点', goal: '节点目标', suggestedTurns: 6, turns: Array.from({ length: 6 }, (_, index) => ({ id: `turn-${index + 1}`, goal: `轮次 ${index + 1}` })) }] };
 
+/**
+ * 执行引擎桩：模拟主 Agent 的大纲行为——没有可执行大纲（无阶段或阶段已完成）时
+ * 先通过注入的回调派工大纲子代理，review/stopped 时按真实循环的行为抛错中止。
+ */
 function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<typeof vi.fn> } = {}) {
   const planner = options.planner ?? vi.fn().mockResolvedValue({ outline, attempts: 1, requiresReview: !!options.preview, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
   let sequence = 0;
   const store = new FirstFloorContinuationStore_ACU();
-  const executionEngine = { prepareCurrentTurnInstruction: vi.fn().mockResolvedValue({ identity: {}, instruction: { instruction: '发送文本', attempts: 1 } }) };
+  const executionEngine = {
+    prepareCurrentTurnInstruction: vi.fn().mockImplementation(async (_isLeaseCurrent: unknown, _retryAttempt: unknown, applyOutline: (instruction: string) => Promise<{ requiresReview: boolean; stopped: string | null }>) => {
+      const task = store.readPersisted()?.activeTask;
+      const stage = task?.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) : null;
+      if (!stage || stage.status === 'completed') {
+        const result = await applyOutline('按当前要求规划大纲');
+        if (result.stopped) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_TASK_STATE_INVALID', 'agent_loop', '任务已停止', false, { stopped: result.stopped }));
+        }
+        if (result.requiresReview) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_OUTLINE_REPLANNED', 'agent_loop', '新大纲等待确认', false));
+        }
+      }
+      return { identity: {}, instruction: { instruction: '发送文本', attempts: 1 } };
+    }),
+  };
   const orchestrator = new ContinuationOrchestrator_ACU({
     store, planner: { plan: planner } as any, executionEngine: executionEngine as any,
     getChatIdentity: () => 'chat-a', now: () => 1_000, allocateId: prefix => `${prefix}-${++sequence}`,
@@ -29,6 +48,19 @@ async function recordPendingHostTurn(orchestrator: ContinuationOrchestrator_ACU,
   });
 }
 
+async function confirmTurns(orchestrator: ContinuationOrchestrator_ACU, store: FirstFloorContinuationStore_ACU, count: number): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages.find(item => item.stageId === task.activeStageId)!;
+    const revision = stage.revisions.find(item => item.revision === stage.activeRevision)!;
+    const node = revision.outline.nodes[stage.activeNodeIndex];
+    const turn = node.turns[stage.activeTurnIndex];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: stage.activeRevision, nodeId: node.id, turnId: turn.id, attemptId: `attempt-${index}` };
+    await recordPendingHostTurn(orchestrator, identity);
+    await orchestrator.confirmCurrentTurn(identity);
+  }
+}
+
 async function expectCode(action: () => Promise<unknown>, code: string) {
   try { await action(); } catch (error) {
     expect(error).toBeInstanceOf(ContinuationValidationError_ACU);
@@ -41,14 +73,20 @@ async function expectCode(action: () => Promise<unknown>, code: string) {
 describe('ContinuationOrchestrator_ACU', () => {
   beforeEach(() => _set_SillyTavern_API_ACU({ chat: [{}], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn().mockResolvedValue(undefined) } as any));
 
-  it('plans before atomically replacing the terminal task and leaves a paused, frozen stage ready to continue', async () => {
+  it('creates the task instantly without planning; the agent-driven continue creates the frozen first stage', async () => {
     const { orchestrator, store, planner } = createOrchestrator();
-    const result = await orchestrator.createTask({ originInstruction: '  推进剧情  ' });
+    const created = await orchestrator.createTask({ originInstruction: '  推进剧情  ' });
+    expect(planner).not.toHaveBeenCalled();
+    expect(created.task).toMatchObject({ originInstruction: '推进剧情', status: 'paused', runStageCount: 0, activeStageId: null });
+    expect(created.task.stages).toEqual([]);
+
+    await orchestrator.continueTask();
     expect(planner).toHaveBeenCalledTimes(1);
-    expect(result.task).toMatchObject({ originInstruction: '推进剧情', status: 'paused', runStageCount: 1 });
-    expect(result.task.stages[0]).toMatchObject({ status: 'running', activeRevision: 1, chronicleStartCount: 3 });
-    expect(result.task.stages[0].revisions[0].frozen).toBe(true);
-    expect(store.readPersisted()).toEqual(result.envelope);
+    const task = store.readPersisted()!.activeTask!;
+    expect(task.runStageCount).toBe(1);
+    expect(task.stages[0]).toMatchObject({ status: 'running', activeRevision: 1, chronicleStartCount: 3 });
+    expect(task.stages[0].revisions[0].frozen).toBe(true);
+    expect(task.stages[0].revisions[0].replanInstruction).toBe('按当前要求规划大纲');
   });
 
   it('persists replacement settings through the first-floor transaction and rejects the running state', async () => {
@@ -66,9 +104,13 @@ describe('ContinuationOrchestrator_ACU', () => {
   it('keeps preview revisions mutable until acceptance and rejects blank task input', async () => {
     const { orchestrator, store } = createOrchestrator({ preview: true });
     await expectCode(() => orchestrator.createTask({ originInstruction: '   ' }), 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY');
-    const preview = await orchestrator.createTask({ originInstruction: '推进剧情' });
-    expect(preview.task.status).toBe('awaiting_outline_review');
-    expect(preview.task.stages[0].revisions[0].frozen).toBe(false);
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+
+    await expectCode(() => orchestrator.continueTask(), 'CONTINUATION_AGENT_OUTLINE_REPLANNED');
+    const preview = store.readPersisted()!.activeTask!;
+    expect(preview.status).toBe('awaiting_outline_review');
+    expect(preview.stages[0].revisions[0].frozen).toBe(false);
+
     const accepted = await orchestrator.acceptOutline();
     expect(accepted.task).toMatchObject({ status: 'paused' });
     expect(accepted.task.stages[0].revisions[0].frozen).toBe(true);
@@ -77,12 +119,12 @@ describe('ContinuationOrchestrator_ACU', () => {
 
   it('sets one persistent deadline on continue and never calls the engine after it expires', async () => {
     let now = 1_000;
-    const { orchestrator, executionEngine } = createOrchestrator();
+    const { orchestrator, executionEngine, store } = createOrchestrator();
     (orchestrator as any).dependencies.now = () => now;
     await orchestrator.createTask({ originInstruction: '推进剧情' });
-    const stored = (orchestrator as any).dependencies.store.readPersisted();
+    const stored = store.readPersisted()!;
     stored.settings = { ...buildDefaultContinuationSettings_ACU(), totalDurationMinutes: 1 };
-    await (orchestrator as any).dependencies.store.replaceAtomically(stored, { chatIdentity: 'chat-a', taskId: stored.activeTask.taskId, stageId: stored.activeTask.activeStageId, revision: 1 });
+    await store.replaceAtomically(stored, { chatIdentity: 'chat-a' });
     await orchestrator.continueTask();
     expect(executionEngine.prepareCurrentTurnInstruction).toHaveBeenCalledTimes(1);
     now = 61_001;
@@ -105,24 +147,38 @@ describe('ContinuationOrchestrator_ACU', () => {
     await expectCode(() => orchestrator.confirmCurrentTurn(identity), 'CONTINUATION_INTERNAL_REQUEST_STALE');
   });
 
-  it('plans the next stage only after the final confirmed turn and counts the initial stage toward the automatic limit', async () => {
+  it('pauses after the final confirmed turn; the next continue delegates the next stage outline to the agent', async () => {
     const { orchestrator, planner, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    for (let index = 0; index < 6; index += 1) {
-      const task = store.readPersisted()!.activeTask!;
-      const stage = task.stages.find(item => item.stageId === task.activeStageId)!;
-      const revision = stage.revisions.find(item => item.revision === stage.activeRevision)!;
-      const node = revision.outline.nodes[stage.activeNodeIndex];
-      const turn = node.turns[stage.activeTurnIndex];
-      const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: stage.activeRevision, nodeId: node.id, turnId: turn.id, attemptId: `attempt-${index}` };
-      await recordPendingHostTurn(orchestrator, identity);
-      await orchestrator.confirmCurrentTurn(identity);
-    }
+    await confirmTurns(orchestrator, store, 6);
+
+    // 末轮确认后不再自动规划：任务落到可继续的暂停态。
+    const completed = store.readPersisted()!.activeTask!;
+    expect(planner).toHaveBeenCalledTimes(1);
+    expect(completed).toMatchObject({ status: 'paused', runStageCount: 1 });
+    expect(completed.stages[0].status).toBe('completed');
+
+    await orchestrator.continueTask();
     const task = store.readPersisted()!.activeTask!;
     expect(planner).toHaveBeenCalledTimes(2);
-    expect(task).toMatchObject({ status: 'paused', runStageCount: 2 });
+    expect(task).toMatchObject({ runStageCount: 2 });
     expect(task.stages.map(stage => stage.status)).toEqual(['completed', 'running']);
+    expect(task.stages[1].revisions[0].frozen).toBe(true);
+  });
+
+  it('replans the remaining stage as an agent outline op and freezes the next revision', async () => {
+    const { orchestrator, planner, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+
+    const result = await orchestrator.replanRemaining({ instruction: '收束当前冲突' });
+    expect(planner).toHaveBeenCalledTimes(2);
+    expect(result.task).toMatchObject({ status: 'paused' });
+    const stage = store.readPersisted()!.activeTask!.stages[0];
+    expect(stage.activeRevision).toBe(2);
+    const revision = stage.revisions.find(item => item.revision === 2)!;
+    expect(revision).toMatchObject({ reason: 'manual_replan', replanInstruction: '收束当前冲突', frozen: true });
   });
 
   it('persists a host-turn identity before dispatch and rejects a mismatched attempt result', async () => {
@@ -145,7 +201,7 @@ describe('ContinuationOrchestrator_ACU', () => {
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     const initial = store.readPersisted()!;
     initial.settings = { ...initial.settings, generationRetryLimit: 1 };
-    await store.replaceAtomically(initial, { chatIdentity: 'chat-a', taskId: initial.activeTask!.taskId, stageId: initial.activeTask!.activeStageId, revision: 1 });
+    await store.replaceAtomically(initial, { chatIdentity: 'chat-a' });
     await orchestrator.continueTask();
     const task = store.readPersisted()!.activeTask!;
     const stage = task.stages[0];
@@ -162,20 +218,21 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'generation_retry_exhausted', pendingHostTurn: { retryCount: 1, status: 'exhausted' }, lastError: { code: 'CONTINUATION_GENERATION_TAGS_MISSING', retryable: false } });
   });
 
-
-  it('keeps a manual stop authoritative when an invalidated replan returns late', async () => {
-    let resolveReplan: ((value: any) => void) | undefined;
-    const planner = vi.fn()
-      .mockResolvedValueOnce({ outline, attempts: 1, requiresReview: false, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } })
-      .mockImplementationOnce(() => new Promise(resolve => { resolveReplan = resolve; }));
+  it('keeps a manual stop authoritative when an invalidated outline op returns late', async () => {
+    let resolvePlan: ((value: any) => void) | undefined;
+    const planner = vi.fn().mockImplementationOnce(() => new Promise(resolve => { resolvePlan = resolve; }));
     const { orchestrator, store } = createOrchestrator({ planner });
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     const replan = orchestrator.replanRemaining({ instruction: '改为收束冲突' });
+    const guarded = replan.catch(error => error);
     await Promise.resolve();
     await orchestrator.stopTask();
-    resolveReplan!({ outline, attempts: 1, requiresReview: false, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
-    await expectCode(() => replan, 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    resolvePlan!({ outline, attempts: 1, requiresReview: false, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
+    const error = await guarded;
+    expect(error).toBeInstanceOf(ContinuationValidationError_ACU);
+    expect((error as ContinuationValidationError_ACU).error.code).toBe('CONTINUATION_INTERNAL_REQUEST_STALE');
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'manual' });
+    expect(store.readPersisted()!.activeTask!.stages).toEqual([]);
   });
 
   it('stops after the initial stage when the automatic stage limit is one', async () => {
@@ -183,18 +240,9 @@ describe('ContinuationOrchestrator_ACU', () => {
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     const persisted = store.readPersisted()!;
     persisted.settings = { ...persisted.settings, maxAutomaticStages: 1 };
-    await store.replaceAtomically(persisted, { chatIdentity: 'chat-a', taskId: persisted.activeTask!.taskId, stageId: persisted.activeTask!.activeStageId, revision: 1 });
+    await store.replaceAtomically(persisted, { chatIdentity: 'chat-a' });
     await orchestrator.continueTask();
-    for (let index = 0; index < 6; index += 1) {
-      const task = store.readPersisted()!.activeTask!;
-      const stage = task.stages.find(item => item.stageId === task.activeStageId)!;
-      const revision = stage.revisions.find(item => item.revision === stage.activeRevision)!;
-      const node = revision.outline.nodes[stage.activeNodeIndex];
-      const turn = node.turns[stage.activeTurnIndex];
-      const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: stage.activeRevision, nodeId: node.id, turnId: turn.id, attemptId: `attempt-${index}` };
-      await recordPendingHostTurn(orchestrator, identity);
-      await orchestrator.confirmCurrentTurn(identity);
-    }
+    await confirmTurns(orchestrator, store, 6);
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'stage_limit_reached', runStageCount: 1 });
     expect(planner).toHaveBeenCalledTimes(1);
   });
@@ -205,6 +253,4 @@ describe('ContinuationOrchestrator_ACU', () => {
     await expectCode(() => orchestrator.abandonAndCreate({ originInstruction: '新任务' }), 'CONTINUATION_TASK_STATE_INVALID');
     expect(store.readPersisted()!.activeTask?.originInstruction).toBe('推进剧情');
   });
-
-
 });

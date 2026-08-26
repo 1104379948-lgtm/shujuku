@@ -7,7 +7,7 @@
  */
 
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
-import type { ContinuationExecutionSnapshot_ACU } from '../stage-execution-engine';
+import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
 import { isAgentWritableModule_ACU, type AgentModuleSnapshot_ACU, type AgentWritableModule_ACU } from './agent-model';
 import { renderAgentConstraints_ACU, renderAgentHooksLedger_ACU, renderAgentInfoGap_ACU } from './agent-module-store';
 import { renderAgentTableByAliases_ACU, renderAgentTableByName_ACU } from './agent-tables';
@@ -33,7 +33,7 @@ export interface AgentResolveContext_ACU {
   chat: any[];
   moduleSnapshot: AgentModuleSnapshot_ACU;
   settledThroughIndex: number;
-  execution: ContinuationExecutionSnapshot_ACU;
+  execution: ContinuationAgentExecutionContext_ACU;
   originInstruction: string;
   recentTurnCount: number;
   tableData?: unknown;
@@ -78,13 +78,23 @@ export function renderAgentRecentHistory_ACU(context: AgentResolveContext_ACU): 
 
 /**
  * 渲染当前大纲窗口：本阶段目标、当前节点与本节点全部轮次目标。
+ * 大纲缺失或当前阶段已完成时如实说明状态，并指出必须先派工大纲子代理。
  * @param context 解析上下文
  * @returns 自然语言文本
  */
 export function renderAgentOutlineWindow_ACU(context: AgentResolveContext_ACU): string {
   const { execution } = context;
+  if (!execution.stage) {
+    return '当前任务还没有阶段大纲。必须先派工 outline-architect 创建首个阶段大纲，才能规划本轮；在大纲创建前 finalize 会被拒绝。';
+  }
+  if (execution.stage.status === 'completed') {
+    return `第 ${execution.stage.stageNumber} 阶段已全部完成（共 ${execution.stage.completedTurns} 轮）。下一阶段大纲尚未创建，需要派工 outline-architect 继续大纲；在此之前 finalize 会被拒绝。`;
+  }
+  if (!execution.revision || !execution.node || !execution.turn) {
+    return `第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待用户确认或游标无效）。本轮无法交付写作指导。`;
+  }
   const turns = execution.node.turns
-    .map((turn, index) => `${index + 1}. ${turn.goal}${turn.id === execution.turn.id ? '  ← 本轮' : ''}`)
+    .map((turn, index) => `${index + 1}. ${turn.goal}${turn.id === execution.turn!.id ? '  ← 本轮' : ''}`)
     .join('\n');
   return [
     `阶段 ${execution.stage.stageNumber}：${execution.revision.outline.title}`,
@@ -115,7 +125,7 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
     case '$HISTORY_UNSETTLED': return { title, text: renderAgentUnsettledHistory_ACU(context) };
     case '$HISTORY_RECENT': return { title, text: renderAgentRecentHistory_ACU(context) };
     case '$OUTLINE_WINDOW': return { title, text: renderAgentOutlineWindow_ACU(context) };
-    case '$CURRENT_TURN_GOAL': return { title, text: context.execution.turn.goal || '（本轮目标为空）' };
+    case '$CURRENT_TURN_GOAL': return { title, text: context.execution.turn?.goal || '（尚无可执行的大纲轮次，本轮目标待大纲创建或继续后确定）' };
     case '$USER_INTENT': return { title, text: context.originInstruction || '（用户未提供初始要求）' };
     case '$HOOKS_LEDGER': return { title, text: renderAgentHooksLedger_ACU(context.moduleSnapshot) };
     case '$INFO_GAP': return { title, text: renderAgentInfoGap_ACU(context.moduleSnapshot) };

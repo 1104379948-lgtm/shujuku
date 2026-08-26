@@ -49,6 +49,14 @@ describe('Agent 目录渲染', () => {
     expect(catalog).not.toContain('你只输出一个 JSON 对象');
   });
 
+  it('大纲子代理排在目录首位，说明三种触发时机与串行执行方式', () => {
+    const catalog = renderAgentSubagentCatalog_ACU();
+    expect(catalog.indexOf('outline-architect')).toBeLessThan(catalog.indexOf('hook-cognition-maintainer'));
+    expect(catalog).toContain('创建（当前没有任何大纲时）');
+    expect(catalog).toContain('串行执行且先于同波次其他派工');
+    expect(catalog).toContain('计入派工预算');
+  });
+
   it('资料模块目录说明谁能写，长期约束标注仅主 Agent 可登记', () => {
     const catalog = renderAgentModuleCatalog_ACU();
     expect(catalog).toContain('$HOOKS_LEDGER');
@@ -105,6 +113,20 @@ describe('Agent 读写集解析', () => {
     const text = resolveAgentReadToken_ACU('$OUTLINE_WINDOW', context_ACU()).text;
     expect(text).toContain('← 本轮');
     expect(text).toContain('大纲是计划，不是已经发生的事实');
+  });
+
+  it('无大纲与阶段已完成两种空态都指引派工大纲子代理', () => {
+    const noOutline = context_ACU();
+    noOutline.execution = { ...noOutline.execution, stage: null, revision: null, node: null, turn: null, turnNumber: null, nodeTurnNumber: null } as any;
+    expect(resolveAgentReadToken_ACU('$OUTLINE_WINDOW', noOutline).text).toContain('还没有阶段大纲');
+    expect(resolveAgentReadToken_ACU('$OUTLINE_WINDOW', noOutline).text).toContain('outline-architect');
+    expect(resolveAgentReadToken_ACU('$CURRENT_TURN_GOAL', noOutline).text).toContain('尚无可执行的大纲轮次');
+
+    const completed = context_ACU();
+    completed.execution = { ...completed.execution, stage: { stageNumber: 2, status: 'completed', completedTurns: 6 } as any, revision: null, node: null, turn: null, turnNumber: null, nodeTurnNumber: null };
+    const text = resolveAgentReadToken_ACU('$OUTLINE_WINDOW', completed).text;
+    expect(text).toContain('已全部完成');
+    expect(text).toContain('继续大纲');
   });
 
   it('$TABLE:<表名> 形式的动态读集直接解析成该表内容', () => {

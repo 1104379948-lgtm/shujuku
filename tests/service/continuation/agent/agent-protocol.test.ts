@@ -61,15 +61,14 @@ describe('主 Agent 动作解析', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'finalize' }, true)).toThrowError(/非空 instruction/);
   });
 
-  it('revise_outline 与 block 都必须带明确理由', () => {
-    expect(parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改慢一点' }, true)).toMatchObject({ kind: 'revise_outline' });
-    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline' }, true)).toThrowError(/replanInstruction/);
+  it('block 必须带明确理由', () => {
     expect(parseAgentMainAction_ACU({ action: 'block', reason: '关键资料缺失', unresolved: ['缺角色表'] }, true)).toMatchObject({ kind: 'block', unresolved: ['缺角色表'] });
     expect(() => parseAgentMainAction_ACU({ action: 'block' }, true)).toThrowError(/必须提供 reason/);
   });
 
-  it('未知动作直接拒绝', () => {
+  it('未知动作直接拒绝，revise_outline 已退役不再是合法动作', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'write_story' }, true)).toThrowError(/action 必须是/);
+    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 delegate \/ finalize \/ block/);
   });
 });
 

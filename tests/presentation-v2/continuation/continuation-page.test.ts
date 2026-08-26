@@ -120,18 +120,26 @@ afterEach(() => { document.body.innerHTML = ''; });
 describe('ContinuationPage', () => {
   it('显示任务创建入口，并将初始要求交给 runtime', async () => {
     const { app, el } = await mountPage();
-    expect(el.textContent).toContain('智能续写任务');
+    expect(el.textContent).toContain('Agent 会话');
     expect(initialize).toHaveBeenCalledOnce();
-    expect(el.textContent).toContain('创建阶段大纲');
+    expect(el.textContent).toContain('创建续写任务');
     expect(el.textContent).not.toContain('循环提示词');
     const textarea = el.querySelector('textarea')!;
     textarea.value = '让主角找到出口';
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
     await nextTick();
-    buttonByText(el, '创建阶段大纲')!.click();
+    buttonByText(el, '创建续写任务')!.click();
     await nextTick();
     expect(originInstruction.value).toBe('让主角找到出口');
     expect(createTask).toHaveBeenCalledOnce();
+    app.unmount();
+  });
+
+  it('任务存在时渲染 Agent 会话流与空态提示', async () => {
+    setTask();
+    const { app, el } = await mountPage();
+    expect(el.querySelector('.acu-v2-session-feed')).not.toBeNull();
+    expect(el.textContent).toContain('还没有运行记录');
     app.unmount();
   });
 

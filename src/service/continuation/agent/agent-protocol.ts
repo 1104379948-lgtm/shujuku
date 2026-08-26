@@ -115,11 +115,6 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
     if (!allowDelegate) failProtocol_ACU('本轮为预算最后一轮，已禁用 delegate，必须输出 finalize 或 block');
     return { kind: 'delegate', thought, delegations: parseDelegations_ACU(payload.delegations) };
   }
-  if (action === 'revise_outline') {
-    const replanInstruction = readText_ACU(payload.replanInstruction);
-    if (!replanInstruction) failProtocol_ACU('revise_outline 动作必须提供 replanInstruction');
-    return { kind: 'revise_outline', thought, replanInstruction };
-  }
   if (action === 'finalize') {
     const instruction = readText_ACU(payload.instruction);
     if (!instruction) failProtocol_ACU('finalize 动作必须提供非空 instruction');
@@ -134,7 +129,7 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
     if (!reason) failProtocol_ACU('block 动作必须提供 reason');
     return { kind: 'block', thought, reason, unresolved: readTextList_ACU(payload.unresolved) };
   }
-  failProtocol_ACU(`action 必须是 delegate / revise_outline / finalize / block 之一，实际收到：${action || '(空)'}`);
+  failProtocol_ACU(`action 必须是 delegate / finalize / block 之一，实际收到：${action || '(空)'}`);
 }
 
 function parseHookItems_ACU(value: unknown): AgentHookDeltaItem_ACU[] {

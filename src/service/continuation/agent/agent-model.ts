@@ -5,7 +5,7 @@
  * 叙事资料模块只覆盖表格系统没有的三项：伏笔账本、认知与信息差、长期约束。
  */
 
-import type { ContinuationExecutionSnapshot_ACU } from '../stage-execution-engine';
+import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
 import type { ContinuationInternalAiRequestIdentity_ACU, ContinuationPromptSegment_ACU, ContinuationSettings_ACU } from '../model';
 
 /** 楼层锚定快照挂在消息对象上的独立字段名，与首楼 `_qrf_continuation` 并列、互不干扰。 */
@@ -93,6 +93,23 @@ export type AgentSubagentName_ACU = typeof AGENT_SUBAGENT_NAMES_ACU[number];
 
 export type AgentSubagentKind_ACU = 'maintain' | 'plan' | 'review';
 
+/**
+ * 大纲子代理的目录名。它不走通用子代理运行时：主循环拦截对它的派工，
+ * 调用编排器注入的租约内事务回调，由既有大纲规划器完成生成与校验。
+ */
+export const AGENT_OUTLINE_AGENT_NAME_ACU = 'outline-architect';
+
+/** 大纲操作种类。由运行时按 envelope 状态推断，主 Agent 不需要也不允许指定。 */
+export type AgentOutlineOpKind_ACU = 'create' | 'revise' | 'continue';
+
+/** 一次大纲操作的结果。stopped 非空表示任务已被停止（阶段上限/总时长），循环必须中止。 */
+export interface AgentOutlineOpResult_ACU {
+  op: AgentOutlineOpKind_ACU;
+  requiresReview: boolean;
+  stopped: 'stage_limit_reached' | 'duration_reached' | null;
+  summary: string;
+}
+
 /** 主 Agent 一次派工的完整输入。读集/写集用占位符 token 表达，不暴露存储路径。 */
 export interface AgentDelegation_ACU {
   agentName: string;
@@ -115,12 +132,6 @@ export interface AgentDelegateAction_ACU {
   delegations: AgentDelegation_ACU[];
 }
 
-export interface AgentReviseOutlineAction_ACU {
-  kind: 'revise_outline';
-  thought: string;
-  replanInstruction: string;
-}
-
 export interface AgentBlockAction_ACU {
   kind: 'block';
   thought: string;
@@ -128,7 +139,7 @@ export interface AgentBlockAction_ACU {
   unresolved: string[];
 }
 
-export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentReviseOutlineAction_ACU | AgentBlockAction_ACU;
+export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU;
 
 /** 运行时硬边界。预留最后一轮让主 Agent 有机会正常交付而不是被突然掐断。 */
 export interface AgentRunBudget_ACU {
@@ -224,10 +235,12 @@ export interface ContinuationAgentTurnPlanResult_ACU {
 /** 一次轮次准备所需的全部外部输入。 */
 export interface ContinuationAgentTurnPlanRequest_ACU {
   settings: ContinuationSettings_ACU;
-  snapshot: ContinuationExecutionSnapshot_ACU;
+  /** 宽松执行上下文供应器。大纲操作会改变游标，循环每次迭代都要重新读取。 */
+  readContext: () => ContinuationAgentExecutionContext_ACU;
   createInternalRequestIdentity: (attempt: number) => ContinuationInternalAiRequestIdentity_ACU & { source: 'turn_instruction' };
   isInternalRequestCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
-  reviseOutline?: (replanInstruction: string) => Promise<void>;
+  /** 大纲操作回调，由编排器在租约内执行。正文重试轮不注入，此时大纲派工被拒绝回灌。 */
+  applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU>;
   signal?: AbortSignal | null;
 }
 

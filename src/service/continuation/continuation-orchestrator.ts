@@ -3,6 +3,7 @@ import { FirstFloorContinuationStore_ACU } from './continuation-store';
 import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
 import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
+import type { AgentOutlineOpResult_ACU } from './agent/agent-model';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
 
 export interface ContinuationChronicleSnapshot_ACU { count: number; range: { first: string; last: string } | null; }
@@ -111,39 +112,30 @@ function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, snapshot: Continua
 export class ContinuationOrchestrator_ACU {
   constructor(private readonly dependencies: ContinuationOrchestratorDependencies_ACU) {}
 
+  /**
+   * 创建任务。不再预先规划大纲：大纲由主 Agent 在循环内按需派工大纲子代理创建，
+   * 因此创建是即时操作，任务以「无阶段」状态落盘等待继续。
+   */
   async createTask(input: CreateContinuationTaskInput_ACU): Promise<ContinuationOrchestratorResult_ACU> {
     const originInstruction = normalizeOriginInstruction_ACU(input.originInstruction);
-    return this.withLease_ACU(async (chatIdentity, lease) => {
+    return this.withLease_ACU(async chatIdentity => {
       const existing = this.dependencies.store.readPersisted()?.activeTask ?? null;
       if (existing && !['completed', 'abandoned', 'failed'].includes(existing.status)) {
         fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前聊天已有未完成的智能续写任务');
       }
       const now = this.dependencies.now();
       const taskId = this.dependencies.allocateId('task');
-      const stageId = this.dependencies.allocateId('stage');
-      const draft: ContinuationTask_ACU = {
-        taskId, originInstruction, status: 'drafting', createdAt: now, updatedAt: now, runStartedAt: null, deadlineAt: null,
-        runStageCount: 1, activeStageId: stageId, stages: [], timeline: [], stopReason: null, lastError: null,
-      };
-      const context: ContinuationPlanningContext_ACU = { envelope: this.baseEnvelope_ACU(), task: draft, stage: null, reason: 'initial', replanInstruction: '' };
-      const planned = await this.planOutline_ACU(context, chatIdentity, lease, stageId, 1);
-      const snapshot = await this.dependencies.readChronicleSnapshot();
-      this.assertLeaseCurrent_ACU(chatIdentity, lease);
-      const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'initial', '', now);
-      const needsReview = planned.requiresReview;
-      const stage = stageForOutline_ACU(stageId, 1, needsReview ? revision : acceptPlannedStageRevision_ACU(revision, context.envelope.settings), snapshot, needsReview ? 'awaiting_review' : 'running');
+      const base = this.baseEnvelope_ACU();
       const candidate: ContinuationEnvelope_ACU = {
-        schemaVersion: context.envelope.schemaVersion,
-        settings: context.envelope.settings,
+        schemaVersion: base.schemaVersion,
+        settings: base.settings,
         activeTask: {
-          ...draft,
-          status: needsReview ? 'awaiting_outline_review' : 'paused',
-          stages: [stage],
-          timeline: [this.timeline_ACU('task_created', now, { stageId }), this.timeline_ACU('outline_ready', now, { stageId, revision: 1 })],
+          taskId, originInstruction, status: 'paused', createdAt: now, updatedAt: now, runStartedAt: null, deadlineAt: null,
+          runStageCount: 0, activeStageId: null, stages: [], timeline: [this.timeline_ACU('task_created', now)], stopReason: null, lastError: null,
         },
       };
       await this.dependencies.store.replaceAtomically(candidate, guardForTask_ACU(chatIdentity, existing));
-      return taskResult_ACU(candidate, this.planningSummary_ACU(planned));
+      return taskResult_ACU(candidate);
     });
   }
 
@@ -205,9 +197,11 @@ export class ContinuationOrchestrator_ACU {
         if (task.stopReason !== null) {
           fail_ACU('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可继续');
         }
-        const stage = getActiveStage_ACU(task);
-        if (stage.status === 'completed') return envelope;
-        if (stage.status !== 'running' || !getActiveRevision_ACU(stage).frozen) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段不可继续');
+        // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）都可以进循环，由主 Agent 派工大纲子代理处理。
+        const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+        if (stage && stage.status !== 'completed' && (stage.status !== 'running' || !getActiveRevision_ACU(stage).frozen)) {
+          fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段不可继续');
+        }
         const now = this.dependencies.now();
         if (task.deadlineAt !== null && now >= task.deadlineAt) {
           started = this.stopEnvelope_ACU(envelope, 'duration_reached', now);
@@ -219,17 +213,16 @@ export class ContinuationOrchestrator_ACU {
       }, { chatIdentity });
       const task = started!.activeTask!;
       if (task.status !== 'running') return taskResult_ACU(started!);
-      const stage = getActiveStage_ACU(task);
       try {
         const retryAttempt = task.pendingHostTurn?.status === 'retry_ready' ? task.pendingHostTurn.identity : undefined;
         const preparedTurn = await this.dependencies.executionEngine.prepareCurrentTurnInstruction(
           () => this.isLeaseCurrent_ACU(chatIdentity, lease),
           retryAttempt,
-          async replanInstruction => { await this.replanWithinLease_ACU(chatIdentity, lease, replanInstruction); },
+          async instruction => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult,
         );
         return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started!), preparedTurn };
       } catch (error) {
-        await this.pauseAfterTurnPreparationFailure_ACU(chatIdentity, task.taskId, stage.stageId, stage.activeRevision, error);
+        await this.pauseWithError_ACU(chatIdentity, task.taskId, error, 'turn_call', '每轮指令生成失败');
         throw error;
       }
     });
@@ -351,7 +344,6 @@ export class ContinuationOrchestrator_ACU {
       const chronicleSnapshot = isFinalTurn ? await this.dependencies.readChronicleSnapshot() : null;
       this.assertLeaseCurrent_ACU(chatIdentity, lease);
       let advanced: ContinuationEnvelope_ACU | null = null;
-      let mustPlanNextStage = false;
       await this.dependencies.store.updatePersistedAtomically(current => {
         const envelope = this.requireEnvelope_ACU(current);
         const task = this.requireTask_ACU(envelope);
@@ -375,29 +367,11 @@ export class ContinuationOrchestrator_ACU {
           advanced = this.stopEnvelope_ACU({ ...envelope, activeTask: completedTurn }, 'stage_limit_reached', now);
           return advanced;
         }
-        if (!envelope.settings.autoNextStage) {
-          advanced = { ...envelope, activeTask: { ...completedTurn, status: 'paused', updatedAt: now } };
-          return advanced;
-        }
-        mustPlanNextStage = true;
+        // 下一阶段的大纲由主 Agent 在下一次继续时派工大纲子代理创建，这里只落到可继续的暂停态。
         advanced = { ...envelope, activeTask: { ...completedTurn, status: 'paused', updatedAt: now } };
         return advanced;
       }, { chatIdentity });
-      if (!mustPlanNextStage) return taskResult_ACU(advanced!);
-      return this.planNextStage_ACU(chatIdentity, lease, advanced!);
-    });
-  }
-
-  async startNextStage(): Promise<ContinuationOrchestratorResult_ACU> {
-    return this.withLease_ACU(async (chatIdentity, lease) => {
-      const current = this.dependencies.store.readPersisted();
-      const envelope = this.requireEnvelope_ACU(current);
-      const task = this.requireTask_ACU(envelope);
-      const stage = getActiveStage_ACU(task);
-      if (task.status !== 'paused' || stage.status !== 'completed' || task.stopReason !== null) {
-        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前任务不可创建下一阶段');
-      }
-      return this.planNextStage_ACU(chatIdentity, lease, envelope);
+      return taskResult_ACU(advanced!);
     });
   }
 
@@ -421,70 +395,139 @@ export class ContinuationOrchestrator_ACU {
     const replanInstruction = typeof input.instruction === 'string' ? input.instruction.trim() : '';
     const chatIdentity = this.requireChatIdentity_ACU();
     this.invalidateLease_ACU(chatIdentity);
-    return this.withLease_ACU((_identity, lease) => this.replanWithinLease_ACU(chatIdentity, lease, replanInstruction));
+    return this.withLease_ACU(async (_identity, lease) => {
+      const taskId = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted())).taskId;
+      try {
+        const outcome = await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, replanInstruction, 'paused');
+        return taskResult_ACU(outcome.envelope, outcome.planning);
+      } catch (error) {
+        await this.pauseWithError_ACU(chatIdentity, taskId, error, 'outline_call', '阶段规划失败');
+        throw error;
+      }
+    });
   }
 
   /**
-   * 重新规划当前阶段剩余部分的事务内核，不涉及租约获取或作废。
-   * 已持有租约的调用方（如 Agent 主循环的 revise_outline）直接复用这里，
-   * 因为 withLease_ACU 不可重入，嵌套获取会被判为「已有操作正在执行」。
+   * 大纲操作事务内核：按 envelope 当前状态推断创建 / 维护 / 继续三种操作。
+   * 主 Agent 循环通过 continueTask 注入的回调调用（endStatus='running'，租约由 continueTask 持有），
+   * UI 的重新规划通过 replanRemaining 调用（endStatus='paused'）。withLease_ACU 不可重入，
+   * 因此这里绝不获取租约，只使用调用方已持有的。
    * @param chatIdentity 当前聊天身份
    * @param lease 调用方已持有的租约
-   * @param replanInstruction 重规划补充要求
-   * @returns 重规划后的任务结果
+   * @param instruction 主 Agent 或用户给大纲子代理的要求
+   * @param endStatus 操作成功后任务的落点状态；需要预览确认时一律 awaiting_outline_review
+   * @returns 操作结果、最新 envelope 与规划摘要
    */
-  async replanWithinLease_ACU(chatIdentity: string, lease: Lease_ACU, replanInstruction: string): Promise<ContinuationOrchestratorResult_ACU> {
-    const sourceTask = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted()));
-    const sourceGuard = guardForTask_ACU(chatIdentity, sourceTask);
-    {
-      let planningEnvelope: ContinuationEnvelope_ACU | null = null;
-      let planningContext: ContinuationPlanningContext_ACU | null = null;
-      await this.dependencies.store.updatePersistedAtomically(current => {
-        const envelope = this.requireEnvelope_ACU(current);
-        const task = this.requireTask_ACU(envelope);
-        const stage = getActiveStage_ACU(task);
-        const previous = getActiveRevision_ACU(stage);
-        if (!['running', 'paused', 'failed'].includes(task.status) || !['running', 'failed'].includes(stage.status)) {
-          fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段不可重新规划');
-        }
-        if (task.stopReason !== null) {
-          fail_ACU('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可重新规划');
-        }
-        const nextRevision = previous.revision + 1;
-        const pending = createPlannedStageRevision_ACU(cloneOutline_ACU(previous.outline), nextRevision, 'manual_replan', replanInstruction, this.dependencies.now());
-        const nextStage = { ...stage, status: 'planning' as const, activeRevision: nextRevision, revisions: [...stage.revisions, pending] };
-        const nextTask: ContinuationTask_ACU = { ...task, status: 'paused', updatedAt: this.dependencies.now(), stopReason: null, lastError: null, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item) };
-        planningEnvelope = { ...envelope, activeTask: nextTask };
-        planningContext = { envelope: planningEnvelope, task: nextTask, stage: nextStage, reason: 'manual_replan', replanInstruction };
-        return planningEnvelope;
-      }, sourceGuard);
-      const context = planningContext!;
-      const stage = context.stage!;
-      const previous = stage.revisions.find(item => item.revision === stage.activeRevision - 1)!;
-      const constraints: ContinuationReplanConstraints_ACU = { previousOutline: previous.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: previous.outline.totalTurns - stage.completedTurns };
-      try {
-        const planned = await this.planOutline_ACU(context, chatIdentity, lease, stage.stageId, stage.activeRevision, constraints);
-        this.assertLeaseCurrent_ACU(chatIdentity, lease);
-        let completed: ContinuationEnvelope_ACU | null = null;
-        await this.dependencies.store.updatePersistedAtomically(current => {
-          const envelope = this.requireEnvelope_ACU(current);
-          const task = this.requireTask_ACU(envelope);
-          const activeStage = getActiveStage_ACU(task);
-          if (task.taskId !== context.task.taskId || activeStage.stageId !== stage.stageId || activeStage.activeRevision !== stage.activeRevision || activeStage.status !== 'planning') {
-            fail_ACU('CONTINUATION_TASK_STATE_INVALID', '重新规划结果已失效');
-          }
-          const pending = getActiveRevision_ACU(activeStage);
-          const accepted = planned.requiresReview ? { ...pending, outline: cloneOutline_ACU(planned.outline) } : acceptPlannedStageRevision_ACU({ ...pending, outline: cloneOutline_ACU(planned.outline) }, envelope.settings, constraints);
-          const nextStage = { ...activeStage, status: (planned.requiresReview ? 'awaiting_review' : 'running') as ContinuationStage_ACU['status'], revisions: activeStage.revisions.map(item => item.revision === accepted.revision ? accepted : item) };
-          completed = { ...envelope, activeTask: { ...task, status: planned.requiresReview ? 'awaiting_outline_review' : 'paused', updatedAt: this.dependencies.now(), stages: task.stages.map(item => item.stageId === nextStage.stageId ? nextStage : item), timeline: [...task.timeline, this.timeline_ACU('outline_ready', this.dependencies.now(), { stageId: nextStage.stageId, revision: accepted.revision })] } };
-          return completed;
-        }, guardForTask_ACU(chatIdentity, context.task));
-        return taskResult_ACU(completed!, this.planningSummary_ACU(planned));
-      } catch (error) {
-        await this.pauseAfterPlanningFailure_ACU(chatIdentity, context.task.taskId, stage.stageId, stage.activeRevision, error);
-        throw error;
+  async applyOutlineOpWithinLease_ACU(chatIdentity: string, lease: Lease_ACU, instruction: string, endStatus: 'running' | 'paused'): Promise<{ opResult: AgentOutlineOpResult_ACU; envelope: ContinuationEnvelope_ACU; planning?: ContinuationOrchestratorResult_ACU['planning'] }> {
+    const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+    const task = this.requireTask_ACU(envelope);
+    if (task.stopReason !== null) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可规划大纲');
+    const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+    if (!stage) return this.createOutlineOp_ACU(chatIdentity, lease, envelope, task, instruction, endStatus);
+    if (stage.status === 'completed') return this.continueOutlineOp_ACU(chatIdentity, lease, envelope, task, stage, instruction, endStatus);
+    if (stage.status === 'running' || stage.status === 'failed') return this.reviseOutlineOp_ACU(chatIdentity, lease, envelope, task, stage, instruction, endStatus);
+    fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前阶段状态不允许大纲操作');
+  }
+
+  /** 创建首个阶段大纲。单阶段事务：先规划后一次性落盘，失败不留任何中间状态。 */
+  private async createOutlineOp_ACU(chatIdentity: string, lease: Lease_ACU, envelope: ContinuationEnvelope_ACU, task: ContinuationTask_ACU, instruction: string, endStatus: 'running' | 'paused'): Promise<{ opResult: AgentOutlineOpResult_ACU; envelope: ContinuationEnvelope_ACU; planning?: ContinuationOrchestratorResult_ACU['planning'] }> {
+    const stageId = this.dependencies.allocateId('stage');
+    const context: ContinuationPlanningContext_ACU = { envelope, task, stage: null, reason: 'initial', replanInstruction: instruction };
+    const planned = await this.planOutline_ACU(context, chatIdentity, lease, stageId, 1);
+    const snapshot = await this.dependencies.readChronicleSnapshot();
+    this.assertLeaseCurrent_ACU(chatIdentity, lease);
+    const stageNumber = task.runStageCount + 1;
+    let result: ContinuationEnvelope_ACU | null = null;
+    await this.dependencies.store.updatePersistedAtomically(current => {
+      const env = this.requireEnvelope_ACU(current);
+      const t = this.requireTask_ACU(env);
+      if (t.taskId !== task.taskId || t.activeStageId !== null || t.stopReason !== null) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '大纲创建前提已失效', false));
       }
+      const now = this.dependencies.now();
+      const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'initial', instruction, now);
+      const nextStage = stageForOutline_ACU(stageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), snapshot, planned.requiresReview ? 'awaiting_review' : 'running');
+      result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: now, activeStageId: stageId, runStageCount: stageNumber, stages: [...t.stages, nextStage], lastError: null, timeline: [...t.timeline, this.timeline_ACU('outline_ready', now, { stageId, revision: 1 })] } };
+      return result;
+    }, guardForTask_ACU(chatIdentity, task));
+    return {
+      opResult: { op: 'create', requiresReview: planned.requiresReview, stopped: null, summary: `已创建第 ${stageNumber} 阶段大纲「${planned.outline.title}」（共 ${planned.outline.totalTurns} 轮）` },
+      envelope: result!,
+      planning: this.planningSummary_ACU(planned),
+    };
+  }
+
+  /** 当前阶段已完成时继续下一阶段大纲。先做停止判定，任务被停止时不再规划。 */
+  private async continueOutlineOp_ACU(chatIdentity: string, lease: Lease_ACU, envelope: ContinuationEnvelope_ACU, task: ContinuationTask_ACU, stage: ContinuationStage_ACU, instruction: string, endStatus: 'running' | 'paused'): Promise<{ opResult: AgentOutlineOpResult_ACU; envelope: ContinuationEnvelope_ACU; planning?: ContinuationOrchestratorResult_ACU['planning'] }> {
+    const now = this.dependencies.now();
+    if (task.deadlineAt !== null && now >= task.deadlineAt) {
+      const stopped = this.stopEnvelope_ACU(envelope, 'duration_reached', now);
+      await this.dependencies.store.replaceAtomically(stopped, guardForTask_ACU(chatIdentity, task));
+      return { opResult: { op: 'continue', requiresReview: false, stopped: 'duration_reached', summary: '总时长已到，任务已停止，不再创建下一阶段' }, envelope: stopped };
     }
+    if (task.runStageCount >= envelope.settings.maxAutomaticStages) {
+      const stopped = this.stopEnvelope_ACU(envelope, 'stage_limit_reached', now);
+      await this.dependencies.store.replaceAtomically(stopped, guardForTask_ACU(chatIdentity, task));
+      return { opResult: { op: 'continue', requiresReview: false, stopped: 'stage_limit_reached', summary: '阶段数已达上限，任务已停止，不再创建下一阶段' }, envelope: stopped };
+    }
+    const nextStageId = this.dependencies.allocateId('stage');
+    const context: ContinuationPlanningContext_ACU = { envelope, task, stage: null, reason: 'auto_next_stage', replanInstruction: instruction };
+    const planned = await this.planOutline_ACU(context, chatIdentity, lease, nextStageId, 1);
+    const snapshot = await this.dependencies.readChronicleSnapshot();
+    this.assertLeaseCurrent_ACU(chatIdentity, lease);
+    const stageNumber = task.runStageCount + 1;
+    let result: ContinuationEnvelope_ACU | null = null;
+    await this.dependencies.store.updatePersistedAtomically(current => {
+      const env = this.requireEnvelope_ACU(current);
+      const t = this.requireTask_ACU(env);
+      const completedStage = t.activeStageId ? t.stages.find(item => item.stageId === t.activeStageId) : null;
+      if (t.taskId !== task.taskId || completedStage?.stageId !== stage.stageId || completedStage.status !== 'completed' || t.stopReason !== null) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '下一阶段规划前提已失效', false));
+      }
+      const at = this.dependencies.now();
+      const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'auto_next_stage', instruction, at);
+      const nextStage = stageForOutline_ACU(nextStageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), snapshot, planned.requiresReview ? 'awaiting_review' : 'running');
+      result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: at, activeStageId: nextStageId, runStageCount: stageNumber, stages: [...t.stages, nextStage], lastError: null, timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStageId, revision: 1 })] } };
+      return result;
+    }, guardForTask_ACU(chatIdentity, task));
+    return {
+      opResult: { op: 'continue', requiresReview: planned.requiresReview, stopped: null, summary: `已继续大纲：第 ${stageNumber} 阶段「${planned.outline.title}」（共 ${planned.outline.totalTurns} 轮）` },
+      envelope: result!,
+      planning: this.planningSummary_ACU(planned),
+    };
+  }
+
+  /** 改写当前阶段剩余部分。完成前缀保护由 schema 校验强制：已完成轮次不可被改掉。 */
+  private async reviseOutlineOp_ACU(chatIdentity: string, lease: Lease_ACU, envelope: ContinuationEnvelope_ACU, task: ContinuationTask_ACU, stage: ContinuationStage_ACU, instruction: string, endStatus: 'running' | 'paused'): Promise<{ opResult: AgentOutlineOpResult_ACU; envelope: ContinuationEnvelope_ACU; planning?: ContinuationOrchestratorResult_ACU['planning'] }> {
+    if (!['running', 'paused', 'failed'].includes(task.status)) {
+      fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前任务状态不可改写大纲');
+    }
+    const current = getActiveRevision_ACU(stage);
+    const constraints: ContinuationReplanConstraints_ACU = { previousOutline: current.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: current.outline.totalTurns - stage.completedTurns };
+    const context: ContinuationPlanningContext_ACU = { envelope, task, stage, reason: 'manual_replan', replanInstruction: instruction };
+    const nextRevisionNumber = current.revision + 1;
+    const planned = await this.planOutline_ACU(context, chatIdentity, lease, stage.stageId, nextRevisionNumber, constraints);
+    this.assertLeaseCurrent_ACU(chatIdentity, lease);
+    let result: ContinuationEnvelope_ACU | null = null;
+    await this.dependencies.store.updatePersistedAtomically(currentEnvelope => {
+      const env = this.requireEnvelope_ACU(currentEnvelope);
+      const t = this.requireTask_ACU(env);
+      const activeStage = getActiveStage_ACU(t);
+      if (t.taskId !== task.taskId || activeStage.stageId !== stage.stageId || activeStage.activeRevision !== current.revision || t.stopReason !== null) {
+        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '重新规划结果已失效');
+      }
+      const at = this.dependencies.now();
+      const pending = createPlannedStageRevision_ACU(cloneOutline_ACU(planned.outline), nextRevisionNumber, 'manual_replan', instruction, at);
+      const accepted = planned.requiresReview ? pending : acceptPlannedStageRevision_ACU(pending, env.settings, constraints);
+      const nextStage = { ...activeStage, status: (planned.requiresReview ? 'awaiting_review' : 'running') as ContinuationStage_ACU['status'], activeRevision: nextRevisionNumber, revisions: [...activeStage.revisions, accepted] };
+      result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: at, lastError: null, stages: t.stages.map(item => item.stageId === nextStage.stageId ? nextStage : item), timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStage.stageId, revision: nextRevisionNumber })] } };
+      return result;
+    }, guardForTask_ACU(chatIdentity, task));
+    return {
+      opResult: { op: 'revise', requiresReview: planned.requiresReview, stopped: null, summary: `已改写第 ${stage.stageNumber} 阶段大纲（revision ${nextRevisionNumber}，已完成的 ${stage.completedTurns} 轮保持不变）` },
+      envelope: result!,
+      planning: this.planningSummary_ACU(planned),
+    };
   }
 
   async abandonAndCreate(input: CreateContinuationTaskInput_ACU & { confirmAbandon?: boolean }): Promise<ContinuationOrchestratorResult_ACU> {
@@ -505,66 +548,6 @@ export class ContinuationOrchestrator_ACU {
     return this.createTask(input);
   }
 
-  private async planNextStage_ACU(chatIdentity: string, lease: Lease_ACU, sourceEnvelope: ContinuationEnvelope_ACU): Promise<ContinuationOrchestratorResult_ACU> {
-    const sourceTask = this.requireTask_ACU(sourceEnvelope);
-    const sourceStage = getActiveStage_ACU(sourceTask);
-    if (sourceTask.deadlineAt !== null && this.dependencies.now() >= sourceTask.deadlineAt) {
-      const stopped = this.stopEnvelope_ACU(sourceEnvelope, 'duration_reached', this.dependencies.now());
-      await this.dependencies.store.replaceAtomically(stopped, guardForTask_ACU(chatIdentity, sourceTask));
-      return taskResult_ACU(stopped);
-    }
-    if (sourceTask.runStageCount >= sourceEnvelope.settings.maxAutomaticStages) {
-      const stopped = this.stopEnvelope_ACU(sourceEnvelope, 'stage_limit_reached', this.dependencies.now());
-      await this.dependencies.store.replaceAtomically(stopped, guardForTask_ACU(chatIdentity, sourceTask));
-      return taskResult_ACU(stopped);
-    }
-    const snapshot = await this.dependencies.readChronicleSnapshot();
-    this.assertLeaseCurrent_ACU(chatIdentity, lease);
-    const nextStageId = this.dependencies.allocateId('stage');
-    let planningContext: ContinuationPlanningContext_ACU | null = null;
-    await this.dependencies.store.updatePersistedAtomically(current => {
-      const envelope = this.requireEnvelope_ACU(current);
-      const task = this.requireTask_ACU(envelope);
-      const completedStage = getActiveStage_ACU(task);
-      if (task.taskId !== sourceTask.taskId || completedStage.stageId !== sourceStage.stageId || completedStage.status !== 'completed' || task.status !== 'paused' || task.stopReason !== null) {
-        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '下一阶段规划前提已失效', false));
-      }
-      const previousRevision = getActiveRevision_ACU(completedStage);
-      const pendingRevision = createPlannedStageRevision_ACU(cloneOutline_ACU(previousRevision.outline), 1, 'auto_next_stage', '', this.dependencies.now());
-      const nextStage = stageForOutline_ACU(nextStageId, task.runStageCount + 1, pendingRevision, snapshot, 'planning');
-      const nextTask: ContinuationTask_ACU = { ...task, status: 'drafting', updatedAt: this.dependencies.now(), activeStageId: nextStageId, runStageCount: task.runStageCount + 1, stages: [...task.stages, nextStage], stopReason: null, lastError: null };
-      const candidate = { ...envelope, activeTask: nextTask };
-      planningContext = { envelope: candidate, task: nextTask, stage: nextStage, reason: 'auto_next_stage', replanInstruction: '' };
-      return candidate;
-    }, guardForTask_ACU(chatIdentity, sourceTask));
-    const context = planningContext!;
-    try {
-      const planned = await this.planOutline_ACU(context, chatIdentity, lease, nextStageId, 1);
-      this.assertLeaseCurrent_ACU(chatIdentity, lease);
-      let completed: ContinuationEnvelope_ACU | null = null;
-      await this.dependencies.store.updatePersistedAtomically(current => {
-        const envelope = this.requireEnvelope_ACU(current);
-        const task = this.requireTask_ACU(envelope);
-        const stage = getActiveStage_ACU(task);
-        if (task.taskId !== context.task.taskId || task.status !== 'drafting' || stage.stageId !== nextStageId || stage.status !== 'planning' || stage.activeRevision !== 1) {
-          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '下一阶段规划结果已失效', false));
-        }
-        const pending = getActiveRevision_ACU(stage);
-        const accepted = planned.requiresReview
-          ? { ...pending, outline: cloneOutline_ACU(planned.outline) }
-          : acceptPlannedStageRevision_ACU({ ...pending, outline: cloneOutline_ACU(planned.outline) }, envelope.settings);
-        const nextStage = { ...stage, status: (planned.requiresReview ? 'awaiting_review' : 'running') as ContinuationStage_ACU['status'], revisions: stage.revisions.map(item => item.revision === 1 ? accepted : item) };
-        completed = { ...envelope, activeTask: { ...task, status: planned.requiresReview ? 'awaiting_outline_review' : 'paused', updatedAt: this.dependencies.now(), stages: task.stages.map(item => item.stageId === nextStageId ? nextStage : item), timeline: [...task.timeline, this.timeline_ACU('outline_ready', this.dependencies.now(), { stageId: nextStageId, revision: 1 })] } };
-        return completed;
-      }, guardForTask_ACU(chatIdentity, context.task));
-      return taskResult_ACU(completed!, this.planningSummary_ACU(planned));
-    } catch (error) {
-      await this.pauseAfterPlanningFailure_ACU(chatIdentity, context.task.taskId, nextStageId, 1, error);
-      throw error;
-    }
-  }
-
-
   private async planOutline_ACU(context: ContinuationPlanningContext_ACU, chatIdentity: string, lease: Lease_ACU, stageId: string, revision: number, replanConstraints?: ContinuationReplanConstraints_ACU): Promise<ContinuationOutlinePlanningResult_ACU> {
     return this.dependencies.planner.plan({
       settings: context.envelope.settings,
@@ -577,30 +560,20 @@ export class ContinuationOrchestrator_ACU {
     });
   }
 
-  private async pauseAfterPlanningFailure_ACU(chatIdentity: string, taskId: string, stageId: string, revision: number, error: unknown): Promise<void> {
-    const lastError = error instanceof ContinuationValidationError_ACU ? error.error : createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'outline_call', '阶段规划失败', false);
+  /**
+   * 循环或规划失败后的统一暂停记录。单阶段事务化后失败不留中间状态，
+   * 这里只负责把任务落到 paused 并记录 lastError，让用户可以直接再继续。
+   */
+  private async pauseWithError_ACU(chatIdentity: string, taskId: string, error: unknown, phase: 'turn_call' | 'outline_call', fallbackMessage: string): Promise<void> {
+    const lastError = error instanceof ContinuationValidationError_ACU ? error.error : createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', phase, fallbackMessage, false);
     try {
       await this.dependencies.store.updatePersistedAtomically(current => {
         const envelope = this.requireEnvelope_ACU(current);
         const task = this.requireTask_ACU(envelope);
-        const stage = getActiveStage_ACU(task);
-        if (task.taskId !== taskId || task.stopReason !== null || stage.stageId !== stageId || stage.activeRevision !== revision || stage.status !== 'planning') return envelope;
-        return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: this.dependencies.now(), lastError, stages: task.stages.map(item => item.stageId === stageId ? { ...item, status: 'failed' } : item), timeline: [...task.timeline, this.timeline_ACU('failed', this.dependencies.now(), { stageId, revision, errorCode: lastError.code })] } };
+        if (task.taskId !== taskId || task.stopReason !== null || !['running', 'paused', 'failed'].includes(task.status)) return envelope;
+        return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: this.dependencies.now(), lastError, timeline: [...task.timeline, this.timeline_ACU('failed', this.dependencies.now(), { errorCode: lastError.code })] } };
       }, { chatIdentity });
-    } catch { /* Preserve the primary planning error; persistence failures remain visible on the next guarded operation. */ }
-  }
-
-  private async pauseAfterTurnPreparationFailure_ACU(chatIdentity: string, taskId: string, stageId: string, revision: number, error: unknown): Promise<void> {
-    const lastError = error instanceof ContinuationValidationError_ACU ? error.error : createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'turn_call', '每轮指令生成失败', false);
-    try {
-      await this.dependencies.store.updatePersistedAtomically(current => {
-        const envelope = this.requireEnvelope_ACU(current);
-        const task = this.requireTask_ACU(envelope);
-        const stage = getActiveStage_ACU(task);
-        if (task.taskId !== taskId || task.status !== 'running' || stage.stageId !== stageId || stage.activeRevision !== revision || stage.status !== 'running') return envelope;
-        return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: this.dependencies.now(), lastError, timeline: [...task.timeline, this.timeline_ACU('failed', this.dependencies.now(), { stageId, revision, errorCode: lastError.code })] } };
-      }, { chatIdentity });
-    } catch { /* Preserve the primary generator error; a later guarded operation exposes persistence failure. */ }
+    } catch { /* Preserve the primary error; a later guarded operation exposes persistence failure. */ }
   }
 
   private planningSummary_ACU(result: ContinuationOutlinePlanningResult_ACU): ContinuationOrchestratorResult_ACU['planning'] {

@@ -5,7 +5,7 @@
  * 子代理的完整系统提示词不暴露给主 Agent，避免主 Agent 被无关细节淹没。
  */
 
-import type { AgentSubagentKind_ACU, AgentSubagentName_ACU, AgentWritableModule_ACU } from './agent-model';
+import { AGENT_OUTLINE_AGENT_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU, type AgentWritableModule_ACU } from './agent-model';
 
 export interface AgentSubagentDefinition_ACU {
   name: AgentSubagentName_ACU;
@@ -86,6 +86,21 @@ export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] 
 ];
 
 /**
+ * 大纲子代理的目录块。它不走通用子代理运行时：运行时会按任务状态自动推断
+ * 创建 / 维护 / 继续三种操作，并用独立的大纲提示词与既有资料完成生成与校验，
+ * 因此这里手写描述而不进入 AGENT_SUBAGENT_DEFINITIONS_ACU。
+ */
+const OUTLINE_AGENT_CATALOG_BLOCK_ACU = [
+  `- name: ${AGENT_OUTLINE_AGENT_NAME_ACU}`,
+  '  类型: 大纲',
+  '  职责: 管理阶段大纲的完整生命周期——创建（当前没有任何大纲时）、维护（大纲与真实剧情脱节、需要改写剩余部分时）、继续（当前阶段已全部完成、需要下一阶段时）。具体做哪种操作由运行时按任务状态自动判断，你只需给出要求。',
+  '  适用时机: 大纲窗口显示「还没有阶段大纲」时必须先派它；真实剧情已经明显偏离大纲计划时派它改写；大纲窗口显示「阶段已全部完成」时派它继续。',
+  '  可读: 无需指定读集（运行时自动注入故事背景、最近剧情、阶段历史与纪要）',
+  '  可写: 阶段大纲（产出经严格 schema 校验后落盘；改写时已完成的轮次受保护，不会被改掉）',
+  '  执行方式: 串行执行且先于同波次其他派工；计入派工预算；prompt 写清你对大纲的要求（走向、节奏、要保留或回收什么）。',
+].join('\n');
+
+/**
  * 渲染子代理能力目录。
  * @returns 主 Agent 可见的摘要文本，不含子代理内部提示词
  */
@@ -98,7 +113,7 @@ export function renderAgentSubagentCatalog_ACU(): string {
     `  可读: ${definition.allowedReads.join('、')}`,
     `  可写: ${definition.allowedWrites.length ? definition.allowedWrites.join('、') : '无（只返回建议）'}`,
   ].join('\n'));
-  return blocks.join('\n');
+  return [OUTLINE_AGENT_CATALOG_BLOCK_ACU, ...blocks].join('\n');
 }
 
 /**

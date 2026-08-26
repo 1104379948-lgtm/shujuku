@@ -1,6 +1,6 @@
 <template>
   <section class="acu-v2-continuation-page">
-    <AcuPanel title="智能续写任务" description="阶段大纲、轮次游标和宿主生成归属均以当前聊天首楼的续写状态为准。">
+    <AcuPanel title="Agent 会话" description="主 Agent 按需派工子代理并管理大纲（创建 / 维护 / 继续）；运行过程实时显示在会话流中，最终正文仍由酒馆模型生成。">
       <template v-if="!runtime.task.value">
         <AcuTextarea
           :model-value="runtime.originInstruction.value"
@@ -15,59 +15,55 @@
             :loading="runtime.busy.value"
             :disabled="!runtime.originInstruction.value.trim()"
             @click="runtime.createTask"
-          >创建阶段大纲</AcuButton>
+          >创建续写任务</AcuButton>
         </div>
       </template>
       <template v-else>
         <dl class="acu-v2-continuation-page__status-grid">
           <div><dt>任务状态</dt><dd>{{ runtime.statusText.value }}</dd></div>
-          <div><dt>当前阶段</dt><dd>{{ runtime.activeStage.value ? `第 ${runtime.activeStage.value.stageNumber} 阶段` : '无' }}</dd></div>
+          <div><dt>当前阶段</dt><dd>{{ runtime.activeStage.value ? `第 ${runtime.activeStage.value.stageNumber} 阶段` : '大纲待创建' }}</dd></div>
           <div><dt>完成轮次</dt><dd>{{ runtime.activeStage.value?.completedTurns ?? 0 }}</dd></div>
           <div><dt>大纲 revision</dt><dd>{{ runtime.activeStage.value?.activeRevision ?? '-' }}</dd></div>
           <div><dt>总倒计时</dt><dd>{{ deadlineText }}</dd></div>
         </dl>
         <p class="acu-v2-continuation-page__instruction">{{ runtime.task.value.originInstruction }}</p>
-        <p v-if="runtime.activeNode.value" class="acu-v2-continuation-page__instruction">当前节点：{{ runtime.activeNode.value.title }}</p>
-        <p v-if="runtime.activeTurn.value" class="acu-v2-continuation-page__instruction">当前轮次目标：{{ runtime.activeTurn.value.goal }}</p>
+        <ContinuationSessionFeed :entries="session.entries.value" :running="session.running.value" />
+        <div class="acu-v2-continuation-page__actions">
+          <AcuButton
+            v-if="runtime.canContinue.value"
+            variant="primary"
+            :loading="runtime.busy.value"
+            @click="runtime.continueTask"
+          >继续当前轮次</AcuButton>
+          <AcuButton
+            v-if="runtime.task.value?.pendingHostTurn?.status === 'retry_ready'"
+            variant="primary"
+            :loading="runtime.busy.value"
+            @click="runtime.retryCurrentTurn"
+          >重试当前轮次</AcuButton>
+          <AcuButton
+            v-if="runtime.task.value && !runtime.isAwaitingHostResult.value"
+            :loading="runtime.busy.value"
+            @click="replan"
+          >重新规划剩余阶段</AcuButton>
+          <AcuButton
+            v-if="runtime.task.value && !runtime.isAwaitingHostResult.value"
+            variant="danger"
+            :loading="runtime.busy.value"
+            @click="runtime.stopTask"
+          >停止智能续写</AcuButton>
+        </div>
+        <p v-if="runtime.isAwaitingHostResult.value" class="acu-v2-continuation-page__notice">
+          当前轮次正在等待宿主生成结束事件，不能重复发送或重规划。
+        </p>
+        <AcuTextarea
+          v-if="runtime.task.value && !runtime.isAwaitingHostResult.value"
+          :model-value="replanInstruction"
+          :rows="3"
+          placeholder="可选：说明本次重新规划要调整的方向..."
+          @update:model-value="replanInstruction = $event"
+        />
       </template>
-    </AcuPanel>
-
-    <AcuPanel title="运行控制" description="继续时仅发送本轮内部 AI 生成的最终普通文本；宿主结果未被唯一归属前不会推进游标。">
-      <div class="acu-v2-continuation-page__actions">
-        <AcuButton
-          v-if="runtime.canContinue.value"
-          variant="primary"
-          :loading="runtime.busy.value"
-          @click="runtime.continueTask"
-        >继续当前轮次</AcuButton>
-        <AcuButton
-          v-if="runtime.task.value?.pendingHostTurn?.status === 'retry_ready'"
-          variant="primary"
-          :loading="runtime.busy.value"
-          @click="runtime.retryCurrentTurn"
-        >重试当前轮次</AcuButton>
-        <AcuButton
-          v-if="runtime.task.value && !runtime.isAwaitingHostResult.value"
-          :loading="runtime.busy.value"
-          @click="replan"
-        >重新规划剩余阶段</AcuButton>
-        <AcuButton
-          v-if="runtime.task.value && !runtime.isAwaitingHostResult.value"
-          variant="danger"
-          :loading="runtime.busy.value"
-          @click="runtime.stopTask"
-        >停止智能续写</AcuButton>
-      </div>
-      <p v-if="runtime.isAwaitingHostResult.value" class="acu-v2-continuation-page__notice">
-        当前轮次正在等待宿主生成结束事件，不能重复发送或重规划。
-      </p>
-      <AcuTextarea
-        v-if="runtime.task.value && !runtime.isAwaitingHostResult.value"
-        :model-value="replanInstruction"
-        :rows="3"
-        placeholder="可选：说明本次重新规划要调整的方向..."
-        @update:model-value="replanInstruction = $event"
-      />
     </AcuPanel>
 
     <AcuPanel v-if="runtime.task.value" title="阶段大纲与执行回执" description="阶段历史默认折叠；当前阶段与其当前 revision 展开。">
@@ -168,8 +164,7 @@
         </AcuFormRow>
       </div>
       <div class="acu-v2-continuation-page__toggles">
-        <AcuCheckbox v-model="settingsDraft.outlinePreview" label="创建后先预览大纲" />
-        <AcuCheckbox v-model="settingsDraft.autoNextStage" label="自动规划下一阶段" />
+        <AcuCheckbox v-model="settingsDraft.outlinePreview" label="大纲产出后先预览再执行" />
       </div>
       <AcuRulePairList v-model="settingsDraft.contextExtractRules" label="上下文提取规则" />
       <AcuRulePairList v-model="settingsDraft.contextExcludeRules" label="上下文排除规则" />
@@ -178,7 +173,7 @@
     </AcuPanel>
 
     <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用段参与内部调用；占位符会按实际出现按需解析。">
-      <h3>阶段大纲提示词</h3>
+      <h3>大纲子代理（outline-architect）提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.outlinePrompt" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('outlinePrompt')" @delete="index => deletePrompt('outlinePrompt', index)" @move="(index, delta) => movePrompt('outlinePrompt', index, delta)" @update="(index, patch) => updatePrompt('outlinePrompt', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('outline')">恢复大纲提示词默认值</AcuButton></div>
       <p class="acu-v2-continuation-page__meta">大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$VALIDATION_ERRORS。</p>
@@ -221,11 +216,14 @@ import AcuPromptSegments from '../components/_lib/AcuPromptSegments.vue';
 import AcuRulePairList from '../components/_lib/AcuRulePairList.vue';
 import AcuSelect from '../components/_lib/AcuSelect.vue';
 import AcuTextarea from '../components/_lib/AcuTextarea.vue';
+import ContinuationSessionFeed from '../components/ContinuationSessionFeed.vue';
 import { useApiPresetSelectOptions } from '../composables/useApiPresetSelectOptions';
 import { useChatChangedTick } from '../composables/useChatChangedListener';
 import { useContinuationRuntime } from '../composables/useContinuationRuntime';
+import { useContinuationSession } from '../composables/useContinuationSession';
 
 const runtime = useContinuationRuntime();
+const session = useContinuationSession();
 const { followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
 const settingsDraft = ref<ContinuationSettings_ACU | null>(null);
 const outlineDraft = ref('');
