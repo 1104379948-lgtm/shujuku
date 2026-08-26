@@ -102792,14 +102792,14 @@ $CONTENT
         },
         {
             role: 'system',
-            content: '【文本协议规范】\n你的每个动作用一个 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在一个 JSON 对象里，一次输出只表达一个动作。\n\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["$读集占位符"],"writes":["$写集占位符"]}。互不依赖的派工放在同一次输出里即为并发。\n大纲的创建、维护、继续也走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads/writes。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲窗口里就能看到新大纲。\n\naction = finalize：交付最终写作指导。前提：大纲窗口里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，约 200 字上限）、summary（一句话本轮要点）、可选 constraints（{"current":[...],"retired":[...]}，登记长期约束；current 必须列出全部仍然生效的约束，要废除的必须写进 retired，漏写不等于删除）。\ninstruction 必须覆盖这个骨架：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
+            content: '【文本协议规范】\n你的每个动作用一个 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"delegate|edit_outline|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在一个 JSON 对象里，一次输出只表达一个动作。\n\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["$读集占位符"],"writes":["$写集占位符"]}。互不依赖的派工放在同一次输出里即为并发。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads/writes。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲窗口里就能看到新大纲。\n\naction = edit_outline：直接用工具微调当前大纲，不发 AI 调用、立即生效。附加字段 edits，数组，每项是下列之一：\n{"op":"set_turn_goal","turnId":"轮次ID","goal":"新目标句"}\n{"op":"set_node_goal","nodeId":"节点ID","goal":"新节点目标"}\n{"op":"insert_turn","nodeId":"节点ID","afterTurnId":"锚点轮次ID或null(插入节点开头)","goal":"新增轮目标"}\n{"op":"remove_turn","turnId":"轮次ID"}\n约束：只能动未完成的部分——已完成轮次不可改，当前正在执行的轮次可以改目标但不可删除；增删会改变总轮数，必须留在阶段规模范围内；一次最多 12 处。改几句目标、加减一两轮用它；整体走向要变才派 outline-architect。\n\naction = finalize：交付最终写作指导。前提：大纲窗口里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，约 200 字上限）、summary（一句话本轮要点）、可选 constraints（{"current":[...],"retired":[...]}，登记长期约束；current 必须列出全部仍然生效的约束，要废除的必须写进 retired，漏写不等于删除）。\ninstruction 必须覆盖这个骨架：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
             enabled: true,
             deletable: false,
             pinned: true,
         },
         {
             role: 'system',
-            content: '【子代理使用规则】\n1. 大纲优先：大纲窗口显示「还没有阶段大纲」或「阶段已全部完成」时，第一件事就是派工 outline-architect；真实剧情已明显偏离大纲计划时，也先派它改写剩余部分再策划本轮。大纲操作串行执行且计入派工预算。\n2. 结算维护类代理只在存在未结算真实历史时才需要派工；未结算范围为空时不要派。\n3. 策划类代理按复杂度选择：普通推进一个主线策划够用；伏笔密集或信息差复杂时再加节拍策划；大转折或已出现冲突时再加连续性审查。\n4. 审查类代理只读，不要给它写集。\n5. 派工的 prompt 要写清「结算什么」「策划什么」或「大纲要怎么改」，以及不许做什么。不要把资料内容抄进 prompt——授权读集后运行时会直接把资料注入给它。\n6. 一个代理最多派 2 次。重复派同一个代理只会得到重复结论时，就该收敛了。',
+            content: '【子代理使用规则】\n1. 大纲优先：大纲窗口显示「还没有阶段大纲」或「阶段已全部完成」时，第一件事就是派工 outline-architect；真实剧情与大纲的偏差如果只需要改几句轮次目标或加减一两轮，用 edit_outline 工具直接改（零成本、立即生效）；整体走向需要重排才派 outline-architect 改写剩余部分。大纲派工串行执行且计入派工预算，edit_outline 不计。\n2. 结算维护类代理只在存在未结算真实历史时才需要派工；未结算范围为空时不要派。\n3. 策划类代理按复杂度选择：普通推进一个主线策划够用；伏笔密集或信息差复杂时再加节拍策划；大转折或已出现冲突时再加连续性审查。\n4. 审查类代理只读，不要给它写集。\n5. 派工的 prompt 要写清「结算什么」「策划什么」或「大纲要怎么改」，以及不许做什么。不要把资料内容抄进 prompt——授权读集后运行时会直接把资料注入给它。\n6. 一个代理最多派 2 次。重复派同一个代理只会得到重复结论时，就该收敛了。',
             enabled: true,
             deletable: true,
         },
@@ -102859,7 +102859,7 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我只输出一个 JSON 对象：\n{"summary":"一句话说明本次结算了什么","delta":{"expectedRevisions":{"hooks":当前版本号,"infoGap":当前版本号},"hooks":[{"action":"upsert|retire","id":"H001","summary":"伏笔内容","status":"planted|reinforced|misled|partially_paid|paid|abandoned","importance":"high|mid|low","plantedIndex":埋设楼层,"plannedPayoff":"计划怎么回收","reason":"retire 时必填"}],"infoGap":[{"action":"upsert|retire","id":"E001","topic":"信息主题","objectiveFact":"客观事实","readerKnown":"读者已知到哪一层","characterKnowledge":[{"name":"角色名","knows":"该角色知道什么"}],"revealStatus":"unrevealed|partial|revealed","revealIndex":揭示楼层或null,"reason":"retire 时必填"}],"constraintProposals":["建议主 Agent 登记的长期约束"]},"needMore":["资料不足时申请补充读取的占位符"]}\n\n只写发生了变化的条目，没变化的不用重复列出。我只写授权给我的模块。expectedRevisions 可以省略，运行时会按我实际读到的版本校验；我若填了，就必须与注入资料里的「当前修订号」一致，填错会导致整份写入被拒。JSON 之外我不输出任何文字。',
+            content: '我只输出一个 JSON 对象：\n{"summary":"一句话说明本次结算了什么","delta":{"expectedRevisions":{"hooks":当前版本号,"infoGap":当前版本号},"hooks":[{"action":"upsert|retire","id":"H001","summary":"伏笔内容","status":"planted|reinforced|misled|partially_paid|paid|abandoned","importance":"high|mid|low","plantedIndex":埋设楼层,"plannedPayoff":"计划怎么回收","reason":"retire 时必填"}],"infoGap":[{"action":"upsert|retire","id":"E001","topic":"信息主题","objectiveFact":"客观事实","readerKnown":"读者已知到哪一层","characterKnowledge":[{"name":"角色名","knows":"该角色知道什么"}],"revealStatus":"unrevealed|partial|revealed","revealIndex":揭示楼层或null,"reason":"retire 时必填"}],"constraintProposals":["建议主 Agent 登记的长期约束"]},"needMore":["资料不足时申请补充读取的占位符"]}\n\n只写发生了变化的条目，没变化的不用重复列出。只改既有条目的某一两个字段时，用 {"action":"patch","id":"条目ID",只带要改的字段}——比如只改一句 summary 就只传 id 和 summary，其余字段保持原样；新增或整条重写才用 upsert。我只写授权给我的模块。expectedRevisions 可以省略，运行时会按我实际读到的版本校验；我若填了，就必须与注入资料里的「当前修订号」一致，填错会导致整份写入被拒。JSON 之外我不输出任何文字。',
             enabled: true,
             deletable: true,
         },
@@ -103974,6 +103974,57 @@ $CONTENT
     function cloneOutline_ACU(outline) {
         return { ...outline, nodes: outline.nodes.map(node => ({ ...node, turns: node.turns.map(turn => ({ ...turn })) })) };
     }
+    function rejectOutlineEdit_ACU(message, details) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', message, false, details));
+    }
+    /**
+     * 把一批句级编辑应用到大纲副本上，并替模型收尾结构一致性（重算 suggestedTurns 与 totalTurns）。
+     * 只做定位与变换，前缀保护、当前轮保护与范围校验由调用方统一执行。
+     * @param outline 当前冻结大纲
+     * @param edits 编辑操作列表
+     * @param allocateId 新增轮次的 ID 分配器
+     * @returns 编辑后的新大纲对象
+     */
+    function applyOutlineEditOps_ACU(outline, edits, allocateId) {
+        const draft = cloneOutline_ACU(outline);
+        for (const edit of edits) {
+            if (edit.op === 'set_turn_goal') {
+                const turn = draft.nodes.flatMap(node => node.turns).find(item => item.id === edit.turnId);
+                if (!turn)
+                    rejectOutlineEdit_ACU(`set_turn_goal 找不到轮次：${edit.turnId}`, { turnId: edit.turnId });
+                turn.goal = edit.goal;
+                continue;
+            }
+            if (edit.op === 'set_node_goal') {
+                const node = draft.nodes.find(item => item.id === edit.nodeId);
+                if (!node)
+                    rejectOutlineEdit_ACU(`set_node_goal 找不到节点：${edit.nodeId}`, { nodeId: edit.nodeId });
+                node.goal = edit.goal;
+                continue;
+            }
+            if (edit.op === 'insert_turn') {
+                const node = draft.nodes.find(item => item.id === edit.nodeId);
+                if (!node)
+                    rejectOutlineEdit_ACU(`insert_turn 找不到节点：${edit.nodeId}`, { nodeId: edit.nodeId });
+                const newTurn = { id: allocateId('turn'), goal: edit.goal };
+                if (edit.afterTurnId === null) {
+                    node.turns.unshift(newTurn);
+                    continue;
+                }
+                const anchor = node.turns.findIndex(item => item.id === edit.afterTurnId);
+                if (anchor < 0)
+                    rejectOutlineEdit_ACU(`insert_turn 的 afterTurnId 不在节点 ${edit.nodeId} 内：${edit.afterTurnId}`, { nodeId: edit.nodeId, afterTurnId: edit.afterTurnId });
+                node.turns.splice(anchor + 1, 0, newTurn);
+                continue;
+            }
+            const node = draft.nodes.find(item => item.turns.some(turn => turn.id === edit.turnId));
+            if (!node)
+                rejectOutlineEdit_ACU(`remove_turn 找不到轮次：${edit.turnId}`, { turnId: edit.turnId });
+            node.turns = node.turns.filter(turn => turn.id !== edit.turnId);
+        }
+        const nodes = draft.nodes.map(node => ({ ...node, suggestedTurns: node.turns.length }));
+        return { ...draft, nodes, totalTurns: nodes.reduce((sum, node) => sum + node.turns.length, 0) };
+    }
     function guardForTask_ACU(chatIdentity, task) {
         const stage = task?.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) : null;
         return task
@@ -104147,7 +104198,7 @@ $CONTENT
                     return taskResult_ACU(started);
                 try {
                     const retryAttempt = task.pendingHostTurn?.status === 'retry_ready' ? task.pendingHostTurn.identity : undefined;
-                    const preparedTurn = await this.dependencies.executionEngine.prepareCurrentTurnInstruction(() => this.isLeaseCurrent_ACU(chatIdentity, lease), retryAttempt, async (instruction) => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult);
+                    const preparedTurn = await this.dependencies.executionEngine.prepareCurrentTurnInstruction(() => this.isLeaseCurrent_ACU(chatIdentity, lease), retryAttempt, async (instruction) => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult, async (edits) => this.applyOutlineEditsWithinLease_ACU(chatIdentity, lease, edits, 'running'));
                     return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started), preparedTurn };
                 }
                 catch (error) {
@@ -104353,6 +104404,54 @@ $CONTENT
             if (stage.status === 'running' || stage.status === 'failed')
                 return this.reviseOutlineOp_ACU(chatIdentity, lease, envelope, task, stage, instruction, endStatus);
             fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前阶段状态不允许大纲操作');
+        }
+        /**
+         * 大纲句级编辑事务：主 Agent 通过工具直接增删改未完成部分的句子，不发大纲 AI 调用。
+         * 结构一致性由运行时收尾（重算 suggestedTurns/totalTurns），完成前缀与当前轮由校验强制保护，
+         * 编辑结果生成下一个 revision 并立即冻结。校验失败抛 CONTINUATION_AGENT_WRITE_REJECTED，
+         * 由主循环拒绝回灌而不是中止本轮。
+         */
+        async applyOutlineEditsWithinLease_ACU(chatIdentity, _lease, edits, endStatus) {
+            const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+            const task = this.requireTask_ACU(envelope);
+            if (task.stopReason !== null)
+                fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可编辑大纲');
+            const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+            if (!stage || stage.status !== 'running') {
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '当前没有可编辑的执行中大纲；请先派工 outline-architect 创建或继续大纲', false));
+            }
+            const current = getActiveRevision_ACU(stage);
+            if (!current.frozen) {
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '当前大纲尚未冻结（可能等待确认），不可编辑', false));
+            }
+            const edited = applyOutlineEditOps_ACU(current.outline, edits, this.dependencies.allocateId);
+            const oldCursorTurn = current.outline.nodes.flatMap(node => node.turns)[stage.completedTurns] ?? null;
+            const newFlattened = edited.nodes.flatMap(node => node.turns);
+            const newCursorTurn = newFlattened[stage.completedTurns] ?? null;
+            if (!oldCursorTurn || !newCursorTurn || newCursorTurn.id !== oldCursorTurn.id) {
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '编辑不能移除或替换当前正在执行的轮次（可以改它的目标句）', false, { cursorTurnId: oldCursorTurn?.id ?? null }));
+            }
+            const range = resolveContinuationTurnRange_ACU(envelope.settings.stageSize, envelope.settings.customTurnMin ?? undefined, envelope.settings.customTurnMax ?? undefined);
+            const validated = validateReplannedStageOutline_ACU(edited, range, {
+                previousOutline: current.outline,
+                completedTurns: stage.completedTurns,
+                expectedRemainingTurns: newFlattened.length - stage.completedTurns,
+            });
+            const nextRevisionNumber = current.revision + 1;
+            const summary = `已按工具编辑改写大纲（${edits.length} 处，revision ${nextRevisionNumber}，共 ${validated.totalTurns} 轮）`;
+            await this.dependencies.store.updatePersistedAtomically(currentEnvelope => {
+                const env = this.requireEnvelope_ACU(currentEnvelope);
+                const t = this.requireTask_ACU(env);
+                const activeStage = getActiveStage_ACU(t);
+                if (t.taskId !== task.taskId || activeStage.stageId !== stage.stageId || activeStage.activeRevision !== current.revision || t.stopReason !== null) {
+                    fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '大纲编辑结果已失效');
+                }
+                const at = this.dependencies.now();
+                const revision = freezePlannedStageRevision_ACU(createPlannedStageRevision_ACU(validated, nextRevisionNumber, 'manual_replan', `Agent 工具编辑：${edits.length} 处`, at));
+                const nextStage = { ...activeStage, activeRevision: nextRevisionNumber, revisions: [...activeStage.revisions, revision] };
+                return { ...env, activeTask: { ...t, status: endStatus, updatedAt: at, lastError: null, stages: t.stages.map(item => item.stageId === nextStage.stageId ? nextStage : item), timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStage.stageId, revision: nextRevisionNumber })] } };
+            }, guardForTask_ACU(chatIdentity, task));
+            return { summary };
         }
         /** 创建首个阶段大纲。单阶段事务：先规划后一次性落盘，失败不留任何中间状态。 */
         async createOutlineOp_ACU(chatIdentity, lease, envelope, task, instruction, endStatus) {
@@ -104634,9 +104733,10 @@ $CONTENT
          * @param isLeaseCurrent 租约有效性检查
          * @param existingAttempt 正文重试轮的既有身份；提供时禁止大纲操作且游标必须原样
          * @param applyOutline 大纲操作回调，由编排器在租约内执行
+         * @param applyOutlineEdits 大纲句级编辑回调，由编排器在租约内执行
          * @returns 最终身份与写作指导
          */
-        async prepareCurrentTurnInstruction(isLeaseCurrent = () => true, existingAttempt, applyOutline) {
+        async prepareCurrentTurnInstruction(isLeaseCurrent = () => true, existingAttempt, applyOutline, applyOutlineEdits) {
             const chatIdentity = this.dependencies.getChatIdentity();
             const initial = currentAgentContext_ACU(this.dependencies.readEnvelope());
             const taskId = initial.task.taskId;
@@ -104671,6 +104771,7 @@ $CONTENT
                 },
                 isInternalRequestCurrent: isCurrent,
                 applyOutline: existingAttempt ? undefined : applyOutline,
+                applyOutlineEdits: existingAttempt ? undefined : applyOutlineEdits,
             });
             // 循环结束后按最终游标铸造身份：finalize 已由循环保证游标存在，这里的严格快照是最后防线。
             const snapshot = currentSnapshot_ACU(this.dependencies.readEnvelope());
@@ -105245,9 +105346,9 @@ $CONTENT
     }
     function collectTouchedModules_ACU(delta) {
         const touched = [];
-        if (delta.hooks.length)
+        if (delta.hooks.length || delta.hookPatches.length)
             touched.push('hooks');
-        if (delta.infoGap.length)
+        if (delta.infoGap.length || delta.infoGapPatches.length)
             touched.push('infoGap');
         return touched;
     }
@@ -105318,6 +105419,25 @@ $CONTENT
         }
         return [...byId.values()];
     }
+    function applyHookPatches_ACU(entries, patches, settledIndex) {
+        const byId = new Map(entries.map(entry => [entry.id, entry]));
+        for (const patch of patches) {
+            const current = byId.get(patch.id);
+            if (!current)
+                reject_ACU(`patch 的伏笔不存在：${patch.id}`, { id: patch.id });
+            if (current.retired)
+                reject_ACU(`伏笔 ${patch.id} 已退役，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
+            byId.set(patch.id, {
+                ...current,
+                summary: patch.summary ?? current.summary,
+                status: patch.status ?? current.status,
+                importance: patch.importance ?? current.importance,
+                plannedPayoff: patch.plannedPayoff ?? current.plannedPayoff,
+                updatedIndex: settledIndex,
+            });
+        }
+        return [...byId.values()];
+    }
     function applyInfoGapDelta_ACU(existing, items, settledIndex) {
         const byId = new Map(existing.map(entry => [entry.id, entry]));
         for (const item of items) {
@@ -105356,6 +105476,34 @@ $CONTENT
         void settledIndex;
         return [...byId.values()];
     }
+    function applyInfoGapPatches_ACU(entries, patches) {
+        const byId = new Map(entries.map(entry => [entry.id, entry]));
+        for (const patch of patches) {
+            const current = byId.get(patch.id);
+            if (!current)
+                reject_ACU(`patch 的信息差条目不存在：${patch.id}`, { id: patch.id });
+            if (current.retired)
+                reject_ACU(`信息差条目 ${patch.id} 已退役，不可 patch`, { id: patch.id });
+            const merged = {
+                ...current,
+                topic: patch.topic ?? current.topic,
+                objectiveFact: patch.objectiveFact ?? current.objectiveFact,
+                readerKnown: patch.readerKnown ?? current.readerKnown,
+                characterKnowledge: patch.characterKnowledge ?? current.characterKnowledge,
+                revealStatus: patch.revealStatus ?? current.revealStatus,
+                revealIndex: 'revealIndex' in patch ? patch.revealIndex : current.revealIndex,
+            };
+            // 合并结果必须满足与 upsert 相同的一致性规则：把计划写成事实的典型症状在 patch 路径同样要拦。
+            if (merged.revealStatus === 'unrevealed' && merged.revealIndex !== null) {
+                reject_ACU(`信息差条目 ${patch.id} patch 后标记为未揭示，揭示楼层必须同时清空（revealIndex 传 null）`, { id: patch.id, revealIndex: merged.revealIndex });
+            }
+            if (merged.revealStatus !== 'unrevealed' && merged.revealIndex === null) {
+                reject_ACU(`信息差条目 ${patch.id} patch 后已揭示，必须给出揭示楼层`, { id: patch.id });
+            }
+            byId.set(patch.id, merged);
+        }
+        return [...byId.values()];
+    }
     /**
      * 把一份子代理写集事务应用到快照上。
      * @param snapshot 当前快照
@@ -105370,15 +105518,21 @@ $CONTENT
         const touched = collectTouchedModules_ACU(delta);
         if (!touched.length)
             return snapshot;
-        const hooks = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
-        const infoGap = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
+        const hooksTouched = delta.hooks.length > 0 || delta.hookPatches.length > 0;
+        const infoGapTouched = delta.infoGap.length > 0 || delta.infoGapPatches.length > 0;
+        let hooks = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
+        if (delta.hookPatches.length)
+            hooks = applyHookPatches_ACU(hooks, delta.hookPatches, settledIndex);
+        let infoGap = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
+        if (delta.infoGapPatches.length)
+            infoGap = applyInfoGapPatches_ACU(infoGap, delta.infoGapPatches);
         return {
             ...snapshot,
             hooks,
             infoGap,
             revisions: {
-                hooks: snapshot.revisions.hooks + (delta.hooks.length ? 1 : 0),
-                infoGap: snapshot.revisions.infoGap + (delta.infoGap.length ? 1 : 0),
+                hooks: snapshot.revisions.hooks + (hooksTouched ? 1 : 0),
+                infoGap: snapshot.revisions.infoGap + (infoGapTouched ? 1 : 0),
                 constraints: snapshot.revisions.constraints,
             },
         };
@@ -105558,6 +105712,48 @@ $CONTENT
             return { agentName, prompt, reads: readTextList_ACU(raw.reads), writes: readTextList_ACU(raw.writes) };
         });
     }
+    /** 单次 edit_outline 动作里最多允许的编辑操作数。 */
+    const OUTLINE_EDIT_LIMIT_ACU = 12;
+    function parseOutlineEdits_ACU(value) {
+        if (!Array.isArray(value) || !value.length)
+            failProtocol_ACU('edit_outline 动作必须提供非空的 edits 数组');
+        if (value.length > OUTLINE_EDIT_LIMIT_ACU)
+            failProtocol_ACU(`一次 edit_outline 最多 ${OUTLINE_EDIT_LIMIT_ACU} 处编辑；更大的改动请派工 outline-architect`);
+        return value.map((raw, index) => {
+            if (!isRecord_ACU$1(raw))
+                failProtocol_ACU(`edits[${index}] 必须是对象`);
+            const op = readText_ACU(raw.op);
+            if (op === 'set_turn_goal') {
+                const turnId = readText_ACU(raw.turnId);
+                const goal = readText_ACU(raw.goal);
+                if (!turnId || !goal)
+                    failProtocol_ACU(`edits[${index}] set_turn_goal 需要 turnId 与非空 goal`);
+                return { op, turnId, goal };
+            }
+            if (op === 'insert_turn') {
+                const nodeId = readText_ACU(raw.nodeId);
+                const goal = readText_ACU(raw.goal);
+                const afterTurnId = readText_ACU(raw.afterTurnId) || null;
+                if (!nodeId || !goal)
+                    failProtocol_ACU(`edits[${index}] insert_turn 需要 nodeId 与非空 goal`);
+                return { op, nodeId, afterTurnId, goal };
+            }
+            if (op === 'remove_turn') {
+                const turnId = readText_ACU(raw.turnId);
+                if (!turnId)
+                    failProtocol_ACU(`edits[${index}] remove_turn 需要 turnId`);
+                return { op, turnId };
+            }
+            if (op === 'set_node_goal') {
+                const nodeId = readText_ACU(raw.nodeId);
+                const goal = readText_ACU(raw.goal);
+                if (!nodeId || !goal)
+                    failProtocol_ACU(`edits[${index}] set_node_goal 需要 nodeId 与非空 goal`);
+                return { op, nodeId, goal };
+            }
+            failProtocol_ACU(`edits[${index}].op 必须是 set_turn_goal / insert_turn / remove_turn / set_node_goal 之一，实际收到：${op || '(空)'}`);
+        });
+    }
     /**
      * 解析主 Agent 的一次协议动作。
      * @param payload 已解析的 JSON 载荷
@@ -105571,6 +105767,9 @@ $CONTENT
             if (!allowDelegate)
                 failProtocol_ACU('本轮为预算最后一轮，已禁用 delegate，必须输出 finalize 或 block');
             return { kind: 'delegate', thought, delegations: parseDelegations_ACU(payload.delegations) };
+        }
+        if (action === 'edit_outline') {
+            return { kind: 'edit_outline', thought, edits: parseOutlineEdits_ACU(payload.edits) };
         }
         if (action === 'finalize') {
             const instruction = readText_ACU(payload.instruction);
@@ -105588,22 +105787,93 @@ $CONTENT
                 failProtocol_ACU('block 动作必须提供 reason');
             return { kind: 'block', thought, reason, unresolved: readTextList_ACU(payload.unresolved) };
         }
-        failProtocol_ACU(`action 必须是 delegate / finalize / block 之一，实际收到：${action || '(空)'}`);
+        failProtocol_ACU(`action 必须是 delegate / edit_outline / finalize / block 之一，实际收到：${action || '(空)'}`);
+    }
+    function parseCharacterKnowledge_ACU(value) {
+        const knowledge = Array.isArray(value) ? value : [];
+        return knowledge.flatMap(item => {
+            if (!isRecord_ACU$1(item))
+                return [];
+            const name = readText_ACU(item.name);
+            return name ? [{ name, knows: readText_ACU(item.knows) }] : [];
+        });
+    }
+    function parseHookPatch_ACU(raw, index) {
+        const id = readText_ACU(raw.id);
+        if (!id)
+            failProtocol_ACU(`delta.hooks[${index}] 的 patch 需要 id`);
+        const patch = { id };
+        if (typeof raw.summary === 'string' && raw.summary.trim())
+            patch.summary = raw.summary.trim();
+        const status = readText_ACU(raw.status);
+        if (status) {
+            if (!AGENT_HOOK_STATUSES_ACU.includes(status))
+                failProtocol_ACU(`delta.hooks[${index}] 的 patch.status 非法：${status}`);
+            patch.status = status;
+        }
+        const importance = readText_ACU(raw.importance);
+        if (importance) {
+            if (!AGENT_HOOK_IMPORTANCES_ACU.includes(importance))
+                failProtocol_ACU(`delta.hooks[${index}] 的 patch.importance 非法：${importance}`);
+            patch.importance = importance;
+        }
+        if (typeof raw.plannedPayoff === 'string')
+            patch.plannedPayoff = raw.plannedPayoff.trim();
+        if (Object.keys(patch).length === 1)
+            failProtocol_ACU(`delta.hooks[${index}] 的 patch 至少要带一个要修改的字段`);
+        return patch;
+    }
+    function parseInfoGapPatch_ACU(raw, index) {
+        const id = readText_ACU(raw.id);
+        if (!id)
+            failProtocol_ACU(`delta.infoGap[${index}] 的 patch 需要 id`);
+        const patch = { id };
+        if (typeof raw.topic === 'string' && raw.topic.trim())
+            patch.topic = raw.topic.trim();
+        if (typeof raw.objectiveFact === 'string')
+            patch.objectiveFact = raw.objectiveFact.trim();
+        if (typeof raw.readerKnown === 'string')
+            patch.readerKnown = raw.readerKnown.trim();
+        if (Array.isArray(raw.characterKnowledge))
+            patch.characterKnowledge = parseCharacterKnowledge_ACU(raw.characterKnowledge);
+        const revealStatus = readText_ACU(raw.revealStatus);
+        if (revealStatus) {
+            if (!AGENT_REVEAL_STATUSES_ACU.includes(revealStatus))
+                failProtocol_ACU(`delta.infoGap[${index}] 的 patch.revealStatus 非法：${revealStatus}`);
+            patch.revealStatus = revealStatus;
+        }
+        if (Object.prototype.hasOwnProperty.call(raw, 'revealIndex')) {
+            if (raw.revealIndex === null)
+                patch.revealIndex = null;
+            else if (typeof raw.revealIndex === 'number' && Number.isInteger(raw.revealIndex) && raw.revealIndex >= 0)
+                patch.revealIndex = raw.revealIndex;
+            else
+                failProtocol_ACU(`delta.infoGap[${index}] 的 patch.revealIndex 必须是非负整数或 null`);
+        }
+        if (Object.keys(patch).length === 1)
+            failProtocol_ACU(`delta.infoGap[${index}] 的 patch 至少要带一个要修改的字段`);
+        return patch;
     }
     function parseHookItems_ACU(value) {
         if (value === undefined || value === null)
-            return [];
+            return { items: [], patches: [] };
         if (!Array.isArray(value))
             failProtocol_ACU('delta.hooks 必须是数组');
-        return value.map((raw, index) => {
+        const items = [];
+        const patches = [];
+        value.forEach((raw, index) => {
             if (!isRecord_ACU$1(raw))
                 failProtocol_ACU(`delta.hooks[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
+            if (action === 'patch') {
+                patches.push(parseHookPatch_ACU(raw, index));
+                return;
+            }
             if (action !== 'upsert' && action !== 'retire')
-                failProtocol_ACU(`delta.hooks[${index}].action 必须是 upsert 或 retire`);
+                failProtocol_ACU(`delta.hooks[${index}].action 必须是 upsert / patch / retire`);
             const status = readText_ACU(raw.status);
             const importance = readText_ACU(raw.importance);
-            return {
+            items.push({
                 action,
                 id: readText_ACU(raw.id),
                 summary: readText_ACU(raw.summary),
@@ -105612,39 +105882,41 @@ $CONTENT
                 plantedIndex: typeof raw.plantedIndex === 'number' && Number.isInteger(raw.plantedIndex) && raw.plantedIndex >= 0 ? raw.plantedIndex : -1,
                 plannedPayoff: readText_ACU(raw.plannedPayoff),
                 reason: readText_ACU(raw.reason),
-            };
+            });
         });
+        return { items, patches };
     }
     function parseInfoGapItems_ACU(value) {
         if (value === undefined || value === null)
-            return [];
+            return { items: [], patches: [] };
         if (!Array.isArray(value))
             failProtocol_ACU('delta.infoGap 必须是数组');
-        return value.map((raw, index) => {
+        const items = [];
+        const patches = [];
+        value.forEach((raw, index) => {
             if (!isRecord_ACU$1(raw))
                 failProtocol_ACU(`delta.infoGap[${index}] 必须是对象`);
             const action = readText_ACU(raw.action);
+            if (action === 'patch') {
+                patches.push(parseInfoGapPatch_ACU(raw, index));
+                return;
+            }
             if (action !== 'upsert' && action !== 'retire')
-                failProtocol_ACU(`delta.infoGap[${index}].action 必须是 upsert 或 retire`);
+                failProtocol_ACU(`delta.infoGap[${index}].action 必须是 upsert / patch / retire`);
             const revealStatus = readText_ACU(raw.revealStatus);
-            const knowledge = Array.isArray(raw.characterKnowledge) ? raw.characterKnowledge : [];
-            return {
+            items.push({
                 action,
                 id: readText_ACU(raw.id),
                 topic: readText_ACU(raw.topic),
                 objectiveFact: readText_ACU(raw.objectiveFact),
                 readerKnown: readText_ACU(raw.readerKnown),
-                characterKnowledge: knowledge.flatMap(item => {
-                    if (!isRecord_ACU$1(item))
-                        return [];
-                    const name = readText_ACU(item.name);
-                    return name ? [{ name, knows: readText_ACU(item.knows) }] : [];
-                }),
+                characterKnowledge: parseCharacterKnowledge_ACU(raw.characterKnowledge),
                 revealStatus: (AGENT_REVEAL_STATUSES_ACU.includes(revealStatus) ? revealStatus : 'unrevealed'),
                 revealIndex: typeof raw.revealIndex === 'number' && Number.isInteger(raw.revealIndex) && raw.revealIndex >= 0 ? raw.revealIndex : null,
                 reason: readText_ACU(raw.reason),
-            };
+            });
         });
+        return { items, patches };
     }
     function parseExpectedRevisions_ACU(value) {
         if (!isRecord_ACU$1(value))
@@ -105664,12 +105936,16 @@ $CONTENT
      */
     function parseAgentMaintainerOutput_ACU(payload) {
         const rawDelta = isRecord_ACU$1(payload.delta) ? payload.delta : {};
+        const hooks = parseHookItems_ACU(rawDelta.hooks);
+        const infoGap = parseInfoGapItems_ACU(rawDelta.infoGap);
         return {
             summary: readText_ACU(payload.summary),
             delta: {
                 expectedRevisions: parseExpectedRevisions_ACU(rawDelta.expectedRevisions ?? payload.expectedRevisions),
-                hooks: parseHookItems_ACU(rawDelta.hooks),
-                infoGap: parseInfoGapItems_ACU(rawDelta.infoGap),
+                hooks: hooks.items,
+                hookPatches: hooks.patches,
+                infoGap: infoGap.items,
+                infoGapPatches: infoGap.patches,
                 constraintProposals: readTextList_ACU(rawDelta.constraintProposals),
             },
             needMore: readTextList_ACU(payload.needMore),
@@ -106202,11 +106478,14 @@ $CONTENT
                     const round = await this.callMainAgent(request, preset, history, context, ledger, budget, iteration, allowDelegate);
                     totalAttempts += round.attempts;
                     const action = round.action;
-                    logAgentSession_ACU({
-                        kind: 'main_action',
-                        title: `迭代 ${iteration} · ${action.kind === 'delegate' ? `派工 ${action.delegations.length} 项` : action.kind === 'finalize' ? '交付写作指导' : '阻断本轮'}`,
-                        detail: action.thought,
-                    });
+                    const actionLabel = action.kind === 'delegate' ? `派工 ${action.delegations.length} 项`
+                        : action.kind === 'edit_outline' ? `工具编辑大纲 ${action.edits.length} 处`
+                            : action.kind === 'finalize' ? '交付写作指导' : '阻断本轮';
+                    logAgentSession_ACU({ kind: 'main_action', title: `迭代 ${iteration} · ${actionLabel}`, detail: action.thought });
+                    if (action.kind === 'edit_outline') {
+                        await this.runOutlineEdits(action.edits, request, context, ledger);
+                        continue;
+                    }
                     if (action.kind === 'finalize') {
                         if (action.constraints) {
                             snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.current, action.constraints.retired, chat.length - 1);
@@ -106281,6 +106560,30 @@ $CONTENT
                 }
             }
             failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', `主 Agent 连续 ${retries + 1} 次返回不符合协议：${lastReason}`, { lastReason });
+        }
+        /**
+         * 执行大纲句级编辑工具。校验失败拒绝回灌，让主 Agent 自己修正而不是中止本轮；
+         * 只有非校验类异常才上抛终止。
+         */
+        async runOutlineEdits(edits, request, context, ledger) {
+            const label = 'outline-edit(工具)';
+            if (!request.applyOutlineEdits) {
+                ledger.outcomes.push({ agentName: label, ok: false, summary: '', detail: '', rejectedReason: '正文重试轮次不允许修改大纲，请基于现有大纲交付或阻断' });
+                logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑被拒绝', detail: '正文重试轮次不允许修改大纲', ok: false });
+                return;
+            }
+            try {
+                const result = await request.applyOutlineEdits(edits);
+                ledger.outcomes.push({ agentName: label, ok: true, summary: result.summary, detail: result.summary, rejectedReason: '' });
+                logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑大纲完成', detail: result.summary });
+                context.execution = request.readContext();
+            }
+            catch (error) {
+                if (!(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_WRITE_REJECTED')
+                    throw error;
+                ledger.outcomes.push({ agentName: label, ok: false, summary: '', detail: '', rejectedReason: error.error.message });
+                logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑被拒绝', detail: error.error.message, ok: false });
+            }
         }
         renderUnsettledRange_ACU(context) {
             const start = context.settledThroughIndex + 1;
