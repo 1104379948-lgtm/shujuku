@@ -102786,13 +102786,13 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我的行动规则：\n1. 派工前先看目录，只派目录里存在的代理，只授权它职责范围内的读写。\n2. 同一波次里各子代理的写集不许重叠，避免互相覆盖。\n3. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工。\n4. 任何环节失败，我如实报告失败，不用编造的结果补位。\n5. 协议 JSON 是我唯一的输出形式，我不会在它外面附加任何文字。',
+            content: '我的行动规则：\n1. 派工前先看目录，只派目录里存在的代理，只授权它职责范围内的读写。\n2. 同一波次里各子代理的写集不许重叠，避免互相覆盖。\n3. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工。\n4. 任何环节失败，我如实报告失败，不用编造的结果补位。\n5. 我的每个动作都以一个完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。',
             enabled: true,
             deletable: true,
         },
         {
             role: 'system',
-            content: '【文本协议规范】\n你每次只输出一个 JSON 对象，形如：\n{"thought":"一句话决策依据","action":"delegate|finalize|block", ...}\n\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["$读集占位符"],"writes":["$写集占位符"]}。互不依赖的派工放在同一次输出里即为并发。\n大纲的创建、维护、继续也走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads/writes。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲窗口里就能看到新大纲。\n\naction = finalize：交付最终写作指导。前提：大纲窗口里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，约 200 字上限）、summary（一句话本轮要点）、可选 constraints（{"current":[...],"retired":[...]}，登记长期约束；current 必须列出全部仍然生效的约束，要废除的必须写进 retired，漏写不等于删除）。\ninstruction 必须覆盖这个骨架：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
+            content: '【文本协议规范】\n你的每个动作用一个 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"delegate|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在一个 JSON 对象里，一次输出只表达一个动作。\n\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["$读集占位符"],"writes":["$写集占位符"]}。互不依赖的派工放在同一次输出里即为并发。\n大纲的创建、维护、继续也走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads/writes。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲窗口里就能看到新大纲。\n\naction = finalize：交付最终写作指导。前提：大纲窗口里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，约 200 字上限）、summary（一句话本轮要点）、可选 constraints（{"current":[...],"retired":[...]}，登记长期约束；current 必须列出全部仍然生效的约束，要废除的必须写进 retired，漏写不等于删除）。\ninstruction 必须覆盖这个骨架：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
             enabled: true,
             deletable: false,
             pinned: true,
@@ -102825,7 +102825,7 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: `<continue>\n证据已经足够时我立刻输出协议动作，不停留在「我接下来打算……」这类计划性陈述。\n本轮我的输出是且只是一个 JSON 对象。\n</continue>\n${AGENT_PREFILLS_ACU.main}`,
+            content: `<continue>\n证据已经足够时我立刻输出协议动作，不停留在「我接下来打算……」这类计划性陈述。\n本轮我的动作以一个完整的 JSON 对象收尾。\n</continue>\n${AGENT_PREFILLS_ACU.main}`,
             enabled: true,
             deletable: false,
             pinned: true,
@@ -105432,17 +105432,9 @@ $CONTENT
             return [];
         return value.map(readText_ACU).filter(Boolean);
     }
-    /**
-     * 从任意文本里提取首个配平的 JSON 对象。
-     * @param text 模型返回的原始文本，可能带 Markdown 围栏或前后解释
-     * @returns 提取到的 JSON 子串；找不到返回 null
-     */
-    function extractFirstJsonObject_ACU(text) {
-        if (typeof text !== 'string')
-            return null;
-        const start = text.indexOf('{');
-        if (start < 0)
-            return null;
+    /** 单次解析里最多扫描的顶层配平对象数，防止超长返回里的花括号碎片拖垮解析。 */
+    const JSON_OBJECT_SCAN_LIMIT_ACU = 6;
+    function balancedObjectFrom_ACU(text, start) {
         let depth = 0;
         let inString = false;
         let escaped = false;
@@ -105467,36 +105459,89 @@ $CONTENT
             else if (char === '}') {
                 depth -= 1;
                 if (depth === 0)
-                    return text.slice(start, index + 1);
+                    return { json: text.slice(start, index + 1), end: index + 1 };
             }
         }
         return null;
     }
     /**
-     * 解析一份 Agent 协议载荷，兼容「完整输出」与「仅续写预填充后半段」两种形态。
+     * 从任意文本里提取首个配平的 JSON 对象。
+     * @param text 模型返回的原始文本，可能带 Markdown 围栏或前后解释
+     * @returns 提取到的 JSON 子串；找不到返回 null
+     */
+    function extractFirstJsonObject_ACU(text) {
+        if (typeof text !== 'string')
+            return null;
+        const start = text.indexOf('{');
+        if (start < 0)
+            return null;
+        return balancedObjectFrom_ACU(text, start)?.json ?? null;
+    }
+    /**
+     * 从任意文本里依次提取多个顶层配平 JSON 对象（已消费区间内的嵌套对象不重复提取）。
+     * @param text 模型返回的原始文本
+     * @returns 提取到的 JSON 子串列表，最多 6 个
+     */
+    function extractJsonObjects_ACU(text) {
+        if (typeof text !== 'string')
+            return [];
+        const objects = [];
+        let cursor = 0;
+        while (objects.length < JSON_OBJECT_SCAN_LIMIT_ACU) {
+            const start = text.indexOf('{', cursor);
+            if (start < 0)
+                break;
+            const balanced = balancedObjectFrom_ACU(text, start);
+            if (!balanced) {
+                // 从该花括号起无法配平（多半是散文里的孤立花括号），跳过它继续找。
+                cursor = start + 1;
+                continue;
+            }
+            objects.push(balanced.json);
+            cursor = balanced.end;
+        }
+        return objects;
+    }
+    function stripMarkdownFences_ACU(text) {
+        return text.replace(/```[a-zA-Z]*\n?/g, '').trim();
+    }
+    /**
+     * 解析一份 Agent 协议载荷。对返回形态宽容：模型可以完整重输 JSON、只续写预填充、
+     * 或在 JSON 前后写自然语言——运行时按判别键从全文中挑出正确的动作对象。
      * @param raw 模型返回的原始文本
      * @param prefill 该请求尾段预填充文本，可为空
+     * @param requiredKeys 协议对象的判别键，含任意一个即视为目标对象；缺省不判别
      * @returns 解析出的对象
      */
-    function parseAgentJsonPayload_ACU(raw, prefill = '') {
+    function parseAgentJsonPayload_ACU(raw, prefill = '', requiredKeys = []) {
         const text = typeof raw === 'string' ? raw : '';
         if (!text.trim())
             failProtocol_ACU('内部 AI 返回为空');
-        const candidates = [text, `${prefill}${text}`];
+        // 剥掉围栏后以 { 开头视为完整重输，原文优先；否则视为续写预填充，拼接候选优先。
+        const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+        const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+        let firstParsed = null;
         for (const candidate of candidates) {
-            const extracted = extractFirstJsonObject_ACU(candidate);
-            if (!extracted)
-                continue;
-            try {
-                const parsed = JSON.parse(extracted);
-                if (isRecord_ACU$1(parsed))
+            for (const extracted of extractJsonObjects_ACU(candidate)) {
+                let parsed;
+                try {
+                    parsed = JSON.parse(extracted);
+                }
+                catch {
+                    continue;
+                }
+                if (!isRecord_ACU$1(parsed))
+                    continue;
+                if (!requiredKeys.length || requiredKeys.some(key => key in parsed))
                     return parsed;
-            }
-            catch {
-                continue;
+                if (!firstParsed)
+                    firstParsed = parsed;
             }
         }
-        failProtocol_ACU('返回内容不包含可解析的 JSON 对象');
+        // 没有对象命中判别键时退回首个可解析对象，让上层契约校验给出准确的字段级报错。
+        if (firstParsed)
+            return firstParsed;
+        failProtocol_ACU(`返回内容不包含可解析的 JSON 对象。模型返回片段：${text.trim().slice(0, 300)}`);
     }
     function parseDelegations_ACU(value) {
         if (!Array.isArray(value) || !value.length)
@@ -105850,6 +105895,12 @@ $CONTENT
         beatPlanner: AGENT_PREFILLS_ACU.planner,
         reviewer: AGENT_PREFILLS_ACU.reviewer,
     };
+    /** 各类子代理契约对象的判别键：解析器据此从模型全文中挑出正确的 JSON 对象。 */
+    const KIND_PAYLOAD_KEYS_ACU = {
+        maintain: ['delta', 'summary', 'needMore'],
+        plan: ['recommendation', 'summary', 'needMore'],
+        review: ['verdict', 'needMore'],
+    };
     function rejectDelegation_ACU(message, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
     }
@@ -105980,7 +106031,7 @@ $CONTENT
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理结果已失效', false));
                 }
                 try {
-                    const payload = parseAgentJsonPayload_ACU(raw, prefill);
+                    const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
                     return {
                         agentName: definition.name,
                         kind: definition.kind,
@@ -106214,7 +106265,7 @@ $CONTENT
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 结果已失效', false));
                 }
                 try {
-                    const payload = parseAgentJsonPayload_ACU(raw, AGENT_PREFILLS_ACU.main);
+                    const payload = parseAgentJsonPayload_ACU(raw, AGENT_PREFILLS_ACU.main, ['action']);
                     const action = parseAgentMainAction_ACU(payload, allowDelegate);
                     // 没有可执行的大纲轮次就不存在「本轮」，finalize 无从谈起；拒绝并回灌，让主 Agent 先走大纲子代理。
                     if (action.kind === 'finalize' && !request.readContext().turn) {
@@ -106224,10 +106275,12 @@ $CONTENT
                 }
                 catch (error) {
                     lastReason = compactAgentProtocolError_ACU(error);
-                    logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 输出被拒绝`, detail: lastReason, ok: false });
+                    // 会话流必须展示模型原文片段：解析被拒不等于模型没输出，用户要能看到它实际返回了什么。
+                    const snippet = String(raw ?? '').trim().slice(0, 300) || '(空)';
+                    logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 输出被拒绝`, detail: `${lastReason}\n模型返回片段：${snippet}`, ok: false });
                 }
             }
-            failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', `主 Agent 连续 ${retries + 1} 次返回不符合协议`, { lastReason });
+            failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', `主 Agent 连续 ${retries + 1} 次返回不符合协议：${lastReason}`, { lastReason });
         }
         renderUnsettledRange_ACU(context) {
             const start = context.settledThroughIndex + 1;
@@ -147910,9 +147963,12 @@ Expected function or array of functions, received type ${typeof value}.`
             ? (isAwaitingHostResult.value ? '等待宿主正文' : task.value.status)
             : '尚未创建任务');
         async function createTask() {
-            await run_ACU(() => runtime.orchestrator.createTask({ originInstruction: originInstruction.value }));
+            const created = await run_ACU(() => runtime.orchestrator.createTask({ originInstruction: originInstruction.value }));
             if (task.value)
                 originInstruction.value = '';
+            // 创建即时完成后直接开始第一轮：主 Agent 会先派工大纲子代理创建大纲，不需要用户再点一次继续。
+            if (created && canContinue.value)
+                await continueTask();
         }
         async function continueTask() {
             await run_ACU(() => runtime.orchestrator.continueTask());
