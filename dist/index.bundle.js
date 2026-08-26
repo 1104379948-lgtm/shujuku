@@ -103829,7 +103829,10 @@ $CONTENT
         const lastError = interruptedPlanning
             ? createContinuationError_ACU('CONTINUATION_TASK_STATE_INVALID', 'load', '重载中断了阶段规划；请手动重新规划剩余阶段', false)
             : task.lastError;
-        return { ...validated, activeTask: { ...task, status: 'paused', updatedAt: Date.now(), stages, lastError } };
+        // 重载后桥的内存认领已丢失，等待中的宿主生成永远无法再被归属；
+        // 清掉等待轮，让任务回到可以直接点继续的暂停态。
+        const pendingHostTurn = task.pendingHostTurn?.status === 'awaiting_generation' ? null : task.pendingHostTurn;
+        return { ...validated, activeTask: { ...task, status: 'paused', updatedAt: Date.now(), stages, lastError, ...(pendingHostTurn !== task.pendingHostTurn ? { pendingHostTurn } : {}) } };
     }
     function readLegacyNonNegativeInteger_ACU(value, fallback) {
         return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : fallback;
@@ -104329,7 +104332,10 @@ $CONTENT
                 await this.dependencies.store.updatePersistedAtomically(current => {
                     const envelope = this.requireEnvelope_ACU(current);
                     const task = this.requireTask_ACU(envelope);
-                    if (task.pendingHostTurn?.status === 'awaiting_generation') {
+                    // 等待宿主结果时只有"桥内存里仍有本次生成的活认领"才是真在飞；
+                    // 重载或事件丢失后的滞留等待轮无法再被归属，丢弃后从当前进度重新继续。
+                    const staleAwaitingTurn = task.pendingHostTurn?.status === 'awaiting_generation';
+                    if (staleAwaitingTurn && this.dependencies.hasLiveHostClaim?.(chatIdentity)) {
                         fail_ACU$1('CONTINUATION_OPERATION_BUSY', '当前轮次正在等待宿主生成结果');
                     }
                     if (task.pendingHostTurn?.status === 'exhausted')
@@ -104337,7 +104343,8 @@ $CONTENT
                     if (task.status === 'awaiting_outline_review' || task.status === 'stopping_after_inflight' || task.status === 'abandoned' || task.status === 'completed' || task.status === 'failed') {
                         fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前任务不可继续');
                     }
-                    if (task.stopReason !== null) {
+                    // 手动停止允许从当前进度恢复；其余停止原因（时长/阶段上限、重试耗尽等）仍不可继续。
+                    if (task.stopReason !== null && task.stopReason !== 'manual') {
                         fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可继续');
                     }
                     // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）都可以进循环，由主 Agent 派工大纲子代理处理。
@@ -104351,7 +104358,7 @@ $CONTENT
                         return started;
                     }
                     const deadlineAt = task.deadlineAt ?? (envelope.settings.totalDurationMinutes > 0 ? now + envelope.settings.totalDurationMinutes * 60000 : null);
-                    started = { ...envelope, activeTask: { ...task, status: 'running', runStartedAt: task.runStartedAt ?? now, deadlineAt, stopReason: null, lastError: null, updatedAt: now } };
+                    started = { ...envelope, activeTask: { ...task, status: 'running', runStartedAt: task.runStartedAt ?? now, deadlineAt, stopReason: null, lastError: null, updatedAt: now, ...(staleAwaitingTurn ? { pendingHostTurn: null } : {}) } };
                     return started;
                 }, { chatIdentity });
                 const task = started.activeTask;
@@ -104476,6 +104483,33 @@ $CONTENT
                         return result;
                     }
                     result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, lastError: error, pendingHostTurn: { ...pending, retryCount: pending.retryCount + 1, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, { stageId: input.identity.stageId, revision: input.identity.revision, nodeId: input.identity.nodeId, turnId: input.identity.turnId, attemptId: input.identity.attemptId, messageIndex: input.messageIndex, errorCode: error.code })] } };
+                    return result;
+                }, { chatIdentity });
+                return taskResult_ACU(result);
+            });
+        }
+        /**
+         * 宿主生成被用户中止（GENERATION_STOPPED）：等待轮转 retry_ready 并暂停任务。
+         * 不消耗重试次数（中止是用户行为，不是模型产出不合格），不设 stopReason，
+         * 用户可以直接重试当前轮次或继续任务。
+         */
+        async failHostTurnForStoppedGeneration(identity) {
+            const chatIdentity = this.requireChatIdentity_ACU();
+            if (identity.chatIdentity !== chatIdentity) {
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '生成中止事件所属聊天已变化', false));
+            }
+            return this.withLease_ACU(async () => {
+                let result = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const envelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(envelope);
+                    const pending = task.pendingHostTurn;
+                    if (task.status !== 'running' || !pending || pending.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, identity)) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '生成中止事件已不属于当前轮次', false));
+                    }
+                    const now = this.dependencies.now();
+                    const error = createContinuationError_ACU('CONTINUATION_TASK_STATE_INVALID', 'generation_evaluate', '宿主生成被中止，可重试当前轮次', true);
+                    result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, lastError: error, pendingHostTurn: { ...pending, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, { stageId: identity.stageId, revision: identity.revision, nodeId: identity.nodeId, turnId: identity.turnId, attemptId: identity.attemptId, errorCode: error.code })] } };
                     return result;
                 }, { chatIdentity });
                 return taskResult_ACU(result);
@@ -104798,7 +104832,9 @@ $CONTENT
         }
         stopEnvelope_ACU(envelope, reason, now) {
             const task = this.requireTask_ACU(envelope);
-            return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: reason, timeline: [...task.timeline, this.timeline_ACU('stopped', now)] } };
+            // 停止即放弃对等待中宿主生成的归属；清掉等待轮，之后继续/恢复不会被它卡死。
+            const pendingHostTurn = task.pendingHostTurn?.status === 'awaiting_generation' ? null : task.pendingHostTurn;
+            return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: reason, ...(pendingHostTurn !== task.pendingHostTurn ? { pendingHostTurn } : {}), timeline: [...task.timeline, this.timeline_ACU('stopped', now)] } };
         }
         async pauseHostTurn_ACU(identity, code, message, stopReason) {
             const chatIdentity = this.requireChatIdentity_ACU();
@@ -107167,14 +107203,27 @@ $CONTENT
 
     /**
      * The only bridge that may couple a prepared continuation turn to host input
-     * and GENERATION_* events. It deliberately fails closed when lifecycle events
-     * cannot be synchronously paired with the click it initiated.
+     * and GENERATION_* events.
+     *
+     * 认领采用两层判定：
+     * - 严格层：GENERATION_STARTED 在发送的同步窗口内到达时按序列号精确配对（历史行为）。
+     * - 宽松层：参考最原始智能续写的状态法——持久化的 pendingHostTurn（awaiting_generation）
+     *   就是"正在等待回复"的标志，任意非 quiet 的生成事件（由调用方经 allowLoose 过滤后）
+     *   都可被认领；归属安全交给 resolveGeneratedAiMessageIndex_ACU 的唯一候选解析兜底。
+     *   宿主的 GENERATION_STARTED 通常在点击发送后的微任务中才送达，严格层此时必然错过，
+     *   没有宽松层就会永远收不到正文完成信号。
      */
     class ContinuationHostGenerationBridge_ACU {
         constructor(dependencies) {
             this.dependencies = dependencies;
             this.sendingIdentity = null;
             this.startedByChat = new Map();
+        }
+        /** 桥内存中是否持有该聊天的活认领（发送窗口内或已认领生成开始）。用于区分真在飞与重载后的滞留态。 */
+        hasLiveClaim(chatIdentity) {
+            if (this.sendingIdentity?.chatIdentity === chatIdentity)
+                return true;
+            return this.startedByChat.has(chatIdentity);
         }
         async send(prepared) {
             const runtime = this.dependencies.runtime;
@@ -107200,37 +107249,75 @@ $CONTENT
                 this.sendingIdentity = null;
             }
         }
-        onGenerationStarted(sequence) {
-            const identity = this.sendingIdentity;
+        /**
+         * 认领宿主生成开始事件。
+         * 严格路径：发送同步窗口内到达（sendingIdentity 仍在）按历史行为配对。
+         * 宽松路径（allowLoose，调用方已过滤 quiet/dryRun/automatic）：当前聊天存在未绑定
+         * 序列号的等待轮时认领——宿主事件通常在发送返回后的微任务里才送达，没有这条路径
+         * 生成开始永远配对不上（spv8.9.2 时代的状态法没有这个问题）。
+         */
+        onGenerationStarted(sequence, allowLoose = false) {
             const runtime = this.dependencies.runtime;
-            if (!identity || identity.chatIdentity !== runtime.getChatIdentity())
+            const identity = this.sendingIdentity;
+            if (identity && identity.chatIdentity === runtime.getChatIdentity()) {
+                const pending = runtime.readPendingHostTurn();
+                if (!pending || pending.pending.identity.attemptId !== identity.attemptId || pending.pending.capture.generationSeq !== null)
+                    return false;
+                this.startedByChat.set(identity.chatIdentity, { identity, sequence, bind: runtime.bindHostTurnGeneration(identity, sequence) });
+                return true;
+            }
+            if (!allowLoose)
                 return false;
-            const pending = runtime.readPendingHostTurn();
-            if (!pending || pending.pending.identity.attemptId !== identity.attemptId || pending.pending.capture.generationSeq !== null)
+            const chatIdentity = runtime.getChatIdentity();
+            if (this.startedByChat.has(chatIdentity))
                 return false;
-            this.startedByChat.set(identity.chatIdentity, { identity, sequence, bind: runtime.bindHostTurnGeneration(identity, sequence) });
+            const snapshot = runtime.readPendingHostTurn();
+            if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.capture.generationSeq !== null)
+                return false;
+            const pendingIdentity = snapshot.pending.identity;
+            this.startedByChat.set(chatIdentity, { identity: pendingIdentity, sequence, bind: runtime.bindHostTurnGeneration(pendingIdentity, sequence) });
             return true;
         }
-        claimsGenerationEnded(sequence) {
-            if (sequence === undefined)
+        /**
+         * 是否认领本次生成结束。严格路径按已认领的序列号精确匹配；
+         * 宽松路径（allowLoose）参考 spv8.9.2 的状态法：只要当前聊天有等待中的宿主轮
+         * 且序列号不冲突（未绑定或一致）就认领，归属由唯一候选解析器兜底。
+         */
+        claimsGenerationEnded(sequence, allowLoose = false) {
+            const runtime = this.dependencies.runtime;
+            const started = this.startedByChat.get(runtime.getChatIdentity());
+            if (started && sequence !== undefined && started.sequence === sequence)
+                return true;
+            if (!allowLoose)
                 return false;
-            const current = this.startedByChat.get(this.dependencies.runtime.getChatIdentity());
-            return !!current && current.sequence === sequence;
+            const snapshot = runtime.readPendingHostTurn();
+            if (!snapshot || snapshot.pending.status !== 'awaiting_generation')
+                return false;
+            const boundSequence = snapshot.pending.capture.generationSeq ?? started?.sequence ?? null;
+            return boundSequence === null || sequence === undefined || boundSequence === sequence;
         }
-        async onGenerationEnded(eventMessageId, sequence) {
-            if (!this.claimsGenerationEnded(sequence))
+        async onGenerationEnded(eventMessageId, sequence, allowLoose = false) {
+            if (!this.claimsGenerationEnded(sequence, allowLoose))
                 return;
             const chatIdentity = this.dependencies.runtime.getChatIdentity();
-            const started = this.startedByChat.get(chatIdentity);
+            const started = this.startedByChat.get(chatIdentity) ?? null;
             this.startedByChat.delete(chatIdentity);
+            // 宽松路径没有 started 记录：身份以持久化等待轮为准。
+            const claimedIdentity = started?.identity ?? this.dependencies.runtime.readPendingHostTurn()?.pending.identity;
+            if (!claimedIdentity)
+                return;
             try {
-                await started.bind;
+                if (started)
+                    await started.bind;
                 const snapshot = this.dependencies.runtime.readPendingHostTurn();
-                if (!snapshot || snapshot.pending.identity.attemptId !== started.identity.attemptId || snapshot.pending.capture.generationSeq !== sequence)
+                if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.identity.attemptId !== claimedIdentity.attemptId)
+                    return;
+                const boundSequence = snapshot.pending.capture.generationSeq;
+                if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence)
                     return;
                 const messageIndex = await this.resolveMessageIndex_ACU(eventMessageId, snapshot.pending.capture, chatIdentity);
                 if (messageIndex === null) {
-                    await this.dependencies.runtime.pauseForHostResultFailure(started.identity);
+                    await this.dependencies.runtime.pauseForHostResultFailure(claimedIdentity);
                     return;
                 }
                 const message = this.dependencies.runtime.getChat()[messageIndex];
@@ -107240,29 +107327,29 @@ $CONTENT
                     // delete-last primitive, so never risk deleting a newer user/AI floor.
                     const chatBeforeRemoval = this.dependencies.runtime.getChat();
                     if (messageIndex !== chatBeforeRemoval.length - 1 || !await this.dependencies.hostInput.removeLastMessage()) {
-                        await this.dependencies.runtime.pauseForHostResultFailure(started.identity);
+                        await this.dependencies.runtime.pauseForHostResultFailure(claimedIdentity);
                         return;
                     }
                     const chatAfterRemoval = this.dependencies.runtime.getChat();
                     if (chatAfterRemoval.length !== messageIndex) {
-                        await this.dependencies.runtime.pauseForHostResultFailure(started.identity);
+                        await this.dependencies.runtime.pauseForHostResultFailure(claimedIdentity);
                         return;
                     }
-                    await this.dependencies.runtime.rejectHostTurnForMissingTags({ identity: started.identity, messageIndex });
+                    await this.dependencies.runtime.rejectHostTurnForMissingTags({ identity: claimedIdentity, messageIndex });
                     const afterReject = this.dependencies.runtime.readPendingHostTurn();
-                    if (afterReject?.pending.status === 'retry_ready' && afterReject.pending.identity.attemptId === started.identity.attemptId) {
+                    if (afterReject?.pending.status === 'retry_ready' && afterReject.pending.identity.attemptId === claimedIdentity.attemptId) {
                         await this.retryCurrentHostTurn_ACU(snapshot.settings.retryDelaySeconds ?? 0);
                     }
                     return;
                 }
-                await this.dependencies.runtime.confirmCurrentTurn(started.identity);
+                await this.dependencies.runtime.confirmCurrentTurn(claimedIdentity);
             }
             catch {
                 // A bridge failure must not leave an attributable turn indefinitely running.
                 // The guarded fallback preserves a stale/persistence error when it can no
                 // longer safely write the original task identity.
                 try {
-                    await this.dependencies.runtime.pauseForHostResultFailure(started.identity);
+                    await this.dependencies.runtime.pauseForHostResultFailure(claimedIdentity);
                 }
                 catch {
                     // No safe write remains after a stale or persistence failure.
@@ -107270,6 +107357,34 @@ $CONTENT
                 return;
             }
             await this.autoContinueAfterTurn_ACU();
+        }
+        /**
+         * 宿主生成被中止（GENERATION_STOPPED）：等待中的宿主轮不会再有结束事件，
+         * 转入 retry_ready + 暂停，用户可重试当前轮或继续/停止，不再卡死在等待态。
+         */
+        async onGenerationStopped(sequence) {
+            const runtime = this.dependencies.runtime;
+            const chatIdentity = runtime.getChatIdentity();
+            const started = this.startedByChat.get(chatIdentity) ?? null;
+            const snapshot = runtime.readPendingHostTurn();
+            if (!snapshot || snapshot.pending.status !== 'awaiting_generation')
+                return;
+            const boundSequence = snapshot.pending.capture.generationSeq ?? started?.sequence ?? null;
+            if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence)
+                return;
+            this.startedByChat.delete(chatIdentity);
+            if (started) {
+                try {
+                    await started.bind;
+                }
+                catch { /* 绑定失败不阻碍中止转换 */ }
+            }
+            try {
+                await runtime.failHostTurnForStoppedGeneration(snapshot.pending.identity);
+            }
+            catch {
+                // 状态已变化（轮次已被其他路径推进/暂停）时无需补写。
+            }
         }
         /**
          * 一轮正文确认成功后的自动续写：等待轮次延迟后自动触发下一轮，
@@ -107361,6 +107476,7 @@ $CONTENT
                 rejectHostTurnForMissingTags: input => orchestrator.rejectHostTurnForMissingTags(input),
                 pauseForHostInputFailure: identity => orchestrator.pauseForHostInputFailure(identity),
                 pauseForHostResultFailure: identity => orchestrator.pauseForHostResultFailure(identity),
+                failHostTurnForStoppedGeneration: identity => orchestrator.failHostTurnForStoppedGeneration(identity),
             },
             hostInput: new SillyTavernHostTurnAdapter_ACU(),
             now: () => Date.now(),
@@ -107490,6 +107606,8 @@ $CONTENT
         const worldbook = new ContinuationWorldbookContext_ACU();
         const planner = new ContinuationOutlinePlanner_ACU();
         const agentPlanner = new ContinuationAgentTurnPlanner_ACU();
+        // 桥在 orchestrator 之后创建，orchestrator 依赖用闭包延迟取活认领状态。
+        let bridgeRef = null;
         const executionEngine = new StageExecutionEngine_ACU({
             readEnvelope: () => store.readPersisted(),
             getChatIdentity: getChatIdentity_ACU,
@@ -107509,14 +107627,25 @@ $CONTENT
                 const revision = stage?.revisions.find(item => item.revision === stage.activeRevision) ?? null;
                 return buildResolvers_ACU(context.task, stage, revision, worldbook);
             },
+            hasLiveHostClaim: chatIdentity => bridgeRef?.hasLiveClaim(chatIdentity) ?? false,
         });
         const bridge = createSillyTavernContinuationHostBridge_ACU(orchestrator);
+        bridgeRef = bridge;
         const unregister = registerContinuationHostGenerationBridge_ACU(bridge);
         return {
             orchestrator,
             bridge,
             initialize: () => migrateLegacySettings_ACU(store),
-            read: () => store.read(),
+            read: () => {
+                // 桥内存里有本次生成的活认领时保留 running 视图：UI 显示"等待宿主正文"并隐藏继续按钮。
+                // 无认领（重载/事件丢失）时走重载派生，任务回到可继续的暂停态。
+                const persisted = store.readPersisted();
+                const task = persisted?.activeTask;
+                if (persisted && task?.status === 'running' && task.pendingHostTurn?.status === 'awaiting_generation' && bridge.hasLiveClaim(getChatIdentity_ACU())) {
+                    return persisted;
+                }
+                return store.read();
+            },
             dispose: () => {
                 unregister();
                 if (runtime_ACU?.orchestrator === orchestrator)
@@ -107835,9 +107964,11 @@ $CONTENT
                         try {
                             const context = recordGenerationContext_ACU(type, params, dryRun);
                             bindContinuationInternalAiGenerationStarted_ACU(context.seq);
-                            // Only a bridge that synchronously initiated the host click may claim this sequence.
-                            // All other lifecycle events remain unavailable to continuation.
-                            getContinuationHostGenerationBridge_ACU()?.onGenerationStarted(context.seq);
+                            // 宿主的 GENERATION_STARTED 通常在发送点击返回后的微任务里才送达，同步配对必然错过；
+                            // 对非 quiet/非 dryRun/非自动触发的生成开放宽松认领（spv8.9.2 状态法），桥内部只在
+                            // 存在未绑定序列号的等待轮时才会认领。
+                            const allowLooseStart = !dryRun && !isQuietLikeGeneration_ACU(type, params) && !params?.automatic_trigger;
+                            getContinuationHostGenerationBridge_ACU()?.onGenerationStarted(context.seq, allowLooseStart);
                         }
                         catch (e) { }
                     });
@@ -107845,7 +107976,9 @@ $CONTENT
                 if (SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED) {
                     SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, () => {
                         try {
-                            discardLatestGenerationContext_ACU();
+                            const discarded = discardLatestGenerationContext_ACU();
+                            // 被中止的生成不会再有 GENERATION_ENDED；通知桥把等待中的续写轮转为可重试，避免卡死。
+                            void getContinuationHostGenerationBridge_ACU()?.onGenerationStopped(discarded?.seq);
                         }
                         catch (e) { }
                     });
@@ -107860,10 +107993,13 @@ $CONTENT
                             return;
                         }
                         const continuationBridge = getContinuationHostGenerationBridge_ACU();
-                        if (continuationBridge?.claimsGenerationEnded(generationContext?.seq)) {
+                        // 宽松认领只对"会产生正文楼层"的生成开放：quiet/dryRun/自动触发生成不许认领，
+                        // 否则会误杀等待中的续写轮。判定复用自动填表的生成门控。
+                        const allowLooseContinuationClaim = shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext);
+                        if (continuationBridge?.claimsGenerationEnded(generationContext?.seq, allowLooseContinuationClaim)) {
                             // The bridge owns this exact host generation and performs its own
                             // bounded materialization/identity checks before any cursor change.
-                            void continuationBridge.onGenerationEnded(message_id, generationContext?.seq);
+                            void continuationBridge.onGenerationEnded(message_id, generationContext?.seq, allowLooseContinuationClaim);
                             return;
                         }
                         // [触发修复] 原子捕获完整意图快照：事件参数只作为锚点，不承诺是 AI 数组下标。
@@ -148488,9 +148624,10 @@ Expected function or array of functions, received type ${typeof value}.`
         const activeNode = computed(() => activeRevision.value?.outline.nodes[activeStage.value?.activeNodeIndex ?? -1] ?? null);
         const activeTurn = computed(() => activeNode.value?.turns[activeStage.value?.activeTurnIndex ?? -1] ?? null);
         // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）也可继续：由主 Agent 派工大纲子代理处理。
+        // 手动停止的任务允许从当前进度恢复；其余停止原因（时长/阶段上限等）不可恢复。
         const canContinue = computed(() => !!task.value
             && task.value.status === 'paused'
-            && task.value.stopReason === null
+            && (task.value.stopReason === null || task.value.stopReason === 'manual')
             && (!activeStage.value || ['running', 'completed'].includes(activeStage.value.status)));
         const isAwaitingHostResult = computed(() => task.value?.status === 'running' && task.value.pendingHostTurn?.status === 'awaiting_generation');
         const statusText = computed(() => task.value
@@ -148588,7 +148725,7 @@ Expected function or array of functions, received type ${typeof value}.`
             __expose();
             const runtime = useContinuationRuntime();
             const session = useContinuationSession();
-            const { followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
+            const { apiStore, followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
             const settingsDraft = ref(null);
             const outlineDraft = ref('');
             const outlineDraftError = ref('');
@@ -148757,20 +148894,55 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.contextTurnCount < 0) {
                     throw new Error('续写设置中的数值不能低于允许范围');
                 }
-                if (normalized.apiPresetMode === 'fixed' && !normalized.fixedApiPresetName.trim())
-                    throw new Error('固定 API 预设名称不能为空');
+                if (normalized.apiPresetMode === 'fixed') {
+                    const presetName = normalized.fixedApiPresetName.trim();
+                    if (!presetName)
+                        throw new Error('固定 API 预设名称不能为空');
+                    if (!presetExists(presetName))
+                        throw new Error(`API 预设 "${presetName}" 不存在，请重新选择`);
+                }
                 for (const channel of agentChannelRoles) {
                     const choice = normalized.agentApiPresets[channel.role];
-                    if (choice.mode === 'fixed' && !choice.presetName.trim())
+                    if (choice.mode !== 'fixed')
+                        continue;
+                    const presetName = choice.presetName.trim();
+                    if (!presetName)
                         throw new Error(`${channel.label} 的固定渠道必须选择预设`);
+                    if (!presetExists(presetName))
+                        throw new Error(`${channel.label} 渠道的 API 预设 "${presetName}" 不存在，请重新选择`);
                 }
                 return normalized;
             }
-            async function saveSettings() {
+            /**
+             * 判断预设名是否存在于当前 API 预设列表中。
+             * 保存前校验存在性，把悬挂引用（预设已被删除）从运行中途的任务失败提前到保存时报错。
+             */
+            function presetExists(presetName) {
+                return apiStore.presets.some(preset => preset.name === presetName);
+            }
+            /** 记录最近一次从权威状态装载/保存成功的草稿快照，用于跳过无变化的自动保存并切断"保存→刷新→重建草稿"的循环。 */
+            let lastPersistedSettingsJson = '';
+            let settingsSaveTimer;
+            /** 设置修改后自动保存（防抖 800ms），与剧情推进/填表工作台的"改动即生效"一致。 */
+            function scheduleSettingsSave() {
+                if (settingsSaveTimer !== undefined)
+                    clearTimeout(settingsSaveTimer);
+                settingsSaveTimer = setTimeout(() => { void saveSettingsNow(); }, 800);
+            }
+            async function saveSettingsNow() {
+                if (!settingsDraft.value)
+                    return;
+                if (JSON.stringify(settingsDraft.value) === lastPersistedSettingsJson)
+                    return;
+                if (runtime.busy.value) {
+                    // 有续写操作正在执行时不抢租约，稍后重试本次保存。
+                    scheduleSettingsSave();
+                    return;
+                }
                 try {
+                    apiStore.refreshFromSettings();
                     const candidate = normalizeSettingsDraft();
                     if (await runtime.saveSettings(candidate)) {
-                        settingsDraft.value = cloneSettings(candidate);
                         settingsError.value = '';
                     }
                 }
@@ -148812,25 +148984,43 @@ Expected function or array of functions, received type ${typeof value}.`
                     return;
                 settingsDraft.value = restoreContinuationPromptDefault_ACU(settingsDraft.value, kind);
             }
+            /** 刷新页面依赖的全部数据源：API 预设列表必须在挂载与聊天切换时重新读取，否则预设下拉是空的。 */
+            function refreshAll() {
+                apiStore.refreshFromSettings();
+                runtime.refresh();
+            }
             onMounted(() => {
+                apiStore.refreshFromSettings();
                 void runtime.initialize();
                 countdownTimer = setInterval(() => { clock.value = Date.now(); }, 1000);
             });
             onBeforeUnmount(() => {
                 if (countdownTimer !== undefined)
                     clearInterval(countdownTimer);
+                if (settingsSaveTimer !== undefined)
+                    clearTimeout(settingsSaveTimer);
             });
-            watch(useChatChangedTick(), runtime.refresh);
-            watch(runtime.settings, settings => { settingsDraft.value = settings ? cloneSettings(settings) : null; }, { immediate: true });
+            watch(useChatChangedTick(), refreshAll);
+            watch(runtime.settings, settings => {
+                settingsDraft.value = settings ? cloneSettings(settings) : null;
+                lastPersistedSettingsJson = settingsDraft.value ? JSON.stringify(settingsDraft.value) : '';
+            }, { immediate: true });
+            watch(settingsDraft, () => {
+                if (!settingsDraft.value)
+                    return;
+                if (JSON.stringify(settingsDraft.value) === lastPersistedSettingsJson)
+                    return;
+                scheduleSettingsSave();
+            }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, session, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, replacementInstruction, confirmAbandon, replanInstruction, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, replan, abandonAndCreate, requiredInteger, normalizeSettingsDraft, saveSettings, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationSessionFeed };
+            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, replacementInstruction, confirmAbandon, replanInstruction, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, replan, abandonAndCreate, requiredInteger, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationSessionFeed };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-ab05ce1d] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__actions[data-v-ab05ce1d] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__status-grid[data-v-ab05ce1d] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0;\n}\n.acu-v2-continuation-page__status-grid div[data-v-ab05ce1d] { border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent); padding-left: 10px;\n}\n.acu-v2-continuation-page__status-grid dt[data-v-ab05ce1d] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__status-grid dd[data-v-ab05ce1d] { margin: 3px 0 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-page__instruction[data-v-ab05ce1d], .acu-v2-continuation-page__notice[data-v-ab05ce1d] { margin: 14px 0 0; color: var(--acu-text-2); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__notice[data-v-ab05ce1d] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-page__error[data-v-ab05ce1d] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-ab05ce1d] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__stage[data-v-ab05ce1d], .acu-v2-continuation-page__revision[data-v-ab05ce1d] { margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-page__stage > summary[data-v-ab05ce1d], .acu-v2-continuation-page__revision > summary[data-v-ab05ce1d] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__outline[data-v-ab05ce1d], .acu-v2-continuation-page__timeline[data-v-ab05ce1d] { display: grid; gap: 8px; padding-left: 22px; color: var(--acu-text-2);\n}\n.acu-v2-continuation-page__settings-grid[data-v-ab05ce1d] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-ab05ce1d] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-ab05ce1d] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-ab05ce1d] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-ab05ce1d] { padding: 14px;\n}\n.acu-v2-continuation-page__status-grid[data-v-ab05ce1d] { grid-template-columns: repeat(2, minmax(0, 1fr));\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-ab05ce1d] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-ab05ce1d");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_ab05ce1d_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-3347c131] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__actions[data-v-3347c131] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__status-grid[data-v-3347c131] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0;\n}\n.acu-v2-continuation-page__status-grid div[data-v-3347c131] { border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent); padding-left: 10px;\n}\n.acu-v2-continuation-page__status-grid dt[data-v-3347c131] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__status-grid dd[data-v-3347c131] { margin: 3px 0 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-page__instruction[data-v-3347c131], .acu-v2-continuation-page__notice[data-v-3347c131] { margin: 14px 0 0; color: var(--acu-text-2); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__notice[data-v-3347c131] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-page__error[data-v-3347c131] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-3347c131] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__stage[data-v-3347c131], .acu-v2-continuation-page__revision[data-v-3347c131] { margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-page__stage > summary[data-v-3347c131], .acu-v2-continuation-page__revision > summary[data-v-3347c131] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__outline[data-v-3347c131], .acu-v2-continuation-page__timeline[data-v-3347c131] { display: grid; gap: 8px; padding-left: 22px; color: var(--acu-text-2);\n}\n.acu-v2-continuation-page__settings-grid[data-v-3347c131] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-3347c131] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-3347c131] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-3347c131] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-3347c131] { padding: 14px;\n}\n.acu-v2-continuation-page__status-grid[data-v-3347c131] { grid-template-columns: repeat(2, minmax(0, 1fr));\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-3347c131] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-3347c131");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_3347c131_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-continuation-page" };
     const _hoisted_2$j = { class: "acu-v2-continuation-page__actions" };
@@ -148869,7 +149059,6 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_23$3 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_24$3 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_25$3 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_26$3 = { class: "acu-v2-continuation-page__actions" };
     function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$l, [
 		createVNode($setup["AcuPanel"], {
@@ -149240,7 +149429,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		$setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
 			key: 3,
 			title: "续写设置",
-			description: "设置先在页面草稿中编辑；点击保存后才经首楼权威状态落盘。宿主生成进行中不能保存。"
+			description: "修改后自动保存并立即生效；宿主生成进行中暂不能保存，生成结束后再修改即可。"
 		}, {
 			default: withCtx(() => [
 				createBaseVNode("div", _hoisted_17$5, [
@@ -149438,19 +149627,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					toDisplayString($setup.settingsError),
 					1
 					/* TEXT */
-				)) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_20$4, [createVNode($setup["AcuButton"], {
-					variant: "primary",
-					loading: $setup.runtime.busy.value,
-					onClick: $setup.saveSettings
-				}, {
-					default: withCtx(() => [..._cache[62] || (_cache[62] = [createTextVNode(
-						"保存续写设置",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, ["loading"])])
+				)) : createCommentVNode("v-if", true)
 			]),
 			_: 1
 		})) : createCommentVNode("v-if", true),
@@ -149460,7 +149637,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。"
 		}, {
 			default: withCtx(() => [
-				_cache[69] || (_cache[69] = createBaseVNode(
+				_cache[68] || (_cache[68] = createBaseVNode(
 					"h3",
 					null,
 					"大纲子代理（outline-architect）提示词",
@@ -149478,22 +149655,22 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[21] || (_cache[21] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
 					onUpdate: _cache[22] || (_cache[22] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_21$4, [createVNode($setup["AcuButton"], { onClick: _cache[23] || (_cache[23] = ($event) => $setup.restorePrompt("outline")) }, {
-					default: withCtx(() => [..._cache[63] || (_cache[63] = [createTextVNode(
+				createBaseVNode("div", _hoisted_20$4, [createVNode($setup["AcuButton"], { onClick: _cache[23] || (_cache[23] = ($event) => $setup.restorePrompt("outline")) }, {
+					default: withCtx(() => [..._cache[62] || (_cache[62] = [createTextVNode(
 						"恢复大纲提示词默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[70] || (_cache[70] = createBaseVNode(
+				_cache[69] || (_cache[69] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$VALIDATION_ERRORS。",
 					-1
 					/* CACHED */
 				)),
-				_cache[71] || (_cache[71] = createBaseVNode(
+				_cache[70] || (_cache[70] = createBaseVNode(
 					"h3",
 					null,
 					"主 Agent 提示词",
@@ -149511,22 +149688,22 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[26] || (_cache[26] = (index, delta) => $setup.movePrompt("main", index, delta)),
 					onUpdate: _cache[27] || (_cache[27] = (index, patch) => $setup.updatePrompt("main", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_22$3, [createVNode($setup["AcuButton"], { onClick: _cache[28] || (_cache[28] = ($event) => $setup.restorePrompt("agent_main")) }, {
-					default: withCtx(() => [..._cache[64] || (_cache[64] = [createTextVNode(
+				createBaseVNode("div", _hoisted_21$4, [createVNode($setup["AcuButton"], { onClick: _cache[28] || (_cache[28] = ($event) => $setup.restorePrompt("agent_main")) }, {
+					default: withCtx(() => [..._cache[63] || (_cache[63] = [createTextVNode(
 						"恢复主 Agent 默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[72] || (_cache[72] = createBaseVNode(
+				_cache[71] || (_cache[71] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"$HISTORY_ANCHOR 标记真实历史插入位置，该段本身不发送。删掉它会让真实历史退回到序列最前面。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$OUTLINE_WINDOW、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET、$TOOL_RESULTS。",
 					-1
 					/* CACHED */
 				)),
-				_cache[73] || (_cache[73] = createBaseVNode(
+				_cache[72] || (_cache[72] = createBaseVNode(
 					"h3",
 					null,
 					"伏笔与认知维护子代理提示词",
@@ -149544,15 +149721,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[31] || (_cache[31] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
 					onUpdate: _cache[32] || (_cache[32] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_23$3, [createVNode($setup["AcuButton"], { onClick: _cache[33] || (_cache[33] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
-					default: withCtx(() => [..._cache[65] || (_cache[65] = [createTextVNode(
+				createBaseVNode("div", _hoisted_22$3, [createVNode($setup["AcuButton"], { onClick: _cache[33] || (_cache[33] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
+					default: withCtx(() => [..._cache[64] || (_cache[64] = [createTextVNode(
 						"恢复维护子代理默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[74] || (_cache[74] = createBaseVNode(
+				_cache[73] || (_cache[73] = createBaseVNode(
 					"h3",
 					null,
 					"主线推进策划子代理提示词",
@@ -149570,15 +149747,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[36] || (_cache[36] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
 					onUpdate: _cache[37] || (_cache[37] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_24$3, [createVNode($setup["AcuButton"], { onClick: _cache[38] || (_cache[38] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
-					default: withCtx(() => [..._cache[66] || (_cache[66] = [createTextVNode(
+				createBaseVNode("div", _hoisted_23$3, [createVNode($setup["AcuButton"], { onClick: _cache[38] || (_cache[38] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
+					default: withCtx(() => [..._cache[65] || (_cache[65] = [createTextVNode(
 						"恢复主线策划默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[75] || (_cache[75] = createBaseVNode(
+				_cache[74] || (_cache[74] = createBaseVNode(
 					"h3",
 					null,
 					"伏笔与节拍策划子代理提示词",
@@ -149596,15 +149773,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[41] || (_cache[41] = (index, delta) => $setup.movePrompt("beatPlanner", index, delta)),
 					onUpdate: _cache[42] || (_cache[42] = (index, patch) => $setup.updatePrompt("beatPlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_25$3, [createVNode($setup["AcuButton"], { onClick: _cache[43] || (_cache[43] = ($event) => $setup.restorePrompt("agent_beat")) }, {
-					default: withCtx(() => [..._cache[67] || (_cache[67] = [createTextVNode(
+				createBaseVNode("div", _hoisted_24$3, [createVNode($setup["AcuButton"], { onClick: _cache[43] || (_cache[43] = ($event) => $setup.restorePrompt("agent_beat")) }, {
+					default: withCtx(() => [..._cache[66] || (_cache[66] = [createTextVNode(
 						"恢复节拍策划默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[76] || (_cache[76] = createBaseVNode(
+				_cache[75] || (_cache[75] = createBaseVNode(
 					"h3",
 					null,
 					"连续性审查子代理提示词",
@@ -149622,15 +149799,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[46] || (_cache[46] = (index, delta) => $setup.movePrompt("reviewer", index, delta)),
 					onUpdate: _cache[47] || (_cache[47] = (index, patch) => $setup.updatePrompt("reviewer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_26$3, [createVNode($setup["AcuButton"], { onClick: _cache[48] || (_cache[48] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
-					default: withCtx(() => [..._cache[68] || (_cache[68] = [createTextVNode(
+				createBaseVNode("div", _hoisted_25$3, [createVNode($setup["AcuButton"], { onClick: _cache[48] || (_cache[48] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
+					default: withCtx(() => [..._cache[67] || (_cache[67] = [createTextVNode(
 						"恢复审查子代理默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[77] || (_cache[77] = createBaseVNode(
+				_cache[76] || (_cache[76] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"子代理可用占位符：$AGENT_READ_MATERIALS（按授权读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（本次写入权限）。",
@@ -149642,7 +149819,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-ab05ce1d"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-3347c131"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
