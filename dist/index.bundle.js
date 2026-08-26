@@ -69787,7 +69787,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "1.1.0" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "8.8.4" || 'unknown';
     /**
      * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
      * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
@@ -102712,7 +102712,7 @@ $CONTENT
             contextTurnCount: 3,
             contextExtractRules: [],
             contextExcludeRules: [],
-            apiPresetMode: 'follow_plot',
+            apiPresetMode: 'current',
             fixedApiPresetName: '',
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             turnInstructionPrompt: buildDefaultContinuationTurnInstructionPrompt_ACU(),
@@ -103019,7 +103019,9 @@ $CONTENT
         const customTurnMax = raw.customTurnMax === null ? null : requireInteger_ACU(raw.customTurnMax, 'settings.customTurnMax', 1);
         if (raw.stageSize === 'custom' && (customTurnMin === null || customTurnMax === null || customTurnMin > customTurnMax || customTurnMax > 50))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', '自定义轮数范围非法');
-        if (!['follow_plot', 'fixed'].includes(raw.apiPresetMode))
+        if (raw.apiPresetMode === 'follow_plot')
+            raw.apiPresetMode = 'current';
+        if (!['current', 'fixed'].includes(raw.apiPresetMode))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'apiPresetMode 非法');
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -103391,7 +103393,6 @@ $CONTENT
     }
 
     const defaultDependencies_ACU$3 = {
-        getFollowPlotPresetName: () => getCurrentRuntimePlotPresetName_ACU(),
         resolvePreset: resolveApiConfigByPreset_ACU,
     };
     function failPreset_ACU(phase, reason) {
@@ -103407,14 +103408,11 @@ $CONTENT
                 failPreset_ACU(phase, 'missing');
             return { presetName, source: 'fixed', reason: 'fixed_preset', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
         }
-        if (settings.apiPresetMode !== 'follow_plot') {
+        if (settings.apiPresetMode !== 'current') {
             throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_CONFIG_MISSING', phase, '智能续写 API 预设模式非法', false));
         }
-        const presetName = dependencies.getFollowPlotPresetName().trim();
-        const resolved = dependencies.resolvePreset(presetName);
-        if (presetName && !resolved.resolved)
-            failPreset_ACU(phase, 'missing');
-        return { presetName, source: 'follow_plot', reason: presetName ? 'plot_preset' : 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
+        const resolved = dependencies.resolvePreset('');
+        return { presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
     }
 
     const defaultDependencies_ACU$2 = {
@@ -145670,6 +145668,7 @@ Expected function or array of functions, received type ${typeof value}.`
         setup(__props, { expose: __expose }) {
             __expose();
             const runtime = useContinuationRuntime();
+            const { followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
             const settingsDraft = ref(null);
             const outlineDraft = ref('');
             const outlineDraftError = ref('');
@@ -145689,6 +145688,26 @@ Expected function or array of functions, received type ${typeof value}.`
                 const seconds = remainingSeconds % 60;
                 return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
             });
+            const continuationApiPresetValue = computed(() => {
+                if (!settingsDraft.value)
+                    return '';
+                return settingsDraft.value.apiPresetMode === 'fixed'
+                    ? settingsDraft.value.fixedApiPresetName
+                    : '';
+            });
+            function applyContinuationApiPreset(value) {
+                if (!settingsDraft.value)
+                    return;
+                const trimmed = String(value || '').trim();
+                if (trimmed) {
+                    settingsDraft.value.apiPresetMode = 'fixed';
+                    settingsDraft.value.fixedApiPresetName = trimmed;
+                }
+                else {
+                    settingsDraft.value.apiPresetMode = 'current';
+                    settingsDraft.value.fixedApiPresetName = '';
+                }
+            }
             const continuationRoleOptions = [
                 { value: 'system', label: 'SYSTEM' },
                 { value: 'user', label: 'USER' },
@@ -145825,14 +145844,14 @@ Expected function or array of functions, received type ${typeof value}.`
             watch(useChatChangedTick(), runtime.refresh);
             watch(runtime.settings, settings => { settingsDraft.value = settings ? cloneSettings(settings) : null; }, { immediate: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, settingsDraft, outlineDraft, outlineDraftError, settingsError, replacementInstruction, confirmAbandon, replanInstruction, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, deadlineText, continuationRoleOptions, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, replan, abandonAndCreate, requiredInteger, normalizeSettingsDraft, saveSettings, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, AcuButton, AcuCheckbox, AcuInput, AcuPanel, AcuPromptSegments, AcuRulePairList, AcuTextarea };
+            const __returned__ = { runtime, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, replacementInstruction, confirmAbandon, replanInstruction, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, replan, abandonAndCreate, requiredInteger, normalizeSettingsDraft, saveSettings, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-1d3e7a9c] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__actions[data-v-1d3e7a9c] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__status-grid[data-v-1d3e7a9c] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0;\n}\n.acu-v2-continuation-page__status-grid div[data-v-1d3e7a9c] { border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent); padding-left: 10px;\n}\n.acu-v2-continuation-page__status-grid dt[data-v-1d3e7a9c] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__status-grid dd[data-v-1d3e7a9c] { margin: 3px 0 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-page__instruction[data-v-1d3e7a9c], .acu-v2-continuation-page__notice[data-v-1d3e7a9c] { margin: 14px 0 0; color: var(--acu-text-2); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__notice[data-v-1d3e7a9c] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-page__error[data-v-1d3e7a9c] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-1d3e7a9c] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__stage[data-v-1d3e7a9c], .acu-v2-continuation-page__revision[data-v-1d3e7a9c] { margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-page__stage > summary[data-v-1d3e7a9c], .acu-v2-continuation-page__revision > summary[data-v-1d3e7a9c] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__outline[data-v-1d3e7a9c], .acu-v2-continuation-page__timeline[data-v-1d3e7a9c] { display: grid; gap: 8px; padding-left: 22px; color: var(--acu-text-2);\n}\n.acu-v2-continuation-page__settings-grid[data-v-1d3e7a9c] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-1d3e7a9c] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-1d3e7a9c] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-1d3e7a9c] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-1d3e7a9c] { padding: 14px;\n}\n.acu-v2-continuation-page__status-grid[data-v-1d3e7a9c] { grid-template-columns: repeat(2, minmax(0, 1fr));\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-1d3e7a9c] { grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-1d3e7a9c");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_1d3e7a9c_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-8d77d55f] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__actions[data-v-8d77d55f] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__status-grid[data-v-8d77d55f] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0;\n}\n.acu-v2-continuation-page__status-grid div[data-v-8d77d55f] { border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent); padding-left: 10px;\n}\n.acu-v2-continuation-page__status-grid dt[data-v-8d77d55f] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__status-grid dd[data-v-8d77d55f] { margin: 3px 0 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-page__instruction[data-v-8d77d55f], .acu-v2-continuation-page__notice[data-v-8d77d55f] { margin: 14px 0 0; color: var(--acu-text-2); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__notice[data-v-8d77d55f] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-page__error[data-v-8d77d55f] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-8d77d55f] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__stage[data-v-8d77d55f], .acu-v2-continuation-page__revision[data-v-8d77d55f] { margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-page__stage > summary[data-v-8d77d55f], .acu-v2-continuation-page__revision > summary[data-v-8d77d55f] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__outline[data-v-8d77d55f], .acu-v2-continuation-page__timeline[data-v-8d77d55f] { display: grid; gap: 8px; padding-left: 22px; color: var(--acu-text-2);\n}\n.acu-v2-continuation-page__settings-grid[data-v-8d77d55f] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-8d77d55f] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-8d77d55f] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-8d77d55f] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-8d77d55f] { padding: 14px;\n}\n.acu-v2-continuation-page__status-grid[data-v-8d77d55f] { grid-template-columns: repeat(2, minmax(0, 1fr));\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-8d77d55f] { grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-8d77d55f");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_8d77d55f_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-continuation-page" };
     const _hoisted_2$j = { class: "acu-v2-continuation-page__actions" };
@@ -145868,17 +145887,14 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_17$5 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_18$5 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_19$5 = { class: "acu-v2-continuation-page__settings-grid" };
-    const _hoisted_20$4 = { key: 0 };
-    const _hoisted_21$4 = { key: 1 };
-    const _hoisted_22$3 = { key: 2 };
-    const _hoisted_23$3 = { class: "acu-v2-continuation-page__toggles" };
-    const _hoisted_24$3 = {
+    const _hoisted_20$4 = { class: "acu-v2-continuation-page__toggles" };
+    const _hoisted_21$4 = {
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_25$3 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_26$3 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_27$3 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_22$3 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_23$3 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_24$3 = { class: "acu-v2-continuation-page__actions" };
     function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$l, [
 		createVNode($setup["AcuPanel"], {
@@ -145900,7 +145916,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					disabled: !$setup.runtime.originInstruction.value.trim(),
 					onClick: $setup.runtime.createTask
 				}, {
-					default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
+					default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
 						"创建阶段大纲",
 						-1
 						/* CACHED */
@@ -145918,7 +145934,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				{ key: 1 },
 				[
 					createBaseVNode("dl", _hoisted_3$g, [
-						createBaseVNode("div", null, [_cache[33] || (_cache[33] = createBaseVNode(
+						createBaseVNode("div", null, [_cache[31] || (_cache[31] = createBaseVNode(
 							"dt",
 							null,
 							"任务状态",
@@ -145931,7 +145947,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							1
 							/* TEXT */
 						)]),
-						createBaseVNode("div", null, [_cache[34] || (_cache[34] = createBaseVNode(
+						createBaseVNode("div", null, [_cache[32] || (_cache[32] = createBaseVNode(
 							"dt",
 							null,
 							"当前阶段",
@@ -145944,7 +145960,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							1
 							/* TEXT */
 						)]),
-						createBaseVNode("div", null, [_cache[35] || (_cache[35] = createBaseVNode(
+						createBaseVNode("div", null, [_cache[33] || (_cache[33] = createBaseVNode(
 							"dt",
 							null,
 							"完成轮次",
@@ -145957,7 +145973,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							1
 							/* TEXT */
 						)]),
-						createBaseVNode("div", null, [_cache[36] || (_cache[36] = createBaseVNode(
+						createBaseVNode("div", null, [_cache[34] || (_cache[34] = createBaseVNode(
 							"dt",
 							null,
 							"大纲 revision",
@@ -145970,7 +145986,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							1
 							/* TEXT */
 						)]),
-						createBaseVNode("div", null, [_cache[37] || (_cache[37] = createBaseVNode(
+						createBaseVNode("div", null, [_cache[35] || (_cache[35] = createBaseVNode(
 							"dt",
 							null,
 							"总倒计时",
@@ -146023,7 +146039,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						loading: $setup.runtime.busy.value,
 						onClick: $setup.runtime.continueTask
 					}, {
-						default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
+						default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
 							"继续当前轮次",
 							-1
 							/* CACHED */
@@ -146036,7 +146052,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						loading: $setup.runtime.busy.value,
 						onClick: $setup.runtime.retryCurrentTurn
 					}, {
-						default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
+						default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
 							"重试当前轮次",
 							-1
 							/* CACHED */
@@ -146048,7 +146064,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						loading: $setup.runtime.busy.value,
 						onClick: $setup.replan
 					}, {
-						default: withCtx(() => [..._cache[40] || (_cache[40] = [createTextVNode(
+						default: withCtx(() => [..._cache[38] || (_cache[38] = [createTextVNode(
 							"重新规划剩余阶段",
 							-1
 							/* CACHED */
@@ -146061,7 +146077,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						loading: $setup.runtime.busy.value,
 						onClick: $setup.runtime.stopTask
 					}, {
-						default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
+						default: withCtx(() => [..._cache[39] || (_cache[39] = [createTextVNode(
 							"停止智能续写",
 							-1
 							/* CACHED */
@@ -146221,7 +146237,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.acceptOutlineDraft
 				}, {
-					default: withCtx(() => [..._cache[42] || (_cache[42] = [createTextVNode(
+					default: withCtx(() => [..._cache[40] || (_cache[40] = [createTextVNode(
 						"确认大纲并继续",
 						-1
 						/* CACHED */
@@ -146254,7 +146270,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.abandonAndCreate
 				}, {
-					default: withCtx(() => [..._cache[43] || (_cache[43] = [createTextVNode(
+					default: withCtx(() => [..._cache[41] || (_cache[41] = [createTextVNode(
 						"放弃并创建新任务",
 						-1
 						/* CACHED */
@@ -146271,212 +146287,188 @@ Expected function or array of functions, received type ${typeof value}.`
 		}, {
 			default: withCtx(() => [
 				createBaseVNode("div", _hoisted_19$5, [
-					createBaseVNode("label", null, [_cache[45] || (_cache[45] = createTextVNode(
-						"阶段规模",
-						-1
-						/* CACHED */
-					)), withDirectives(createBaseVNode(
-						"select",
-						{ "onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.settingsDraft.stageSize = $event) },
-						[..._cache[44] || (_cache[44] = [
-							createBaseVNode(
-								"option",
-								{ value: "short" },
-								"短（3–5）",
-								-1
-								/* CACHED */
-							),
-							createBaseVNode(
-								"option",
-								{ value: "standard" },
-								"标准（6–10）",
-								-1
-								/* CACHED */
-							),
-							createBaseVNode(
-								"option",
-								{ value: "long" },
-								"长（11–20）",
-								-1
-								/* CACHED */
-							),
-							createBaseVNode(
-								"option",
-								{ value: "custom" },
-								"自定义",
-								-1
-								/* CACHED */
-							)
-						])],
-						512
-						/* NEED_PATCH */
-					), [[vModelSelect, $setup.settingsDraft.stageSize]])]),
-					$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createElementBlock("label", _hoisted_20$4, [_cache[46] || (_cache[46] = createTextVNode(
-						"最少轮次",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.customTurnMin,
-						"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.settingsDraft.customTurnMin = $event),
-						type: "number",
-						min: 1,
-						max: 50
-					}, null, 8, ["modelValue"])])) : createCommentVNode("v-if", true),
-					$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createElementBlock("label", _hoisted_21$4, [_cache[47] || (_cache[47] = createTextVNode(
-						"最多轮次",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.customTurnMax,
-						"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settingsDraft.customTurnMax = $event),
-						type: "number",
-						min: 1,
-						max: 50
-					}, null, 8, ["modelValue"])])) : createCommentVNode("v-if", true),
-					createBaseVNode("label", null, [_cache[48] || (_cache[48] = createTextVNode(
-						"自动阶段上限",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.maxAutomaticStages,
-						"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
-						type: "number",
-						min: 1
-					}, null, 8, ["modelValue"])]),
-					createBaseVNode("label", null, [_cache[49] || (_cache[49] = createTextVNode(
-						"正文重试次数",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.generationRetryLimit,
-						"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
-						type: "number",
-						min: 0
-					}, null, 8, ["modelValue"])]),
-					createBaseVNode("label", null, [_cache[50] || (_cache[50] = createTextVNode(
-						"内部 AI 重试次数",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.internalAiRetryLimit,
-						"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
-						type: "number",
-						min: 0
-					}, null, 8, ["modelValue"])]),
-					createBaseVNode("label", null, [_cache[51] || (_cache[51] = createTextVNode(
-						"轮次延迟（秒）",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.loopDelaySeconds,
-						"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
-						type: "number",
-						min: 0
-					}, null, 8, ["modelValue"])]),
-					createBaseVNode("label", null, [_cache[52] || (_cache[52] = createTextVNode(
-						"重试延迟（秒）",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.retryDelaySeconds,
-						"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
-						type: "number",
-						min: 0
-					}, null, 8, ["modelValue"])]),
-					createBaseVNode("label", null, [_cache[53] || (_cache[53] = createTextVNode(
-						"总时长（分钟，0 为不设总时长）",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.totalDurationMinutes,
-						"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.totalDurationMinutes = $event),
-						type: "number",
-						min: 0
-					}, null, 8, ["modelValue"])]),
-					createBaseVNode("label", null, [_cache[54] || (_cache[54] = createTextVNode(
-						"最近剧情轮数",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.contextTurnCount,
-						"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.contextTurnCount = $event),
-						type: "number",
-						min: 0
-					}, null, 8, ["modelValue"])]),
-					createBaseVNode("label", null, [_cache[55] || (_cache[55] = createTextVNode(
-						"循环标签",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.loopTags,
-						"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.loopTags = $event),
-						type: "text"
-					}, null, 8, ["modelValue"])]),
-					createBaseVNode("label", null, [_cache[57] || (_cache[57] = createTextVNode(
-						"API 预设",
-						-1
-						/* CACHED */
-					)), withDirectives(createBaseVNode(
-						"select",
-						{ "onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.apiPresetMode = $event) },
-						[..._cache[56] || (_cache[56] = [createBaseVNode(
-							"option",
-							{ value: "follow_plot" },
-							"跟随剧情预设",
-							-1
-							/* CACHED */
-						), createBaseVNode(
-							"option",
-							{ value: "fixed" },
-							"固定预设",
-							-1
-							/* CACHED */
-						)])],
-						512
-						/* NEED_PATCH */
-					), [[vModelSelect, $setup.settingsDraft.apiPresetMode]])]),
-					$setup.settingsDraft.apiPresetMode === "fixed" ? (openBlock(), createElementBlock("label", _hoisted_22$3, [_cache[58] || (_cache[58] = createTextVNode(
-						"固定预设名称",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuInput"], {
-						modelValue: $setup.settingsDraft.fixedApiPresetName,
-						"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.fixedApiPresetName = $event),
-						type: "text"
-					}, null, 8, ["modelValue"])])) : createCommentVNode("v-if", true)
+					createVNode($setup["AcuFormRow"], { label: "阶段规模" }, {
+						default: withCtx(() => [withDirectives(createBaseVNode(
+							"select",
+							{ "onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.settingsDraft.stageSize = $event) },
+							[..._cache[42] || (_cache[42] = [
+								createBaseVNode(
+									"option",
+									{ value: "short" },
+									"短（3–5）",
+									-1
+									/* CACHED */
+								),
+								createBaseVNode(
+									"option",
+									{ value: "standard" },
+									"标准（6–10）",
+									-1
+									/* CACHED */
+								),
+								createBaseVNode(
+									"option",
+									{ value: "long" },
+									"长（11–20）",
+									-1
+									/* CACHED */
+								),
+								createBaseVNode(
+									"option",
+									{ value: "custom" },
+									"自定义",
+									-1
+									/* CACHED */
+								)
+							])],
+							512
+							/* NEED_PATCH */
+						), [[vModelSelect, $setup.settingsDraft.stageSize]])]),
+						_: 1
+					}),
+					$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createBlock($setup["AcuFormRow"], {
+						key: 0,
+						label: "最少轮次"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.customTurnMin,
+							"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.settingsDraft.customTurnMin = $event),
+							type: "number",
+							min: 1,
+							max: 50
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					})) : createCommentVNode("v-if", true),
+					$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createBlock($setup["AcuFormRow"], {
+						key: 1,
+						label: "最多轮次"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.customTurnMax,
+							"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settingsDraft.customTurnMax = $event),
+							type: "number",
+							min: 1,
+							max: 50
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					})) : createCommentVNode("v-if", true),
+					createVNode($setup["AcuFormRow"], { label: "自动阶段上限" }, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.maxAutomaticStages,
+							"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
+							type: "number",
+							min: 1
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], { label: "正文重试次数" }, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.generationRetryLimit,
+							"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
+							type: "number",
+							min: 0
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], { label: "内部 AI 重试次数" }, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.internalAiRetryLimit,
+							"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
+							type: "number",
+							min: 0
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], { label: "轮次延迟（秒）" }, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.loopDelaySeconds,
+							"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
+							type: "number",
+							min: 0
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], { label: "重试延迟（秒）" }, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.retryDelaySeconds,
+							"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
+							type: "number",
+							min: 0
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], { label: "总时长（分钟，0 为不设总时长）" }, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.totalDurationMinutes,
+							"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.totalDurationMinutes = $event),
+							type: "number",
+							min: 0
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], { label: "最近剧情轮数" }, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.contextTurnCount,
+							"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.contextTurnCount = $event),
+							type: "number",
+							min: 0
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], { label: "循环标签" }, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							modelValue: $setup.settingsDraft.loopTags,
+							"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.loopTags = $event),
+							type: "text"
+						}, null, 8, ["modelValue"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], { label: "API 预设" }, {
+						default: withCtx(() => [createVNode($setup["AcuSelect"], {
+							options: $setup.continuationApiPresetOptions,
+							"model-value": $setup.continuationApiPresetValue,
+							placeholder: $setup.followActiveApiLabel,
+							"onUpdate:modelValue": $setup.applyContinuationApiPreset
+						}, null, 8, [
+							"options",
+							"model-value",
+							"placeholder"
+						])]),
+						_: 1
+					})
 				]),
-				createBaseVNode("div", _hoisted_23$3, [createVNode($setup["AcuCheckbox"], {
+				createBaseVNode("div", _hoisted_20$4, [createVNode($setup["AcuCheckbox"], {
 					modelValue: $setup.settingsDraft.outlinePreview,
-					"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.outlinePreview = $event),
+					"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.outlinePreview = $event),
 					label: "创建后先预览大纲"
 				}, null, 8, ["modelValue"]), createVNode($setup["AcuCheckbox"], {
 					modelValue: $setup.settingsDraft.autoNextStage,
-					"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.autoNextStage = $event),
+					"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.autoNextStage = $event),
 					label: "自动规划下一阶段"
 				}, null, 8, ["modelValue"])]),
 				createVNode($setup["AcuRulePairList"], {
 					modelValue: $setup.settingsDraft.contextExtractRules,
-					"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
+					"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
 					label: "上下文提取规则"
 				}, null, 8, ["modelValue"]),
 				createVNode($setup["AcuRulePairList"], {
 					modelValue: $setup.settingsDraft.contextExcludeRules,
-					"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
+					"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
 					label: "上下文排除规则"
 				}, null, 8, ["modelValue"]),
 				$setup.settingsError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_24$3,
+					_hoisted_21$4,
 					toDisplayString($setup.settingsError),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_25$3, [createVNode($setup["AcuButton"], {
+				createBaseVNode("div", _hoisted_22$3, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.saveSettings
 				}, {
-					default: withCtx(() => [..._cache[59] || (_cache[59] = [createTextVNode(
+					default: withCtx(() => [..._cache[43] || (_cache[43] = [createTextVNode(
 						"保存续写设置",
 						-1
 						/* CACHED */
@@ -146492,7 +146484,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。"
 		}, {
 			default: withCtx(() => [
-				_cache[62] || (_cache[62] = createBaseVNode(
+				_cache[46] || (_cache[46] = createBaseVNode(
 					"h3",
 					null,
 					"阶段大纲提示词",
@@ -146505,20 +146497,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[22] || (_cache[22] = ($event) => $setup.addPrompt("outlinePrompt")),
-					onDelete: _cache[23] || (_cache[23] = (index) => $setup.deletePrompt("outlinePrompt", index)),
-					onMove: _cache[24] || (_cache[24] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
-					onUpdate: _cache[25] || (_cache[25] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
+					onAdd: _cache[20] || (_cache[20] = ($event) => $setup.addPrompt("outlinePrompt")),
+					onDelete: _cache[21] || (_cache[21] = (index) => $setup.deletePrompt("outlinePrompt", index)),
+					onMove: _cache[22] || (_cache[22] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
+					onUpdate: _cache[23] || (_cache[23] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_26$3, [createVNode($setup["AcuButton"], { onClick: _cache[26] || (_cache[26] = ($event) => $setup.restorePrompt("outline")) }, {
-					default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
+				createBaseVNode("div", _hoisted_23$3, [createVNode($setup["AcuButton"], { onClick: _cache[24] || (_cache[24] = ($event) => $setup.restorePrompt("outline")) }, {
+					default: withCtx(() => [..._cache[44] || (_cache[44] = [createTextVNode(
 						"恢复大纲提示词默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[63] || (_cache[63] = createBaseVNode(
+				_cache[47] || (_cache[47] = createBaseVNode(
 					"h3",
 					null,
 					"轮次指令提示词",
@@ -146531,20 +146523,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[27] || (_cache[27] = ($event) => $setup.addPrompt("turnInstructionPrompt")),
-					onDelete: _cache[28] || (_cache[28] = (index) => $setup.deletePrompt("turnInstructionPrompt", index)),
-					onMove: _cache[29] || (_cache[29] = (index, delta) => $setup.movePrompt("turnInstructionPrompt", index, delta)),
-					onUpdate: _cache[30] || (_cache[30] = (index, patch) => $setup.updatePrompt("turnInstructionPrompt", index, patch))
+					onAdd: _cache[25] || (_cache[25] = ($event) => $setup.addPrompt("turnInstructionPrompt")),
+					onDelete: _cache[26] || (_cache[26] = (index) => $setup.deletePrompt("turnInstructionPrompt", index)),
+					onMove: _cache[27] || (_cache[27] = (index, delta) => $setup.movePrompt("turnInstructionPrompt", index, delta)),
+					onUpdate: _cache[28] || (_cache[28] = (index, patch) => $setup.updatePrompt("turnInstructionPrompt", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_27$3, [createVNode($setup["AcuButton"], { onClick: _cache[31] || (_cache[31] = ($event) => $setup.restorePrompt("turn_instruction")) }, {
-					default: withCtx(() => [..._cache[61] || (_cache[61] = [createTextVNode(
+				createBaseVNode("div", _hoisted_24$3, [createVNode($setup["AcuButton"], { onClick: _cache[29] || (_cache[29] = ($event) => $setup.restorePrompt("turn_instruction")) }, {
+					default: withCtx(() => [..._cache[45] || (_cache[45] = [createTextVNode(
 						"恢复轮次指令默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[64] || (_cache[64] = createBaseVNode(
+				_cache[48] || (_cache[48] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$CURRENT_STAGE、$CURRENT_NODE、$CURRENT_TURN_GOAL、$TURN_NUMBER、$NODE_TURN_NUMBER、$VALIDATION_ERRORS。",
@@ -146556,7 +146548,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-1d3e7a9c"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-8d77d55f"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
