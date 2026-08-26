@@ -120,19 +120,52 @@
 
     <AcuPanel v-if="settingsDraft" title="续写设置" description="设置先在页面草稿中编辑；点击保存后才经首楼权威状态落盘。宿主生成进行中不能保存。">
       <div class="acu-v2-continuation-page__settings-grid">
-        <label>阶段规模<select v-model="settingsDraft.stageSize"><option value="short">短（3–5）</option><option value="standard">标准（6–10）</option><option value="long">长（11–20）</option><option value="custom">自定义</option></select></label>
-        <label v-if="settingsDraft.stageSize === 'custom'">最少轮次<AcuInput v-model="settingsDraft.customTurnMin" type="number" :min="1" :max="50" /></label>
-        <label v-if="settingsDraft.stageSize === 'custom'">最多轮次<AcuInput v-model="settingsDraft.customTurnMax" type="number" :min="1" :max="50" /></label>
-        <label>自动阶段上限<AcuInput v-model="settingsDraft.maxAutomaticStages" type="number" :min="1" /></label>
-        <label>正文重试次数<AcuInput v-model="settingsDraft.generationRetryLimit" type="number" :min="0" /></label>
-        <label>内部 AI 重试次数<AcuInput v-model="settingsDraft.internalAiRetryLimit" type="number" :min="0" /></label>
-        <label>轮次延迟（秒）<AcuInput v-model="settingsDraft.loopDelaySeconds" type="number" :min="0" /></label>
-        <label>重试延迟（秒）<AcuInput v-model="settingsDraft.retryDelaySeconds" type="number" :min="0" /></label>
-        <label>总时长（分钟，0 为不设总时长）<AcuInput v-model="settingsDraft.totalDurationMinutes" type="number" :min="0" /></label>
-        <label>最近剧情轮数<AcuInput v-model="settingsDraft.contextTurnCount" type="number" :min="0" /></label>
-        <label>循环标签<AcuInput v-model="settingsDraft.loopTags" type="text" /></label>
-        <label>API 预设<select v-model="settingsDraft.apiPresetMode"><option value="current">跟随当前 API</option><option value="fixed">固定预设</option></select></label>
-        <label v-if="settingsDraft.apiPresetMode === 'fixed'">固定预设名称<AcuInput v-model="settingsDraft.fixedApiPresetName" type="text" /></label>
+        <AcuFormRow label="阶段规模">
+          <select v-model="settingsDraft.stageSize">
+            <option value="short">短（3–5）</option>
+            <option value="standard">标准（6–10）</option>
+            <option value="long">长（11–20）</option>
+            <option value="custom">自定义</option>
+          </select>
+        </AcuFormRow>
+        <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最少轮次">
+          <AcuInput v-model="settingsDraft.customTurnMin" type="number" :min="1" :max="50" />
+        </AcuFormRow>
+        <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最多轮次">
+          <AcuInput v-model="settingsDraft.customTurnMax" type="number" :min="1" :max="50" />
+        </AcuFormRow>
+        <AcuFormRow label="自动阶段上限">
+          <AcuInput v-model="settingsDraft.maxAutomaticStages" type="number" :min="1" />
+        </AcuFormRow>
+        <AcuFormRow label="正文重试次数">
+          <AcuInput v-model="settingsDraft.generationRetryLimit" type="number" :min="0" />
+        </AcuFormRow>
+        <AcuFormRow label="内部 AI 重试次数">
+          <AcuInput v-model="settingsDraft.internalAiRetryLimit" type="number" :min="0" />
+        </AcuFormRow>
+        <AcuFormRow label="轮次延迟（秒）">
+          <AcuInput v-model="settingsDraft.loopDelaySeconds" type="number" :min="0" />
+        </AcuFormRow>
+        <AcuFormRow label="重试延迟（秒）">
+          <AcuInput v-model="settingsDraft.retryDelaySeconds" type="number" :min="0" />
+        </AcuFormRow>
+        <AcuFormRow label="总时长（分钟，0 为不设总时长）">
+          <AcuInput v-model="settingsDraft.totalDurationMinutes" type="number" :min="0" />
+        </AcuFormRow>
+        <AcuFormRow label="最近剧情轮数">
+          <AcuInput v-model="settingsDraft.contextTurnCount" type="number" :min="0" />
+        </AcuFormRow>
+        <AcuFormRow label="循环标签">
+          <AcuInput v-model="settingsDraft.loopTags" type="text" />
+        </AcuFormRow>
+        <AcuFormRow label="API 预设">
+          <AcuSelect
+            :options="continuationApiPresetOptions"
+            :model-value="continuationApiPresetValue"
+            :placeholder="followActiveApiLabel"
+            @update:model-value="applyContinuationApiPreset"
+          />
+        </AcuFormRow>
       </div>
       <div class="acu-v2-continuation-page__toggles">
         <AcuCheckbox v-model="settingsDraft.outlinePreview" label="创建后先预览大纲" />
@@ -166,15 +199,19 @@ import { restoreContinuationPromptDefault_ACU } from '../../service/continuation
 import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU, StageOutline_ACU } from '../../service/continuation/model';
 import AcuButton from '../components/_lib/AcuButton.vue';
 import AcuCheckbox from '../components/_lib/AcuCheckbox.vue';
+import AcuFormRow from '../components/_lib/AcuFormRow.vue';
 import AcuInput from '../components/_lib/AcuInput.vue';
 import AcuPanel from '../components/_lib/AcuPanel.vue';
 import AcuPromptSegments from '../components/_lib/AcuPromptSegments.vue';
 import AcuRulePairList from '../components/_lib/AcuRulePairList.vue';
+import AcuSelect from '../components/_lib/AcuSelect.vue';
 import AcuTextarea from '../components/_lib/AcuTextarea.vue';
+import { useApiPresetSelectOptions } from '../composables/useApiPresetSelectOptions';
 import { useChatChangedTick } from '../composables/useChatChangedListener';
 import { useContinuationRuntime } from '../composables/useContinuationRuntime';
 
 const runtime = useContinuationRuntime();
+const { followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
 const settingsDraft = ref<ContinuationSettings_ACU | null>(null);
 const outlineDraft = ref('');
 const outlineDraftError = ref('');
@@ -194,6 +231,25 @@ const deadlineText = computed(() => {
   const seconds = remainingSeconds % 60;
   return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 });
+
+const continuationApiPresetValue = computed(() => {
+  if (!settingsDraft.value) return '';
+  return settingsDraft.value.apiPresetMode === 'fixed'
+    ? settingsDraft.value.fixedApiPresetName
+    : '';
+});
+
+function applyContinuationApiPreset(value: string): void {
+  if (!settingsDraft.value) return;
+  const trimmed = String(value || '').trim();
+  if (trimmed) {
+    settingsDraft.value.apiPresetMode = 'fixed';
+    settingsDraft.value.fixedApiPresetName = trimmed;
+  } else {
+    settingsDraft.value.apiPresetMode = 'current';
+    settingsDraft.value.fixedApiPresetName = '';
+  }
+}
 
 const continuationRoleOptions = [
   { value: 'system', label: 'SYSTEM' },

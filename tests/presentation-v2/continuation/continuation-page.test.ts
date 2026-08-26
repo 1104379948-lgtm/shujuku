@@ -4,6 +4,7 @@
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createPinia, setActivePinia } from 'pinia';
 import { createApp, nextTick, ref } from 'vue';
 
 const chatTick = ref(0);
@@ -65,7 +66,9 @@ async function mountPage() {
   const Page = (await import('../../../src/presentation-v2/pages/ContinuationPage.vue')).default;
   const el = document.createElement('div');
   document.body.appendChild(el);
+  const pinia = createPinia();
   const app = createApp(Page);
+  app.use(pinia);
   app.mount(el);
   await nextTick();
   return { app, el };
@@ -78,6 +81,7 @@ function buttonByText(el: Element, text: string): HTMLButtonElement | undefined 
 beforeEach(() => {
   document.body.innerHTML = '';
   task.value = null;
+  setActivePinia(createPinia());
   activeStage.value = null;
   activeRevision.value = null;
   activeNode.value = null;
@@ -99,7 +103,7 @@ function setSettings(): void {
     loopTags: '', loopDelaySeconds: 5, totalDurationMinutes: 0,
     retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3,
     contextTurnCount: 3, contextExtractRules: [], contextExcludeRules: [],
-    apiPresetMode: 'follow_plot', fixedApiPresetName: '',
+    apiPresetMode: 'current', fixedApiPresetName: '',
     outlinePrompt: [{ role: 'system', content: '规划', enabled: true, deletable: true }],
     turnInstructionPrompt: [{ role: 'user', content: '续写', enabled: true, deletable: true }],
   };
