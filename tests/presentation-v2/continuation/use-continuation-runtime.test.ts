@@ -115,6 +115,19 @@ describe('useContinuationRuntime', () => {
     expect(harness.continueTask).not.toHaveBeenCalled();
   });
 
+  it('手动停止的任务允许继续，其余停止原因不允许', async () => {
+    const stoppedTask = { taskId: 'task-1', status: 'paused', stopReason: 'manual', activeStageId: null, stages: [], pendingHostTurn: null };
+    harness.read.mockReturnValue({ schemaVersion: 1, settings: {}, activeTask: stoppedTask } as any);
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+    continuation.refresh();
+    expect(continuation.canContinue.value).toBe(true);
+
+    harness.read.mockReturnValue({ schemaVersion: 1, settings: {}, activeTask: { ...stoppedTask, stopReason: 'duration_reached' } } as any);
+    continuation.refresh();
+    expect(continuation.canContinue.value).toBe(false);
+  });
+
   it('将设置保存和预览确认经由编排器处理，不直接发送宿主消息', async () => {
     const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
     const continuation = useContinuationRuntime();

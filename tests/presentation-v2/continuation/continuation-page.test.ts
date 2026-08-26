@@ -168,20 +168,33 @@ describe('ContinuationPage', () => {
     app.unmount();
   });
 
-  it('渲染大纲、执行回执、设置与伪 Role 提示词，并仅通过 runtime 保存设置', async () => {
-    setSettings();
-    setTask();
-    const { app, el } = await mountPage();
+  it('渲染大纲、执行回执、设置与伪 Role 提示词，设置修改后自动经 runtime 保存', async () => {
+    vi.useFakeTimers();
+    try {
+      setSettings();
+      setTask();
+      const { app, el } = await mountPage();
 
-    expect(el.textContent).toContain('阶段大纲与执行回执');
-    expect(el.textContent).toContain('逃离计划');
-    expect(el.textContent).toContain('续写设置');
-    expect(el.textContent).toContain('伪 Role 提示词');
-    expect(el.textContent).toContain('总倒计时');
-    buttonByText(el, '保存续写设置')!.click();
-    await nextTick();
-    expect(saveSettings).toHaveBeenCalledOnce();
-    app.unmount();
+      expect(el.textContent).toContain('阶段大纲与执行回执');
+      expect(el.textContent).toContain('逃离计划');
+      expect(el.textContent).toContain('续写设置');
+      expect(el.textContent).toContain('伪 Role 提示词');
+      expect(el.textContent).toContain('总倒计时');
+      // 保存按钮已移除：修改任意设置项后由防抖自动保存。
+      expect(buttonByText(el, '保存续写设置')).toBeUndefined();
+
+      const stageSizeSelect = el.querySelector<HTMLSelectElement>('select')!;
+      stageSizeSelect.value = 'short';
+      stageSizeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      await nextTick();
+      expect(saveSettings).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(900);
+      expect(saveSettings).toHaveBeenCalledOnce();
+      expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short' });
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
 

@@ -292,6 +292,25 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(chat[0]._qrf_continuation.activeTask.status).toBe('paused');
   });
 
+  it('clears an unattributable awaiting host turn while deriving the reload pause', () => {
+    const persisted = buildRunningEnvelope_ACU();
+    persisted.activeTask!.pendingHostTurn = {
+      identity: { chatIdentity: 'chat-a', taskId: 'task-1', stageId: 'stage-1', revision: 1, nodeId: 'node-1', turnId: 'turn-1', attemptId: 'attempt-1' },
+      capture: { capturedAt: 1, capturedChatLength: 1, capturedAiFloorCount: 0, generationSeq: 3 },
+      retryCount: 0,
+      status: 'awaiting_generation',
+    } as any;
+    const chat: any[] = [{ _qrf_continuation: persisted }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+
+    const restored = new FirstFloorContinuationStore_ACU().read();
+
+    expect(restored!.activeTask!.status).toBe('paused');
+    expect(restored!.activeTask!.pendingHostTurn).toBeNull();
+    // 持久化快照本身不被读取路径改写。
+    expect(chat[0]._qrf_continuation.activeTask.pendingHostTurn.status).toBe('awaiting_generation');
+  });
+
   it('derives an interrupted drafting or planning task as a paused failed stage after reload', () => {
     const persisted = buildRunningEnvelope_ACU();
     persisted.activeTask!.status = 'drafting';

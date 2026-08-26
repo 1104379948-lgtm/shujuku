@@ -114,7 +114,7 @@
       </div>
     </AcuPanel>
 
-    <AcuPanel v-if="settingsDraft" title="续写设置" description="设置先在页面草稿中编辑；点击保存后才经首楼权威状态落盘。宿主生成进行中不能保存。">
+    <AcuPanel v-if="settingsDraft" title="续写设置" description="修改后自动保存并立即生效；宿主生成进行中暂不能保存，生成结束后再修改即可。">
       <div class="acu-v2-continuation-page__settings-grid">
         <AcuFormRow label="阶段规模">
           <select v-model="settingsDraft.stageSize">
@@ -176,7 +176,6 @@
       <AcuRulePairList v-model="settingsDraft.contextExtractRules" label="上下文提取规则" />
       <AcuRulePairList v-model="settingsDraft.contextExcludeRules" label="上下文排除规则" />
       <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
-      <div class="acu-v2-continuation-page__actions"><AcuButton variant="primary" :loading="runtime.busy.value" @click="saveSettings">保存续写设置</AcuButton></div>
     </AcuPanel>
 
     <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用段参与内部调用；占位符会按实际出现按需解析。">
@@ -231,7 +230,7 @@ import { useContinuationSession } from '../composables/useContinuationSession';
 
 const runtime = useContinuationRuntime();
 const session = useContinuationSession();
-const { followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
+const { apiStore, followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
 const settingsDraft = ref<ContinuationSettings_ACU | null>(null);
 const outlineDraft = ref('');
 const outlineDraftError = ref('');
@@ -404,19 +403,51 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
   if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.contextTurnCount < 0) {
     throw new Error('续写设置中的数值不能低于允许范围');
   }
-  if (normalized.apiPresetMode === 'fixed' && !normalized.fixedApiPresetName.trim()) throw new Error('固定 API 预设名称不能为空');
+  if (normalized.apiPresetMode === 'fixed') {
+    const presetName = normalized.fixedApiPresetName.trim();
+    if (!presetName) throw new Error('固定 API 预设名称不能为空');
+    if (!presetExists(presetName)) throw new Error(`API 预设 "${presetName}" 不存在，请重新选择`);
+  }
   for (const channel of agentChannelRoles) {
     const choice = normalized.agentApiPresets[channel.role];
-    if (choice.mode === 'fixed' && !choice.presetName.trim()) throw new Error(`${channel.label} 的固定渠道必须选择预设`);
+    if (choice.mode !== 'fixed') continue;
+    const presetName = choice.presetName.trim();
+    if (!presetName) throw new Error(`${channel.label} 的固定渠道必须选择预设`);
+    if (!presetExists(presetName)) throw new Error(`${channel.label} 渠道的 API 预设 "${presetName}" 不存在，请重新选择`);
   }
   return normalized;
 }
 
-async function saveSettings(): Promise<void> {
+/**
+ * 判断预设名是否存在于当前 API 预设列表中。
+ * 保存前校验存在性，把悬挂引用（预设已被删除）从运行中途的任务失败提前到保存时报错。
+ */
+function presetExists(presetName: string): boolean {
+  return apiStore.presets.some(preset => preset.name === presetName);
+}
+
+/** 记录最近一次从权威状态装载/保存成功的草稿快照，用于跳过无变化的自动保存并切断"保存→刷新→重建草稿"的循环。 */
+let lastPersistedSettingsJson = '';
+let settingsSaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** 设置修改后自动保存（防抖 800ms），与剧情推进/填表工作台的"改动即生效"一致。 */
+function scheduleSettingsSave(): void {
+  if (settingsSaveTimer !== undefined) clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = setTimeout(() => { void saveSettingsNow(); }, 800);
+}
+
+async function saveSettingsNow(): Promise<void> {
+  if (!settingsDraft.value) return;
+  if (JSON.stringify(settingsDraft.value) === lastPersistedSettingsJson) return;
+  if (runtime.busy.value) {
+    // 有续写操作正在执行时不抢租约，稍后重试本次保存。
+    scheduleSettingsSave();
+    return;
+  }
   try {
+    apiStore.refreshFromSettings();
     const candidate = normalizeSettingsDraft();
     if (await runtime.saveSettings(candidate)) {
-      settingsDraft.value = cloneSettings(candidate);
       settingsError.value = '';
     }
   } catch (error) {
@@ -461,15 +492,31 @@ function restorePrompt(kind: ContinuationPromptKind_ACU): void {
   settingsDraft.value = restoreContinuationPromptDefault_ACU(settingsDraft.value, kind);
 }
 
+/** 刷新页面依赖的全部数据源：API 预设列表必须在挂载与聊天切换时重新读取，否则预设下拉是空的。 */
+function refreshAll(): void {
+  apiStore.refreshFromSettings();
+  runtime.refresh();
+}
+
 onMounted(() => {
+  apiStore.refreshFromSettings();
   void runtime.initialize();
   countdownTimer = setInterval(() => { clock.value = Date.now(); }, 1_000);
 });
 onBeforeUnmount(() => {
   if (countdownTimer !== undefined) clearInterval(countdownTimer);
+  if (settingsSaveTimer !== undefined) clearTimeout(settingsSaveTimer);
 });
-watch(useChatChangedTick(), runtime.refresh);
-watch(runtime.settings, settings => { settingsDraft.value = settings ? cloneSettings(settings) : null; }, { immediate: true });
+watch(useChatChangedTick(), refreshAll);
+watch(runtime.settings, settings => {
+  settingsDraft.value = settings ? cloneSettings(settings) : null;
+  lastPersistedSettingsJson = settingsDraft.value ? JSON.stringify(settingsDraft.value) : '';
+}, { immediate: true });
+watch(settingsDraft, () => {
+  if (!settingsDraft.value) return;
+  if (JSON.stringify(settingsDraft.value) === lastPersistedSettingsJson) return;
+  scheduleSettingsSave();
+}, { deep: true });
 watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
 </script>
 

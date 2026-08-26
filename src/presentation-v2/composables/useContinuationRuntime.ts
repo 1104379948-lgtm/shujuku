@@ -81,9 +81,10 @@ export function useContinuationRuntime() {
   const activeNode = computed(() => activeRevision.value?.outline.nodes[activeStage.value?.activeNodeIndex ?? -1] ?? null);
   const activeTurn = computed(() => activeNode.value?.turns[activeStage.value?.activeTurnIndex ?? -1] ?? null);
   // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）也可继续：由主 Agent 派工大纲子代理处理。
+  // 手动停止的任务允许从当前进度恢复；其余停止原因（时长/阶段上限等）不可恢复。
   const canContinue = computed(() => !!task.value
     && task.value.status === 'paused'
-    && task.value.stopReason === null
+    && (task.value.stopReason === null || task.value.stopReason === 'manual')
     && (!activeStage.value || ['running', 'completed'].includes(activeStage.value.status)));
   const isAwaitingHostResult = computed(() => task.value?.status === 'running' && task.value.pendingHostTurn?.status === 'awaiting_generation');
   const statusText = computed(() => task.value

@@ -359,16 +359,20 @@ export   function mainInitialize_ACU() {
             try {
               const context = recordGenerationContext_ACU(type, params, dryRun);
               bindContinuationInternalAiGenerationStarted_ACU(context.seq);
-              // Only a bridge that synchronously initiated the host click may claim this sequence.
-              // All other lifecycle events remain unavailable to continuation.
-              getContinuationHostGenerationBridge_ACU()?.onGenerationStarted(context.seq);
+              // 宿主的 GENERATION_STARTED 通常在发送点击返回后的微任务里才送达，同步配对必然错过；
+              // 对非 quiet/非 dryRun/非自动触发的生成开放宽松认领（spv8.9.2 状态法），桥内部只在
+              // 存在未绑定序列号的等待轮时才会认领。
+              const allowLooseStart = !dryRun && !isQuietLikeGeneration_ACU(type, params) && !params?.automatic_trigger;
+              getContinuationHostGenerationBridge_ACU()?.onGenerationStarted(context.seq, allowLooseStart);
             } catch (e) {}
           });
         }
         if (SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED) {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, () => {
             try {
-              discardLatestGenerationContext_ACU();
+              const discarded = discardLatestGenerationContext_ACU();
+              // 被中止的生成不会再有 GENERATION_ENDED；通知桥把等待中的续写轮转为可重试，避免卡死。
+              void getContinuationHostGenerationBridge_ACU()?.onGenerationStopped(discarded?.seq);
             } catch (e) {}
           });
         }
@@ -382,10 +386,13 @@ export   function mainInitialize_ACU() {
                   return;
                 }
                 const continuationBridge = getContinuationHostGenerationBridge_ACU();
-                if (continuationBridge?.claimsGenerationEnded(generationContext?.seq)) {
+                // 宽松认领只对"会产生正文楼层"的生成开放：quiet/dryRun/自动触发生成不许认领，
+                // 否则会误杀等待中的续写轮。判定复用自动填表的生成门控。
+                const allowLooseContinuationClaim = shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext);
+                if (continuationBridge?.claimsGenerationEnded(generationContext?.seq, allowLooseContinuationClaim)) {
                   // The bridge owns this exact host generation and performs its own
                   // bounded materialization/identity checks before any cursor change.
-                  void continuationBridge.onGenerationEnded(message_id, generationContext?.seq);
+                  void continuationBridge.onGenerationEnded(message_id, generationContext?.seq, allowLooseContinuationClaim);
                   return;
                 }
                 // [触发修复] 原子捕获完整意图快照：事件参数只作为锚点，不承诺是 AI 数组下标。

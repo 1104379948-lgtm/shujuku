@@ -27,6 +27,8 @@ export interface ContinuationOrchestratorDependencies_ACU {
   allocateId: (prefix: string) => string;
   readChronicleSnapshot: () => Promise<ContinuationChronicleSnapshot_ACU>;
   createOutlineResolvers: (context: ContinuationPlanningContext_ACU) => Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
+  /** 桥内存中是否持有该聊天的活认领。缺省视为无认领（测试注入场景）。 */
+  hasLiveHostClaim?: (chatIdentity: string) => boolean;
 }
 
 type Lease_ACU = { id: string; epoch: number };
@@ -238,14 +240,18 @@ export class ContinuationOrchestrator_ACU {
       await this.dependencies.store.updatePersistedAtomically(current => {
         const envelope = this.requireEnvelope_ACU(current);
         const task = this.requireTask_ACU(envelope);
-        if (task.pendingHostTurn?.status === 'awaiting_generation') {
+        // 等待宿主结果时只有"桥内存里仍有本次生成的活认领"才是真在飞；
+        // 重载或事件丢失后的滞留等待轮无法再被归属，丢弃后从当前进度重新继续。
+        const staleAwaitingTurn = task.pendingHostTurn?.status === 'awaiting_generation';
+        if (staleAwaitingTurn && this.dependencies.hasLiveHostClaim?.(chatIdentity)) {
           fail_ACU('CONTINUATION_OPERATION_BUSY', '当前轮次正在等待宿主生成结果');
         }
         if (task.pendingHostTurn?.status === 'exhausted') fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前轮次正文重试已耗尽');
         if (task.status === 'awaiting_outline_review' || task.status === 'stopping_after_inflight' || task.status === 'abandoned' || task.status === 'completed' || task.status === 'failed') {
           fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前任务不可继续');
         }
-        if (task.stopReason !== null) {
+        // 手动停止允许从当前进度恢复；其余停止原因（时长/阶段上限、重试耗尽等）仍不可继续。
+        if (task.stopReason !== null && task.stopReason !== 'manual') {
           fail_ACU('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可继续');
         }
         // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）都可以进循环，由主 Agent 派工大纲子代理处理。
@@ -259,7 +265,7 @@ export class ContinuationOrchestrator_ACU {
           return started;
         }
         const deadlineAt = task.deadlineAt ?? (envelope.settings.totalDurationMinutes > 0 ? now + envelope.settings.totalDurationMinutes * 60_000 : null);
-        started = { ...envelope, activeTask: { ...task, status: 'running', runStartedAt: task.runStartedAt ?? now, deadlineAt, stopReason: null, lastError: null, updatedAt: now } };
+        started = { ...envelope, activeTask: { ...task, status: 'running', runStartedAt: task.runStartedAt ?? now, deadlineAt, stopReason: null, lastError: null, updatedAt: now, ...(staleAwaitingTurn ? { pendingHostTurn: null } : {}) } };
         return started;
       }, { chatIdentity });
       const task = started!.activeTask!;
@@ -391,6 +397,34 @@ export class ContinuationOrchestrator_ACU {
           return result;
         }
         result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, lastError: error, pendingHostTurn: { ...pending, retryCount: pending.retryCount + 1, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, { stageId: input.identity.stageId, revision: input.identity.revision, nodeId: input.identity.nodeId, turnId: input.identity.turnId, attemptId: input.identity.attemptId, messageIndex: input.messageIndex, errorCode: error.code })] } };
+        return result;
+      }, { chatIdentity });
+      return taskResult_ACU(result!);
+    });
+  }
+
+  /**
+   * 宿主生成被用户中止（GENERATION_STOPPED）：等待轮转 retry_ready 并暂停任务。
+   * 不消耗重试次数（中止是用户行为，不是模型产出不合格），不设 stopReason，
+   * 用户可以直接重试当前轮次或继续任务。
+   */
+  async failHostTurnForStoppedGeneration(identity: TurnAttemptIdentity_ACU): Promise<ContinuationOrchestratorResult_ACU> {
+    const chatIdentity = this.requireChatIdentity_ACU();
+    if (identity.chatIdentity !== chatIdentity) {
+      throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '生成中止事件所属聊天已变化', false));
+    }
+    return this.withLease_ACU(async () => {
+      let result: ContinuationEnvelope_ACU | null = null;
+      await this.dependencies.store.updatePersistedAtomically(current => {
+        const envelope = this.requireEnvelope_ACU(current);
+        const task = this.requireTask_ACU(envelope);
+        const pending = task.pendingHostTurn;
+        if (task.status !== 'running' || !pending || pending.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, identity)) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '生成中止事件已不属于当前轮次', false));
+        }
+        const now = this.dependencies.now();
+        const error = createContinuationError_ACU('CONTINUATION_TASK_STATE_INVALID', 'generation_evaluate', '宿主生成被中止，可重试当前轮次', true);
+        result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, lastError: error, pendingHostTurn: { ...pending, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, { stageId: identity.stageId, revision: identity.revision, nodeId: identity.nodeId, turnId: identity.turnId, attemptId: identity.attemptId, errorCode: error.code })] } };
         return result;
       }, { chatIdentity });
       return taskResult_ACU(result!);
@@ -719,7 +753,9 @@ export class ContinuationOrchestrator_ACU {
 
   private stopEnvelope_ACU(envelope: ContinuationEnvelope_ACU, reason: 'manual' | 'duration_reached' | 'stage_limit_reached', now: number): ContinuationEnvelope_ACU {
     const task = this.requireTask_ACU(envelope);
-    return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: reason, timeline: [...task.timeline, this.timeline_ACU('stopped', now)] } };
+    // 停止即放弃对等待中宿主生成的归属；清掉等待轮，之后继续/恢复不会被它卡死。
+    const pendingHostTurn = task.pendingHostTurn?.status === 'awaiting_generation' ? null : task.pendingHostTurn;
+    return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: reason, ...(pendingHostTurn !== task.pendingHostTurn ? { pendingHostTurn } : {}), timeline: [...task.timeline, this.timeline_ACU('stopped', now)] } };
   }
 
   private async pauseHostTurn_ACU(identity: TurnAttemptIdentity_ACU, code: 'CONTINUATION_HOST_INPUT_UNAVAILABLE' | 'CONTINUATION_TASK_STATE_INVALID', message: string, stopReason: 'host_input_unavailable' | 'state_invalid'): Promise<ContinuationOrchestratorResult_ACU> {

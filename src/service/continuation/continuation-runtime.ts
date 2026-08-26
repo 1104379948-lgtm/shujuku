@@ -143,6 +143,8 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
   const worldbook = new ContinuationWorldbookContext_ACU();
   const planner = new ContinuationOutlinePlanner_ACU();
   const agentPlanner = new ContinuationAgentTurnPlanner_ACU();
+  // 桥在 orchestrator 之后创建，orchestrator 依赖用闭包延迟取活认领状态。
+  let bridgeRef: ContinuationHostGenerationBridge_ACU | null = null;
   const executionEngine = new StageExecutionEngine_ACU({
     readEnvelope: () => store.readPersisted(),
     getChatIdentity: getChatIdentity_ACU,
@@ -162,14 +164,25 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
       const revision = stage?.revisions.find(item => item.revision === stage.activeRevision) ?? null;
       return buildResolvers_ACU(context.task, stage, revision, worldbook);
     },
+    hasLiveHostClaim: chatIdentity => bridgeRef?.hasLiveClaim(chatIdentity) ?? false,
   });
   const bridge = createSillyTavernContinuationHostBridge_ACU(orchestrator);
+  bridgeRef = bridge;
   const unregister = registerContinuationHostGenerationBridge_ACU(bridge);
   return {
     orchestrator,
     bridge,
     initialize: () => migrateLegacySettings_ACU(store),
-    read: () => store.read(),
+    read: () => {
+      // 桥内存里有本次生成的活认领时保留 running 视图：UI 显示"等待宿主正文"并隐藏继续按钮。
+      // 无认领（重载/事件丢失）时走重载派生，任务回到可继续的暂停态。
+      const persisted = store.readPersisted();
+      const task = persisted?.activeTask;
+      if (persisted && task?.status === 'running' && task.pendingHostTurn?.status === 'awaiting_generation' && bridge.hasLiveClaim(getChatIdentity_ACU())) {
+        return persisted;
+      }
+      return store.read();
+    },
     dispose: () => {
       unregister();
       if (runtime_ACU?.orchestrator === orchestrator) runtime_ACU = null;

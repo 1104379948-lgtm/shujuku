@@ -12,7 +12,7 @@ const outline = { schemaVersion: 1 as const, title: '阶段', goal: '目标', to
  * 执行引擎桩：模拟主 Agent 的大纲行为——没有可执行大纲（无阶段或阶段已完成）时
  * 先通过注入的回调派工大纲子代理，review/stopped 时按真实循环的行为抛错中止。
  */
-function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<typeof vi.fn> } = {}) {
+function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<typeof vi.fn>; hasLiveHostClaim?: () => boolean } = {}) {
   const planner = options.planner ?? vi.fn().mockResolvedValue({ outline, attempts: 1, requiresReview: !!options.preview, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
   let sequence = 0;
   const store = new FirstFloorContinuationStore_ACU();
@@ -37,6 +37,7 @@ function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<t
     getChatIdentity: () => 'chat-a', now: () => 1_000, allocateId: prefix => `${prefix}-${++sequence}`,
     readChronicleSnapshot: vi.fn().mockResolvedValue({ count: 3, range: { first: 'AM1', last: 'AM3' } }),
     createOutlineResolvers: () => ({}),
+    ...(options.hasLiveHostClaim ? { hasLiveHostClaim: options.hasLiveHostClaim } : {}),
   });
   return { orchestrator, planner, store, executionEngine };
 }
@@ -326,6 +327,92 @@ describe('ContinuationOrchestrator_ACU', () => {
       { op: 'set_turn_goal', turnId: 'turn-1', goal: '篡改已完成轮次' },
     ], 'running'), 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED');
     expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(1);
+  });
+
+  it('stays busy while the bridge holds a live claim for the awaiting host turn', async () => {
+    const { orchestrator, store } = createOrchestrator({ hasLiveHostClaim: () => true });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-live' };
+    await recordPendingHostTurn(orchestrator, identity);
+
+    await expectCode(() => orchestrator.continueTask(), 'CONTINUATION_OPERATION_BUSY');
+    expect(store.readPersisted()!.activeTask!.pendingHostTurn).toMatchObject({ status: 'awaiting_generation' });
+  });
+
+  it('recovers a stale awaiting host turn without a live claim and continues from current progress', async () => {
+    const { orchestrator, store, executionEngine } = createOrchestrator({ hasLiveHostClaim: () => false });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-stale' };
+    await recordPendingHostTurn(orchestrator, identity);
+
+    // 重载/事件丢失后的滞留等待轮：桥没有活认领，继续应当丢弃它并重新规划当前轮。
+    await orchestrator.continueTask();
+    const recovered = store.readPersisted()!.activeTask!;
+    expect(recovered.pendingHostTurn).toBeNull();
+    expect(recovered.status).toBe('running');
+    expect(executionEngine.prepareCurrentTurnInstruction).toHaveBeenCalledTimes(2);
+  });
+
+  it('resumes a manually stopped task from current progress and clears its awaiting turn on stop', async () => {
+    const { orchestrator, store, executionEngine } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-stop' };
+    await recordPendingHostTurn(orchestrator, identity);
+
+    await orchestrator.stopTask();
+    const stopped = store.readPersisted()!.activeTask!;
+    expect(stopped).toMatchObject({ status: 'paused', stopReason: 'manual' });
+    expect(stopped.pendingHostTurn).toBeNull();
+
+    await orchestrator.continueTask();
+    const resumed = store.readPersisted()!.activeTask!;
+    expect(resumed.stopReason).toBeNull();
+    expect(resumed.status).toBe('running');
+    expect(executionEngine.prepareCurrentTurnInstruction).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps non-manual stop reasons non-resumable', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    const persisted = store.readPersisted()!;
+    persisted.settings = { ...persisted.settings, maxAutomaticStages: 1 };
+    await store.replaceAtomically(persisted, { chatIdentity: 'chat-a' });
+    await orchestrator.continueTask();
+    await confirmTurns(orchestrator, store, 6);
+    expect(store.readPersisted()!.activeTask!.stopReason).toBe('stage_limit_reached');
+
+    await expectCode(() => orchestrator.continueTask(), 'CONTINUATION_TASK_STATE_INVALID');
+  });
+
+  it('converts a stopped host generation into a retryable turn without consuming the retry budget', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-stopped' };
+    await recordPendingHostTurn(orchestrator, identity);
+
+    await orchestrator.failHostTurnForStoppedGeneration(identity);
+    expect(store.readPersisted()!.activeTask).toMatchObject({
+      status: 'paused',
+      stopReason: null,
+      pendingHostTurn: { status: 'retry_ready', retryCount: 0 },
+      lastError: { code: 'CONTINUATION_TASK_STATE_INVALID', retryable: true },
+    });
   });
 
   it('requires explicit confirmation before abandoning the current task', async () => {

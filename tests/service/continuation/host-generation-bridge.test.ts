@@ -24,6 +24,7 @@ function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; o
     rejectHostTurnForMissingTags: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
     pauseForHostInputFailure: vi.fn(async () => { pending = { ...pending, status: 'exhausted' }; }),
     pauseForHostResultFailure: vi.fn(async () => { pending = { ...pending, status: 'exhausted' }; }),
+    failHostTurnForStoppedGeneration: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
   };
   const hostInput = { send: vi.fn(() => options.send ?? true), removeLastMessage: vi.fn(async () => { chat = chat.slice(0, -1); return true; }) };
   const wait = vi.fn(async () => options.onWait?.());
@@ -170,6 +171,61 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity);
     expect(h.continueTask).not.toHaveBeenCalled();
     expect(h.hostInput.send).toHaveBeenCalledOnce();
+  });
+
+  it('claims and confirms the ended generation in loose mode when no synchronous start pairing exists', async () => {
+    const h = createHarness();
+    // 宿主 GENERATION_STARTED 在发送返回后的微任务里才送达：不模拟同步配对。
+    await expect(h.bridge.send(prepared)).resolves.toBe(true);
+    expect(h.bridge.hasLiveClaim('chat-a')).toBe(false);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
+
+    expect(h.bridge.claimsGenerationEnded(7, false)).toBe(false);
+    expect(h.bridge.claimsGenerationEnded(7, true)).toBe(true);
+    await h.bridge.onGenerationEnded(9, 7, true);
+
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity);
+    expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
+  });
+
+  it('binds a loosely claimed generation start so the strict ended path matches later', async () => {
+    const h = createHarness();
+    await h.bridge.send(prepared);
+
+    expect(h.bridge.onGenerationStarted(7, true)).toBe(true);
+    expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(identity, 7);
+    expect(h.bridge.hasLiveClaim('chat-a')).toBe(true);
+    expect(h.bridge.claimsGenerationEnded(7)).toBe(true);
+  });
+
+  it('rejects a loose claim whose sequence conflicts with the bound generation', async () => {
+    const h = createHarness();
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+
+    expect(h.bridge.claimsGenerationEnded(8, true)).toBe(false);
+    await h.bridge.onGenerationEnded(9, 8, true);
+    expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+  });
+
+  it('converts an awaiting turn to retry-ready when its host generation is stopped', async () => {
+    const h = createHarness();
+    await h.bridge.send(prepared);
+
+    await h.bridge.onGenerationStopped(undefined);
+
+    expect(h.runtime.failHostTurnForStoppedGeneration).toHaveBeenCalledWith(identity);
+    expect(h.runtime.readPendingHostTurn()!.pending.status).toBe('retry_ready');
+  });
+
+  it('ignores a stopped generation whose sequence belongs to another generation', async () => {
+    const h = createHarness();
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+
+    await h.bridge.onGenerationStopped(8);
+
+    expect(h.runtime.failHostTurnForStoppedGeneration).not.toHaveBeenCalled();
   });
 
   it('swallows an auto-continue failure without overwriting the recorded task state', async () => {

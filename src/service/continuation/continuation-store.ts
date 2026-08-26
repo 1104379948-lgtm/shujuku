@@ -416,7 +416,10 @@ export function derivePausedContinuationEnvelopeAfterReload_ACU(envelope: Contin
   const lastError = interruptedPlanning
     ? createContinuationError_ACU('CONTINUATION_TASK_STATE_INVALID', 'load', '重载中断了阶段规划；请手动重新规划剩余阶段', false)
     : task.lastError;
-  return { ...validated, activeTask: { ...task, status: 'paused', updatedAt: Date.now(), stages, lastError } };
+  // 重载后桥的内存认领已丢失，等待中的宿主生成永远无法再被归属；
+  // 清掉等待轮，让任务回到可以直接点继续的暂停态。
+  const pendingHostTurn = task.pendingHostTurn?.status === 'awaiting_generation' ? null : task.pendingHostTurn;
+  return { ...validated, activeTask: { ...task, status: 'paused', updatedAt: Date.now(), stages, lastError, ...(pendingHostTurn !== task.pendingHostTurn ? { pendingHostTurn } : {}) } };
 }
 
 function readLegacyNonNegativeInteger_ACU(value: unknown, fallback: number): number {
