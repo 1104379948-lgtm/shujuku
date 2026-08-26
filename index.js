@@ -103056,13 +103056,13 @@ $CONTENT
     const DEFAULT_OUTLINE_PROMPT_ACU = [
         {
             role: 'system',
-            content: '你是专业的小说阶段规划助手。负责根据故事背景与历史进展，为下一阶段生成结构化剧情大纲。\n必须输出一个严格的 JSON 对象，包含 schemaVersion(1)、title、goal、totalTurns、nodes；nodes 中每个节点包含 id、title、goal、suggestedTurns、turns；turns 中包含 id、goal。\n节点建议轮数总和与逐轮目标数量必须等于 totalTurns。\n绝对禁止输出 Markdown 围栏(如 ```json)、代码块、前言后语或解释性文本。',
+            content: '你是专业的小说阶段规划助手。负责根据故事背景与历史进展，为下一阶段规划剧情大纲。\n输出格式：把大纲内容写入下列标签，标签外可以自由书写你的思路与分析，系统只读取标签内的内容。\n<stage_title>阶段标题</stage_title>\n<stage_goal>阶段整体目标</stage_goal>\n<node>\n<node_title>节点标题</node_title>\n<node_goal>节点目标</node_goal>\n<turn>本轮剧情目标（每轮一个 turn 标签，内容为该轮要发生的具体剧情）</turn>\n</node>\n节点数量不限，每个 <node> 内至少一个 <turn>；全部 <turn> 的总数就是本阶段的轮数，必须落在给定的阶段轮数范围内。\n不要输出 JSON，不要输出 id、编号或轮数统计字段——结构编号全部由系统自动生成。',
             enabled: true,
             deletable: true,
         },
         {
             role: 'assistant',
-            content: '收到。我作为小说阶段规划助手，将严格遵循 JSON Schema 结构，仅输出纯合法的 JSON 文本，绝不包含任何多余的包裹标签、Markdown 围栏或说明文字。',
+            content: '收到。我作为小说阶段规划助手，会把阶段标题、阶段目标、各节点与逐轮剧情目标分别写入 <stage_title>、<stage_goal>、<node>、<node_title>、<node_goal>、<turn> 标签中；标签外只写思路分析，不输出 JSON、id 或任何编号统计字段，并保证全部 <turn> 总数落在给定的轮数范围内。',
             enabled: true,
             deletable: true,
         },
@@ -103074,27 +103074,23 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的 goal 时，我会：\n1. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n2. 落实“行动、阻碍、悬念”三要素，确保冲突递进而非平庸重复；\n3. 设计明显的情绪曲线（压抑后必有释放），并维护清晰的信息差动态变化；\n4. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n5. 确保节点内容丰满，每一轮次的目标都具体到“发生了什么危机、做出了什么选择、揭示了什么信息”及“下一阶段悬念”，足以支撑详细正文。\n我会将这些原则映射到 JSON 结构中。',
+            content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n2. 落实“行动、阻碍、悬念”三要素，确保冲突递进而非平庸重复；\n3. 设计明显的情绪曲线（压抑后必有释放），并维护清晰的信息差动态变化；\n4. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n5. 确保节点内容丰满，每一轮次的目标都具体到“发生了什么危机、做出了什么选择、揭示了什么信息”及“下一阶段悬念”，足以支撑详细正文。\n我会将这些原则落实到各个标签的内容中。',
             enabled: true,
             deletable: true,
         },
         {
             role: 'user',
-            content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n已完成且不可改写的当前阶段部分：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n允许重新分配的剩余轮数：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n上一阶段纪要：\n$LAST_STAGE_CHRONICLES\n\n更早阶段概要：\n$EARLIER_STAGE_SUMMARIES\n\n最近剧情：\n$RECENT_STORY\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲。',
+            content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n上一阶段纪要：\n$LAST_STAGE_CHRONICLES\n\n更早阶段概要：\n$EARLIER_STAGE_SUMMARIES\n\n最近剧情：\n$RECENT_STORY\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。',
             enabled: true,
             deletable: true,
         },
-        {
-            role: 'assistant',
-            content: '{\n  "schemaVersion": 1,',
-            enabled: true,
-            deletable: true,
-        }
     ];
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv1.0-continuation-prompt-pseudo-role-v2';
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V7_ACU = 'spv1.5-continuation-prompt-pseudo-role-v7';
     /** Agent 续写链路上线版本。旧版本一律强制刷新为 Agent 提示词组。 */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V8_ACU = 'spv1.6-continuation-agent-prompt-v8';
+    /** 大纲标签化版本：大纲提示词改为标签口径并移除 JSON 预填充。旧版本一律强制刷新。 */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU = 'spv1.7-continuation-outline-tags-v9';
     function clonePromptSegments_ACU(segments) {
         return segments.map(segment => ({ ...segment }));
     }
@@ -103122,7 +103118,7 @@ $CONTENT
             fixedApiPresetName: '',
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V8_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -103480,10 +103476,10 @@ $CONTENT
         let outlinePrompt = raw.outlinePrompt;
         let agentPrompts = raw.agentPrompts;
         let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V8_ACU) {
+        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V8_ACU;
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -103878,6 +103874,111 @@ $CONTENT
         return { presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
     }
 
+    /**
+     * service/continuation/outline-tags.ts — 大纲标签协议
+     *
+     * 模型不再输出严格 JSON：阶段/节点/轮次内容用标签包裹，标签外的散文、思路、
+     * Markdown 围栏一律忽略。id、suggestedTurns、totalTurns、schemaVersion 等
+     * 结构字段全部由运行时生成推导，模型只负责创作内容。
+     *
+     * 标签契约（与 defaults.ts 的默认大纲提示词一一对应）：
+     * <stage_title>…</stage_title> <stage_goal>…</stage_goal>
+     * <node><node_title>…</node_title><node_goal>…</node_goal><turn>…</turn>…</node>
+     */
+    function failParse_ACU(message) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_OUTLINE_JSON_INVALID', 'outline_parse', message, true));
+    }
+    function readTag_ACU(text, tag) {
+        const match = text.match(new RegExp(`<${tag}\\s*>([\\s\\S]*?)</${tag}\\s*>`, 'i'));
+        return match ? match[1].trim() : '';
+    }
+    function readTagList_ACU(text, tag) {
+        const pattern = new RegExp(`<${tag}\\s*>([\\s\\S]*?)</${tag}\\s*>`, 'gi');
+        const values = [];
+        for (const match of text.matchAll(pattern)) {
+            const value = match[1].trim();
+            if (value)
+                values.push(value);
+        }
+        return values;
+    }
+    /**
+     * 从模型返回原文中宽容提取大纲标签结构。标签外内容（思路、围栏、JSON）全部忽略。
+     * @param raw 模型返回的原始文本
+     * @returns 阶段标题/目标与节点列表（节点含标题/目标与逐轮目标文本）
+     */
+    function parseOutlineTags_ACU(raw) {
+        const text = typeof raw === 'string' ? raw : '';
+        if (!text.trim())
+            failParse_ACU('大纲返回为空');
+        const nodeBlocks = readTagList_ACU(text, 'node');
+        if (!nodeBlocks.length) {
+            failParse_ACU(`返回内容不包含任何 <node> 标签。模型返回片段：${text.trim().slice(0, 300)}`);
+        }
+        const nodes = nodeBlocks.map((block, index) => {
+            const turns = readTagList_ACU(block, 'turn');
+            if (!turns.length)
+                failParse_ACU(`第 ${index + 1} 个 <node> 中没有任何非空 <turn> 标签`);
+            return { title: readTag_ACU(block, 'node_title'), goal: readTag_ACU(block, 'node_goal'), turns };
+        });
+        return { title: readTag_ACU(text, 'stage_title'), goal: readTag_ACU(text, 'stage_goal'), nodes };
+    }
+    /**
+     * 把标签解析结果构建为标准阶段大纲。全部结构字段在这里生成推导：
+     * node/turn id 由 allocateId 分配，suggestedTurns=节点轮数，totalTurns=轮数总和。
+     * @param parsed 标签解析结果
+     * @param allocateId ID 分配器（与 edit_outline 插入轮次共用同一惯例）
+     * @param fallback 重规划时沿用旧大纲的阶段标题/目标（模型可不重述）
+     * @returns 结构完整的 StageOutline，内容性缺失（空 goal）留给 schema 校验反馈
+     */
+    function buildStageOutlineFromTags_ACU(parsed, allocateId, fallback) {
+        const nodes = parsed.nodes.map((node, index) => ({
+            id: allocateId('node'),
+            title: node.title || `节点${index + 1}`,
+            goal: node.goal,
+            suggestedTurns: node.turns.length,
+            turns: node.turns.map(goal => ({ id: allocateId('turn'), goal })),
+        }));
+        return {
+            schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
+            title: parsed.title || fallback?.title || '',
+            goal: parsed.goal || fallback?.goal || '',
+            totalTurns: nodes.reduce((sum, node) => sum + node.suggestedTurns, 0),
+            nodes,
+        };
+    }
+    /**
+     * 重规划拼接：截取旧大纲的已完成前缀（保留原 node/turn id 与节点归属，
+     * 截断处节点重算 suggestedTurns），其后拼接模型规划的剩余节点。
+     * @param previous 旧 revision 的完整大纲
+     * @param completedTurns 已完成轮数
+     * @param planned 模型只含剩余轮次的新大纲（已由 buildStageOutlineFromTags_ACU 构建）
+     * @returns 前缀逐字保留、剩余部分替换后的完整大纲
+     */
+    function spliceOutlineWithCompletedPrefix_ACU(previous, completedTurns, planned) {
+        if (completedTurns <= 0)
+            return planned;
+        let remaining = completedTurns;
+        const prefixNodes = [];
+        for (const node of previous.nodes) {
+            if (remaining <= 0)
+                break;
+            const take = Math.min(remaining, node.turns.length);
+            remaining -= take;
+            if (take > 0) {
+                prefixNodes.push({ ...node, suggestedTurns: take, turns: node.turns.slice(0, take).map(turn => ({ ...turn })) });
+            }
+        }
+        const nodes = [...prefixNodes, ...planned.nodes];
+        return {
+            schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
+            title: planned.title || previous.title,
+            goal: planned.goal || previous.goal,
+            totalTurns: nodes.reduce((sum, node) => sum + node.suggestedTurns, 0),
+            nodes,
+        };
+    }
+
     const defaultDependencies_ACU$3 = {
         resolveApiPreset: resolveContinuationApiPreset_ACU,
         callInternalAi: callContinuationInternalAi_ACU,
@@ -103888,7 +103989,8 @@ $CONTENT
         return createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'outline_call', '阶段大纲内部 AI 调用失败', true);
     }
     function compactValidationError_ACU(error) {
-        return `${error.code}@${error.phase}`;
+        // 附上 message：标签口径下剩余的校验错误（轮数超范围、goal 为空）只有带原因模型才能自愈。
+        return `${error.code}@${error.phase}: ${error.message}`;
     }
     function isRetryableOutlineError_ACU(error) {
         if (error.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' || error.code === 'CONTINUATION_OUTLINE_JSON_INVALID')
@@ -103897,17 +103999,6 @@ $CONTENT
             return true;
         return error.code === 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED'
             || error.code === 'CONTINUATION_REPLAN_REMAINING_TURNS_MISMATCH';
-    }
-    function parseOutlinePayload_ACU(raw) {
-        if (typeof raw !== 'string' || !raw.trim()) {
-            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_OUTLINE_JSON_INVALID', 'outline_parse', '阶段大纲返回为空或不是 JSON 对象', true));
-        }
-        try {
-            return JSON.parse(raw);
-        }
-        catch {
-            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_OUTLINE_JSON_INVALID', 'outline_parse', '阶段大纲必须是单一严格 JSON 对象', true));
-        }
     }
     class ContinuationOutlinePlanner_ACU {
         constructor(dependencies = defaultDependencies_ACU$3) {
@@ -103933,10 +104024,15 @@ $CONTENT
                     if (!isCurrent(identity)) {
                         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
                     }
-                    const payload = parseOutlinePayload_ACU(raw);
-                    const outline = request.replanConstraints
-                        ? validateReplannedStageOutline_ACU(payload, range, request.replanConstraints)
-                        : validateStageOutline_ACU(payload, range);
+                    const constraints = request.replanConstraints;
+                    const parsed = parseOutlineTags_ACU(raw);
+                    const built = buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? { title: constraints.previousOutline.title, goal: constraints.previousOutline.goal } : undefined);
+                    // 重规划：模型只规划剩余轮次，已完成前缀由运行时拼回；剩余轮数额度放宽，
+                    // 只要求拼接后 totalTurns 落在阶段规模范围内（校验按实际拼接结果传额度）。
+                    const candidate = constraints ? spliceOutlineWithCompletedPrefix_ACU(constraints.previousOutline, constraints.completedTurns, built) : built;
+                    const outline = constraints
+                        ? validateReplannedStageOutline_ACU(candidate, range, { ...constraints, expectedRemainingTurns: candidate.totalTurns - constraints.completedTurns })
+                        : validateStageOutline_ACU(candidate, range);
                     return { outline, attempts: attempt + 1, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason }, requiresReview: request.settings.outlinePreview };
                 }
                 catch (error) {
@@ -104136,10 +104232,12 @@ $CONTENT
                     const previous = revision.reason === 'manual_replan'
                         ? stage.revisions.find(item => item.revision === revision.revision - 1)
                         : null;
+                    const candidateOutline = cloneOutline_ACU(input.outline ?? revision.outline);
+                    // 剩余轮数额度已放宽：按候选大纲的实际轮数复核，前缀保护仍以上一 revision 为基准。
                     const constraints = previous
-                        ? { previousOutline: previous.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: previous.outline.totalTurns - stage.completedTurns }
+                        ? { previousOutline: previous.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: candidateOutline.nodes.reduce((sum, node) => sum + node.turns.length, 0) - stage.completedTurns }
                         : undefined;
-                    const accepted = acceptPlannedStageRevision_ACU({ ...revision, outline: cloneOutline_ACU(input.outline ?? revision.outline) }, envelope.settings, constraints);
+                    const accepted = acceptPlannedStageRevision_ACU({ ...revision, outline: candidateOutline }, envelope.settings, constraints);
                     const now = this.dependencies.now();
                     const nextStage = { ...stage, status: 'running', revisions: stage.revisions.map(item => item.revision === accepted.revision ? accepted : item) };
                     result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item) } };
@@ -104540,7 +104638,9 @@ $CONTENT
                 }
                 const at = this.dependencies.now();
                 const pending = createPlannedStageRevision_ACU(cloneOutline_ACU(planned.outline), nextRevisionNumber, 'manual_replan', instruction, at);
-                const accepted = planned.requiresReview ? pending : acceptPlannedStageRevision_ACU(pending, env.settings, constraints);
+                // 剩余轮数额度已放宽：复核约束按规划结果的实际轮数重建，前缀保护仍以旧大纲为基准。
+                const acceptConstraints = { previousOutline: current.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: planned.outline.totalTurns - stage.completedTurns };
+                const accepted = planned.requiresReview ? pending : acceptPlannedStageRevision_ACU(pending, env.settings, acceptConstraints);
                 const nextStage = { ...activeStage, status: (planned.requiresReview ? 'awaiting_review' : 'running'), activeRevision: nextRevisionNumber, revisions: [...activeStage.revisions, accepted] };
                 result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: at, lastError: null, stages: t.stages.map(item => item.stageId === nextStage.stageId ? nextStage : item), timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStage.stageId, revision: nextRevisionNumber })] } };
                 return result;
@@ -104574,6 +104674,7 @@ $CONTENT
                 reason: context.reason,
                 replanInstruction: context.replanInstruction,
                 replanConstraints,
+                allocateId: this.dependencies.allocateId,
                 resolvers: this.dependencies.createOutlineResolvers(context),
                 createInternalRequestIdentity: attempt => ({ source: 'outline', requestId: this.dependencies.allocateId('outline-request'), chatIdentity, taskId: context.task.taskId, stageId, revision, attemptId: `outline-${attempt}` }),
                 isInternalRequestCurrent: identity => this.isLeaseCurrent_ACU(chatIdentity, lease) && identity.chatIdentity === chatIdentity && identity.taskId === context.task.taskId && identity.stageId === stageId && identity.revision === revision,
@@ -107183,15 +107284,28 @@ $CONTENT
             return [];
         return task.stages.filter(stage => stage.stageNumber < activeStage.stageNumber && stage.status === 'completed');
     }
+    /** 已完成前缀渲染为可读文本（不用 JSON，避免诱导模型输出 JSON 而非大纲标签）。 */
     function completedPrefix_ACU(stage, revision) {
         if (!stage || !revision || stage.completedTurns <= 0)
             return '';
         let remaining = stage.completedTurns;
-        return JSON.stringify(revision.outline.nodes.flatMap(node => {
-            const turns = node.turns.slice(0, Math.max(0, Math.min(remaining, node.turns.length)));
+        let turnNumber = 0;
+        const parts = [];
+        for (const node of revision.outline.nodes) {
+            if (remaining <= 0)
+                break;
+            const turns = node.turns.slice(0, Math.min(remaining, node.turns.length));
             remaining -= turns.length;
-            return turns.length ? [{ id: node.id, title: node.title, goal: node.goal, turns }] : [];
-        }));
+            if (!turns.length)
+                continue;
+            const lines = [`节点「${node.title}」：${node.goal}`];
+            for (const turn of turns) {
+                turnNumber += 1;
+                lines.push(`已完成第 ${turnNumber} 轮：${turn.goal}`);
+            }
+            parts.push(lines.join('\n'));
+        }
+        return parts.join('\n\n');
     }
     function buildResolvers_ACU(task, stage, revision, worldbook, current) {
         const previous = previousStages_ACU(task, stage);
