@@ -108,6 +108,19 @@ export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'maintainer', 'mainli
 
 export type ContinuationAgentPromptKey_ACU = typeof CONTINUATION_AGENT_PROMPT_KEYS_ACU[number];
 
+/** 可独立配置 AI 渠道的六个角色：主 Agent、大纲子代理与四个派工子代理。 */
+export const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'] as const;
+
+export type ContinuationAgentApiPresetRole_ACU = typeof CONTINUATION_AGENT_API_PRESET_ROLES_ACU[number];
+
+/** 单个角色的渠道选择。inherit 表示沿用全局 apiPresetMode/fixedApiPresetName。 */
+export interface ContinuationAgentApiPresetChoice_ACU {
+  mode: 'inherit' | 'current' | 'fixed';
+  presetName: string;
+}
+
+export type ContinuationAgentApiPresets_ACU = Record<ContinuationAgentApiPresetRole_ACU, ContinuationAgentApiPresetChoice_ACU>;
+
 export interface ContinuationTurnRange_ACU {
   min: number;
   max: number;
@@ -152,6 +165,7 @@ export interface ContinuationSettings_ACU {
   contextExcludeRules: ContinuationRulePair_ACU[];
   apiPresetMode: 'current' | 'fixed';
   fixedApiPresetName: string;
+  agentApiPresets: ContinuationAgentApiPresets_ACU;
   outlinePrompt: ContinuationPromptSegment_ACU[];
   agentPrompts: ContinuationAgentPrompts_ACU;
   promptForceDefaultVersion?: string;

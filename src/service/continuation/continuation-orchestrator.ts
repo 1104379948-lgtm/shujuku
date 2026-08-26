@@ -338,6 +338,25 @@ export class ContinuationOrchestrator_ACU {
     });
   }
 
+  /**
+   * 自动续写资格（只读）：一轮正文确认成功后，桥据此决定是否延迟触发下一轮。
+   * 只有「暂停且无停止原因、无待处理正文、无遗留错误、阶段可继续」的任务才有资格；
+   * 用户停止、时长/阶段数上限、大纲预览待确认、循环失败都会让资格消失。
+   */
+  readAutoContinueState(): { eligible: boolean; delaySeconds: number } {
+    const envelope = this.dependencies.store.readPersisted();
+    const task = envelope?.activeTask;
+    if (!envelope || !task) return { eligible: false, delaySeconds: 0 };
+    const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+    const stageContinuable = !stage || ['running', 'completed'].includes(stage.status);
+    const eligible = task.status === 'paused'
+      && task.stopReason === null
+      && task.lastError === null
+      && !task.pendingHostTurn
+      && stageContinuable;
+    return { eligible, delaySeconds: Math.max(0, envelope.settings.loopDelaySeconds) };
+  }
+
   /** Read-only bridge input; it never derives reload state or writes the envelope. */
   readPendingHostTurn(): ContinuationPendingHostTurnSnapshot_ACU | null {
     const envelope = this.dependencies.store.readPersisted();
@@ -408,7 +427,8 @@ export class ContinuationOrchestrator_ACU {
         const progressed = advanceConfirmedTurn_ACU(task, chronicleSnapshot, now, this.timeline_ACU.bind(this));
         const completedTurn: ContinuationTask_ACU = { ...progressed, pendingHostTurn: null };
         if (!isLastTurn) {
-          advanced = { ...envelope, activeTask: completedTurn };
+          // 轮边界统一落 paused：自动续写从这个可判定状态出发，页面重载后也能手动恢复。
+          advanced = { ...envelope, activeTask: { ...completedTurn, status: 'paused', updatedAt: now } };
           return advanced;
         }
         if (task.deadlineAt !== null && now >= task.deadlineAt) {

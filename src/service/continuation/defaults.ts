@@ -1,4 +1,4 @@
-import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationStageSize_ACU, type ContinuationTurnRange_ACU } from './model';
+import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationAgentApiPresets_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationStageSize_ACU, type ContinuationTurnRange_ACU } from './model';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
 
 export const CONTINUATION_TURN_RANGES_ACU: Readonly<Record<Exclude<ContinuationStageSize_ACU, 'custom'>, ContinuationTurnRange_ACU>> = {
@@ -55,6 +55,15 @@ export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptS
   return clonePromptSegments_ACU(DEFAULT_OUTLINE_PROMPT_ACU);
 }
 
+/** 六个角色默认全部沿用全局渠道配置，保证旧信封无感迁移。 */
+export function buildDefaultContinuationAgentApiPresets_ACU(): ContinuationAgentApiPresets_ACU {
+  const presets = {} as ContinuationAgentApiPresets_ACU;
+  for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
+    presets[role] = { mode: 'inherit', presetName: '' };
+  }
+  return presets;
+}
+
 export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU {
   return {
     stageSize: 'standard',
@@ -74,6 +83,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     contextExcludeRules: [],
     apiPresetMode: 'current',
     fixedApiPresetName: '',
+    agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
     promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU,

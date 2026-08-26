@@ -11,7 +11,7 @@
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU } from '../internal-ai-call';
-import { resolveContinuationApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
+import { effectiveAgentApiPresetMode_ACU, resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import {
   ContinuationValidationError_ACU,
@@ -21,7 +21,7 @@ import {
 } from '../model';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
 import { beginAgentSessionRun_ACU, logAgentSession_ACU } from './agent-session-log';
-import { renderAgentModuleCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
+import { findAgentSubagentDefinition_ACU, renderAgentModuleCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
 import { readAgentModuleSnapshot_ACU, writeAgentModuleSnapshot_ACU } from './agent-module-store';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistration_ACU, applyAgentModuleDelta_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
@@ -45,7 +45,7 @@ import {
 const HISTORY_SENTINEL_ACU = '\u0000__QRF_AGENT_HISTORY__\u0000';
 
 export interface ContinuationAgentTurnPlannerDependencies_ACU {
-  resolveApiPreset: typeof resolveContinuationApiPreset_ACU;
+  resolveApiPreset: typeof resolveContinuationAgentApiPreset_ACU;
   callInternalAi: (
     messages: Array<{ role: string; content: string }>,
     preset: ContinuationResolvedApiPreset_ACU,
@@ -60,7 +60,7 @@ export interface ContinuationAgentTurnPlannerDependencies_ACU {
 }
 
 const defaultDependencies_ACU: ContinuationAgentTurnPlannerDependencies_ACU = {
-  resolveApiPreset: resolveContinuationApiPreset_ACU,
+  resolveApiPreset: resolveContinuationAgentApiPreset_ACU,
   callInternalAi: callContinuationInternalAi_ACU,
   subagentRuntime: new AgentSubagentRuntime_ACU(),
   readChat: getChatArray_ACU,
@@ -152,14 +152,19 @@ export function renderAgentToolResults_ACU(ledger: AgentRunLedger_ACU): string {
     .join('\n\n');
 }
 
+/** 参与波次并发判定的四个派工子代理渠道角色。 */
+const SUBAGENT_PRESET_ROLES_ACU = ['maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'] as const;
+
 /**
  * 计算同波次实际可用的并发上限。
  * @param settings 续写设置
  * @param budget 预算配置
- * @returns 并发上限；跟随当前活动 API 时为 1，因为主 API 的归因机制不支持并发内部请求
+ * @returns 并发上限；任一子代理角色的生效渠道为「跟随当前活动 API」时为 1，
+ *          因为主 API 的归因机制不支持并发内部请求
  */
 function resolveWaveLimit_ACU(settings: ContinuationSettings_ACU, budget: AgentRunBudget_ACU): number {
-  return settings.apiPresetMode === 'current' ? 1 : Math.max(1, budget.maxConcurrent);
+  const hasCurrentChannel = SUBAGENT_PRESET_ROLES_ACU.some(role => effectiveAgentApiPresetMode_ACU(settings, role) === 'current');
+  return hasCurrentChannel ? 1 : Math.max(1, budget.maxConcurrent);
 }
 
 function describePlannerOutcome_ACU(summary: string, recommendation: string, mustPreserve: readonly string[], risks: readonly string[]): string {
@@ -182,7 +187,7 @@ export class ContinuationAgentTurnPlanner_ACU {
    * @returns 最终指导与本轮使用的 API 预设信息
    */
   async plan(request: ContinuationAgentTurnPlanRequest_ACU, apiDependencies?: ContinuationApiPresetDependencies_ACU): Promise<ContinuationAgentTurnPlanResult_ACU> {
-    const preset = this.dependencies.resolveApiPreset(request.settings, 'turn_call', apiDependencies);
+    const preset = this.dependencies.resolveApiPreset(request.settings, 'main', 'turn_call', apiDependencies);
     const budget = this.dependencies.budget;
     const chat = this.dependencies.readChat();
     let snapshot = this.dependencies.readModuleSnapshot(chat);
@@ -237,7 +242,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           failLoop_ACU('CONTINUATION_AGENT_BLOCKED', `主 Agent 阻断本轮：${action.reason}`, { unresolved: action.unresolved });
         }
 
-        snapshot = await this.runDelegations(action, request, preset, context, ledger, budget, chat, snapshot);
+        snapshot = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies);
       }
 
       failLoop_ACU('CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', `主 Agent 在 ${budget.maxIterations} 次迭代内没有交付最终指导`, { delegationsUsed: ledger.delegationsUsed });
@@ -366,12 +371,12 @@ export class ContinuationAgentTurnPlanner_ACU {
   private async runDelegations(
     action: AgentDelegateAction_ACU,
     request: ContinuationAgentTurnPlanRequest_ACU,
-    preset: ContinuationResolvedApiPreset_ACU,
     context: AgentResolveContext_ACU,
     ledger: AgentRunLedger_ACU,
     budget: AgentRunBudget_ACU,
     chat: any[],
     snapshot: AgentModuleSnapshot_ACU,
+    apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<AgentModuleSnapshot_ACU> {
     const waveLimit = resolveWaveLimit_ACU(request.settings, budget);
     const outcomesBefore = ledger.outcomes.length;
@@ -419,7 +424,8 @@ export class ContinuationAgentTurnPlanner_ACU {
         continue;
       }
       if (accepted.length >= waveLimit) {
-        const why = waveLimit === 1 && request.settings.apiPresetMode === 'current'
+        const hasCurrentChannel = SUBAGENT_PRESET_ROLES_ACU.some(role => effectiveAgentApiPresetMode_ACU(request.settings, role) === 'current');
+        const why = waveLimit === 1 && hasCurrentChannel
           ? '当前跟随活动 API，同一波次只能派工 1 个子代理'
           : `同一波次并发上限为 ${waveLimit} 个`;
         ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `${why}，本次未执行，可在下一次迭代重派` });
@@ -430,12 +436,15 @@ export class ContinuationAgentTurnPlanner_ACU {
 
     const settled = await Promise.all(accepted.map(async (delegation): Promise<{ delegation: AgentDelegation_ACU; result: AgentSubagentRunResult_ACU | null; error: unknown }> => {
       try {
+        // 每个子代理按自己的渠道角色解析；渠道解析失败会成为该派工的拒绝结果回喂给主 Agent。
+        const definition = findAgentSubagentDefinition_ACU(delegation.agentName);
+        const delegationPreset = this.dependencies.resolveApiPreset(request.settings, definition?.promptKey ?? 'main', 'agent_delegate', apiDependencies);
         const result = await this.dependencies.subagentRuntime.run({
           delegation,
           settings: request.settings,
           resolveContext: context,
           budget,
-          preset,
+          preset: delegationPreset,
           // attemptId 必须原样保留：轮次一致性校验按它比对，改写会让所有子代理请求被判失效。
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),

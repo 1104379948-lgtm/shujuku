@@ -2,6 +2,7 @@ import { resolveApiConfigByPreset_ACU, type ApiPresetApiConfig_ACU, type ApiPres
 import {
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
+  type ContinuationAgentApiPresetRole_ACU,
   type ContinuationErrorPhase_ACU,
   type ContinuationSettings_ACU,
 } from './model';
@@ -47,4 +48,33 @@ export function resolveContinuationApiPreset_ACU(settings: Pick<ContinuationSett
   }
   const resolved = dependencies.resolvePreset('');
   return { presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
+}
+
+type AgentApiPresetSettings_ACU = Pick<ContinuationSettings_ACU, 'apiPresetMode' | 'fixedApiPresetName'> & Partial<Pick<ContinuationSettings_ACU, 'agentApiPresets'>>;
+
+/**
+ * 计算某个角色的生效渠道模式：inherit 回落到全局 apiPresetMode。
+ * 波次并发规则据此判定是否需要串行（current 模式走主 API，不支持并发内部请求）。
+ * @param settings 续写设置
+ * @param role 渠道角色
+ * @returns 'current' 或 'fixed'
+ */
+export function effectiveAgentApiPresetMode_ACU(settings: AgentApiPresetSettings_ACU, role: ContinuationAgentApiPresetRole_ACU): 'current' | 'fixed' {
+  const choice = settings.agentApiPresets?.[role];
+  if (!choice || choice.mode === 'inherit') return settings.apiPresetMode;
+  return choice.mode;
+}
+
+/**
+ * 按角色解析 AI 渠道。inherit（或缺失配置）沿用全局解析；
+ * current/fixed 以角色自己的配置复用同一 fail-closed 解析逻辑。
+ * @param settings 续写设置
+ * @param role 渠道角色（main/outline/maintainer/mainlinePlanner/beatPlanner/reviewer）
+ * @param phase 出错时记录的阶段
+ * @returns 解析后的渠道；固定预设缺失时抛 CONTINUATION_API_PRESET_MISSING
+ */
+export function resolveContinuationAgentApiPreset_ACU(settings: AgentApiPresetSettings_ACU, role: ContinuationAgentApiPresetRole_ACU, phase: ContinuationErrorPhase_ACU, dependencies: ContinuationApiPresetDependencies_ACU = defaultDependencies_ACU): ContinuationResolvedApiPreset_ACU {
+  const choice = settings.agentApiPresets?.[role];
+  if (!choice || choice.mode === 'inherit') return resolveContinuationApiPreset_ACU(settings, phase, dependencies);
+  return resolveContinuationApiPreset_ACU({ apiPresetMode: choice.mode, fixedApiPresetName: choice.presetName }, phase, dependencies);
 }

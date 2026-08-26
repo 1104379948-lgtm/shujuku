@@ -48,6 +48,7 @@ interface Harness_ACU {
   subCalls: Array<Array<{ role: string; content: string }>>;
   written: Array<{ index: number; snapshot: AgentModuleSnapshot_ACU }>;
   outlineCalls: string[];
+  presetRoles: string[];
   setContext: (factory: () => any) => void;
 }
 
@@ -62,6 +63,7 @@ function harness_ACU(options: {
   applyOutlineEdits?: (edits: any[]) => Promise<{ summary: string }> | { summary: string };
   withoutApplyOutline?: boolean;
   apiPresetMode?: 'current' | 'fixed';
+  agentApiPresets?: Partial<Record<'main' | 'outline' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer', { mode: 'inherit' | 'current' | 'fixed'; presetName: string }>>;
 }): Harness_ACU {
   const mainReplies = [...options.mainReplies];
   const subReplies = [...(options.subReplies ?? [])];
@@ -69,6 +71,7 @@ function harness_ACU(options: {
   const subCalls: Array<Array<{ role: string; content: string }>> = [];
   const written: Array<{ index: number; snapshot: AgentModuleSnapshot_ACU }> = [];
   const outlineCalls: string[] = [];
+  const presetRoles: string[] = [];
   const chat = chat_ACU();
   let snapshot = options.snapshot ?? buildEmptyAgentModuleSnapshot_ACU();
   let contextFactory = options.context ?? execution_ACU;
@@ -79,7 +82,7 @@ function harness_ACU(options: {
   });
 
   const planner = new ContinuationAgentTurnPlanner_ACU({
-    resolveApiPreset: (() => preset_ACU) as any,
+    resolveApiPreset: ((_settings: unknown, role: string) => { presetRoles.push(role); return preset_ACU; }) as any,
     callInternalAi: async messages => { mainCalls.push(messages); return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}'; },
     subagentRuntime,
     readChat: () => chat,
@@ -92,6 +95,7 @@ function harness_ACU(options: {
   settings.internalAiRetryLimit = 1;
   settings.apiPresetMode = options.apiPresetMode ?? 'fixed';
   settings.fixedApiPresetName = 'p1';
+  if (options.agentApiPresets) settings.agentApiPresets = { ...settings.agentApiPresets, ...options.agentApiPresets };
 
   const request: ContinuationAgentTurnPlanRequest_ACU = {
     settings,
@@ -113,7 +117,7 @@ function harness_ACU(options: {
         },
   };
 
-  return { planner, request, mainCalls, subCalls, written, outlineCalls, setContext: factory => { contextFactory = factory; } };
+  return { planner, request, mainCalls, subCalls, written, outlineCalls, presetRoles, setContext: factory => { contextFactory = factory; } };
 }
 
 function lastMessage_ACU(messages: Array<{ role: string; content: string }>): { role: string; content: string } {
@@ -493,6 +497,25 @@ describe('派工与写集落盘', () => {
     expect(h.subCalls).toHaveLength(1);
     expect(h.mainCalls[0][findIndex_ACU(h.mainCalls[0], '本轮预算状态')].content).toContain('同一波次最多 1 个子代理');
     expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('当前跟随活动 API，同一波次只能派工 1 个子代理');
+  });
+
+  it('全局跟随当前 API 但子代理角色全部固定渠道时，波次恢复并发且按角色解析渠道', async () => {
+    const fixedChannel = { mode: 'fixed' as const, presetName: 'p2' };
+    const h = harness_ACU({
+      apiPresetMode: 'current',
+      budget: { maxConcurrent: 2 },
+      agentApiPresets: { maintainer: fixedChannel, mainlinePlanner: fixedChannel, beatPlanner: fixedChannel, reviewer: fixedChannel },
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"mainline-planner","prompt":"主线","reads":["$OUTLINE_WINDOW"]},{"agentName":"beat-planner","prompt":"节拍","reads":["$OUTLINE_WINDOW"]}]}',
+        '{"action":"finalize","instruction":"指导"}',
+      ],
+      subReplies: ['{"summary":"主线","recommendation":"推进"}', '{"summary":"节拍","recommendation":"三拍"}'],
+    });
+    await h.planner.plan(h.request);
+
+    expect(h.subCalls).toHaveLength(2);
+    expect(h.mainCalls[0][findIndex_ACU(h.mainCalls[0], '本轮预算状态')].content).toContain('同一波次最多 2 个子代理');
+    expect(h.presetRoles).toEqual(['main', 'mainlinePlanner', 'beatPlanner']);
   });
 
   it('同一代理超过次数上限后被拒绝', async () => {

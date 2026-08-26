@@ -123,6 +123,34 @@ describe('FirstFloorContinuationStore_ACU', () => {
     }
   });
 
+  it('backfills default per-role channels for envelopes persisted before agentApiPresets existed', () => {
+    const legacy = buildEnvelope_ACU() as any;
+    delete legacy.settings.agentApiPresets;
+    legacy.settings.apiPresetMode = 'fixed';
+    legacy.settings.fixedApiPresetName = 'p1';
+    const chat: any[] = [{ _qrf_continuation: legacy }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+
+    const loaded = new FirstFloorContinuationStore_ACU().read()!;
+    expect(loaded.settings.agentApiPresets).toEqual({
+      main: { mode: 'inherit', presetName: '' },
+      outline: { mode: 'inherit', presetName: '' },
+      maintainer: { mode: 'inherit', presetName: '' },
+      mainlinePlanner: { mode: 'inherit', presetName: '' },
+      beatPlanner: { mode: 'inherit', presetName: '' },
+      reviewer: { mode: 'inherit', presetName: '' },
+    });
+    expect(loaded.settings).toMatchObject({ apiPresetMode: 'fixed', fixedApiPresetName: 'p1' });
+  });
+
+  it('fails closed on a persisted per-role channel with an illegal mode', () => {
+    const invalid = buildEnvelope_ACU() as any;
+    invalid.settings.agentApiPresets.reviewer = { mode: 'random', presetName: '' };
+    const chat: any[] = [{ _qrf_continuation: invalid }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(() => new FirstFloorContinuationStore_ACU().read()).toThrow(ContinuationValidationError_ACU);
+  });
+
   it('restores in-memory first-floor data and attempts rollback persistence after a save failure', async () => {
     const original = buildEnvelope_ACU();
     const chat: any[] = [{ _qrf_continuation: original }];

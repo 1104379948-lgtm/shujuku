@@ -104,6 +104,14 @@ function setSettings(): void {
     retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3,
     contextTurnCount: 3, contextExtractRules: [], contextExcludeRules: [],
     apiPresetMode: 'current', fixedApiPresetName: '',
+    agentApiPresets: {
+      main: { mode: 'inherit', presetName: '' },
+      outline: { mode: 'inherit', presetName: '' },
+      maintainer: { mode: 'inherit', presetName: '' },
+      mainlinePlanner: { mode: 'inherit', presetName: '' },
+      beatPlanner: { mode: 'inherit', presetName: '' },
+      reviewer: { mode: 'inherit', presetName: '' },
+    },
     outlinePrompt: [{ role: 'system', content: '规划', enabled: true, deletable: true }],
     agentPrompts: {
       main: [{ role: 'system', content: '主控', enabled: true, deletable: true }],

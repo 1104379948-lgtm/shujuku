@@ -50,6 +50,9 @@ async function recordPendingHostTurn(orchestrator: ContinuationOrchestrator_ACU,
 
 async function confirmTurns(orchestrator: ContinuationOrchestrator_ACU, store: FirstFloorContinuationStore_ACU, count: number): Promise<void> {
   for (let index = 0; index < count; index += 1) {
+    // 每轮确认后任务统一落 paused，真实链路由桥的自动续写调 continueTask 再进入下一轮。
+    const before = store.readPersisted()!.activeTask!;
+    if (before.status === 'paused' && before.stopReason === null) await orchestrator.continueTask();
     const task = store.readPersisted()!.activeTask!;
     const stage = task.stages.find(item => item.stageId === task.activeStageId)!;
     const revision = stage.revisions.find(item => item.revision === stage.activeRevision)!;
@@ -145,6 +148,36 @@ describe('ContinuationOrchestrator_ACU', () => {
     await orchestrator.confirmCurrentTurn(identity);
     expect(store.readPersisted()!.activeTask!.stages[0]).toMatchObject({ completedTurns: 1, activeNodeIndex: 0, activeTurnIndex: 1 });
     await expectCode(() => orchestrator.confirmCurrentTurn(identity), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+  });
+
+  it('pauses at every confirmed turn boundary and exposes auto-continue eligibility', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    await confirmTurns(orchestrator, store, 1);
+
+    // 非最后一轮的确认同样落 paused：自动续写与手动继续都从这个状态出发。
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: null, lastError: null, pendingHostTurn: null });
+    expect(orchestrator.readAutoContinueState()).toEqual({ eligible: true, delaySeconds: 5 });
+  });
+
+  it('denies auto-continue for stopped tasks, recorded errors, and pending host turns', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    expect(orchestrator.readAutoContinueState()).toEqual({ eligible: false, delaySeconds: 0 });
+
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-a' };
+    await recordPendingHostTurn(orchestrator, identity);
+    expect(orchestrator.readAutoContinueState().eligible).toBe(false);
+
+    await orchestrator.confirmCurrentTurn(identity);
+    expect(orchestrator.readAutoContinueState().eligible).toBe(true);
+    await orchestrator.stopTask();
+    expect(orchestrator.readAutoContinueState().eligible).toBe(false);
   });
 
   it('pauses after the final confirmed turn; the next continue delegates the next stage outline to the agent', async () => {

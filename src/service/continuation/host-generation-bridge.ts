@@ -9,6 +9,8 @@ export interface ContinuationHostTurnRuntime_ACU {
   getChat(): any[];
   getGenerationSequence(): number;
   readPendingHostTurn(): { settings: { loopTags: string; retryDelaySeconds?: number }; pending: { identity: TurnAttemptIdentity_ACU; capture: ContinuationHostGenerationCapture_ACU; status: 'awaiting_generation' | 'retry_ready' | 'exhausted' } } | null;
+  readAutoContinueState(): { eligible: boolean; delaySeconds: number };
+  continueTask(): Promise<{ preparedTurn?: ContinuationPreparedTurnInstruction_ACU }>;
   retryCurrentTurn(): Promise<{ preparedTurn?: ContinuationPreparedTurnInstruction_ACU }>;
   recordHostTurn(input: { identity: TurnAttemptIdentity_ACU; capture: ContinuationHostGenerationCapture_ACU }): Promise<unknown>;
   bindHostTurnGeneration(identity: TurnAttemptIdentity_ACU, generationSeq: number): Promise<void>;
@@ -125,6 +127,27 @@ export class ContinuationHostGenerationBridge_ACU {
       } catch {
         // No safe write remains after a stale or persistence failure.
       }
+      return;
+    }
+    await this.autoContinueAfterTurn_ACU();
+  }
+
+  /**
+   * 一轮正文确认成功后的自动续写：等待轮次延迟后自动触发下一轮，
+   * 与正文重试自动链同构。资格在延迟前后各读一次——用户可能在延迟期间停止任务。
+   * continueTask 的失败已由 orchestrator 落为 paused+lastError，这里不再改写状态。
+   */
+  private async autoContinueAfterTurn_ACU(): Promise<void> {
+    const runtime = this.dependencies.runtime;
+    const state = runtime.readAutoContinueState();
+    if (!state.eligible) return;
+    await this.dependencies.wait(state.delaySeconds * 1_000);
+    if (!runtime.readAutoContinueState().eligible) return;
+    try {
+      const result = await runtime.continueTask();
+      if (result.preparedTurn) await this.send(result.preparedTurn);
+    } catch {
+      // 状态已由 orchestrator 记录（paused+lastError 或拒绝原因），自动链到此为止。
     }
   }
 

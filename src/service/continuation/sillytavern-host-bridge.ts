@@ -10,7 +10,7 @@ import { SillyTavernHostTurnAdapter_ACU } from './host-turn-adapter';
  * second concurrent continuation dispatcher by importing this module.
  */
 export function createSillyTavernContinuationHostBridge_ACU(
-  orchestrator: Pick<ContinuationOrchestrator_ACU, 'readPendingHostTurn' | 'recordHostTurn' | 'bindHostTurnGeneration' | 'confirmCurrentTurn' | 'rejectHostTurnForMissingTags' | 'pauseForHostInputFailure' | 'pauseForHostResultFailure' | 'retryCurrentTurn'>,
+  orchestrator: Pick<ContinuationOrchestrator_ACU, 'readPendingHostTurn' | 'readAutoContinueState' | 'recordHostTurn' | 'bindHostTurnGeneration' | 'confirmCurrentTurn' | 'rejectHostTurnForMissingTags' | 'pauseForHostInputFailure' | 'pauseForHostResultFailure' | 'retryCurrentTurn' | 'continueTask'>,
 ): ContinuationHostGenerationBridge_ACU {
   const getChat = (): any[] => Array.isArray(SillyTavern_API_ACU?.chat) ? SillyTavern_API_ACU.chat as any[] : [];
   const getChatIdentity = (): string => String(getActiveChatStorageIdentity_ACU(getChat()) ?? '');
@@ -20,6 +20,8 @@ export function createSillyTavernContinuationHostBridge_ACU(
       getChat,
       getGenerationSequence: () => 0,
       readPendingHostTurn: () => orchestrator.readPendingHostTurn(),
+      readAutoContinueState: () => orchestrator.readAutoContinueState(),
+      continueTask: () => orchestrator.continueTask(),
       retryCurrentTurn: () => orchestrator.retryCurrentTurn(),
       recordHostTurn: input => orchestrator.recordHostTurn(input),
       bindHostTurnGeneration: (identity, generationSeq) => orchestrator.bindHostTurnGeneration(identity, generationSeq),

@@ -3,15 +3,20 @@ import { ContinuationHostGenerationBridge_ACU } from '../../../src/service/conti
 
 const identity = { chatIdentity: 'chat-a', taskId: 'task-a', stageId: 'stage-a', revision: 1, nodeId: 'node-a', turnId: 'turn-a', attemptId: 'attempt-a' };
 
-function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; onWait?: () => void } = {}) {
+function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; onWait?: () => void; autoContinueStates?: Array<{ eligible: boolean; delaySeconds: number }> } = {}) {
   let chat = options.chat ?? [{ is_user: true }];
   let chatIdentity = 'chat-a';
   let pending: any = null;
+  const autoContinueStates = [...(options.autoContinueStates ?? [])];
   const retryPreparedTurn: any = { identity, instruction: { instruction: '重试后的最终普通文本' } };
+  const continuePreparedTurn: any = { identity, instruction: { instruction: '自动续写的下一轮文本' } };
   const retryCurrentTurn = vi.fn(async () => ({ preparedTurn: retryPreparedTurn }));
+  const continueTask = vi.fn(async () => ({ preparedTurn: continuePreparedTurn }));
   const runtime = {
     getChatIdentity: () => chatIdentity, getChat: () => chat, getGenerationSequence: () => 0,
     readPendingHostTurn: () => pending ? { settings: { loopTags: options.tags ?? '<ok>' }, pending } : null,
+    readAutoContinueState: vi.fn(() => autoContinueStates.length ? autoContinueStates.shift()! : { eligible: false, delaySeconds: 0 }),
+    continueTask,
     retryCurrentTurn,
     recordHostTurn: vi.fn(async ({ identity: sent, capture }) => { pending = { identity: sent, capture, retryCount: 0, status: 'awaiting_generation' }; }),
     bindHostTurnGeneration: vi.fn(async (_identity, generationSeq) => { pending = { ...pending, capture: { ...pending.capture, generationSeq } }; }),
@@ -21,8 +26,9 @@ function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; o
     pauseForHostResultFailure: vi.fn(async () => { pending = { ...pending, status: 'exhausted' }; }),
   };
   const hostInput = { send: vi.fn(() => options.send ?? true), removeLastMessage: vi.fn(async () => { chat = chat.slice(0, -1); return true; }) };
-  const bridge = new ContinuationHostGenerationBridge_ACU({ runtime, hostInput, now: () => 100, wait: vi.fn(async () => options.onWait?.()), materializationRetries: 1, materializationRetryDelayMs: 0 });
-  return { bridge, runtime, hostInput, retryCurrentTurn, setChat: (value: any[]) => { chat = value; }, setChatIdentity: (value: string) => { chatIdentity = value; } };
+  const wait = vi.fn(async () => options.onWait?.());
+  const bridge = new ContinuationHostGenerationBridge_ACU({ runtime, hostInput, now: () => 100, wait, materializationRetries: 1, materializationRetryDelayMs: 0 });
+  return { bridge, runtime, hostInput, retryCurrentTurn, continueTask, wait, setChat: (value: any[]) => { chat = value; }, setChatIdentity: (value: string) => { chatIdentity = value; } };
 }
 
 describe('ContinuationHostGenerationBridge_ACU', () => {
@@ -139,5 +145,44 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     await h.bridge.onGenerationEnded(99, 7);
     expect(h.runtime.pauseForHostResultFailure).toHaveBeenCalledWith(identity);
     expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+  });
+
+  it('auto-continues the next turn after a confirmed reply, honoring the loop delay', async () => {
+    const h = createHarness({ autoContinueStates: [{ eligible: true, delaySeconds: 5 }, { eligible: true, delaySeconds: 5 }] });
+    h.hostInput.send.mockImplementationOnce(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
+    await h.bridge.onGenerationEnded(9, 7);
+
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity);
+    expect(h.wait).toHaveBeenCalledWith(5_000);
+    expect(h.continueTask).toHaveBeenCalledOnce();
+    expect(h.hostInput.send).toHaveBeenLastCalledWith('自动续写的下一轮文本');
+  });
+
+  it('abandons the auto-continue when eligibility is lost during the delay', async () => {
+    const h = createHarness({ autoContinueStates: [{ eligible: true, delaySeconds: 5 }, { eligible: false, delaySeconds: 0 }] });
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
+    await h.bridge.onGenerationEnded(9, 7);
+
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity);
+    expect(h.continueTask).not.toHaveBeenCalled();
+    expect(h.hostInput.send).toHaveBeenCalledOnce();
+  });
+
+  it('swallows an auto-continue failure without overwriting the recorded task state', async () => {
+    const h = createHarness({ autoContinueStates: [{ eligible: true, delaySeconds: 0 }, { eligible: true, delaySeconds: 0 }] });
+    h.continueTask.mockRejectedValueOnce(new Error('已被用户停止'));
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
+
+    await expect(h.bridge.onGenerationEnded(9, 7)).resolves.toBeUndefined();
+
+    expect(h.continueTask).toHaveBeenCalledOnce();
+    expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
+    expect(h.hostInput.send).toHaveBeenCalledOnce();
   });
 });

@@ -154,12 +154,19 @@
         <AcuFormRow label="循环标签">
           <AcuInput v-model="settingsDraft.loopTags" type="text" />
         </AcuFormRow>
-        <AcuFormRow label="API 预设">
+        <AcuFormRow label="API 预设（全局默认）">
           <AcuSelect
             :options="continuationApiPresetOptions"
             :model-value="continuationApiPresetValue"
             :placeholder="followActiveApiLabel"
             @update:model-value="applyContinuationApiPreset"
+          />
+        </AcuFormRow>
+        <AcuFormRow v-for="channel in agentChannelRoles" :key="channel.role" :label="`渠道 · ${channel.label}`">
+          <AcuSelect
+            :options="agentChannelOptions"
+            :model-value="agentChannelValue(channel.role)"
+            @update:model-value="value => applyAgentChannel(channel.role, value)"
           />
         </AcuFormRow>
       </div>
@@ -270,11 +277,56 @@ const continuationRoleOptions = [
   { value: 'assistant', label: 'ASSISTANT' },
 ];
 
+/** 渠道下拉里「跟随全局默认」的哨兵值：空串已被「跟随当前活动 API」占用。 */
+const INHERIT_CHANNEL_VALUE = '__inherit__';
+
+const agentChannelRoles = [
+  { role: 'main', label: '主 Agent' },
+  { role: 'outline', label: '大纲子代理' },
+  { role: 'maintainer', label: '伏笔与认知维护' },
+  { role: 'mainlinePlanner', label: '主线推进策划' },
+  { role: 'beatPlanner', label: '伏笔与节拍策划' },
+  { role: 'reviewer', label: '连续性审查' },
+] as const;
+
+type AgentChannelRole = typeof agentChannelRoles[number]['role'];
+
+const agentChannelOptions = computed(() => [
+  { value: INHERIT_CHANNEL_VALUE, label: '跟随全局默认' },
+  ...continuationApiPresetOptions.value,
+]);
+
+function agentChannelValue(role: AgentChannelRole): string {
+  const choice = settingsDraft.value?.agentApiPresets?.[role];
+  if (!choice || choice.mode === 'inherit') return INHERIT_CHANNEL_VALUE;
+  return choice.mode === 'fixed' ? choice.presetName : '';
+}
+
+function applyAgentChannel(role: AgentChannelRole, value: string): void {
+  if (!settingsDraft.value) return;
+  const trimmed = String(value ?? '').trim();
+  if (trimmed === INHERIT_CHANNEL_VALUE) {
+    settingsDraft.value.agentApiPresets[role] = { mode: 'inherit', presetName: '' };
+  } else if (trimmed) {
+    settingsDraft.value.agentApiPresets[role] = { mode: 'fixed', presetName: trimmed };
+  } else {
+    settingsDraft.value.agentApiPresets[role] = { mode: 'current', presetName: '' };
+  }
+}
+
 function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings_ACU {
   return {
     ...settings,
     contextExtractRules: settings.contextExtractRules.map(rule => ({ ...rule })),
     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
+    agentApiPresets: {
+      main: { ...settings.agentApiPresets.main },
+      outline: { ...settings.agentApiPresets.outline },
+      maintainer: { ...settings.agentApiPresets.maintainer },
+      mainlinePlanner: { ...settings.agentApiPresets.mainlinePlanner },
+      beatPlanner: { ...settings.agentApiPresets.beatPlanner },
+      reviewer: { ...settings.agentApiPresets.reviewer },
+    },
     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
     agentPrompts: {
       main: settings.agentPrompts.main.map(segment => ({ ...segment })),
@@ -353,6 +405,10 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     throw new Error('续写设置中的数值不能低于允许范围');
   }
   if (normalized.apiPresetMode === 'fixed' && !normalized.fixedApiPresetName.trim()) throw new Error('固定 API 预设名称不能为空');
+  for (const channel of agentChannelRoles) {
+    const choice = normalized.agentApiPresets[channel.role];
+    if (choice.mode === 'fixed' && !choice.presetName.trim()) throw new Error(`${channel.label} 的固定渠道必须选择预设`);
+  }
   return normalized;
 }
 

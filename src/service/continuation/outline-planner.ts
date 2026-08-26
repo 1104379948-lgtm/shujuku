@@ -1,6 +1,6 @@
 import { callContinuationInternalAi_ACU } from './internal-ai-call';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from './defaults';
-import { resolveContinuationApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from './api-preset';
+import { resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from './api-preset';
 import { validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutline_ACU } from './outline-schema';
 import { buildStageOutlineFromTags_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from './outline-tags';
 import { renderContinuationPrompt_ACU, type ContinuationPromptPlaceholder_ACU } from './prompt-template';
@@ -36,12 +36,12 @@ export interface ContinuationOutlinePlanningResult_ACU {
 }
 
 export interface ContinuationOutlinePlannerDependencies_ACU {
-  resolveApiPreset: typeof resolveContinuationApiPreset_ACU;
+  resolveApiPreset: typeof resolveContinuationAgentApiPreset_ACU;
   callInternalAi: (messages: Array<{ role: string; content: string }>, preset: ContinuationResolvedApiPreset_ACU, identity: ContinuationInternalAiRequestIdentity_ACU) => Promise<string | null>;
 }
 
 const defaultDependencies_ACU: ContinuationOutlinePlannerDependencies_ACU = {
-  resolveApiPreset: resolveContinuationApiPreset_ACU,
+  resolveApiPreset: resolveContinuationAgentApiPreset_ACU,
   callInternalAi: callContinuationInternalAi_ACU,
 };
 
@@ -68,7 +68,7 @@ export class ContinuationOutlinePlanner_ACU {
 
   async plan(request: ContinuationOutlinePlanningRequest_ACU, apiDependencies?: ContinuationApiPresetDependencies_ACU): Promise<ContinuationOutlinePlanningResult_ACU> {
     const range = resolveContinuationTurnRange_ACU(request.settings.stageSize, request.settings.customTurnMin ?? undefined, request.settings.customTurnMax ?? undefined);
-    const preset = this.dependencies.resolveApiPreset(request.settings, request.reason === 'manual_replan' ? 'replan' : 'outline_call', apiDependencies);
+    const preset = this.dependencies.resolveApiPreset(request.settings, 'outline', request.reason === 'manual_replan' ? 'replan' : 'outline_call', apiDependencies);
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
     let lastError: ContinuationError_ACU | null = null;
 

@@ -1,8 +1,8 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU } from './defaults';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
-import { CONTINUATION_AGENT_PROMPT_KEYS_ACU } from './model';
+import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, CONTINUATION_AGENT_PROMPT_KEYS_ACU } from './model';
 import { resolveContinuationTurnRange_ACU, validateStageOutline_ACU } from './outline-schema';
 import { validateContinuationPromptSegments_ACU } from './prompt-template';
 import {
@@ -96,13 +96,34 @@ function validateAgentPrompts_ACU(raw: unknown): ContinuationSettings_ACU['agent
   };
 }
 
+/**
+ * 校验六个角色的 AI 渠道配置。
+ * @param raw 持久化里的 agentApiPresets 字段
+ * @returns 逐角色校验后的渠道配置
+ */
+function validateAgentApiPresets_ACU(raw: unknown): ContinuationSettings_ACU['agentApiPresets'] {
+  if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.agentApiPresets 必须是对象');
+  requireKeys_ACU(raw, CONTINUATION_AGENT_API_PRESET_ROLES_ACU, 'settings.agentApiPresets');
+  const result = {} as ContinuationSettings_ACU['agentApiPresets'];
+  for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
+    const choice = raw[role];
+    if (!isRecord_ACU(choice)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `settings.agentApiPresets.${role} 必须是对象`);
+    requireKeys_ACU(choice, ['mode', 'presetName'], `settings.agentApiPresets.${role}`);
+    if (!['inherit', 'current', 'fixed'].includes(choice.mode as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `settings.agentApiPresets.${role}.mode 非法`);
+    result[role] = { mode: choice.mode as 'inherit' | 'current' | 'fixed', presetName: requireString_ACU(choice.presetName, `settings.agentApiPresets.${role}.presetName`) };
+  }
+  return result;
+}
+
 function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
   // V7 及更早的信封带 turnInstructionPrompt 且没有 agentPrompts。严格键校验会把它判成未知字段，
   // 所以先就地迁移：丢掉退役字段、补上 Agent 提示词，再进入正常校验。
   if (Object.prototype.hasOwnProperty.call(raw, 'turnInstructionPrompt')) delete raw.turnInstructionPrompt;
   if (!Object.prototype.hasOwnProperty.call(raw, 'agentPrompts')) raw.agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'outlinePrompt', 'agentPrompts'];
+  // 渠道按角色拆分之前的信封没有 agentApiPresets；就地补默认（全 inherit）即无感迁移。
+  if (!Object.prototype.hasOwnProperty.call(raw, 'agentApiPresets')) raw.agentApiPresets = buildDefaultContinuationAgentApiPresets_ACU();
+  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
   requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
   if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
   const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
@@ -128,6 +149,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0),
     contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
     apiPresetMode: raw.apiPresetMode as ContinuationSettings_ACU['apiPresetMode'], fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
+    agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),
     outlinePrompt: validateContinuationPromptSegments_ACU(outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'), agentPrompts: validateAgentPrompts_ACU(agentPrompts),
     promptForceDefaultVersion,
   };
