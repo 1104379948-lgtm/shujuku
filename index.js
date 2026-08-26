@@ -102650,6 +102650,8 @@ $CONTENT
         }
     }
     const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'];
+    /** 可独立配置 AI 渠道的六个角色：主 Agent、大纲子代理与四个派工子代理。 */
+    const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'];
     function createContinuationError_ACU(code, phase, message, retryable = false, details) {
         return details === undefined ? { code, phase, message, retryable } : { code, phase, message, retryable, details };
     }
@@ -103097,6 +103099,14 @@ $CONTENT
     function buildDefaultContinuationOutlinePrompt_ACU() {
         return clonePromptSegments_ACU(DEFAULT_OUTLINE_PROMPT_ACU);
     }
+    /** 六个角色默认全部沿用全局渠道配置，保证旧信封无感迁移。 */
+    function buildDefaultContinuationAgentApiPresets_ACU() {
+        const presets = {};
+        for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
+            presets[role] = { mode: 'inherit', presetName: '' };
+        }
+        return presets;
+    }
     function buildDefaultContinuationSettings_ACU() {
         return {
             stageSize: 'standard',
@@ -103116,6 +103126,7 @@ $CONTENT
             contextExcludeRules: [],
             apiPresetMode: 'current',
             fixedApiPresetName: '',
+            agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
             promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU,
@@ -103452,6 +103463,27 @@ $CONTENT
             reviewer: validateContinuationPromptSegments_ACU(raw.reviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
         };
     }
+    /**
+     * 校验六个角色的 AI 渠道配置。
+     * @param raw 持久化里的 agentApiPresets 字段
+     * @returns 逐角色校验后的渠道配置
+     */
+    function validateAgentApiPresets_ACU(raw) {
+        if (!isRecord_ACU$3(raw))
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings.agentApiPresets 必须是对象');
+        requireKeys_ACU(raw, CONTINUATION_AGENT_API_PRESET_ROLES_ACU, 'settings.agentApiPresets');
+        const result = {};
+        for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
+            const choice = raw[role];
+            if (!isRecord_ACU$3(choice))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `settings.agentApiPresets.${role} 必须是对象`);
+            requireKeys_ACU(choice, ['mode', 'presetName'], `settings.agentApiPresets.${role}`);
+            if (!['inherit', 'current', 'fixed'].includes(choice.mode))
+                fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `settings.agentApiPresets.${role}.mode 非法`);
+            result[role] = { mode: choice.mode, presetName: requireString_ACU(choice.presetName, `settings.agentApiPresets.${role}.presetName`) };
+        }
+        return result;
+    }
     function validateSettings_ACU(raw) {
         if (!isRecord_ACU$3(raw))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
@@ -103461,7 +103493,10 @@ $CONTENT
             delete raw.turnInstructionPrompt;
         if (!Object.prototype.hasOwnProperty.call(raw, 'agentPrompts'))
             raw.agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'outlinePrompt', 'agentPrompts'];
+        // 渠道按角色拆分之前的信封没有 agentApiPresets；就地补默认（全 inherit）即无感迁移。
+        if (!Object.prototype.hasOwnProperty.call(raw, 'agentApiPresets'))
+            raw.agentApiPresets = buildDefaultContinuationAgentApiPresets_ACU();
+        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
         requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
         if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
@@ -103489,6 +103524,7 @@ $CONTENT
             generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0),
             contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
             apiPresetMode: raw.apiPresetMode, fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
+            agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),
             outlinePrompt: validateContinuationPromptSegments_ACU(outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'), agentPrompts: validateAgentPrompts_ACU(agentPrompts),
             promptForceDefaultVersion,
         };
@@ -103873,6 +103909,33 @@ $CONTENT
         const resolved = dependencies.resolvePreset('');
         return { presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
     }
+    /**
+     * 计算某个角色的生效渠道模式：inherit 回落到全局 apiPresetMode。
+     * 波次并发规则据此判定是否需要串行（current 模式走主 API，不支持并发内部请求）。
+     * @param settings 续写设置
+     * @param role 渠道角色
+     * @returns 'current' 或 'fixed'
+     */
+    function effectiveAgentApiPresetMode_ACU(settings, role) {
+        const choice = settings.agentApiPresets?.[role];
+        if (!choice || choice.mode === 'inherit')
+            return settings.apiPresetMode;
+        return choice.mode;
+    }
+    /**
+     * 按角色解析 AI 渠道。inherit（或缺失配置）沿用全局解析；
+     * current/fixed 以角色自己的配置复用同一 fail-closed 解析逻辑。
+     * @param settings 续写设置
+     * @param role 渠道角色（main/outline/maintainer/mainlinePlanner/beatPlanner/reviewer）
+     * @param phase 出错时记录的阶段
+     * @returns 解析后的渠道；固定预设缺失时抛 CONTINUATION_API_PRESET_MISSING
+     */
+    function resolveContinuationAgentApiPreset_ACU(settings, role, phase, dependencies = defaultDependencies_ACU$4) {
+        const choice = settings.agentApiPresets?.[role];
+        if (!choice || choice.mode === 'inherit')
+            return resolveContinuationApiPreset_ACU(settings, phase, dependencies);
+        return resolveContinuationApiPreset_ACU({ apiPresetMode: choice.mode, fixedApiPresetName: choice.presetName }, phase, dependencies);
+    }
 
     /**
      * service/continuation/outline-tags.ts — 大纲标签协议
@@ -103980,7 +104043,7 @@ $CONTENT
     }
 
     const defaultDependencies_ACU$3 = {
-        resolveApiPreset: resolveContinuationApiPreset_ACU,
+        resolveApiPreset: resolveContinuationAgentApiPreset_ACU,
         callInternalAi: callContinuationInternalAi_ACU,
     };
     function toPlannerError_ACU(error) {
@@ -104006,7 +104069,7 @@ $CONTENT
         }
         async plan(request, apiDependencies) {
             const range = resolveContinuationTurnRange_ACU(request.settings.stageSize, request.settings.customTurnMin ?? undefined, request.settings.customTurnMax ?? undefined);
-            const preset = this.dependencies.resolveApiPreset(request.settings, request.reason === 'manual_replan' ? 'replan' : 'outline_call', apiDependencies);
+            const preset = this.dependencies.resolveApiPreset(request.settings, 'outline', request.reason === 'manual_replan' ? 'replan' : 'outline_call', apiDependencies);
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
             let lastError = null;
             for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -104360,6 +104423,25 @@ $CONTENT
                 }, { chatIdentity });
             });
         }
+        /**
+         * 自动续写资格（只读）：一轮正文确认成功后，桥据此决定是否延迟触发下一轮。
+         * 只有「暂停且无停止原因、无待处理正文、无遗留错误、阶段可继续」的任务才有资格；
+         * 用户停止、时长/阶段数上限、大纲预览待确认、循环失败都会让资格消失。
+         */
+        readAutoContinueState() {
+            const envelope = this.dependencies.store.readPersisted();
+            const task = envelope?.activeTask;
+            if (!envelope || !task)
+                return { eligible: false, delaySeconds: 0 };
+            const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+            const stageContinuable = !stage || ['running', 'completed'].includes(stage.status);
+            const eligible = task.status === 'paused'
+                && task.stopReason === null
+                && task.lastError === null
+                && !task.pendingHostTurn
+                && stageContinuable;
+            return { eligible, delaySeconds: Math.max(0, envelope.settings.loopDelaySeconds) };
+        }
         /** Read-only bridge input; it never derives reload state or writes the envelope. */
         readPendingHostTurn() {
             const envelope = this.dependencies.store.readPersisted();
@@ -104429,7 +104511,8 @@ $CONTENT
                     const progressed = advanceConfirmedTurn_ACU(task, chronicleSnapshot, now, this.timeline_ACU.bind(this));
                     const completedTurn = { ...progressed, pendingHostTurn: null };
                     if (!isLastTurn) {
-                        advanced = { ...envelope, activeTask: completedTurn };
+                        // 轮边界统一落 paused：自动续写从这个可判定状态出发，页面重载后也能手动恢复。
+                        advanced = { ...envelope, activeTask: { ...completedTurn, status: 'paused', updatedAt: now } };
                         return advanced;
                     }
                     if (task.deadlineAt !== null && now >= task.deadlineAt) {
@@ -106442,7 +106525,7 @@ $CONTENT
     /** 真实历史插入位置的内部哨兵。用不可见字符避免与提示词正文撞车。 */
     const HISTORY_SENTINEL_ACU = '\u0000__QRF_AGENT_HISTORY__\u0000';
     const defaultDependencies_ACU$1 = {
-        resolveApiPreset: resolveContinuationApiPreset_ACU,
+        resolveApiPreset: resolveContinuationAgentApiPreset_ACU,
         callInternalAi: callContinuationInternalAi_ACU,
         subagentRuntime: new AgentSubagentRuntime_ACU(),
         readChat: getChatArray_ACU,
@@ -106524,14 +106607,18 @@ $CONTENT
         })
             .join('\n\n');
     }
+    /** 参与波次并发判定的四个派工子代理渠道角色。 */
+    const SUBAGENT_PRESET_ROLES_ACU = ['maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'];
     /**
      * 计算同波次实际可用的并发上限。
      * @param settings 续写设置
      * @param budget 预算配置
-     * @returns 并发上限；跟随当前活动 API 时为 1，因为主 API 的归因机制不支持并发内部请求
+     * @returns 并发上限；任一子代理角色的生效渠道为「跟随当前活动 API」时为 1，
+     *          因为主 API 的归因机制不支持并发内部请求
      */
     function resolveWaveLimit_ACU(settings, budget) {
-        return settings.apiPresetMode === 'current' ? 1 : Math.max(1, budget.maxConcurrent);
+        const hasCurrentChannel = SUBAGENT_PRESET_ROLES_ACU.some(role => effectiveAgentApiPresetMode_ACU(settings, role) === 'current');
+        return hasCurrentChannel ? 1 : Math.max(1, budget.maxConcurrent);
     }
     function describePlannerOutcome_ACU(summary, recommendation, mustPreserve, risks) {
         return [
@@ -106553,7 +106640,7 @@ $CONTENT
          * @returns 最终指导与本轮使用的 API 预设信息
          */
         async plan(request, apiDependencies) {
-            const preset = this.dependencies.resolveApiPreset(request.settings, 'turn_call', apiDependencies);
+            const preset = this.dependencies.resolveApiPreset(request.settings, 'main', 'turn_call', apiDependencies);
             const budget = this.dependencies.budget;
             const chat = this.dependencies.readChat();
             let snapshot = this.dependencies.readModuleSnapshot(chat);
@@ -106603,7 +106690,7 @@ $CONTENT
                         terminalLogged = true;
                         failLoop_ACU('CONTINUATION_AGENT_BLOCKED', `主 Agent 阻断本轮：${action.reason}`, { unresolved: action.unresolved });
                     }
-                    snapshot = await this.runDelegations(action, request, preset, context, ledger, budget, chat, snapshot);
+                    snapshot = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies);
                 }
                 failLoop_ACU('CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', `主 Agent 在 ${budget.maxIterations} 次迭代内没有交付最终指导`, { delegationsUsed: ledger.delegationsUsed });
             }
@@ -106710,7 +106797,7 @@ $CONTENT
                 return [...history.map(item => ({ ...item })), ...result];
             return result;
         }
-        async runDelegations(action, request, preset, context, ledger, budget, chat, snapshot) {
+        async runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies) {
             const waveLimit = resolveWaveLimit_ACU(request.settings, budget);
             const outcomesBefore = ledger.outcomes.length;
             const outlineDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU);
@@ -106755,7 +106842,8 @@ $CONTENT
                     continue;
                 }
                 if (accepted.length >= waveLimit) {
-                    const why = waveLimit === 1 && request.settings.apiPresetMode === 'current'
+                    const hasCurrentChannel = SUBAGENT_PRESET_ROLES_ACU.some(role => effectiveAgentApiPresetMode_ACU(request.settings, role) === 'current');
+                    const why = waveLimit === 1 && hasCurrentChannel
                         ? '当前跟随活动 API，同一波次只能派工 1 个子代理'
                         : `同一波次并发上限为 ${waveLimit} 个`;
                     ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `${why}，本次未执行，可在下一次迭代重派` });
@@ -106765,12 +106853,15 @@ $CONTENT
             }
             const settled = await Promise.all(accepted.map(async (delegation) => {
                 try {
+                    // 每个子代理按自己的渠道角色解析；渠道解析失败会成为该派工的拒绝结果回喂给主 Agent。
+                    const definition = findAgentSubagentDefinition_ACU(delegation.agentName);
+                    const delegationPreset = this.dependencies.resolveApiPreset(request.settings, definition?.promptKey ?? 'main', 'agent_delegate', apiDependencies);
                     const result = await this.dependencies.subagentRuntime.run({
                         delegation,
                         settings: request.settings,
                         resolveContext: context,
                         budget,
-                        preset,
+                        preset: delegationPreset,
                         // attemptId 必须原样保留：轮次一致性校验按它比对，改写会让所有子代理请求被判失效。
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
@@ -107176,6 +107267,30 @@ $CONTENT
                 catch {
                     // No safe write remains after a stale or persistence failure.
                 }
+                return;
+            }
+            await this.autoContinueAfterTurn_ACU();
+        }
+        /**
+         * 一轮正文确认成功后的自动续写：等待轮次延迟后自动触发下一轮，
+         * 与正文重试自动链同构。资格在延迟前后各读一次——用户可能在延迟期间停止任务。
+         * continueTask 的失败已由 orchestrator 落为 paused+lastError，这里不再改写状态。
+         */
+        async autoContinueAfterTurn_ACU() {
+            const runtime = this.dependencies.runtime;
+            const state = runtime.readAutoContinueState();
+            if (!state.eligible)
+                return;
+            await this.dependencies.wait(state.delaySeconds * 1000);
+            if (!runtime.readAutoContinueState().eligible)
+                return;
+            try {
+                const result = await runtime.continueTask();
+                if (result.preparedTurn)
+                    await this.send(result.preparedTurn);
+            }
+            catch {
+                // 状态已由 orchestrator 记录（paused+lastError 或拒绝原因），自动链到此为止。
             }
         }
         async resolveMessageIndex_ACU(eventMessageId, capture, chatIdentity) {
@@ -107237,6 +107352,8 @@ $CONTENT
                 getChat,
                 getGenerationSequence: () => 0,
                 readPendingHostTurn: () => orchestrator.readPendingHostTurn(),
+                readAutoContinueState: () => orchestrator.readAutoContinueState(),
+                continueTask: () => orchestrator.continueTask(),
                 retryCurrentTurn: () => orchestrator.retryCurrentTurn(),
                 recordHostTurn: input => orchestrator.recordHostTurn(input),
                 bindHostTurnGeneration: (identity, generationSeq) => orchestrator.bindHostTurnGeneration(identity, generationSeq),
@@ -148463,6 +148580,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return { entries, running };
     }
 
+    const INHERIT_CHANNEL_VALUE = '__inherit__';
     /** 取出指定提示词组的数组。大纲组在设置根层，五组 Agent 提示词在 agentPrompts 下。 */
     var _sfc_main$l = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationPage',
@@ -148515,11 +148633,52 @@ Expected function or array of functions, received type ${typeof value}.`
                 { value: 'user', label: 'USER' },
                 { value: 'assistant', label: 'ASSISTANT' },
             ];
+            /** 渠道下拉里「跟随全局默认」的哨兵值：空串已被「跟随当前活动 API」占用。 */
+            const agentChannelRoles = [
+                { role: 'main', label: '主 Agent' },
+                { role: 'outline', label: '大纲子代理' },
+                { role: 'maintainer', label: '伏笔与认知维护' },
+                { role: 'mainlinePlanner', label: '主线推进策划' },
+                { role: 'beatPlanner', label: '伏笔与节拍策划' },
+                { role: 'reviewer', label: '连续性审查' },
+            ];
+            const agentChannelOptions = computed(() => [
+                { value: INHERIT_CHANNEL_VALUE, label: '跟随全局默认' },
+                ...continuationApiPresetOptions.value,
+            ]);
+            function agentChannelValue(role) {
+                const choice = settingsDraft.value?.agentApiPresets?.[role];
+                if (!choice || choice.mode === 'inherit')
+                    return INHERIT_CHANNEL_VALUE;
+                return choice.mode === 'fixed' ? choice.presetName : '';
+            }
+            function applyAgentChannel(role, value) {
+                if (!settingsDraft.value)
+                    return;
+                const trimmed = String(value ?? '').trim();
+                if (trimmed === INHERIT_CHANNEL_VALUE) {
+                    settingsDraft.value.agentApiPresets[role] = { mode: 'inherit', presetName: '' };
+                }
+                else if (trimmed) {
+                    settingsDraft.value.agentApiPresets[role] = { mode: 'fixed', presetName: trimmed };
+                }
+                else {
+                    settingsDraft.value.agentApiPresets[role] = { mode: 'current', presetName: '' };
+                }
+            }
             function cloneSettings(settings) {
                 return {
                     ...settings,
                     contextExtractRules: settings.contextExtractRules.map(rule => ({ ...rule })),
                     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
+                    agentApiPresets: {
+                        main: { ...settings.agentApiPresets.main },
+                        outline: { ...settings.agentApiPresets.outline },
+                        maintainer: { ...settings.agentApiPresets.maintainer },
+                        mainlinePlanner: { ...settings.agentApiPresets.mainlinePlanner },
+                        beatPlanner: { ...settings.agentApiPresets.beatPlanner },
+                        reviewer: { ...settings.agentApiPresets.reviewer },
+                    },
                     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
                     agentPrompts: {
                         main: settings.agentPrompts.main.map(segment => ({ ...segment })),
@@ -148600,6 +148759,11 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 if (normalized.apiPresetMode === 'fixed' && !normalized.fixedApiPresetName.trim())
                     throw new Error('固定 API 预设名称不能为空');
+                for (const channel of agentChannelRoles) {
+                    const choice = normalized.agentApiPresets[channel.role];
+                    if (choice.mode === 'fixed' && !choice.presetName.trim())
+                        throw new Error(`${channel.label} 的固定渠道必须选择预设`);
+                }
                 return normalized;
             }
             async function saveSettings() {
@@ -148659,14 +148823,14 @@ Expected function or array of functions, received type ${typeof value}.`
             watch(useChatChangedTick(), runtime.refresh);
             watch(runtime.settings, settings => { settingsDraft.value = settings ? cloneSettings(settings) : null; }, { immediate: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, session, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, replacementInstruction, confirmAbandon, replanInstruction, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, replan, abandonAndCreate, requiredInteger, normalizeSettingsDraft, saveSettings, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationSessionFeed };
+            const __returned__ = { runtime, session, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, replacementInstruction, confirmAbandon, replanInstruction, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, replan, abandonAndCreate, requiredInteger, normalizeSettingsDraft, saveSettings, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationSessionFeed };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-945b1ab6] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__actions[data-v-945b1ab6] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__status-grid[data-v-945b1ab6] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0;\n}\n.acu-v2-continuation-page__status-grid div[data-v-945b1ab6] { border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent); padding-left: 10px;\n}\n.acu-v2-continuation-page__status-grid dt[data-v-945b1ab6] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__status-grid dd[data-v-945b1ab6] { margin: 3px 0 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-page__instruction[data-v-945b1ab6], .acu-v2-continuation-page__notice[data-v-945b1ab6] { margin: 14px 0 0; color: var(--acu-text-2); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__notice[data-v-945b1ab6] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-page__error[data-v-945b1ab6] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-945b1ab6] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__stage[data-v-945b1ab6], .acu-v2-continuation-page__revision[data-v-945b1ab6] { margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-page__stage > summary[data-v-945b1ab6], .acu-v2-continuation-page__revision > summary[data-v-945b1ab6] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__outline[data-v-945b1ab6], .acu-v2-continuation-page__timeline[data-v-945b1ab6] { display: grid; gap: 8px; padding-left: 22px; color: var(--acu-text-2);\n}\n.acu-v2-continuation-page__settings-grid[data-v-945b1ab6] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-945b1ab6] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-945b1ab6] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-945b1ab6] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-945b1ab6] { padding: 14px;\n}\n.acu-v2-continuation-page__status-grid[data-v-945b1ab6] { grid-template-columns: repeat(2, minmax(0, 1fr));\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-945b1ab6] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-945b1ab6");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_945b1ab6_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-ab05ce1d] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__actions[data-v-ab05ce1d] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__status-grid[data-v-ab05ce1d] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0;\n}\n.acu-v2-continuation-page__status-grid div[data-v-ab05ce1d] { border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent); padding-left: 10px;\n}\n.acu-v2-continuation-page__status-grid dt[data-v-ab05ce1d] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__status-grid dd[data-v-ab05ce1d] { margin: 3px 0 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-page__instruction[data-v-ab05ce1d], .acu-v2-continuation-page__notice[data-v-ab05ce1d] { margin: 14px 0 0; color: var(--acu-text-2); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__notice[data-v-ab05ce1d] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-page__error[data-v-ab05ce1d] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-ab05ce1d] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__stage[data-v-ab05ce1d], .acu-v2-continuation-page__revision[data-v-ab05ce1d] { margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-page__stage > summary[data-v-ab05ce1d], .acu-v2-continuation-page__revision > summary[data-v-ab05ce1d] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__outline[data-v-ab05ce1d], .acu-v2-continuation-page__timeline[data-v-ab05ce1d] { display: grid; gap: 8px; padding-left: 22px; color: var(--acu-text-2);\n}\n.acu-v2-continuation-page__settings-grid[data-v-ab05ce1d] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-ab05ce1d] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-ab05ce1d] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-ab05ce1d] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-ab05ce1d] { padding: 14px;\n}\n.acu-v2-continuation-page__status-grid[data-v-ab05ce1d] { grid-template-columns: repeat(2, minmax(0, 1fr));\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-ab05ce1d] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-ab05ce1d");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_ab05ce1d_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-continuation-page" };
     const _hoisted_2$j = { class: "acu-v2-continuation-page__actions" };
@@ -149216,7 +149380,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					}),
-					createVNode($setup["AcuFormRow"], { label: "API 预设" }, {
+					createVNode($setup["AcuFormRow"], { label: "API 预设（全局默认）" }, {
 						default: withCtx(() => [createVNode($setup["AcuSelect"], {
 							options: $setup.continuationApiPresetOptions,
 							"model-value": $setup.continuationApiPresetValue,
@@ -149228,7 +149392,30 @@ Expected function or array of functions, received type ${typeof value}.`
 							"placeholder"
 						])]),
 						_: 1
-					})
+					}),
+					(openBlock(), createElementBlock(
+						Fragment,
+						null,
+						renderList($setup.agentChannelRoles, (channel) => {
+							return createVNode($setup["AcuFormRow"], {
+								key: channel.role,
+								label: `渠道 · ${channel.label}`
+							}, {
+								default: withCtx(() => [createVNode($setup["AcuSelect"], {
+									options: $setup.agentChannelOptions,
+									"model-value": $setup.agentChannelValue(channel.role),
+									"onUpdate:modelValue": (value) => $setup.applyAgentChannel(channel.role, value)
+								}, null, 8, [
+									"options",
+									"model-value",
+									"onUpdate:modelValue"
+								])]),
+								_: 2
+							}, 1032, ["label"]);
+						}),
+						64
+						/* STABLE_FRAGMENT */
+					))
 				]),
 				createBaseVNode("div", _hoisted_18$5, [createVNode($setup["AcuCheckbox"], {
 					modelValue: $setup.settingsDraft.outlinePreview,
@@ -149455,7 +149642,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-945b1ab6"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-ab05ce1d"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
