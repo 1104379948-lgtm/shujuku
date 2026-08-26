@@ -1,6 +1,6 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V8_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU } from './defaults';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
 import { CONTINUATION_AGENT_PROMPT_KEYS_ACU } from './model';
 import { resolveContinuationTurnRange_ACU, validateStageOutline_ACU } from './outline-schema';
@@ -114,10 +114,10 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   let outlinePrompt = raw.outlinePrompt;
   let agentPrompts = raw.agentPrompts;
   let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V8_ACU) {
+  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V8_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU;
   }
   
   return {

@@ -202,10 +202,12 @@ export class ContinuationOrchestrator_ACU {
         const previous = revision.reason === 'manual_replan'
           ? stage.revisions.find(item => item.revision === revision.revision - 1)
           : null;
+        const candidateOutline = cloneOutline_ACU(input.outline ?? revision.outline);
+        // 剩余轮数额度已放宽：按候选大纲的实际轮数复核，前缀保护仍以上一 revision 为基准。
         const constraints = previous
-          ? { previousOutline: previous.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: previous.outline.totalTurns - stage.completedTurns }
+          ? { previousOutline: previous.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: candidateOutline.nodes.reduce((sum, node) => sum + node.turns.length, 0) - stage.completedTurns }
           : undefined;
-        const accepted = acceptPlannedStageRevision_ACU({ ...revision, outline: cloneOutline_ACU(input.outline ?? revision.outline) }, envelope.settings, constraints);
+        const accepted = acceptPlannedStageRevision_ACU({ ...revision, outline: candidateOutline }, envelope.settings, constraints);
         const now = this.dependencies.now();
         const nextStage = { ...stage, status: 'running' as const, revisions: stage.revisions.map(item => item.revision === accepted.revision ? accepted : item) };
         result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item) } };
@@ -616,7 +618,9 @@ export class ContinuationOrchestrator_ACU {
       }
       const at = this.dependencies.now();
       const pending = createPlannedStageRevision_ACU(cloneOutline_ACU(planned.outline), nextRevisionNumber, 'manual_replan', instruction, at);
-      const accepted = planned.requiresReview ? pending : acceptPlannedStageRevision_ACU(pending, env.settings, constraints);
+      // 剩余轮数额度已放宽：复核约束按规划结果的实际轮数重建，前缀保护仍以旧大纲为基准。
+      const acceptConstraints: ContinuationReplanConstraints_ACU = { previousOutline: current.outline, completedTurns: stage.completedTurns, expectedRemainingTurns: planned.outline.totalTurns - stage.completedTurns };
+      const accepted = planned.requiresReview ? pending : acceptPlannedStageRevision_ACU(pending, env.settings, acceptConstraints);
       const nextStage = { ...activeStage, status: (planned.requiresReview ? 'awaiting_review' : 'running') as ContinuationStage_ACU['status'], activeRevision: nextRevisionNumber, revisions: [...activeStage.revisions, accepted] };
       result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: at, lastError: null, stages: t.stages.map(item => item.stageId === nextStage.stageId ? nextStage : item), timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStage.stageId, revision: nextRevisionNumber })] } };
       return result;
@@ -652,6 +656,7 @@ export class ContinuationOrchestrator_ACU {
       reason: context.reason,
       replanInstruction: context.replanInstruction,
       replanConstraints,
+      allocateId: this.dependencies.allocateId,
       resolvers: this.dependencies.createOutlineResolvers(context),
       createInternalRequestIdentity: attempt => ({ source: 'outline', requestId: this.dependencies.allocateId('outline-request'), chatIdentity, taskId: context.task.taskId, stageId, revision, attemptId: `outline-${attempt}` }),
       isInternalRequestCurrent: identity => this.isLeaseCurrent_ACU(chatIdentity, lease) && identity.chatIdentity === chatIdentity && identity.taskId === context.task.taskId && identity.stageId === stageId && identity.revision === revision,

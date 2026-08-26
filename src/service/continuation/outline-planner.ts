@@ -2,6 +2,7 @@ import { callContinuationInternalAi_ACU } from './internal-ai-call';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from './defaults';
 import { resolveContinuationApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from './api-preset';
 import { validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutline_ACU } from './outline-schema';
+import { buildStageOutlineFromTags_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from './outline-tags';
 import { renderContinuationPrompt_ACU, type ContinuationPromptPlaceholder_ACU } from './prompt-template';
 import {
   ContinuationValidationError_ACU,
@@ -20,6 +21,8 @@ export interface ContinuationOutlinePlanningRequest_ACU {
   reason: ContinuationRevisionReason_ACU;
   createInternalRequestIdentity: (attempt: number) => ContinuationInternalAiRequestIdentity_ACU & { source: 'outline' };
   isInternalRequestCurrent: (identity: ContinuationInternalAiRequestIdentity_ACU) => boolean;
+  /** node/turn 的 ID 分配器。模型不再输出 id，结构标识全部由运行时生成。 */
+  allocateId: (prefix: string) => string;
   replanInstruction?: string;
   replanConstraints?: ContinuationReplanConstraints_ACU;
   resolvers?: Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
@@ -48,7 +51,8 @@ function toPlannerError_ACU(error: unknown): ContinuationError_ACU {
 }
 
 function compactValidationError_ACU(error: ContinuationError_ACU): string {
-  return `${error.code}@${error.phase}`;
+  // 附上 message：标签口径下剩余的校验错误（轮数超范围、goal 为空）只有带原因模型才能自愈。
+  return `${error.code}@${error.phase}: ${error.message}`;
 }
 
 function isRetryableOutlineError_ACU(error: ContinuationError_ACU): boolean {
@@ -58,16 +62,6 @@ function isRetryableOutlineError_ACU(error: ContinuationError_ACU): boolean {
     || error.code === 'CONTINUATION_REPLAN_REMAINING_TURNS_MISMATCH';
 }
 
-function parseOutlinePayload_ACU(raw: string): unknown {
-  if (typeof raw !== 'string' || !raw.trim()) {
-    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_OUTLINE_JSON_INVALID', 'outline_parse', '阶段大纲返回为空或不是 JSON 对象', true));
-  }
-  try {
-    return JSON.parse(raw);
-  } catch {
-    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_OUTLINE_JSON_INVALID', 'outline_parse', '阶段大纲必须是单一严格 JSON 对象', true));
-  }
-}
 
 export class ContinuationOutlinePlanner_ACU {
   constructor(private readonly dependencies: ContinuationOutlinePlannerDependencies_ACU = defaultDependencies_ACU) {}
@@ -92,10 +86,15 @@ export class ContinuationOutlinePlanner_ACU {
         if (!isCurrent(identity)) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
         }
-        const payload = parseOutlinePayload_ACU(raw);
-        const outline = request.replanConstraints
-          ? validateReplannedStageOutline_ACU(payload, range, request.replanConstraints)
-          : validateStageOutline_ACU(payload, range);
+        const constraints = request.replanConstraints;
+        const parsed = parseOutlineTags_ACU(raw);
+        const built = buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? { title: constraints.previousOutline.title, goal: constraints.previousOutline.goal } : undefined);
+        // 重规划：模型只规划剩余轮次，已完成前缀由运行时拼回；剩余轮数额度放宽，
+        // 只要求拼接后 totalTurns 落在阶段规模范围内（校验按实际拼接结果传额度）。
+        const candidate = constraints ? spliceOutlineWithCompletedPrefix_ACU(constraints.previousOutline, constraints.completedTurns, built) : built;
+        const outline = constraints
+          ? validateReplannedStageOutline_ACU(candidate, range, { ...constraints, expectedRemainingTurns: candidate.totalTurns - constraints.completedTurns })
+          : validateStageOutline_ACU(candidate, range);
         return { outline, attempts: attempt + 1, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason }, requiresReview: request.settings.outlinePreview };
       } catch (error) {
         lastError = toPlannerError_ACU(error);

@@ -145,7 +145,7 @@ describe('Continuation defaults', () => {
     expect(first.maxAutomaticStages).toBe(6);
     expect(first.internalAiRetryLimit).toBe(3);
     expect(first.apiPresetMode).toBe('current');
-    expect(first.outlinePrompt[0].content).toContain('严格的 JSON 对象');
+    expect(first.outlinePrompt[0].content).toContain('<stage_title>');
     expect(first.agentPrompts.main[0].content).toContain('主控 Agent');
     expect(first.agentPrompts.maintainer[0].content).toContain('伏笔与认知维护子代理');
     expect(first.agentPrompts.mainlinePlanner[0].content).toContain('主线推进策划子代理');

@@ -58,14 +58,25 @@ function previousStages_ACU(task: ContinuationTask_ACU, activeStage: Continuatio
   return task.stages.filter(stage => stage.stageNumber < activeStage.stageNumber && stage.status === 'completed');
 }
 
+/** 已完成前缀渲染为可读文本（不用 JSON，避免诱导模型输出 JSON 而非大纲标签）。 */
 function completedPrefix_ACU(stage: ContinuationStage_ACU | null, revision: StageRevision_ACU | null): string {
   if (!stage || !revision || stage.completedTurns <= 0) return '';
   let remaining = stage.completedTurns;
-  return JSON.stringify(revision.outline.nodes.flatMap(node => {
-    const turns = node.turns.slice(0, Math.max(0, Math.min(remaining, node.turns.length)));
+  let turnNumber = 0;
+  const parts: string[] = [];
+  for (const node of revision.outline.nodes) {
+    if (remaining <= 0) break;
+    const turns = node.turns.slice(0, Math.min(remaining, node.turns.length));
     remaining -= turns.length;
-    return turns.length ? [{ id: node.id, title: node.title, goal: node.goal, turns }] : [];
-  }));
+    if (!turns.length) continue;
+    const lines = [`节点「${node.title}」：${node.goal}`];
+    for (const turn of turns) {
+      turnNumber += 1;
+      lines.push(`已完成第 ${turnNumber} 轮：${turn.goal}`);
+    }
+    parts.push(lines.join('\n'));
+  }
+  return parts.join('\n\n');
 }
 
 function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage_ACU | null, revision: StageRevision_ACU | null, worldbook: ContinuationWorldbookContext_ACU, current?: ContinuationExecutionSnapshot_ACU): Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string>>> {

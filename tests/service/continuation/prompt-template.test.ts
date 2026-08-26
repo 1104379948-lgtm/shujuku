@@ -79,7 +79,7 @@ describe('continuation prompt templates', () => {
     settings.agentPrompts.reviewer = [{ role: 'user', content: 'custom reviewer', deletable: true }];
     const restoredOutline = restoreContinuationPromptDefault_ACU(settings, 'outline');
 
-    expect(restoredOutline.outlinePrompt[0].content).toContain('严格的 JSON 对象');
+    expect(restoredOutline.outlinePrompt[0].content).toContain('<stage_title>');
     expect(restoredOutline.agentPrompts.main[0].content).toBe('custom main');
     expect(restoredOutline.agentPrompts.reviewer[0].content).toBe('custom reviewer');
     expect(restoredOutline).toMatchObject({ apiPresetMode: 'current', maxAutomaticStages: 6 });
