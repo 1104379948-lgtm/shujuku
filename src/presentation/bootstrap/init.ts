@@ -26,6 +26,7 @@ import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSumm
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
 import { topLevelWindow_ACU } from '../../shared/env';
+import { getUiSurface_ACU, showUiSurfaceToast_ACU } from '../../shared/ui-surface-registry';
 import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
 import { bindContinuationInternalAiGenerationStarted_ACU, consumeContinuationInternalAiGenerationEnded_ACU } from '../../service/continuation/internal-ai-events';
 import { getContinuationHostGenerationBridge_ACU } from '../../service/continuation/host-generation-bridge-registry';
@@ -250,6 +251,9 @@ export   function mainInitialize_ACU() {
 
           // 稍作延迟以确保SillyTavern已完全加载新聊天的消息列表
           setTimeout(async () => {
+           // C5 加载失败可见化：三层兼容读取全部失败的真损坏数据才会走到这里的
+           // catch——不再静默空表，弹可操作的错误提示。
+           try {
              if (scheduledChatIdentifier_ACU && currentChatFileIdentifier_ACU !== scheduledChatIdentifier_ACU) {
                  logDebug_ACU(`ACU: Skip delayed chat refresh because active chat already changed to "${currentChatFileIdentifier_ACU || '未知'}".`);
                  return;
@@ -338,6 +342,18 @@ export   function mainInitialize_ACU() {
             }
             
             logDebug_ACU('ACU: Chat data reload and UI refresh triggered after chat change (Delayed).');
+           } catch (chatChangedError) {
+             const message = chatChangedError instanceof Error ? chatChangedError.message : String(chatChangedError);
+             logError_ACU('ACU: CHAT_CHANGED 延迟刷新失败（已尝试全部兼容读取层）:', chatChangedError);
+             showUiSurfaceToast_ACU({
+               kind: 'error',
+               text: `表格数据加载失败：${message}`,
+               action: {
+                 label: '打开数据管理',
+                 onClick: async () => { await getUiSurface_ACU()?.openSettings?.(); },
+               },
+             });
+           }
          }, 1200); // 增加延迟到1200ms，给SillyTavern更多的DOM渲染和上下文切换时间
         });
 
@@ -644,10 +660,28 @@ export   function mainInitialize_ACU() {
           }
       };
 
+      // C5 加载失败可见化：初始加载与 CHAT_CHANGED 同级兜底，不允许静默空表。
+      const initWithChatIdSafely = async (chatId: string) => {
+          try {
+              await initWithChatId(chatId);
+          } catch (initError) {
+              const message = initError instanceof Error ? initError.message : String(initError);
+              logError_ACU('ACU: 初始加载表格数据失败（已尝试全部兼容读取层）:', initError);
+              showUiSurfaceToast_ACU({
+                  kind: 'error',
+                  text: `表格数据加载失败：${message}`,
+                  action: {
+                      label: '打开数据管理',
+                      onClick: async () => { await getUiSurface_ACU()?.openSettings?.(); },
+                  },
+              });
+          }
+      };
+
       if (SillyTavern_API_ACU && SillyTavern_API_ACU.chatId) {
           // chatId 已可用，延迟初始化
           setTimeout(async () => {
-              await initWithChatId(SillyTavern_API_ACU!.chatId);
+              await initWithChatIdSafely(SillyTavern_API_ACU!.chatId);
           }, 1000);
       } else {
           // chatId 暂时不可用，启动轮询重试（每200ms检查一次，最多等15秒）
@@ -660,7 +694,7 @@ export   function mainInitialize_ACU() {
               if (chatId) {
                   clearInterval(pollTimer);
                   logDebug_ACU(`ACU: chatId became available after ${pollCount * 200}ms polling: ${chatId}`);
-                  await initWithChatId(chatId);
+                  await initWithChatIdSafely(chatId);
               } else if (pollCount >= maxPolls) {
                   clearInterval(pollTimer);
                   logWarn_ACU(`ACU: chatId still not available after ${maxPolls * 200}ms polling. Waiting for CHAT_CHANGED event.`);

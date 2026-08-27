@@ -26,6 +26,7 @@ import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
 import { applyGuideMetadataToSheet_ACU, isSameSheetHeader_ACU } from '../template/guide-metadata-overlay';
 import { repairLegacyAutoMergedRowTails_ACU } from '../../shared/canonical-row-normalizer';
+import { showUiSurfaceToast_ACU } from '../../shared/ui-surface-registry';
 
 /**
  * Legacy entry point retained for callers that need in-place normalization.
@@ -447,6 +448,27 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
   }
 
 
+  /** 每个「聊天标识+隔离键」只弹一次直读降级提示，避免每次合并都打扰用户。 */
+  const notifiedLegacyDirectReadFallbacks_ACU = new Set<string>();
+
+  function notifyLegacyDirectReadFallbackOnce_ACU(isolationKey: string, reason: string): void {
+      const chatIdentity = (() => {
+          try {
+              const chat = getChatArray_ACU();
+              return Array.isArray(chat) ? `len:${chat.length}:${String(chat[0]?.send_date ?? '')}` : 'no-chat';
+          } catch (_) {
+              return 'no-chat';
+          }
+      })();
+      const key = `${chatIdentity}|${isolationKey}`;
+      if (notifiedLegacyDirectReadFallbacks_ACU.has(key)) return;
+      notifiedLegacyDirectReadFallbacks_ACU.add(key);
+      showUiSurfaceToast_ACU({
+          kind: 'warning',
+          text: `旧格式表格数据已按兼容模式直读（数据可用）。自动升级暂未完成：${reason}`,
+      });
+  }
+
   export async function mergeAllIndependentTables_ACU() {
       const chat = getChatArray_ACU();
       if (!chat || chat.length === 0) {
@@ -491,29 +513,41 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
 
       if (strategy.mode === 'legacy-v1') {
           const mergedLegacyData = await mergeAllIndependentTablesLegacyV1_ACU();
-          const migrationResult = await migrateLegacyStorageToV2OnLoad_ACU({
-              data: mergedLegacyData,
-              isolationKey: currentIsolationKey,
-              isolationConfig: {
+          try {
+              const migrationResult = await migrateLegacyStorageToV2OnLoad_ACU({
+                  data: mergedLegacyData,
+                  isolationKey: currentIsolationKey,
+                  isolationConfig: {
+                      enabled: settings_ACU.dataIsolationEnabled,
+                      code: settings_ACU.dataIsolationCode,
+                  },
+                  skipUpdateFloors: settings_ACU.skipUpdateFloors,
+              });
+              if (!migrationResult.migrated) {
+                  throw new Error(`旧存储迁移到 V2 失败: ${migrationResult.error || '未执行迁移'}`);
+              }
+              if (!migrationResult.data) {
+                  throw new Error('旧存储迁移到 V2 失败: 迁移成功结果缺少修复后的表格数据。');
+              }
+              const postStrategy = resolveTableStorageStrategy_ACU(chat, currentIsolationKey, {
                   enabled: settings_ACU.dataIsolationEnabled,
                   code: settings_ACU.dataIsolationCode,
-              },
-              skipUpdateFloors: settings_ACU.skipUpdateFloors,
-          });
-          if (!migrationResult.migrated) {
-              throw new Error(`旧存储迁移到 V2 失败: ${migrationResult.error || '未执行迁移'}`);
+              });
+              if (postStrategy.mode !== 'v2') {
+                  throw new Error(`旧存储迁移后二次校验失败：当前模式=${postStrategy.mode}${postStrategy.mode === 'legacy-v1' ? `，reason=${postStrategy.reason}` : ''}`);
+              }
+              return migrateContentNullToRowId(migrationResult.data);
+          } catch (migrationError) {
+              // C4 读取不阻塞：迁移失败（audit 不可修、mixed 阻断、provenance 非法等）
+              // 时不再 throw——降级为 xing/7.9 之前的直读合并结果，数据照常可用。
+              // 迁移待决已由 migrateLegacyStorageToV2OnLoad_ACU 内部登记（mixed 场景走
+              // registerMixedStorageDecision_ACU 通道）；写入门闸
+              // ensureLegacyStorageMigratedBeforeWrite_ACU 维持严格，写仍要求迁移成功。
+              const message = migrationError instanceof Error ? migrationError.message : String(migrationError);
+              logWarn_ACU(`[TableStorage] 旧存储迁移失败，已降级为直读旧格式（数据可用，写入前仍需完成迁移）：${message}`);
+              notifyLegacyDirectReadFallbackOnce_ACU(currentIsolationKey, message);
+              return migrateContentNullToRowId(mergedLegacyData);
           }
-          if (!migrationResult.data) {
-              throw new Error('旧存储迁移到 V2 失败: 迁移成功结果缺少修复后的表格数据。');
-          }
-          const postStrategy = resolveTableStorageStrategy_ACU(chat, currentIsolationKey, {
-              enabled: settings_ACU.dataIsolationEnabled,
-              code: settings_ACU.dataIsolationCode,
-          });
-          if (postStrategy.mode !== 'v2') {
-              throw new Error(`旧存储迁移后二次校验失败：当前模式=${postStrategy.mode}${postStrategy.mode === 'legacy-v1' ? `，reason=${postStrategy.reason}` : ''}`);
-          }
-          return migrateContentNullToRowId(migrationResult.data);
       }
 
       return migrateContentNullToRowId(await mergeAllIndependentTablesLegacyV1_ACU());

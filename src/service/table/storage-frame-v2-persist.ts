@@ -20,7 +20,7 @@ import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } f
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { parseDDLColumnInfos_ACU } from '../../shared/ddl-utils';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
-import { findLatestSpv79TransitionCheckpoint_ACU } from './spv79-transition-checkpoint';
+import { findLatestTransitionCheckpoint_ACU } from './compat-transition-checkpoint';
 
 export interface TableCheckpointGenerationConfig_ACU {
   maxEntriesAfterCheckpoint: number;
@@ -426,7 +426,7 @@ export function hasAnyV2Checkpoint_ACU(chat: any[], isolationKey: string, maxMes
     const tagData = readIsolatedTagData_ACU(message, isolationKey);
     return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
   });
-  return hasFullCheckpoint || findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey, maxMessageIndex) !== null;
+  return hasFullCheckpoint || findLatestTransitionCheckpoint_ACU(chat, isolationKey, maxMessageIndex) !== null;
 }
 
 function hasAnyV2Frame_ACU(chat: any[], isolationKey: string, maxMessageIndex = chat.length - 1): boolean {

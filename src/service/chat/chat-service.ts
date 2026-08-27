@@ -38,7 +38,7 @@ import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/stora
 import { collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { assertSingleActiveFullCheckpointV2_ACU, frameHasSuffixReplayArtifact_ACU } from '../table/storage-frame-v2-persist';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
-import { findLatestSpv79TransitionCheckpoint_ACU } from '../table/spv79-transition-checkpoint';
+import { findLatestTransitionCheckpoint_ACU } from '../table/compat-transition-checkpoint';
 import { hasActiveProvisionalBridgeAnywhere_ACU, recoverProvisionalBridgeSession_ACU } from '../table/manual-catch-up-provisional-bridge';
 import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../table/storage-frame-v2-types';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
@@ -528,14 +528,15 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
                 && typeof isolatedData === 'object'
                 && !Array.isArray(isolatedData)
                 && Object.values(isolatedData).some(tagData => isV2TagData_ACU(tagData));
-            const hasSpv79TransitionCheckpoint = isolatedData
+            const hasTransitionCheckpoint = isolatedData
                 && typeof isolatedData === 'object'
                 && !Array.isArray(isolatedData)
                 && Object.values(isolatedData).some(tagData => (
                     !!tagData && typeof tagData === 'object'
-                    && (tagData as any).spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition'
+                    && ((tagData as any).spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition'
+                        || (tagData as any).compatTransitionCheckpoint?.kind === 'compat_replay_transition')
                 ));
-            if (messageIndex === anchorIndex || hasV2Frame || hasSpv79TransitionCheckpoint) {
+            if (messageIndex === anchorIndex || hasV2Frame || hasTransitionCheckpoint) {
                 snapshots.set(messageIndex, messageFieldSnapshot_ACU(message));
             }
         });
@@ -779,7 +780,8 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
         if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData)) continue;
         for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
             if (tagData && typeof tagData === 'object'
-                && (tagData as any).spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition') {
+                && ((tagData as any).spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition'
+                    || (tagData as any).compatTransitionCheckpoint?.kind === 'compat_replay_transition')) {
                 isolationKeys.add(isolationKey);
             }
         }
@@ -788,7 +790,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
         const strategy = resolveTableStorageStrategy_ACU(chat, isolationKey, isolationConfig);
         if (strategy.mode !== 'v2') continue;
 
-        const transitionRef = findLatestSpv79TransitionCheckpoint_ACU(chat, isolationKey);
+        const transitionRef = findLatestTransitionCheckpoint_ACU(chat, isolationKey);
         if (transitionRef && boundaryAnchorIndex < transitionRef.messageIndex) {
             // 私有根已经是完整 canonical 状态，且位于本轮保留边界之后；旧历史即使被
             // purge 也不能再反向决定该根是否有效。此轮无需为该隔离域另写更早的 full，
@@ -823,6 +825,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
                 ?.TavernDB_ACU_IsolatedData?.[isolationKey];
             if (candidateTransitionTagData && typeof candidateTransitionTagData === 'object') {
                 delete candidateTransitionTagData.spv79TransitionCheckpoint;
+                delete candidateTransitionTagData.compatTransitionCheckpoint;
             }
             const strictReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
                 maxMessageIndex: boundaryAnchorIndex,
@@ -833,7 +836,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
                 || strictReplay.requiresCheckpointConvergence
                 || strictReplay.compatibilityRepairs?.length
                 || getTableDataFingerprint_ACU(strictReplay.data) !== getTableDataFingerprint_ACU(transitionReplay.data)) {
-                const error = new Error(`边界 checkpoint 收敛失败：已有 compaction full 无法严格替代 SPv7.9 过渡根（isolationKey=[${isolationKey || '无标签'}]）。`) as Error & { failedIsolationKey?: string };
+                const error = new Error(`边界 checkpoint 收敛失败：已有 compaction full 无法严格替代过渡根（isolationKey=[${isolationKey || '无标签'}]）。`) as Error & { failedIsolationKey?: string };
                 error.failedIsolationKey = isolationKey;
                 throw error;
             }
@@ -841,9 +844,10 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
             const transitionTagData = transitionMessage?.TavernDB_ACU_IsolatedData?.[isolationKey];
             if (transitionTagData && typeof transitionTagData === 'object') {
                 delete transitionTagData.spv79TransitionCheckpoint;
+                delete transitionTagData.compatTransitionCheckpoint;
             }
             changed = true;
-            logDebug_ACU(`[V2 Compaction] 已验证既有边界 full 并移除 isolationKey=[${isolationKey || '无标签'}] 的 SPv7.9 过渡根。`);
+            logDebug_ACU(`[V2 Compaction] 已验证既有边界 full 并移除 isolationKey=[${isolationKey || '无标签'}] 的过渡根。`);
             continue;
         }
 
@@ -960,6 +964,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
                     ?.TavernDB_ACU_IsolatedData?.[isolationKey];
                 if (candidateTransitionTagData && typeof candidateTransitionTagData === 'object') {
                     delete candidateTransitionTagData.spv79TransitionCheckpoint;
+                    delete candidateTransitionTagData.compatTransitionCheckpoint;
                 }
             }
             const strictReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
@@ -987,6 +992,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
             const transitionTagData = transitionMessage?.TavernDB_ACU_IsolatedData?.[isolationKey];
             if (transitionTagData && typeof transitionTagData === 'object') {
                 delete transitionTagData.spv79TransitionCheckpoint;
+                delete transitionTagData.compatTransitionCheckpoint;
             }
         }
         changed = true;
