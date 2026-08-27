@@ -246,14 +246,17 @@ export class ContinuationOrchestrator_ACU {
     });
   }
 
+  /**
+   * 替换续写设置。任务运行中也允许保存：设置在每轮规划开始时才被重新读取，
+   * 落盘发生在轮与轮之间不会影响在途生成；Agent 正在规划时租约互斥会以
+   * CONTINUATION_OPERATION_BUSY 拒绝，调用方稍后重试即可。与现有任务冲突的
+   * 修改（如阶段规模与已冻结大纲不符）由信封候选校验 fail-closed 拒绝。
+   */
   async replaceSettings(input: ReplaceContinuationSettingsInput_ACU): Promise<ContinuationEnvelope_ACU> {
     return this.withLease_ACU(async chatIdentity => {
       let result: ContinuationEnvelope_ACU | null = null;
       await this.dependencies.store.updatePersistedAtomically(current => {
         const envelope = this.requireEnvelope_ACU(current);
-        if (envelope.activeTask?.status === 'running' || envelope.activeTask?.status === 'stopping_after_inflight') {
-          fail_ACU('CONTINUATION_OPERATION_BUSY', '宿主生成进行中，不能修改智能续写设置');
-        }
         result = { ...envelope, settings: input.settings };
         return result;
       }, { chatIdentity });

@@ -273,8 +273,8 @@ export class ContinuationAgentTurnPlanner_ACU {
         : context.execution.turn?.goal ?? '本轮目标待大纲确定',
       resumedState !== null,
     );
-    // 会话必须在 beginAgentSessionRun_ACU 之后打开：新运行会清空会话流，
-    // 压缩通知若先于它记录就会被清掉，用户再也看不到「历史被压缩过」这件事。
+    // 会话在 beginAgentSessionRun_ACU 之后打开：压缩/阈值通知按时间顺序
+    // 落在本次运行的分隔条之后，用户能看出它属于哪一次运行。
     const session = await this.openConversation_ACU(chat, request, cursorKeyOf());
     // 换轮通告只在游标真的变了时追加：同一轮内的中断恢复不重复通告，否则模型会以为又开了一轮。
     if (session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) !== session.turnKey) {

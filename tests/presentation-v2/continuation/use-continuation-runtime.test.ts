@@ -144,12 +144,29 @@ describe('useContinuationRuntime', () => {
     const settings = { stageSize: 'standard' } as any;
     const outline = { schemaVersion: 1, title: '阶段', goal: '目标', totalTurns: 6, nodes: [] } as any;
 
-    await continuation.saveSettings(settings);
+    await expect(continuation.saveSettings(settings)).resolves.toBe('saved');
     await continuation.acceptOutline(outline);
 
     expect(harness.replaceSettings).toHaveBeenCalledWith({ settings });
     expect(harness.acceptOutline).toHaveBeenCalledWith({ outline });
     expect(harness.bridgeSend).not.toHaveBeenCalled();
+  });
+
+  it('设置保存遇到操作互斥时返回 busy 且不弹错误吐司，其他错误返回 failed 并吐司', async () => {
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const { ContinuationValidationError_ACU, createContinuationError_ACU } = await import('../../../src/service/continuation/model');
+    const continuation = useContinuationRuntime();
+    const settings = { stageSize: 'standard' } as any;
+
+    harness.replaceSettings.mockRejectedValueOnce(new ContinuationValidationError_ACU(
+      createContinuationError_ACU('CONTINUATION_OPERATION_BUSY', 'persist', '当前聊天已有智能续写操作正在执行', false),
+    ));
+    await expect(continuation.saveSettings(settings)).resolves.toBe('busy');
+    expect(harness.toastError).not.toHaveBeenCalled();
+
+    harness.replaceSettings.mockRejectedValueOnce(new Error('持久化失败'));
+    await expect(continuation.saveSettings(settings)).resolves.toBe('failed');
+    expect(harness.toastError).toHaveBeenCalled();
   });
 
   it('会话发送：空白不派发，编排器要求继续时紧接着跑一轮', async () => {

@@ -13,14 +13,17 @@ import {
 beforeEach(() => { resetAgentSessionLogForTests_ACU(); });
 
 describe('Agent 会话日志', () => {
-  it('新一次运行清空上一次会话并置运行标记', () => {
+  it('新一次运行不清空既有记录，只追加分隔条并置运行标记', () => {
     beginAgentSessionRun_ACU('第 1 阶段 · 第 1/6 轮');
     logAgentSession_ACU({ kind: 'main_action', title: '迭代 1 · 派工 2 项' });
     beginAgentSessionRun_ACU('第 1 阶段 · 第 2/6 轮', '推进');
 
+    // 会话流是滚动累积的：自动续写每轮开新运行，清空会让界面每轮塌缩重来。
     const entries = readAgentSessionLog_ACU();
-    expect(entries).toHaveLength(1);
-    expect(entries[0]).toMatchObject({ kind: 'run_started', title: '第 1 阶段 · 第 2/6 轮', detail: '推进', ok: true });
+    expect(entries).toHaveLength(3);
+    expect(entries[0]).toMatchObject({ kind: 'run_started', title: '第 1 阶段 · 第 1/6 轮' });
+    expect(entries[1]).toMatchObject({ kind: 'main_action', title: '迭代 1 · 派工 2 项' });
+    expect(entries[2]).toMatchObject({ kind: 'run_started', title: '第 1 阶段 · 第 2/6 轮', detail: '推进', ok: true });
     expect(isAgentSessionRunning_ACU()).toBe(true);
   });
 

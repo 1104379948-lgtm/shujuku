@@ -99,16 +99,22 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(task.stages[0].revisions[0].replanInstruction).toBe('按当前要求规划大纲');
   });
 
-  it('persists replacement settings through the first-floor transaction and rejects the running state', async () => {
+  it('persists replacement settings through the first-floor transaction, including while the task is running', async () => {
     const { orchestrator, store } = createOrchestrator();
     const settings = { ...buildDefaultContinuationSettings_ACU(), loopTags: 'required-tag', internalAiRetryLimit: 0 };
 
     await expect(orchestrator.replaceSettings({ settings })).resolves.toMatchObject({ settings });
     expect(store.readPersisted()).toMatchObject({ settings });
 
+    // 任务运行中（等待宿主正文等空档）也允许保存：设置在每轮规划开始时才被重新读取，
+    // 落盘发生在轮与轮之间，不影响在途生成。拒绝保存会让 UI 显示的渠道与实际调用永久脱节。
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    await expectCode(() => orchestrator.replaceSettings({ settings }), 'CONTINUATION_OPERATION_BUSY');
+    expect(store.readPersisted()!.activeTask!.status).toBe('running');
+    const updated = { ...settings, agentHistoryTokenBudget: 12000 };
+    await expect(orchestrator.replaceSettings({ settings: updated })).resolves.toMatchObject({ settings: updated });
+    expect(store.readPersisted()!.settings.agentHistoryTokenBudget).toBe(12000);
+    expect(store.readPersisted()!.activeTask!.status).toBe('running');
   });
 
   it('keeps preview revisions mutable until acceptance and rejects blank task input', async () => {

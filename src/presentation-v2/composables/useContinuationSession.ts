@@ -1,5 +1,6 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import {
+  clearAgentSessionLog_ACU,
   hasAgentSessionEntries_ACU,
   hydrateAgentSessionLog_ACU,
   isAgentSessionRunning_ACU,
@@ -56,6 +57,15 @@ export function useContinuationSession() {
     sync();
   }
 
+  /**
+   * 切换聊天后调用：会话流是全局内存，不清空就会把上一个聊天的记录带进当前聊天。
+   * 先清空再从当前聊天的持久会话重新回灌。
+   */
+  function rehydrate(): void {
+    clearAgentSessionLog_ACU();
+    hydrate();
+  }
+
   onMounted(() => {
     unsubscribe = subscribeAgentSessionLog_ACU(sync);
     hydrate();
@@ -66,5 +76,5 @@ export function useContinuationSession() {
     unsubscribe = null;
   });
 
-  return { entries, running, hydrate };
+  return { entries, running, hydrate, rehydrate };
 }

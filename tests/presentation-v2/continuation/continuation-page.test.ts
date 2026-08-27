@@ -28,7 +28,7 @@ const sendAgentMessage = vi.fn(async () => true);
 const saveActiveOutline = vi.fn(async () => true);
 const clearData = vi.fn(async () => true);
 const acceptOutline = vi.fn(async () => true);
-const saveSettings = vi.fn(async () => true);
+const saveSettings = vi.fn(async () => 'saved' as const);
 const restorePromptDefault = vi.fn((draft: any) => draft);
 
 vi.mock('../../../src/presentation-v2/composables/useContinuationRuntime', () => ({
@@ -269,6 +269,33 @@ describe('ContinuationPage', () => {
       await vi.advanceTimersByTimeAsync(900);
       expect(saveSettings).toHaveBeenCalledOnce();
       expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 24000 });
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Agent 规划占用时保存返回 busy：显示排队提示并自动重试，落盘后提示消失', async () => {
+    vi.useFakeTimers();
+    try {
+      setSettings();
+      setTask('running');
+      saveSettings.mockResolvedValueOnce('busy' as any);
+      const { app, el } = await mountPage();
+
+      const stageSizeSelect = el.querySelector<HTMLSelectElement>('select')!;
+      stageSizeSelect.value = 'short';
+      stageSizeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      await nextTick();
+      await vi.advanceTimersByTimeAsync(900);
+      expect(saveSettings).toHaveBeenCalledOnce();
+      expect(el.textContent).toContain('将在本轮空档自动保存');
+
+      // 第二次重试默认返回 'saved'：改动落盘，排队提示清除。
+      await vi.advanceTimersByTimeAsync(900);
+      expect(saveSettings).toHaveBeenCalledTimes(2);
+      await nextTick();
+      expect(el.textContent).not.toContain('将在本轮空档自动保存');
       app.unmount();
     } finally {
       vi.useRealTimers();

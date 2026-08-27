@@ -74,13 +74,15 @@ function truncateDetail_ACU(text: string): string {
 
 /**
  * 开始一次新的运行。
+ *
+ * 会话流是滚动累积的：新运行只追加一条分隔条目，绝不清空既有记录——
+ * 自动续写每轮都开新运行，若在这里清空，用户看到的界面每轮都会塌缩重来。
+ * 清空只发生在「一键清空」与切换聊天时（clearAgentSessionLog_ACU）。
  * @param label 本次运行的标题，如「第 2 阶段 · 第 3 轮」
  * @param detail 起始说明
- * @param resume 为 true 时保留既有会话记录并写入「恢复运行」条目——
- *               从中断点恢复时用户必须能看到之前已完成的过程；缺省清空重来
+ * @param resume 为 true 时写「恢复运行」分隔（中断点恢复），否则写「开始运行」分隔
  */
 export function beginAgentSessionRun_ACU(label: string, detail = '', resume = false): void {
-  if (!resume) entries_ACU = [];
   running_ACU = true;
   logAgentSession_ACU({ kind: resume ? 'run_resumed' : 'run_started', title: label, detail });
 }

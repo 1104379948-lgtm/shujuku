@@ -44,7 +44,7 @@
         />
       </AcuPanel>
 
-      <AcuPanel v-if="settingsDraft" title="续写设置" description="修改后自动保存并立即生效；宿主生成进行中暂不能保存，生成结束后再修改即可。">
+      <AcuPanel v-if="settingsDraft" title="续写设置" description="修改后自动保存；任务运行中也可以改，改动会在本轮空档落盘、下一轮开始时生效。">
         <div class="acu-v2-continuation-page__settings-grid">
           <AcuFormRow label="阶段规模">
             <select v-model="settingsDraft.stageSize">
@@ -112,6 +112,7 @@
         <AcuRulePairList v-model="settingsDraft.contextExtractRules" label="上下文提取规则" />
         <AcuRulePairList v-model="settingsDraft.contextExcludeRules" label="上下文排除规则" />
         <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
+        <p v-if="settingsNotice" class="acu-v2-continuation-page__meta">{{ settingsNotice }}</p>
       </AcuPanel>
     </AcuPanelGrid>
 
@@ -174,6 +175,7 @@ const settingsDraft = ref<ContinuationSettings_ACU | null>(null);
 const outlineDraft = ref('');
 const outlineDraftError = ref('');
 const settingsError = ref('');
+const settingsNotice = ref('');
 const materialsPanel = ref<InstanceType<typeof ContinuationMaterialsPanel> | null>(null);
 const clock = ref(Date.now());
 let countdownTimer: ReturnType<typeof setInterval> | undefined;
@@ -390,14 +392,22 @@ async function saveSettingsNow(): Promise<void> {
     scheduleSettingsSave();
     return;
   }
+  let candidate: ContinuationSettings_ACU;
   try {
     apiStore.refreshFromSettings();
-    const candidate = normalizeSettingsDraft();
-    if (await runtime.saveSettings(candidate)) {
-      settingsError.value = '';
-    }
+    candidate = normalizeSettingsDraft();
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : '续写设置无效';
+    return;
+  }
+  const outcome = await runtime.saveSettings(candidate);
+  if (outcome === 'saved') {
+    settingsError.value = '';
+    settingsNotice.value = '';
+  } else if (outcome === 'busy') {
+    // Agent 正在规划，改动不能丢：告知用户并排队等空档（如等待宿主正文时）落盘。
+    settingsNotice.value = '设置已修改：Agent 正在运行，将在本轮空档自动保存并于下一轮生效。';
+    scheduleSettingsSave();
   }
 }
 
@@ -442,6 +452,8 @@ function restorePrompt(kind: ContinuationPromptKind_ACU): void {
 function refreshAll(): void {
   apiStore.refreshFromSettings();
   runtime.refresh();
+  // 会话流是全局内存：切聊天必须清空并从新聊天的持久会话回灌，否则显示的是上一个聊天的记录。
+  session.rehydrate();
 }
 
 onMounted(() => {
@@ -455,8 +467,12 @@ onBeforeUnmount(() => {
 });
 watch(useChatChangedTick(), refreshAll);
 watch(runtime.settings, settings => {
+  // 每次刷新信封都会产生新的 settings 引用；只有持久化内容真的变了（保存成功、切换聊天）
+  // 才重建草稿。否则运行期间的每次状态刷新都会把用户尚未保存的改动悄悄冲掉。
+  const persistedJson = settings ? JSON.stringify(cloneSettings(settings)) : '';
+  if (persistedJson === lastPersistedSettingsJson && settingsDraft.value) return;
   settingsDraft.value = settings ? cloneSettings(settings) : null;
-  lastPersistedSettingsJson = settingsDraft.value ? JSON.stringify(settingsDraft.value) : '';
+  lastPersistedSettingsJson = persistedJson;
 }, { immediate: true });
 watch(settingsDraft, () => {
   if (!settingsDraft.value) return;

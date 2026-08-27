@@ -147,8 +147,29 @@ export function useContinuationRuntime() {
     return succeeded;
   }
 
-  async function saveSettings(settings: ContinuationSettings_ACU): Promise<boolean> {
-    return run_ACU(() => runtime.orchestrator.replaceSettings({ settings }));
+  /**
+   * 保存续写设置。
+   *
+   * Agent 正在规划时编排器以 CONTINUATION_OPERATION_BUSY 拒绝写入——这不是错误而是时机问题，
+   * 返回 'busy' 让页面静默排队重试，而不是弹错误吐司把用户的改动丢掉。
+   * @param settings 规范化后的完整设置
+   * @returns 'saved' 已落盘；'busy' 暂时写不进（稍后重试）；'failed' 校验或持久化失败（已吐司）
+   */
+  async function saveSettings(settings: ContinuationSettings_ACU): Promise<'saved' | 'busy' | 'failed'> {
+    if (busy.value) return 'busy';
+    busy.value = true;
+    try {
+      envelope.value = await runtime.orchestrator.replaceSettings({ settings });
+      refresh();
+      return 'saved';
+    } catch (error) {
+      if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_OPERATION_BUSY') return 'busy';
+      toast.error(errorMessage_ACU(error), { muteable: false });
+      refresh();
+      return 'failed';
+    } finally {
+      busy.value = false;
+    }
   }
 
   /**

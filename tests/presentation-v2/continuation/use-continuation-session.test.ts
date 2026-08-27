@@ -84,6 +84,19 @@ describe('useContinuationSession', () => {
     expect(session.entries.value).toEqual([]);
   });
 
+  it('rehydrate 清空既有条目并从当前聊天的持久会话重新回灌（切换聊天用）', () => {
+    logAgentSession_ACU({ kind: 'main_action', title: '上一个聊天的条目' });
+    const { session } = mountSession_ACU();
+    expect(session.entries.value.map(entry => entry.title)).toEqual(['上一个聊天的条目']);
+
+    harness.readConversation.mockReturnValue(snapshot_ACU([
+      { id: 'm1', kind: 'user', text: '新聊天的历史消息', digest: '会话输入', createdAt: 1, turnKey: null },
+    ]));
+    session.rehydrate();
+
+    expect(session.entries.value.map(entry => [entry.kind, entry.detail])).toEqual([['user_message', '新聊天的历史消息']]);
+  });
+
   it('卸载后实时事件不再写进已销毁组件的会话流', () => {
     const { app, session } = mountSession_ACU();
     logAgentSession_ACU({ kind: 'main_action', title: '卸载前' });
