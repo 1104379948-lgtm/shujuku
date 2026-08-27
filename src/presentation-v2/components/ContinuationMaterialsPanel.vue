@@ -199,6 +199,8 @@ defineExpose({ reload });
 .acu-v2-continuation-materials__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .acu-v2-continuation-materials__block { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; }
 .acu-v2-continuation-materials__block > summary { cursor: pointer; color: var(--acu-text-1); }
-.acu-v2-continuation-materials__list, .acu-v2-continuation-materials__timeline { display: grid; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
+.acu-v2-continuation-materials__list, .acu-v2-continuation-materials__timeline { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
+/* 带 max-height 的滚动列表不用 grid：行会被压缩到最小贡献导致条目压扁（同会话流的修复）。 */
 .acu-v2-continuation-materials__timeline { max-height: 320px; overflow-y: auto; }
+.acu-v2-continuation-materials__timeline > li { flex: 0 0 auto; }
 </style>

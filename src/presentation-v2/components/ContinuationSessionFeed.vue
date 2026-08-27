@@ -113,7 +113,11 @@ watch(() => props.entries.length, async () => {
 </script>
 
 <style scoped>
-.acu-v2-session-feed { display: grid; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent); }
+/* 纵向列表必须用 flex 列而不是 grid：容器带 max-height 时 grid 会把行压缩到最小贡献，
+   而卡片（overflow: hidden）的最小贡献是 0——条目会被纵向压扁成一条条细线。
+   flex 列 + 子项 flex: none 保证每个条目始终保持内容高度，超出部分滚动。 */
+.acu-v2-session-feed { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent); }
+.acu-v2-session-feed > * { flex: 0 0 auto; }
 .acu-v2-session-feed__empty { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px); }
 
 /* 运行分隔条 */
