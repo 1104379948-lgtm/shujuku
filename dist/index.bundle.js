@@ -36442,7 +36442,7 @@ $CONTENT
         });
     }
 
-    function isRecord_ACU$9(value) {
+    function isRecord_ACU$a(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function createResult_ACU() {
@@ -36458,7 +36458,7 @@ $CONTENT
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet_key', { sheetKey });
             return result;
         }
-        if (!isRecord_ACU$9(sheet)) {
+        if (!isRecord_ACU$a(sheet)) {
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet', { sheetKey });
             return result;
         }
@@ -36497,7 +36497,7 @@ $CONTENT
     }
     function validateCanonicalCheckpointData_ACU(data, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$9(data)) {
+        if (!isRecord_ACU$a(data)) {
             addIssue_ACU$1(result, 'data', context, 'invalid_data');
             return result;
         }
@@ -36525,7 +36525,7 @@ $CONTENT
      */
     function validateMigrationProvenanceV1_ACU(provenance) {
         const issues = [];
-        if (!isRecord_ACU$9(provenance)) {
+        if (!isRecord_ACU$a(provenance)) {
             return { valid: false, issues: ['provenance_not_object'] };
         }
         if (provenance.version !== 1)
@@ -36548,7 +36548,7 @@ $CONTENT
             issues.push('invalid_source_ai_floors');
         }
         const lastChangedBySheet = provenance.legacyLastChangedAiFloorBySheet;
-        if (!isRecord_ACU$9(lastChangedBySheet)
+        if (!isRecord_ACU$a(lastChangedBySheet)
             || Object.keys(lastChangedBySheet).some(sheetKey => !sheetKey.startsWith('sheet_') || !isNonNegativeInteger_ACU(lastChangedBySheet[sheetKey]))) {
             issues.push('invalid_last_changed_floor_by_sheet');
         }
@@ -36564,7 +36564,7 @@ $CONTENT
     }
     function validateCanonicalCheckpoint_ACU(checkpoint, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$9(checkpoint)) {
+        if (!isRecord_ACU$a(checkpoint)) {
             addIssue_ACU$1(result, 'full', context, 'checkpoint_not_object');
             return result;
         }
@@ -36585,7 +36585,7 @@ $CONTENT
             if (checkpoint.fallbackProvenance !== undefined) {
                 const provenance = checkpoint.fallbackProvenance;
                 let valid = false;
-                if (isRecord_ACU$9(provenance)) {
+                if (isRecord_ACU$a(provenance)) {
                     const rangeStart = provenance.rangeStartMessageIndex;
                     const rangeEnd = provenance.rangeEndMessageIndex;
                     const createdAt = provenance.createdAt;
@@ -39145,12 +39145,12 @@ $CONTENT
         };
     }
 
-    function isRecord_ACU$8(value) {
+    function isRecord_ACU$9(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function fingerprint_ACU(value) {
         const text = JSON.stringify(value, (_key, item) => {
-            if (!isRecord_ACU$8(item))
+            if (!isRecord_ACU$9(item))
                 return item;
             return Object.keys(item).sort().reduce((out, key) => { out[key] = item[key]; return out; }, {});
         });
@@ -39186,7 +39186,7 @@ $CONTENT
         return !!value && (canonicalPhysicalName_ACU(value) === canonicalPhysicalName_ACU(sqlName) || (!!comment && value === comment));
     }
     function resolveRequiredHeaderIndexes_ACU(result, sheetKey, sheet, header, omitLeadingRowId = false) {
-        const ddl = isRecord_ACU$8(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
+        const ddl = isRecord_ACU$9(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
         if (!ddl)
             return new Map();
         const ddlColumns = parseDDLColumnInfos_ACU(ddl).slice(omitLeadingRowId ? 1 : 0);
@@ -39332,11 +39332,11 @@ $CONTENT
      * It deliberately does not touch populated tables or malformed seed pools.
      */
     function normalizeHeaderOnlyRowIdColumns_ACU(data) {
-        if (!isRecord_ACU$8(data))
+        if (!isRecord_ACU$9(data))
             return data;
         let normalized = null;
         for (const [sheetKey, sheet] of Object.entries(data)) {
-            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$8(sheet))
+            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$9(sheet))
                 continue;
             const action = headerOnlyRowIdNormalizationAction_ACU(sheet);
             if (!action)
@@ -39368,7 +39368,7 @@ $CONTENT
             addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '无数据模板缺少 row_id，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
             return { header: ['row_id', ...header], insertsRowId: true };
         }
-        const ddl = isRecord_ACU$8(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
+        const ddl = isRecord_ACU$9(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
         const ddlText = typeof ddl === 'string' ? ddl : '';
         const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
         // 只有 DDL 明确多出首列 row_id，且其余列按顺序与业务表头对应，才允许自动插入身份列。
@@ -39389,7 +39389,7 @@ $CONTENT
     }
     function auditTableDataForUpgrade_ACU(data) {
         const result = { status: 'clean', issues: [], repairPlan: [], dataFingerprintBefore: fingerprint_ACU(data), sourceData: data };
-        if (!isRecord_ACU$8(data)) {
+        if (!isRecord_ACU$9(data)) {
             addIssue_ACU(result, { code: 'upgrade_invalid_data', message: '表格数据不是对象' });
             result.status = 'unrecoverable';
             return result;
@@ -39401,7 +39401,7 @@ $CONTENT
             return result;
         }
         for (const [sheetKey, rawSheet] of sheets) {
-            if (!isRecord_ACU$8(rawSheet)) {
+            if (!isRecord_ACU$9(rawSheet)) {
                 addIssue_ACU(result, { code: 'upgrade_invalid_data', sheetKey, message: 'sheet 不是对象' });
                 continue;
             }
@@ -39434,7 +39434,7 @@ $CONTENT
         return result;
     }
 
-    function isRecord_ACU$7(value) {
+    function isRecord_ACU$8(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function cloneData_ACU(data) {
@@ -39502,9 +39502,9 @@ $CONTENT
         const candidateData = cloneData_ACU(audit.sourceData);
         const idRemap = [];
         const overflowCells = [];
-        if (isRecord_ACU$7(candidateData) && audit.status !== 'unrecoverable') {
+        if (isRecord_ACU$8(candidateData) && audit.status !== 'unrecoverable') {
             Object.entries(candidateData).forEach(([sheetKey, sheet]) => {
-                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$7(sheet))
+                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$8(sheet))
                     return;
                 repairSheet_ACU(sheet, sheetKey, audit, idRemap, overflowCells);
             });
@@ -47770,7 +47770,7 @@ $CONTENT
     const SNAPSHOT_FORMAT_ACU = 'acu-mixed-storage-snapshot';
     const SNAPSHOT_VERSION_ACU = 1;
     const DANGEROUS_KEYS_ACU$1 = new Set(['__proto__', 'constructor', 'prototype']);
-    function isRecord_ACU$6(value) {
+    function isRecord_ACU$7(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function assertSafeJsonValue_ACU$1(value, path = '$', seen = new Set()) {
@@ -47782,7 +47782,7 @@ $CONTENT
             seen.delete(value);
             return;
         }
-        if (!isRecord_ACU$6(value))
+        if (!isRecord_ACU$7(value))
             return;
         if (seen.has(value))
             throw new Error(`Mixed storage snapshot 包含循环引用：${path}`);
@@ -65684,11 +65684,11 @@ $CONTENT
     function _set_contentOptimizationAbortRequested_ACU(v) { contentOptimizationAbortRequested_ACU = v; }
 
     /** Legacy quick-reply loop fields are retired and must not be persisted again. */
-    function isRecord_ACU$5(value) {
+    function isRecord_ACU$6(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     }
     function stripLegacyLoopPromptFieldsInPlace_ACU(source) {
-        if (!isRecord_ACU$5(source) || !isRecord_ACU$5(source.loopSettings))
+        if (!isRecord_ACU$6(source) || !isRecord_ACU$6(source.loopSettings))
             return false;
         const loopSettings = source.loopSettings;
         const hadLegacyFields = Object.prototype.hasOwnProperty.call(loopSettings, 'quickReplyContent')
@@ -65698,10 +65698,10 @@ $CONTENT
         return hadLegacyFields;
     }
     function stripLegacyLoopPromptFields_ACU(source) {
-        if (!isRecord_ACU$5(source))
+        if (!isRecord_ACU$6(source))
             return source;
         const result = { ...source };
-        if (!isRecord_ACU$5(source.loopSettings))
+        if (!isRecord_ACU$6(source.loopSettings))
             return result;
         result.loopSettings = { ...source.loopSettings };
         stripLegacyLoopPromptFieldsInPlace_ACU(result);
@@ -102665,6 +102665,34 @@ $CONTENT
     /** 楼层锚定快照挂在消息对象上的独立字段名，与首楼 `_qrf_continuation` 并列、互不干扰。 */
     const AGENT_MODULE_FIELD_ACU = '_qrf_continuation_agent';
     const AGENT_MODULE_SCHEMA_VERSION_ACU = 1;
+    /** 主 Agent 自身会话记录挂在消息对象上的字段名。与资料快照同楼不同字段，互不干扰。 */
+    const AGENT_CONVERSATION_FIELD_ACU = '_qrf_continuation_agent_chat';
+    const AGENT_CONVERSATION_SCHEMA_VERSION_ACU = 1;
+    /**
+     * 会话消息种类。API 角色由种类推导，UI 展示样式也由种类决定：
+     * - user：人类在 Agent 会话里的输入（初始要求、中途插话、重规划说明）
+     * - agent：主 Agent 某次迭代的原始输出（含 thought 与动作 JSON）
+     * - tool：运行时回灌给主 Agent 的结果或拒绝原因
+     * - turn：新轮次开始通告（相当于人类下发新任务）
+     * - handoff：token 预算压缩时生成的交接报告
+     */
+    const AGENT_CONVERSATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'turn', 'handoff'];
+    /** 摘取小说正文时默认保留的已结算 AI 楼层数。未结算楼层始终全给，不受此值限制。 */
+    const AGENT_STORY_WINDOW_DEFAULT_ACU = 20;
+    /**
+     * 主 Agent 会话历史的默认 token 预算。取 24000 是因为一轮规划的提示词骨架（子代理目录、
+     * 模块目录、表格目录、大纲窗口、正文窗口）已占用相当篇幅，会话历史再占这个量级时，
+     * 128k 级上下文仍有充足余量；超出后按整轮压缩为交接报告。
+     */
+    const AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU = 24000;
+    /**
+     * 轮次进行中允许超出预算的倍数。
+     *
+     * 压缩只在轮次边界发生，因此一轮内到达阈值只登记不执行。但若同一轮反复失败重跑（游标不变、
+     * 每次重跑又追加迭代记录），历史会一直长下去；到这个倍数时改为立即压缩——此时的替代方案是
+     * 请求因超长而必然失败，用户除了一键清空别无出路，那比一次轮内压缩更糟。
+     */
+    const AGENT_HISTORY_EMERGENCY_FACTOR_ACU = 2;
     /** 热上下文里最多展示的活跃伏笔条数，超出部分如实标注不静默丢弃。 */
     const AGENT_HOT_HOOK_LIMIT_ACU = 8;
     /** 单个资料块渲染字符上限，超出即截断并标注。 */
@@ -102700,14 +102728,15 @@ $CONTENT
     /**
      * service/continuation/agent/agent-defaults.ts — Agent 各请求的伪 role + 预填充提示词
      *
-     * 装配约定（与真实历史的相对位置是刻意的）：
-     * 所有伪 role 提示词与本回合动态运行时证据都排在真实历史之前，真实历史是序列尾部，
-     * 迭代轨迹（工具结果回灌）追加在历史之后。这样前缀在多次迭代之间保持稳定。
+     * 装配约定（各部分的相对位置是刻意的）：
+     * 伪 role 规则组 → 小说正文（$STORY_TEXT，只含正文模型楼层）→ 本回合运行时证据 →
+     * 主 Agent 自己的会话记录（$HISTORY_ANCHOR）→ 尾部预填充。
+     * 会话记录放在最后，因为它是唯一按迭代增长的部分；把它放尾部才能让前缀在迭代间保持稳定。
      *
      * 规则不用命令式 system 灌输，而是 user 提问 → assistant 第一人称承诺的问答组，
      * 让模型先以自己的口吻确认边界，再进入执行。
      */
-    /** 主 Agent 提示词里标记真实历史插入位置的段。装配器遇到该段时插入逐楼历史而不发送本段。 */
+    /** 主 Agent 提示词里标记会话记录插入位置的段。装配器遇到该段时插入会话消息而不发送本段。 */
     const AGENT_HISTORY_ANCHOR_TOKEN_ACU = '$HISTORY_ANCHOR';
     /** 各请求尾段预填充文本。解析器会在必要时把它拼回模型输出前再解析。 */
     const AGENT_PREFILLS_ACU = {
@@ -102770,13 +102799,13 @@ $CONTENT
         },
         {
             role: 'user',
-            content: '本回合会在真实历史之后给你一段运行时数据。你打算怎么用它？',
+            content: '说清楚你收到的上下文是怎么排布的，各部分你分别怎么用。',
             enabled: true,
             deletable: true,
         },
         {
             role: 'assistant',
-            content: '我会把那段运行时数据当作系统提供的证据，而不是用户的发言。里面的轮次目标、未结算范围、子代理目录、资料目录、预算余额和工具结果，都是我做决策的依据，不是需要我复述或润色的内容。\n如果运行时数据与真实历史冲突，我以真实历史为准；如果子代理之间结论冲突，我按已验证的事实裁决，硬事实冲突无法裁决时我就阻断，不和稀泥。',
+            content: '我收到的上下文分三层，越往后越新：\n1. 小说正文：用户与正文模型之间已经发生的内容，只含正文模型产出的楼层。这是唯一的已发生事实来源，也是我唯一不能质疑的部分。\n2. 本回合运行时数据：轮次目标、大纲窗口、未结算范围、子代理目录、资料目录、生效约束、预算余额。这些是系统给我的证据，不是用户发言，我不复述也不润色。\n3. 我自己的会话记录：用户在这条会话里对我说的话、我历次迭代实际输出过的动作、运行时回灌给我的派工结果与拒绝原因。它跨轮次持续累积，所以我一看就知道自己已经做过什么、哪一步被拒过、为什么被拒。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是因为 token 预算把原始消息移出了上下文，浓缩记录里写的都是已经发生的过程，同样不需要重做。\n三层之间冲突时的优先级：小说正文 > 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。',
             enabled: true,
             deletable: true,
         },
@@ -102813,14 +102842,27 @@ $CONTENT
         },
         {
             role: 'system',
-            content: AGENT_HISTORY_ANCHOR_TOKEN_ACU,
+            content: '【已经发生的小说正文】\n以下是用户与正文模型之间已经产出并保留下来的正文，只含正文模型的楼层，按楼层顺序排列。这是本次任务里唯一的已发生事实来源。\n\n$STORY_TEXT',
             enabled: true,
             deletable: false,
             pinned: true,
         },
         {
             role: 'system',
-            content: '上边是用户与正文模型之间已经发生的真实剧情，下边是本回合运行时数据，用以辅助你继续完成任务。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【当前大纲窗口】\n$OUTLINE_WINDOW\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【本轮预算状态】\n$BUDGET\n\n【已完成的工具结果】\n$TOOL_RESULTS\n\n注意事项：以上内容是系统证据，不是用户发言，不要复述。已发生事实只认真实历史；大纲窗口是计划。资料模块的具体内容不在这里，需要时授权给子代理读取。',
+            content: '【本回合运行时数据】\n以下是系统提供的证据，不是用户发言，不要复述。已发生事实只认小说正文；大纲窗口是计划。资料模块的具体内容不在这里，需要时授权给子代理读取。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【当前大纲窗口】\n$OUTLINE_WINDOW\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【当前生效的长期约束】\n$ACTIVE_CONSTRAINTS\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【本轮预算状态】\n$BUDGET',
+            enabled: true,
+            deletable: false,
+            pinned: true,
+        },
+        {
+            role: 'system',
+            content: '【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。',
+            enabled: true,
+            deletable: true,
+        },
+        {
+            role: 'system',
+            content: AGENT_HISTORY_ANCHOR_TOKEN_ACU,
             enabled: true,
             deletable: false,
             pinned: true,
@@ -103093,6 +103135,11 @@ $CONTENT
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V8_ACU = 'spv1.6-continuation-agent-prompt-v8';
     /** 大纲标签化版本：大纲提示词改为标签口径并移除 JSON 预填充。旧版本一律强制刷新。 */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU = 'spv1.7-continuation-outline-tags-v9';
+    /**
+     * Agent 会话化版本：正文改由 $STORY_TEXT 独立摘取，$HISTORY_ANCHOR 承载主 Agent 自己的会话，
+     * $TOOL_RESULTS 退役。旧提示词描述的上下文排布与运行时不再一致，必须强制刷新。
+     */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU = 'spv1.8-continuation-agent-conversation-v10';
     function clonePromptSegments_ACU(segments) {
         return segments.map(segment => ({ ...segment }));
     }
@@ -103122,6 +103169,8 @@ $CONTENT
             generationRetryLimit: 3,
             internalAiRetryLimit: 3,
             contextTurnCount: 3,
+            storyWindowFloors: AGENT_STORY_WINDOW_DEFAULT_ACU,
+            agentHistoryTokenBudget: AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
             contextExtractRules: [],
             contextExcludeRules: [],
             apiPresetMode: 'current',
@@ -103129,7 +103178,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -103158,7 +103207,7 @@ $CONTENT
     function fail_ACU$3(code, phase, message, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, phase, message, false, details));
     }
-    function isRecord_ACU$4(value) {
+    function isRecord_ACU$5(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function assertExactKeys_ACU(value, keys, path) {
@@ -103192,7 +103241,7 @@ $CONTENT
         return value;
     }
     function validateTurn_ACU(raw, path) {
-        if (!isRecord_ACU$4(raw)) {
+        if (!isRecord_ACU$5(raw)) {
             fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是对象：${path}`, { path });
         }
         assertExactKeys_ACU(raw, TURN_KEYS_ACU, path);
@@ -103200,7 +103249,7 @@ $CONTENT
     }
     function validateNode_ACU(raw, index, turnIds) {
         const path = `nodes[${index}]`;
-        if (!isRecord_ACU$4(raw)) {
+        if (!isRecord_ACU$5(raw)) {
             fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `字段必须是对象：${path}`, { path });
         }
         assertExactKeys_ACU(raw, NODE_KEYS_ACU, path);
@@ -103241,7 +103290,7 @@ $CONTENT
      * The returned outline is a fresh, typed value assembled only from validated fields.
      */
     function validateStageOutline_ACU(raw, range) {
-        if (!isRecord_ACU$4(raw)) {
+        if (!isRecord_ACU$5(raw)) {
             fail_ACU$3('CONTINUATION_OUTLINE_NOT_OBJECT', 'outline_validate', '阶段大纲必须是单一 JSON 对象');
         }
         assertExactKeys_ACU(raw, OUTLINE_KEYS_ACU, 'outline');
@@ -103321,7 +103370,7 @@ $CONTENT
         '$CURRENT_TURN_GOAL', '$TURN_NUMBER', '$NODE_TURN_NUMBER', '$VALIDATION_ERRORS',
         // 以下为 Agent 续写链路专用占位符。$TABLE:<表名> 形式的动态读集不在此列，
         // 它只作为读集标识符，由解析器汇入 $AGENT_READ_MATERIALS。
-        '$HISTORY_ANCHOR', '$UNSETTLED_RANGE', '$AGENT_CATALOG', '$MODULE_CATALOG',
+        '$HISTORY_ANCHOR', '$STORY_TEXT', '$UNSETTLED_RANGE', '$AGENT_CATALOG', '$MODULE_CATALOG',
         '$TABLE_CATALOG', '$TABLE_GLOBAL', '$TABLE_CHARACTERS', '$TABLE_CHRONICLES',
         '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$BUDGET', '$TOOL_RESULTS',
         '$AGENT_READ_MATERIALS', '$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$USER_INTENT', '$OUTLINE_WINDOW',
@@ -103397,7 +103446,7 @@ $CONTENT
     const ERROR_PHASES_ACU = ['load', 'persist', 'outline_prompt', 'outline_call', 'outline_parse', 'outline_validate', 'turn_prompt', 'turn_call', 'host_send', 'generation_evaluate', 'replan', 'agent_loop', 'agent_delegate', 'agent_persist'];
     const ERROR_CODES_ACU = ['CONTINUATION_CONFIG_MISSING', 'CONTINUATION_CONFIG_NOT_INTEGER', 'CONTINUATION_CONFIG_OUT_OF_RANGE', 'CONTINUATION_STAGE_SIZE_INVALID', 'CONTINUATION_CUSTOM_RANGE_INVALID', 'CONTINUATION_ENVELOPE_INVALID', 'CONTINUATION_CHAT_UNAVAILABLE', 'CONTINUATION_CHAT_CHANGED', 'CONTINUATION_WRITE_GUARD_MISMATCH', 'CONTINUATION_PERSIST_FAILED', 'CONTINUATION_PROMPT_INVALID', 'CONTINUATION_PROMPT_EMPTY', 'CONTINUATION_API_PRESET_MISSING', 'CONTINUATION_MIGRATION_INVALID', 'CONTINUATION_OUTLINE_NOT_OBJECT', 'CONTINUATION_OUTLINE_UNKNOWN_FIELD', 'CONTINUATION_OUTLINE_FIELD_MISSING', 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'CONTINUATION_OUTLINE_STRING_EMPTY', 'CONTINUATION_OUTLINE_SCHEMA_VERSION_INVALID', 'CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE', 'CONTINUATION_OUTLINE_NODES_EMPTY', 'CONTINUATION_OUTLINE_NODE_ID_DUPLICATE', 'CONTINUATION_OUTLINE_TURN_ID_DUPLICATE', 'CONTINUATION_OUTLINE_SUGGESTED_TURNS_INVALID', 'CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH', 'CONTINUATION_OUTLINE_TOTAL_TURNS_MISMATCH', 'CONTINUATION_REPLAN_CONTEXT_INVALID', 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED', 'CONTINUATION_OUTLINE_JSON_INVALID', 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'CONTINUATION_OUTLINE_RETRY_EXHAUSTED', 'CONTINUATION_REVISION_FROZEN', 'CONTINUATION_TURN_INSTRUCTION_EMPTY', 'CONTINUATION_TURN_INSTRUCTION_RETRY_EXHAUSTED', 'CONTINUATION_INTERNAL_REQUEST_STALE', 'CONTINUATION_OPERATION_BUSY', 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY', 'CONTINUATION_TASK_NOT_FOUND', 'CONTINUATION_TASK_STATE_INVALID', 'CONTINUATION_HOST_INPUT_UNAVAILABLE', 'CONTINUATION_GENERATION_TAGS_MISSING', 'CONTINUATION_AGENT_PROTOCOL_INVALID', 'CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', 'CONTINUATION_AGENT_BLOCKED', 'CONTINUATION_AGENT_SUBAGENT_FAILED', 'CONTINUATION_AGENT_WRITE_REJECTED', 'CONTINUATION_AGENT_OUTLINE_REPLANNED', 'CONTINUATION_AGENT_SNAPSHOT_INVALID'];
     const TIMELINE_KINDS_ACU = ['task_created', 'outline_ready', 'turn_sent', 'turn_completed', 'turn_retry', 'stage_completed', 'paused', 'stopped', 'failed'];
-    function isRecord_ACU$3(value) {
+    function isRecord_ACU$4(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function fail_ACU$2(code, message, details, phase = 'persist') {
@@ -103440,7 +103489,7 @@ $CONTENT
         if (!Array.isArray(value))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `字段必须是数组：${path}`, { path });
         return value.map((rule, index) => {
-            if (!isRecord_ACU$3(rule))
+            if (!isRecord_ACU$4(rule))
                 fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `规则必须是对象：${path}[${index}]`, { path: `${path}[${index}]` });
             requireKeys_ACU(rule, ['start', 'end'], `${path}[${index}]`);
             return { start: requireString_ACU(rule.start, `${path}[${index}].start`), end: requireString_ACU(rule.end, `${path}[${index}].end`) };
@@ -103452,7 +103501,7 @@ $CONTENT
      * @returns 逐组校验后的提示词集合
      */
     function validateAgentPrompts_ACU(raw) {
-        if (!isRecord_ACU$3(raw))
+        if (!isRecord_ACU$4(raw))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings.agentPrompts 必须是对象');
         requireKeys_ACU(raw, CONTINUATION_AGENT_PROMPT_KEYS_ACU, 'settings.agentPrompts');
         return {
@@ -103469,13 +103518,13 @@ $CONTENT
      * @returns 逐角色校验后的渠道配置
      */
     function validateAgentApiPresets_ACU(raw) {
-        if (!isRecord_ACU$3(raw))
+        if (!isRecord_ACU$4(raw))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings.agentApiPresets 必须是对象');
         requireKeys_ACU(raw, CONTINUATION_AGENT_API_PRESET_ROLES_ACU, 'settings.agentApiPresets');
         const result = {};
         for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
             const choice = raw[role];
-            if (!isRecord_ACU$3(choice))
+            if (!isRecord_ACU$4(choice))
                 fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `settings.agentApiPresets.${role} 必须是对象`);
             requireKeys_ACU(choice, ['mode', 'presetName'], `settings.agentApiPresets.${role}`);
             if (!['inherit', 'current', 'fixed'].includes(choice.mode))
@@ -103485,7 +103534,7 @@ $CONTENT
         return result;
     }
     function validateSettings_ACU(raw) {
-        if (!isRecord_ACU$3(raw))
+        if (!isRecord_ACU$4(raw))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
         // V7 及更早的信封带 turnInstructionPrompt 且没有 agentPrompts。严格键校验会把它判成未知字段，
         // 所以先就地迁移：丢掉退役字段、补上 Agent 提示词，再进入正常校验。
@@ -103496,7 +103545,12 @@ $CONTENT
         // 渠道按角色拆分之前的信封没有 agentApiPresets；就地补默认（全 inherit）即无感迁移。
         if (!Object.prototype.hasOwnProperty.call(raw, 'agentApiPresets'))
             raw.agentApiPresets = buildDefaultContinuationAgentApiPresets_ACU();
-        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+        // 主 Agent 会话改造之前的信封没有这两项；补默认即无感迁移，不必让用户重建配置。
+        if (!Object.prototype.hasOwnProperty.call(raw, 'storyWindowFloors'))
+            raw.storyWindowFloors = AGENT_STORY_WINDOW_DEFAULT_ACU;
+        if (!Object.prototype.hasOwnProperty.call(raw, 'agentHistoryTokenBudget'))
+            raw.agentHistoryTokenBudget = AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU;
+        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'storyWindowFloors', 'agentHistoryTokenBudget', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
         requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
         if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
@@ -103511,10 +103565,10 @@ $CONTENT
         let outlinePrompt = raw.outlinePrompt;
         let agentPrompts = raw.agentPrompts;
         let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU) {
+        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU;
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -103522,6 +103576,7 @@ $CONTENT
             maxAutomaticStages: requireInteger_ACU(raw.maxAutomaticStages, 'settings.maxAutomaticStages', 1), loopTags: requireString_ACU(raw.loopTags, 'settings.loopTags'),
             loopDelaySeconds: requireInteger_ACU(raw.loopDelaySeconds, 'settings.loopDelaySeconds', 0), totalDurationMinutes: requireInteger_ACU(raw.totalDurationMinutes, 'settings.totalDurationMinutes', 0), retryDelaySeconds: requireInteger_ACU(raw.retryDelaySeconds, 'settings.retryDelaySeconds', 0),
             generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0),
+            storyWindowFloors: requireInteger_ACU(raw.storyWindowFloors, 'settings.storyWindowFloors', 0), agentHistoryTokenBudget: requireInteger_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', 0),
             contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
             apiPresetMode: raw.apiPresetMode, fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
             agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),
@@ -103545,7 +103600,7 @@ $CONTENT
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'timeline 必须是数组');
         return raw.map((entry, index) => {
             const path = `activeTask.timeline[${index}]`;
-            if (!isRecord_ACU$3(entry))
+            if (!isRecord_ACU$4(entry))
                 fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `时间线条目必须是对象：${path}`);
             for (const key of Object.keys(entry))
                 if (!['id', 'at', 'kind', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId', 'messageIndex', 'errorCode'].includes(key))
@@ -103565,13 +103620,13 @@ $CONTENT
     function validatePendingHostTurn_ACU(raw) {
         if (raw === null || raw === undefined)
             return null;
-        if (!isRecord_ACU$3(raw))
+        if (!isRecord_ACU$4(raw))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn 必须是对象或 null');
         requireKeys_ACU(raw, ['identity', 'capture', 'retryCount', 'status'], 'activeTask.pendingHostTurn');
-        if (!isRecord_ACU$3(raw.identity))
+        if (!isRecord_ACU$4(raw.identity))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.identity 必须是对象');
         requireKeys_ACU(raw.identity, ['chatIdentity', 'taskId', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId'], 'activeTask.pendingHostTurn.identity');
-        if (!isRecord_ACU$3(raw.capture))
+        if (!isRecord_ACU$4(raw.capture))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.capture 必须是对象');
         requireKeys_ACU(raw.capture, ['capturedAt', 'capturedChatLength', 'capturedAiFloorCount', 'generationSeq'], 'activeTask.pendingHostTurn.capture');
         return {
@@ -103595,7 +103650,7 @@ $CONTENT
         };
     }
     function validateTask_ACU(raw, settings) {
-        if (!isRecord_ACU$3(raw))
+        if (!isRecord_ACU$4(raw))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'activeTask 必须是对象或 null');
         const requiredKeys = ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'runStartedAt', 'deadlineAt', 'runStageCount', 'activeStageId', 'stages', 'timeline', 'stopReason', 'lastError'];
         const allowedKeys = [...requiredKeys, 'pendingHostTurn'];
@@ -103611,7 +103666,7 @@ $CONTENT
         const stageIds = new Set();
         const stages = raw.stages.map((stage, index) => {
             const path = `activeTask.stages[${index}]`;
-            if (!isRecord_ACU$3(stage))
+            if (!isRecord_ACU$4(stage))
                 fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `阶段必须是对象：${path}`);
             const stageKeys = ['stageId', 'stageNumber', 'status', 'chronicleStartCount', 'chronicleEndCount', 'chronicleAddedCount', 'chronicleRange', 'activeRevision', 'revisions', 'activeNodeIndex', 'activeTurnIndex', 'completedTurns'];
             requireKeys_ACU(stage, stageKeys, path);
@@ -103625,7 +103680,7 @@ $CONTENT
             const revisionNumbers = new Set();
             const revisions = stage.revisions.map((revision, revisionIndex) => {
                 const revisionPath = `${path}.revisions[${revisionIndex}]`;
-                if (!isRecord_ACU$3(revision))
+                if (!isRecord_ACU$4(revision))
                     fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `revision 必须是对象：${revisionPath}`);
                 requireKeys_ACU(revision, ['revision', 'createdAt', 'reason', 'replanInstruction', 'frozen', 'outline'], revisionPath);
                 const number = requireInteger_ACU(revision.revision, `${revisionPath}.revision`, 1);
@@ -103637,7 +103692,7 @@ $CONTENT
             const activeRevision = requireInteger_ACU(stage.activeRevision, `${path}.activeRevision`, 1);
             if (!revisionNumbers.has(activeRevision))
                 fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `activeRevision 未指向现有 revision：${path}`);
-            const chronicleRange = stage.chronicleRange === null ? null : (() => { if (!isRecord_ACU$3(stage.chronicleRange))
+            const chronicleRange = stage.chronicleRange === null ? null : (() => { if (!isRecord_ACU$4(stage.chronicleRange))
                 fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `chronicleRange 必须是对象：${path}`); requireKeys_ACU(stage.chronicleRange, ['first', 'last'], `${path}.chronicleRange`); return { first: requireString_ACU(stage.chronicleRange.first, `${path}.chronicleRange.first`), last: requireString_ACU(stage.chronicleRange.last, `${path}.chronicleRange.last`) }; })();
             return { stageId, stageNumber: requireInteger_ACU(stage.stageNumber, `${path}.stageNumber`, 1), status: stageStatus, chronicleStartCount: requireInteger_ACU(stage.chronicleStartCount, `${path}.chronicleStartCount`, 0), chronicleEndCount: stage.chronicleEndCount === null ? null : requireInteger_ACU(stage.chronicleEndCount, `${path}.chronicleEndCount`, 0), chronicleAddedCount: stage.chronicleAddedCount === null ? null : requireInteger_ACU(stage.chronicleAddedCount, `${path}.chronicleAddedCount`, 0), chronicleRange, activeRevision, revisions, activeNodeIndex: requireInteger_ACU(stage.activeNodeIndex, `${path}.activeNodeIndex`, 0), activeTurnIndex: requireInteger_ACU(stage.activeTurnIndex, `${path}.activeTurnIndex`, 0), completedTurns: requireInteger_ACU(stage.completedTurns, `${path}.completedTurns`, 0) };
         });
@@ -103646,7 +103701,7 @@ $CONTENT
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'activeStageId 未指向现有阶段');
         const stopReason = raw.stopReason === null ? null : requireEnum_ACU(raw.stopReason, STOP_REASONS_ACU, 'activeTask.stopReason');
         const lastError = raw.lastError === null ? null : (() => {
-            if (!isRecord_ACU$3(raw.lastError))
+            if (!isRecord_ACU$4(raw.lastError))
                 fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'lastError 必须是对象');
             const requiredErrorKeys = ['code', 'message', 'phase', 'retryable'];
             for (const key of requiredErrorKeys)
@@ -103662,7 +103717,7 @@ $CONTENT
                 retryable: requireBoolean_ACU(raw.lastError.retryable, 'activeTask.lastError.retryable'),
             };
             if ('details' in raw.lastError) {
-                if (!isRecord_ACU$3(raw.lastError.details))
+                if (!isRecord_ACU$4(raw.lastError.details))
                     fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'lastError.details 必须是对象');
                 error.details = { ...raw.lastError.details };
             }
@@ -103672,7 +103727,7 @@ $CONTENT
     }
     function validateContinuationEnvelope_ACU(raw, phase = 'load') {
         try {
-            if (!isRecord_ACU$3(raw))
+            if (!isRecord_ACU$4(raw))
                 fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', '智能续写状态必须是对象');
             requireKeys_ACU(raw, ['schemaVersion', 'settings', 'activeTask'], 'envelope');
             if (raw.schemaVersion !== CONTINUATION_SCHEMA_VERSION_ACU)
@@ -103840,14 +103895,14 @@ $CONTENT
     function readLegacyRules_ACU(value) {
         if (!Array.isArray(value))
             return [];
-        return value.filter(isRecord_ACU$3).flatMap(rule => typeof rule.start === 'string' && typeof rule.end === 'string' ? [{ start: rule.start, end: rule.end }] : []);
+        return value.filter(isRecord_ACU$4).flatMap(rule => typeof rule.start === 'string' && typeof rule.end === 'string' ? [{ start: rule.start, end: rule.end }] : []);
     }
     /** One-way migration: retained settings only; prompt rotation fields are intentionally excluded. */
     function buildLegacyContinuationMigration_ACU(legacyPlotSettings) {
         const settings = buildDefaultContinuationSettings_ACU();
-        if (!isRecord_ACU$3(legacyPlotSettings))
+        if (!isRecord_ACU$4(legacyPlotSettings))
             return { settings, didMigrate: false };
-        const loopSettings = isRecord_ACU$3(legacyPlotSettings.loopSettings) ? legacyPlotSettings.loopSettings : {};
+        const loopSettings = isRecord_ACU$4(legacyPlotSettings.loopSettings) ? legacyPlotSettings.loopSettings : {};
         settings.loopTags = typeof loopSettings.loopTags === 'string' ? loopSettings.loopTags : settings.loopTags;
         settings.loopDelaySeconds = readLegacyNonNegativeInteger_ACU(loopSettings.loopDelay, settings.loopDelaySeconds);
         settings.retryDelaySeconds = readLegacyNonNegativeInteger_ACU(loopSettings.retryDelay, settings.retryDelaySeconds);
@@ -104158,8 +104213,753 @@ $CONTENT
         return { ...revision, frozen: true, outline: { ...revision.outline, nodes: revision.outline.nodes.map(node => ({ ...node, turns: node.turns.map(turn => ({ ...turn })) })) } };
     }
 
+    /**
+     * service/continuation/agent/agent-conversation-store.ts — 主 Agent 自身会话记录的楼层锚定存储
+     *
+     * 主 Agent 现在像标准 coding agent 一样看得到自己的对话：用户的输入、它历次迭代的原始输出、
+     * 运行时回灌的工具结果，按真实 role 顺序累积成消息序列。小说正文不在这里，它由
+     * `$STORY_TEXT` 占位符独立摘取（只取 AI 楼层）。
+     *
+     * 存储策略与资料快照 (`agent-module-store`) 完全同构：全量写入末楼的独立字段，读取时从尾
+     * 向前找最近的合法快照。删楼、Swipe、编辑替换都会让该楼层连同会话一起消失，自动回退到上一个
+     * 快照，因此这里同样不需要失效协调机制。
+     */
+    /** 单条会话消息的字符上限。模型原始输出与工具结果都可能很长，超出即截断并如实标注。 */
+    const AGENT_CONVERSATION_TEXT_LIMIT_ACU = 8000;
+    /** 各非 assistant 种类在发送给模型时的标题前缀，让模型能区分「谁在说话」。 */
+    const KIND_PREFIXES_ACU = {
+        user: '【用户】',
+        agent: '',
+        tool: '【工具结果】',
+        turn: '【新的一轮】',
+        handoff: '【早期会话交接报告】',
+    };
+    function isRecord_ACU$3(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function isKind_ACU(value) {
+        return typeof value === 'string' && AGENT_CONVERSATION_MESSAGE_KINDS_ACU.includes(value);
+    }
+    function truncateText_ACU(text) {
+        if (text.length <= AGENT_CONVERSATION_TEXT_LIMIT_ACU)
+            return text;
+        return `${text.slice(0, AGENT_CONVERSATION_TEXT_LIMIT_ACU)}\n（本条内容超出 ${AGENT_CONVERSATION_TEXT_LIMIT_ACU} 字上限，已截断）`;
+    }
+    function buildEmptyAgentConversation_ACU() {
+        return { schemaVersion: AGENT_CONVERSATION_SCHEMA_VERSION_ACU, nextId: 1, updatedAt: 0, messages: [] };
+    }
+    function validateMessage_ACU(raw) {
+        if (!isRecord_ACU$3(raw))
+            return null;
+        if (!isKind_ACU(raw.kind))
+            return null;
+        const text = typeof raw.text === 'string' ? raw.text : '';
+        if (!text.trim())
+            return null;
+        const id = typeof raw.id === 'number' && Number.isInteger(raw.id) && raw.id > 0 ? raw.id : 0;
+        if (!id)
+            return null;
+        return {
+            id,
+            kind: raw.kind,
+            text,
+            digest: typeof raw.digest === 'string' ? raw.digest : '',
+            turnKey: typeof raw.turnKey === 'string' ? raw.turnKey : '',
+            at: typeof raw.at === 'number' && raw.at >= 0 ? raw.at : 0,
+        };
+    }
+    /**
+     * 校验一份持久化会话。整体结构非法返回 null，让读取端继续向前寻找上一个合法快照；
+     * 个别条目非法只丢该条（某一楼层的字段可能被外部工具局部污染）。
+     * @param raw 楼层字段上的原始值
+     * @returns 合法快照或 null
+     */
+    function validateAgentConversationSnapshot_ACU(raw) {
+        if (!isRecord_ACU$3(raw))
+            return null;
+        if (raw.schemaVersion !== AGENT_CONVERSATION_SCHEMA_VERSION_ACU)
+            return null;
+        if (!Array.isArray(raw.messages))
+            return null;
+        const messages = raw.messages.flatMap(item => { const message = validateMessage_ACU(item); return message ? [message] : []; });
+        const highestId = messages.reduce((max, message) => Math.max(max, message.id), 0);
+        const declaredNextId = typeof raw.nextId === 'number' && Number.isInteger(raw.nextId) && raw.nextId > 0 ? raw.nextId : 1;
+        return {
+            schemaVersion: AGENT_CONVERSATION_SCHEMA_VERSION_ACU,
+            // nextId 必须严格大于已有最大 id，否则追加会撞号导致 UI 的 key 冲突。
+            nextId: Math.max(declaredNextId, highestId + 1),
+            updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+            messages,
+        };
+    }
+    /**
+     * 读取当前生效的会话快照。
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 最近的合法会话；全程无命中时返回空会话
+     */
+    function readAgentConversation_ACU(chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+            const message = messages[index];
+            if (!message || typeof message !== 'object')
+                continue;
+            if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU))
+                continue;
+            const snapshot = validateAgentConversationSnapshot_ACU(message[AGENT_CONVERSATION_FIELD_ACU]);
+            if (!snapshot)
+                continue;
+            return snapshot;
+        }
+        return buildEmptyAgentConversation_ACU();
+    }
+    /**
+     * 把会话快照写入指定楼层并真实提交到宿主。
+     * @param chat 聊天数组
+     * @param targetIndex 承载会话的楼层下标，通常是末楼
+     * @param snapshot 待写入的全量会话
+     */
+    async function writeAgentConversation_ACU(chat, targetIndex, snapshot) {
+        const message = Array.isArray(chat) ? chat[targetIndex] : null;
+        if (!message || typeof message !== 'object') {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 会话记录的目标楼层不可用', false, { targetIndex }));
+        }
+        const container = message;
+        const hadPrevious = Object.prototype.hasOwnProperty.call(container, AGENT_CONVERSATION_FIELD_ACU);
+        const previous = container[AGENT_CONVERSATION_FIELD_ACU];
+        try {
+            container[AGENT_CONVERSATION_FIELD_ACU] = { ...snapshot, updatedAt: Date.now() };
+            await saveChatToHostStrict_ACU();
+        }
+        catch (error) {
+            if (hadPrevious)
+                container[AGENT_CONVERSATION_FIELD_ACU] = previous;
+            else
+                delete container[AGENT_CONVERSATION_FIELD_ACU];
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 会话记录写盘失败，已还原楼层字段', false, { targetIndex, message: error instanceof Error ? error.message : String(error) }));
+        }
+    }
+    /**
+     * 追加若干条会话消息。
+     * @param snapshot 当前会话
+     * @param appends 待追加的消息；text 为空的条目被忽略
+     * @returns 新的会话快照；没有有效条目时原样返回，调用方据此跳过落盘
+     */
+    function appendAgentConversation_ACU(snapshot, appends) {
+        const usable = appends.filter(item => String(item.text ?? '').trim());
+        if (!usable.length)
+            return snapshot;
+        let nextId = snapshot.nextId;
+        const at = Date.now();
+        const added = usable.map(item => ({
+            id: nextId++,
+            kind: item.kind,
+            text: truncateText_ACU(String(item.text)),
+            digest: String(item.digest ?? ''),
+            turnKey: String(item.turnKey ?? ''),
+            at,
+        }));
+        return { ...snapshot, nextId, messages: [...snapshot.messages, ...added] };
+    }
+    /**
+     * 追加消息到当前聊天的持久会话并落盘。供循环之外的调用方（用户输入、重规划说明）使用。
+     * @param appends 待追加的消息
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 是否真的写入；没有楼层可承载或没有有效条目时为 false
+     */
+    async function appendAgentConversationToChat_ACU(appends, chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        const targetIndex = messages.length - 1;
+        if (targetIndex < 0)
+            return false;
+        const snapshot = readAgentConversation_ACU(messages);
+        const next = appendAgentConversation_ACU(snapshot, appends);
+        if (next === snapshot)
+            return false;
+        await writeAgentConversation_ACU(messages, targetIndex, next);
+        return true;
+    }
+    /**
+     * 渲染会话消息为发送给模型的消息序列。
+     * @param snapshot 当前会话
+     * @returns `{ role, content }` 数组；主 Agent 自己的输出是 assistant，其余一律 user
+     */
+    function renderAgentConversationMessages_ACU(snapshot) {
+        return snapshot.messages.map(message => {
+            const prefix = KIND_PREFIXES_ACU[message.kind];
+            return {
+                role: message.kind === 'agent' ? 'assistant' : 'user',
+                content: prefix ? `${prefix}\n${message.text}` : message.text,
+            };
+        });
+    }
+    /**
+     * 找出会话里最后一次轮次通告的游标指纹。
+     * @param snapshot 当前会话
+     * @returns 最后一条 turn 消息的 turnKey；没有通告过则为空串
+     */
+    function lastAnnouncedTurnKey_ACU(snapshot) {
+        for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
+            if (snapshot.messages[index].kind === 'turn')
+                return snapshot.messages[index].turnKey;
+        }
+        return '';
+    }
+    /**
+     * 从全部楼层清除会话字段。用于「一键清空」，只删扩展字段，绝不触碰正文。
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 是否有楼层被改动
+     */
+    async function clearAgentConversationField_ACU(chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        let changed = false;
+        for (const message of messages) {
+            if (!message || typeof message !== 'object')
+                continue;
+            if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU))
+                continue;
+            delete message[AGENT_CONVERSATION_FIELD_ACU];
+            changed = true;
+        }
+        if (changed)
+            await saveChatToHostStrict_ACU();
+        return changed;
+    }
+
+    /**
+     * service/continuation/agent/agent-module-store.ts — 楼层锚定的叙事资料快照存储
+     *
+     * 存储策略：全量快照写入被结算范围最后一楼的独立字段，读取时从尾向前找最近的合法快照。
+     * 删楼、Swipe、编辑替换都会让该楼层连同快照一起消失，资料自动回退到上一个快照，
+     * 因此这里不需要任何失效协调机制。
+     */
+    const IMPORTANCE_WEIGHTS_ACU = { high: 3, mid: 2, low: 1 };
+    function isRecord_ACU$2(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function readText_ACU$1(value) {
+        return typeof value === 'string' ? value : '';
+    }
+    function readIndex_ACU(value) {
+        return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : -1;
+    }
+    function readEnum_ACU(value, allowed, fallback) {
+        return typeof value === 'string' && allowed.includes(value) ? value : fallback;
+    }
+    function buildEmptyAgentModuleSnapshot_ACU() {
+        return {
+            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
+            settledThroughIndex: -1,
+            updatedAt: 0,
+            revisions: { hooks: 0, infoGap: 0, constraints: 0 },
+            hooks: [],
+            infoGap: [],
+            constraints: [],
+        };
+    }
+    function validateHookEntry_ACU(raw) {
+        if (!isRecord_ACU$2(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const summary = readText_ACU$1(raw.summary).trim();
+        if (!id || !summary)
+            return null;
+        return {
+            id,
+            summary,
+            status: readEnum_ACU(raw.status, AGENT_HOOK_STATUSES_ACU, 'planted'),
+            importance: readEnum_ACU(raw.importance, AGENT_HOOK_IMPORTANCES_ACU, 'mid'),
+            plantedIndex: readIndex_ACU(raw.plantedIndex),
+            updatedIndex: readIndex_ACU(raw.updatedIndex),
+            plannedPayoff: readText_ACU$1(raw.plannedPayoff),
+            retired: raw.retired === true,
+            retiredReason: readText_ACU$1(raw.retiredReason),
+        };
+    }
+    function validateInfoGapEntry_ACU(raw) {
+        if (!isRecord_ACU$2(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const topic = readText_ACU$1(raw.topic).trim();
+        if (!id || !topic)
+            return null;
+        const knowledge = Array.isArray(raw.characterKnowledge) ? raw.characterKnowledge : [];
+        const revealStatus = readEnum_ACU(raw.revealStatus, AGENT_REVEAL_STATUSES_ACU, 'unrevealed');
+        const revealIndex = readIndex_ACU(raw.revealIndex);
+        return {
+            id,
+            topic,
+            objectiveFact: readText_ACU$1(raw.objectiveFact),
+            readerKnown: readText_ACU$1(raw.readerKnown),
+            characterKnowledge: knowledge.flatMap(item => {
+                if (!isRecord_ACU$2(item))
+                    return [];
+                const name = readText_ACU$1(item.name).trim();
+                return name ? [{ name, knows: readText_ACU$1(item.knows) }] : [];
+            }),
+            revealStatus,
+            // 未揭示的条目不允许携带揭示楼层，这是模型把计划写成事实的典型症状。
+            revealIndex: revealStatus === 'unrevealed' || revealIndex < 0 ? null : revealIndex,
+            retired: raw.retired === true,
+            retiredReason: readText_ACU$1(raw.retiredReason),
+        };
+    }
+    function validateConstraintEntry_ACU(raw) {
+        if (!isRecord_ACU$2(raw))
+            return null;
+        const id = readText_ACU$1(raw.id).trim();
+        const text = readText_ACU$1(raw.text).trim();
+        if (!id || !text)
+            return null;
+        return { id, text, reason: readText_ACU$1(raw.reason), createdIndex: readIndex_ACU(raw.createdIndex) };
+    }
+    /**
+     * 校验一份持久化快照。非法返回 null 而不抛错，让读取端可以继续向前寻找上一个合法快照，
+     * 因为某一楼层的字段可能只是被外部工具污染，不代表整条链路不可用。
+     */
+    function validateAgentModuleSnapshot_ACU(raw) {
+        if (!isRecord_ACU$2(raw))
+            return null;
+        if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU)
+            return null;
+        if (!isRecord_ACU$2(raw.revisions))
+            return null;
+        if (!Array.isArray(raw.hooks) || !Array.isArray(raw.infoGap) || !Array.isArray(raw.constraints))
+            return null;
+        const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
+        if (settledThroughIndex < 0)
+            return null;
+        return {
+            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
+            settledThroughIndex,
+            updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+            revisions: {
+                hooks: Math.max(0, readIndex_ACU(raw.revisions.hooks)),
+                infoGap: Math.max(0, readIndex_ACU(raw.revisions.infoGap)),
+                constraints: Math.max(0, readIndex_ACU(raw.revisions.constraints)),
+            },
+            hooks: raw.hooks.flatMap(item => { const entry = validateHookEntry_ACU(item); return entry ? [entry] : []; }),
+            infoGap: raw.infoGap.flatMap(item => { const entry = validateInfoGapEntry_ACU(item); return entry ? [entry] : []; }),
+            constraints: raw.constraints.flatMap(item => { const entry = validateConstraintEntry_ACU(item); return entry ? [entry] : []; }),
+        };
+    }
+    /**
+     * 读取当前生效的资料快照。
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 最近的合法快照；全程无命中时返回 settledThroughIndex = -1 的空快照
+     */
+    function readAgentModuleSnapshot_ACU(chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+            const message = messages[index];
+            if (!message || typeof message !== 'object')
+                continue;
+            if (!Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU))
+                continue;
+            const snapshot = validateAgentModuleSnapshot_ACU(message[AGENT_MODULE_FIELD_ACU]);
+            if (!snapshot)
+                continue;
+            // 删楼后残留快照记录的水位可能指向已不存在的楼层，必须钳制，否则未结算区间会算成负数。
+            const highestIndex = messages.length - 1;
+            return snapshot.settledThroughIndex > highestIndex ? { ...snapshot, settledThroughIndex: highestIndex } : snapshot;
+        }
+        return buildEmptyAgentModuleSnapshot_ACU();
+    }
+    /**
+     * 把快照写入指定楼层并真实提交到宿主。
+     * @param chat 聊天数组
+     * @param targetIndex 承载快照的楼层下标，通常是被结算范围的最后一楼
+     * @param snapshot 待写入的全量快照
+     */
+    async function writeAgentModuleSnapshot_ACU(chat, targetIndex, snapshot) {
+        const message = Array.isArray(chat) ? chat[targetIndex] : null;
+        if (!message || typeof message !== 'object') {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照的目标楼层不可用', false, { targetIndex }));
+        }
+        const container = message;
+        const hadPrevious = Object.prototype.hasOwnProperty.call(container, AGENT_MODULE_FIELD_ACU);
+        const previous = container[AGENT_MODULE_FIELD_ACU];
+        try {
+            container[AGENT_MODULE_FIELD_ACU] = { ...snapshot, settledThroughIndex: targetIndex, updatedAt: Date.now() };
+            await saveChatToHostStrict_ACU();
+        }
+        catch (error) {
+            if (hadPrevious)
+                container[AGENT_MODULE_FIELD_ACU] = previous;
+            else
+                delete container[AGENT_MODULE_FIELD_ACU];
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照写盘失败，已还原楼层字段', false, { targetIndex, message: error instanceof Error ? error.message : String(error) }));
+        }
+    }
+    function rejectSnapshotEdit_ACU(message, details) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', message, false, details));
+    }
+    /**
+     * 用户手动改写资料快照。
+     *
+     * 与子代理写入的关键区别是「不容忍静默丢条目」：校验器为了容错会丢掉结构非法的单条记录，
+     * 那对模型输出是合理的降级，但对用户编辑是数据丢失——用户会以为自己保存成功了。因此这里
+     * 逐类比对条目数，只要有条目被丢弃就整份拒绝并指出是哪一类。
+     * @param raw 用户编辑后的快照对象（可只带 hooks / infoGap / constraints）
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 落盘后的快照
+     */
+    async function replaceAgentModuleSnapshotByUser_ACU(raw, chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        const targetIndex = messages.length - 1;
+        if (targetIndex < 0)
+            rejectSnapshotEdit_ACU('当前聊天没有可承载资料快照的楼层');
+        if (!isRecord_ACU$2(raw))
+            rejectSnapshotEdit_ACU('资料快照必须是 JSON 对象');
+        const current = readAgentModuleSnapshot_ACU(messages);
+        const merged = {
+            ...current,
+            ...raw,
+            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
+            settledThroughIndex: targetIndex,
+            // 手动编辑同样推进修订号：否则携带旧修订号的子代理写集会通过并覆盖用户刚保存的内容。
+            revisions: {
+                hooks: current.revisions.hooks + 1,
+                infoGap: current.revisions.infoGap + 1,
+                constraints: current.revisions.constraints + 1,
+            },
+        };
+        const validated = validateAgentModuleSnapshot_ACU(merged);
+        if (!validated)
+            rejectSnapshotEdit_ACU('资料快照结构非法：hooks / infoGap / constraints 必须是数组');
+        const checks = [
+            ['伏笔账本 hooks', merged.hooks, validated.hooks],
+            ['信息差 infoGap', merged.infoGap, validated.infoGap],
+            ['长期约束 constraints', merged.constraints, validated.constraints],
+        ];
+        for (const [label, input, accepted] of checks) {
+            const inputLength = Array.isArray(input) ? input.length : 0;
+            if (inputLength !== accepted.length) {
+                rejectSnapshotEdit_ACU(`${label} 中有 ${inputLength - accepted.length} 条记录不符合结构要求（id 与关键文本字段不能为空），整份编辑未保存`, { label, inputLength, acceptedLength: accepted.length });
+            }
+        }
+        await writeAgentModuleSnapshot_ACU(messages, targetIndex, validated);
+        return validated;
+    }
+    /**
+     * 从全部楼层清除资料快照字段。用于「一键清空」，只删扩展字段，绝不触碰正文。
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 是否有楼层被改动
+     */
+    async function clearAgentModuleField_ACU(chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        let changed = false;
+        for (const message of messages) {
+            if (!message || typeof message !== 'object')
+                continue;
+            if (!Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU))
+                continue;
+            delete message[AGENT_MODULE_FIELD_ACU];
+            changed = true;
+        }
+        if (changed)
+            await saveChatToHostStrict_ACU();
+        return changed;
+    }
+    function truncateAgentBlock_ACU(text) {
+        if (text.length <= AGENT_BLOCK_CHAR_LIMIT_ACU)
+            return text;
+        return `${text.slice(0, AGENT_BLOCK_CHAR_LIMIT_ACU)}\n（本资料块超出 ${AGENT_BLOCK_CHAR_LIMIT_ACU} 字上限，已截断；未展示部分不代表不存在）`;
+    }
+    function compareHooks_ACU(left, right) {
+        const weight = (IMPORTANCE_WEIGHTS_ACU[right.importance] ?? 0) - (IMPORTANCE_WEIGHTS_ACU[left.importance] ?? 0);
+        return weight !== 0 ? weight : right.plantedIndex - left.plantedIndex;
+    }
+    /**
+     * 渲染伏笔账本的热上下文。
+     * @param snapshot 当前快照
+     * @returns 自然语言文本；活跃条目超过上限时如实标注未展示数量
+     */
+    function renderAgentHooksLedger_ACU(snapshot) {
+        // 修订号必须放在首行：材料超长被截断时也不会丢失并发校验依据。
+        const head = `当前修订号=${snapshot.revisions.hooks}`;
+        const active = snapshot.hooks.filter(hook => !hook.retired);
+        if (!active.length)
+            return `${head}\n当前没有活跃伏笔。`;
+        const sorted = [...active].sort(compareHooks_ACU);
+        const shown = sorted.slice(0, AGENT_HOT_HOOK_LIMIT_ACU);
+        const lines = shown.map(hook => [
+            `- [${hook.id}] 重要度=${hook.importance} 状态=${hook.status} 埋设楼层=${hook.plantedIndex} 最近变动楼层=${hook.updatedIndex}`,
+            `  内容：${hook.summary}`,
+            hook.plannedPayoff ? `  计划回收：${hook.plannedPayoff}` : '',
+        ].filter(Boolean).join('\n'));
+        const hidden = sorted.length - shown.length;
+        const tail = hidden > 0 ? `\n另有 ${hidden} 条活跃伏笔未进入本次热上下文，需要时请派工读取完整账本。` : '';
+        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}${tail}`);
+    }
+    /**
+     * 渲染认知与信息差时间线。
+     * @param snapshot 当前快照
+     * @returns 自然语言文本，包含客观事实、读者已知、各角色知晓与揭示状态
+     */
+    function renderAgentInfoGap_ACU(snapshot) {
+        const head = `当前修订号=${snapshot.revisions.infoGap}`;
+        const active = snapshot.infoGap.filter(entry => !entry.retired);
+        if (!active.length)
+            return `${head}\n当前没有登记的信息差条目。`;
+        const lines = active.map(entry => [
+            `- [${entry.id}] ${entry.topic}（揭示状态=${entry.revealStatus}${entry.revealIndex === null ? '' : `，揭示楼层=${entry.revealIndex}`}）`,
+            `  客观事实：${entry.objectiveFact || '（未登记）'}`,
+            `  读者已知：${entry.readerKnown || '（未登记）'}`,
+            entry.characterKnowledge.length ? `  角色知晓：${entry.characterKnowledge.map(item => `${item.name}=${item.knows}`).join('；')}` : '',
+        ].filter(Boolean).join('\n'));
+        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
+    }
+    /**
+     * 渲染长期约束清单。
+     * @param snapshot 当前快照
+     * @returns 自然语言文本，每条包含约束内容与登记理由
+     */
+    function renderAgentConstraints_ACU(snapshot) {
+        const head = `当前修订号=${snapshot.revisions.constraints}`;
+        if (!snapshot.constraints.length)
+            return `${head}\n当前没有登记的长期约束。`;
+        const lines = snapshot.constraints.map(item => `- [${item.id}] ${item.text}${item.reason ? `（理由：${item.reason}）` : ''}`);
+        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
+    }
+
+    /**
+     * service/continuation/agent/agent-run-cache.ts — Agent 循环运行恢复缓存
+     *
+     * 纯内存缓存：主循环在每次迭代边界保存运行账本（派工结论、迭代进度），
+     * 失败中断后「继续当前轮次」据此从中断点恢复，而不是丢掉全部已获得的证据从头重跑。
+     * 键为聊天身份；恢复时按任务与大纲游标严格校验，任何不匹配都作废缓存。
+     * 页面重载会清空缓存——此时资料快照已持久化，从头重跑是安全降级而非错误。
+     */
+    const statesByChat_ACU = new Map();
+    /**
+     * 保存运行状态。同一聊天只保留最新一份（租约保证同聊天无并发循环）。
+     * @param chatIdentity 聊天身份
+     * @param state 运行状态；内部做深拷贝，调用方后续修改不影响缓存
+     */
+    function saveAgentRunState_ACU(chatIdentity, state) {
+        if (!chatIdentity)
+            return;
+        statesByChat_ACU.set(chatIdentity, {
+            taskId: state.taskId,
+            cursorKey: state.cursorKey,
+            nextIteration: state.nextIteration,
+            ledger: {
+                delegationsUsed: state.ledger.delegationsUsed,
+                perAgent: { ...state.ledger.perAgent },
+                outcomes: state.ledger.outcomes.map(outcome => ({ ...outcome })),
+            },
+        });
+    }
+    /**
+     * 读取可恢复的运行状态。任务或游标不匹配即作废并返回 null——
+     * 旧轮次的证据对新轮次而言是污染而不是资产。
+     * @param chatIdentity 聊天身份
+     * @param taskId 当前任务
+     * @param cursorKey 当前大纲游标指纹
+     * @returns 匹配的运行状态深拷贝；无缓存或不匹配时为 null
+     */
+    function readAgentRunState_ACU(chatIdentity, taskId, cursorKey) {
+        const cached = statesByChat_ACU.get(chatIdentity);
+        if (!cached)
+            return null;
+        if (cached.taskId !== taskId || cached.cursorKey !== cursorKey) {
+            statesByChat_ACU.delete(chatIdentity);
+            return null;
+        }
+        return {
+            taskId: cached.taskId,
+            cursorKey: cached.cursorKey,
+            nextIteration: cached.nextIteration,
+            ledger: {
+                delegationsUsed: cached.ledger.delegationsUsed,
+                perAgent: { ...cached.ledger.perAgent },
+                outcomes: cached.ledger.outcomes.map(outcome => ({ ...outcome })),
+            },
+        };
+    }
+    /**
+     * 清除运行状态。finalize 成功交付与主 Agent 主动 block 时调用：
+     * 前者本轮已完成，后者是明确的终局判断，重跑应给全新预算而不是复播旧证据。
+     * @param chatIdentity 聊天身份
+     */
+    function clearAgentRunState_ACU(chatIdentity) {
+        statesByChat_ACU.delete(chatIdentity);
+    }
+    function resetAgentRunCacheForTests_ACU() {
+        statesByChat_ACU.clear();
+    }
+
+    /**
+     * service/continuation/agent/agent-session-log.ts — Agent 运行会话日志
+     *
+     * 纯内存、无框架依赖的旁路事件通道：主循环在关键节点发事件，UI 订阅后
+     * 以 coding 会话样式实时展示。它绝不参与业务决策——订阅者抛错被就地吞掉，
+     * 任何日志问题都不允许影响续写循环本身。
+     */
+    /** 会话条目上限。超出后丢最旧的，避免长循环把 UI 内存撑爆。 */
+    const SESSION_ENTRY_LIMIT_ACU = 300;
+    /** 单条 detail 的字符上限。会话流展示要点，不承载完整提示词或正文。 */
+    const SESSION_DETAIL_LIMIT_ACU = 2000;
+    let entries_ACU = [];
+    let nextId_ACU = 1;
+    let running_ACU = false;
+    const listeners_ACU = new Set();
+    function notify_ACU() {
+        for (const listener of listeners_ACU) {
+            try {
+                listener();
+            }
+            catch { /* 订阅者异常不允许影响续写循环。 */ }
+        }
+    }
+    function truncateDetail_ACU(text) {
+        if (text.length <= SESSION_DETAIL_LIMIT_ACU)
+            return text;
+        return `${text.slice(0, SESSION_DETAIL_LIMIT_ACU)}\n（内容过长，已截断）`;
+    }
+    /**
+     * 开始一次新的运行。
+     * @param label 本次运行的标题，如「第 2 阶段 · 第 3 轮」
+     * @param detail 起始说明
+     * @param resume 为 true 时保留既有会话记录并写入「恢复运行」条目——
+     *               从中断点恢复时用户必须能看到之前已完成的过程；缺省清空重来
+     */
+    function beginAgentSessionRun_ACU(label, detail = '', resume = false) {
+        if (!resume)
+            entries_ACU = [];
+        running_ACU = true;
+        logAgentSession_ACU({ kind: resume ? 'run_resumed' : 'run_started', title: label, detail });
+    }
+    /**
+     * 记录一条会话事件。
+     * @param input 事件内容；ok 缺省为 true，status 缺省按 ok 推导（false→failed，true→done）
+     * @returns 条目 id，可用于 updateAgentSession_ACU 原地更新（如 running→done）
+     */
+    function logAgentSession_ACU(input) {
+        const id = nextId_ACU++;
+        const ok = input.ok !== false;
+        entries_ACU.push({
+            id,
+            at: Date.now(),
+            kind: input.kind,
+            title: input.title,
+            detail: truncateDetail_ACU(String(input.detail ?? '')),
+            agentName: String(input.agentName ?? ''),
+            ok,
+            status: input.status ?? (ok ? 'done' : 'failed'),
+        });
+        if (entries_ACU.length > SESSION_ENTRY_LIMIT_ACU)
+            entries_ACU = entries_ACU.slice(-SESSION_ENTRY_LIMIT_ACU);
+        if (input.kind === 'run_completed' || input.kind === 'run_failed' || input.kind === 'block')
+            running_ACU = false;
+        notify_ACU();
+        return id;
+    }
+    /**
+     * 原地更新一条已有会话条目（典型用途：派工从 running 更新为成功/失败）。
+     * @param id logAgentSession_ACU 返回的条目 id
+     * @param patch 要更新的字段；条目已被上限截断淘汰时静默忽略
+     */
+    function updateAgentSession_ACU(id, patch) {
+        const entry = entries_ACU.find(item => item.id === id);
+        if (!entry)
+            return;
+        if (patch.title !== undefined)
+            entry.title = patch.title;
+        if (patch.detail !== undefined)
+            entry.detail = truncateDetail_ACU(String(patch.detail));
+        if (patch.ok !== undefined)
+            entry.ok = patch.ok;
+        if (patch.status !== undefined)
+            entry.status = patch.status;
+        else if (patch.ok !== undefined)
+            entry.status = patch.ok ? 'done' : 'failed';
+        notify_ACU();
+    }
+    /**
+     * 读取当前会话条目。
+     * @returns 条目数组的浅拷贝，调用方不可回写
+     */
+    function readAgentSessionLog_ACU() {
+        return [...entries_ACU];
+    }
+    /**
+     * 当前会话流是否已有条目。UI 据此判断是否需要从持久会话回灌。
+     * @returns 有条目返回 true
+     */
+    function hasAgentSessionEntries_ACU() {
+        return entries_ACU.length > 0;
+    }
+    /**
+     * 从持久化的 Agent 会话回灌历史条目。
+     *
+     * 会话流本身是纯内存的，页面重载即空；而 Agent 的会话记录是楼层锚定持久化的。
+     * 回灌让「滚动会话界面」在重载后仍然显示既往对话，而不是白屏。
+     * 只在会话流为空时生效，避免同页内重复挂载导致条目翻倍；也不改变运行标记。
+     * @param items 待回灌的条目内容，按时间顺序
+     * @returns 实际写入的条目数；已有条目时返回 0
+     */
+    function hydrateAgentSessionLog_ACU(items) {
+        if (entries_ACU.length || !items.length)
+            return 0;
+        for (const item of items) {
+            const ok = item.ok !== false;
+            entries_ACU.push({
+                id: nextId_ACU++,
+                at: Date.now(),
+                kind: item.kind,
+                title: item.title,
+                detail: truncateDetail_ACU(String(item.detail ?? '')),
+                agentName: String(item.agentName ?? ''),
+                ok,
+                status: item.status ?? (ok ? 'done' : 'failed'),
+            });
+        }
+        if (entries_ACU.length > SESSION_ENTRY_LIMIT_ACU)
+            entries_ACU = entries_ACU.slice(-SESSION_ENTRY_LIMIT_ACU);
+        notify_ACU();
+        return items.length;
+    }
+    /**
+     * 清空会话流。用于「一键清空」：订阅者保留，清空后立即收到通知刷新为空界面。
+     * 与 resetAgentSessionLogForTests_ACU 的区别是不解绑订阅者，因此可以在运行期调用。
+     */
+    function clearAgentSessionLog_ACU() {
+        entries_ACU = [];
+        running_ACU = false;
+        notify_ACU();
+    }
+    /**
+     * 当前是否有运行中的 Agent 循环。
+     * @returns 运行标记
+     */
+    function isAgentSessionRunning_ACU() {
+        return running_ACU;
+    }
+    /**
+     * 订阅会话变化。
+     * @param listener 变化回调，回调内自行调用 readAgentSessionLog_ACU 取最新条目
+     * @returns 退订函数
+     */
+    function subscribeAgentSessionLog_ACU(listener) {
+        listeners_ACU.add(listener);
+        return () => { listeners_ACU.delete(listener); };
+    }
+    function resetAgentSessionLogForTests_ACU() {
+        entries_ACU = [];
+        nextId_ACU = 1;
+        running_ACU = false;
+        listeners_ACU.clear();
+    }
+
     const leasesByChat_ACU = new Map();
     const epochsByChat_ACU = new Map();
+    /**
+     * 每个聊天在跑的 Agent 循环对应的中断控制器。
+     * 租约作废只能让「下一次」身份校验失败，在途的 HTTP 请求还得等它自己返回；
+     * 用户点停止或中途插话时要立刻见效，就必须真的 abort 掉在飞的请求。
+     */
+    const abortControllersByChat_ACU = new Map();
     function fail_ACU$1(code, message) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'persist', message, false));
     }
@@ -104394,14 +105194,20 @@ $CONTENT
                 const task = started.activeTask;
                 if (task.status !== 'running')
                     return taskResult_ACU(started);
+                const controller = new AbortController();
+                abortControllersByChat_ACU.set(chatIdentity, controller);
                 try {
                     const retryAttempt = task.pendingHostTurn?.status === 'retry_ready' ? task.pendingHostTurn.identity : undefined;
-                    const preparedTurn = await this.dependencies.executionEngine.prepareCurrentTurnInstruction(() => this.isLeaseCurrent_ACU(chatIdentity, lease), retryAttempt, async (instruction) => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult, async (edits) => this.applyOutlineEditsWithinLease_ACU(chatIdentity, lease, edits, 'running'));
+                    const preparedTurn = await this.dependencies.executionEngine.prepareCurrentTurnInstruction(() => this.isLeaseCurrent_ACU(chatIdentity, lease), retryAttempt, async (instruction) => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult, async (edits) => this.applyOutlineEditsWithinLease_ACU(chatIdentity, lease, edits, 'running'), controller.signal);
                     return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started), preparedTurn };
                 }
                 catch (error) {
                     await this.pauseWithError_ACU(chatIdentity, task.taskId, error, 'turn_call', '每轮指令生成失败');
                     throw error;
+                }
+                finally {
+                    if (abortControllersByChat_ACU.get(chatIdentity) === controller)
+                        abortControllersByChat_ACU.delete(chatIdentity);
                 }
             });
         }
@@ -104609,10 +105415,108 @@ $CONTENT
                 return taskResult_ACU(stopped);
             });
         }
+        /**
+         * 在 Agent 会话里以用户身份说话。这是「像 coding agent 一样交互」的唯一入口。
+         *
+         * 三种情形：没有任务时等价于创建任务并把这句话作为初始要求；空闲时把消息记进会话记录；
+         * 循环正在跑时先中断在途请求再记消息——中断后主 Agent 下一次迭代会带着这条消息重新开始，
+         * 已完成的派工结论由 run cache 保留，不会白跑。
+         * @param input 用户输入的文本
+         * @returns 任务快照与「调用方是否应接着继续跑循环」的判定
+         */
+        async sendAgentMessage(input) {
+            const text = normalizeOriginInstruction_ACU(input.text);
+            const existing = this.dependencies.store.readPersisted()?.activeTask ?? null;
+            const hasLiveTask = !!existing && !['completed', 'abandoned', 'failed'].includes(existing.status);
+            if (!hasLiveTask) {
+                const created = await this.createTask({ originInstruction: text });
+                await this.recordUserMessage_ACU(text, '创建续写任务');
+                return { ...created, created: true, interrupted: false, shouldContinue: true };
+            }
+            const chatIdentity = this.requireChatIdentity_ACU();
+            // 等待宿主正文期间不能打断：那是酒馆自己的生成，中断它不属于本插件的职责范围。
+            // 消息仍然记入会话，主 Agent 在下一轮开始时就会读到。
+            const awaitingHost = existing.pendingHostTurn?.status === 'awaiting_generation';
+            const wasRunning = existing.status === 'running' && !awaitingHost;
+            if (wasRunning)
+                this.invalidateLease_ACU(chatIdentity);
+            await this.recordUserMessage_ACU(text, wasRunning ? '打断并插话' : '会话输入');
+            let envelope = null;
+            await this.withLease_ACU(async () => {
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const currentEnvelope = this.requireEnvelope_ACU(current);
+                    const task = this.requireTask_ACU(currentEnvelope);
+                    const now = this.dependencies.now();
+                    // 被打断的运行落回 paused 且不设 stopReason：这不是「停止」，而是等着带上新消息重新继续。
+                    envelope = wasRunning
+                        ? { ...currentEnvelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: null, lastError: null } }
+                        : currentEnvelope;
+                    return envelope;
+                }, guardForTask_ACU(chatIdentity, existing));
+            });
+            const task = envelope.activeTask;
+            const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+            const shouldContinue = !awaitingHost
+                && task.status === 'paused'
+                && (task.stopReason === null || task.stopReason === 'manual')
+                && !task.pendingHostTurn
+                && (!stage || ['running', 'completed'].includes(stage.status));
+            return { ...taskResult_ACU(envelope), created: false, interrupted: wasRunning, shouldContinue };
+        }
+        /**
+         * 用户在资料界面手动改写当前阶段大纲后保存。
+         *
+         * 走与 Agent 工具编辑完全相同的校验：已完成轮次不可改、当前执行轮不可删、总轮数必须留在
+         * 阶段规模范围内。这样「用户编辑」不会成为绕过大纲一致性约束的后门。
+         * @param input 用户编辑后的完整大纲
+         * @returns 任务快照
+         */
+        async replaceActiveOutline(input) {
+            return this.withLease_ACU(async (chatIdentity) => {
+                const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+                const task = this.requireTask_ACU(envelope);
+                if (task.status === 'running' || task.status === 'stopping_after_inflight') {
+                    fail_ACU$1('CONTINUATION_OPERATION_BUSY', '循环正在运行，请先停止再手动编辑大纲');
+                }
+                const stage = getActiveStage_ACU(task);
+                const current = getActiveRevision_ACU(stage);
+                if (stage.status !== 'running' || !current.frozen) {
+                    fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前没有可手动编辑的已冻结大纲');
+                }
+                await this.commitEditedOutline_ACU(chatIdentity, envelope, task, stage, current, cloneOutline_ACU(input.outline), '用户手动编辑', '已保存手动编辑的大纲（', 'paused');
+                return taskResult_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted()));
+            });
+        }
+        /**
+         * 一键清空：丢弃当前任务、Agent 会话记录与本地资料快照，回到「可以从当前剧情重新规划」的状态。
+         * 绝不触碰任何正文楼层——清掉的只有本插件写在楼层上的扩展字段与首楼信封里的任务。
+         * @returns 清空后的信封与各项是否真的有内容被清除
+         */
+        async clearContinuationData() {
+            const chatIdentity = this.requireChatIdentity_ACU();
+            const existing = this.dependencies.store.readPersisted()?.activeTask ?? null;
+            this.invalidateLease_ACU(chatIdentity);
+            const envelope = await this.withLease_ACU(async () => {
+                let result = null;
+                await this.dependencies.store.updatePersistedAtomically(current => {
+                    const currentEnvelope = this.requireEnvelope_ACU(current);
+                    result = { ...currentEnvelope, activeTask: null };
+                    return result;
+                }, guardForTask_ACU(chatIdentity, existing));
+                return result;
+            });
+            clearAgentRunState_ACU(chatIdentity);
+            const clearedModules = await (this.dependencies.clearAgentModules ?? clearAgentModuleField_ACU)();
+            const clearedConversation = await (this.dependencies.clearAgentConversation ?? clearAgentConversationField_ACU)();
+            clearAgentSessionLog_ACU();
+            return { envelope, clearedModules, clearedConversation };
+        }
         async replanRemaining(input = {}) {
             const replanInstruction = typeof input.instruction === 'string' ? input.instruction.trim() : '';
             const chatIdentity = this.requireChatIdentity_ACU();
             this.invalidateLease_ACU(chatIdentity);
+            if (replanInstruction)
+                await this.recordUserMessage_ACU(replanInstruction, '要求重新规划大纲');
             return this.withLease_ACU(async (_identity, lease) => {
                 const taskId = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted())).taskId;
                 try {
@@ -104670,20 +105574,39 @@ $CONTENT
                 throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '当前大纲尚未冻结（可能等待确认），不可编辑', false));
             }
             const edited = applyOutlineEditOps_ACU(current.outline, edits, this.dependencies.allocateId);
+            return this.commitEditedOutline_ACU(chatIdentity, envelope, task, stage, current, edited, `Agent 工具编辑：${edits.length} 处`, `已按工具编辑改写大纲（${edits.length} 处`, endStatus);
+        }
+        /**
+         * 把一份直接改好的大纲提交为下一个已冻结 revision。
+         *
+         * 工具编辑与用户手动编辑共用这条路径：两者的差别只是「怎么得到候选大纲」，
+         * 之后的当前轮保护、前缀保护、轮数范围校验与落盘必须完全一致，否则手动编辑就成了绕过校验的后门。
+         * @param chatIdentity 当前聊天身份
+         * @param envelope 读到候选大纲时的信封
+         * @param task 当时的任务
+         * @param stage 当时的活动阶段
+         * @param current 被替换的 revision
+         * @param candidate 候选大纲
+         * @param reasonNote 写入 revision 的来源说明
+         * @param summaryHead 回执摘要前半段，函数负责补上 revision 与轮数
+         * @param endStatus 落盘后任务状态
+         * @returns 回执摘要
+         */
+        async commitEditedOutline_ACU(chatIdentity, envelope, task, stage, current, candidate, reasonNote, summaryHead, endStatus) {
             const oldCursorTurn = current.outline.nodes.flatMap(node => node.turns)[stage.completedTurns] ?? null;
-            const newFlattened = edited.nodes.flatMap(node => node.turns);
+            const newFlattened = candidate.nodes.flatMap(node => node.turns);
             const newCursorTurn = newFlattened[stage.completedTurns] ?? null;
             if (!oldCursorTurn || !newCursorTurn || newCursorTurn.id !== oldCursorTurn.id) {
                 throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '编辑不能移除或替换当前正在执行的轮次（可以改它的目标句）', false, { cursorTurnId: oldCursorTurn?.id ?? null }));
             }
             const range = resolveContinuationTurnRange_ACU(envelope.settings.stageSize, envelope.settings.customTurnMin ?? undefined, envelope.settings.customTurnMax ?? undefined);
-            const validated = validateReplannedStageOutline_ACU(edited, range, {
+            const validated = validateReplannedStageOutline_ACU(candidate, range, {
                 previousOutline: current.outline,
                 completedTurns: stage.completedTurns,
                 expectedRemainingTurns: newFlattened.length - stage.completedTurns,
             });
             const nextRevisionNumber = current.revision + 1;
-            const summary = `已按工具编辑改写大纲（${edits.length} 处，revision ${nextRevisionNumber}，共 ${validated.totalTurns} 轮）`;
+            const summary = `${summaryHead}，revision ${nextRevisionNumber}，共 ${validated.totalTurns} 轮）`;
             await this.dependencies.store.updatePersistedAtomically(currentEnvelope => {
                 const env = this.requireEnvelope_ACU(currentEnvelope);
                 const t = this.requireTask_ACU(env);
@@ -104692,7 +105615,7 @@ $CONTENT
                     fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '大纲编辑结果已失效');
                 }
                 const at = this.dependencies.now();
-                const revision = freezePlannedStageRevision_ACU(createPlannedStageRevision_ACU(validated, nextRevisionNumber, 'manual_replan', `Agent 工具编辑：${edits.length} 处`, at));
+                const revision = freezePlannedStageRevision_ACU(createPlannedStageRevision_ACU(validated, nextRevisionNumber, 'manual_replan', reasonNote, at));
                 const nextStage = { ...activeStage, activeRevision: nextRevisionNumber, revisions: [...activeStage.revisions, revision] };
                 return { ...env, activeTask: { ...t, status: endStatus, updatedAt: at, lastError: null, stages: t.stages.map(item => item.stageId === nextStage.stageId ? nextStage : item), timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStage.stageId, revision: nextRevisionNumber })] } };
             }, guardForTask_ACU(chatIdentity, task));
@@ -104844,6 +105767,27 @@ $CONTENT
             }
             catch { /* Preserve the primary error; a later guarded operation exposes persistence failure. */ }
         }
+        /**
+         * 把用户消息同时写进持久会话记录与展示用会话流。
+         * 落盘失败不上抛：消息没能持久化时会话流仍要显示它，用户至少能看到自己说过什么。
+         * @param text 用户消息正文
+         * @param digest 短标签，用于压缩交接报告与 UI 标题
+         */
+        async recordUserMessage_ACU(text, digest) {
+            logAgentSession_ACU({ kind: 'user_message', title: digest, detail: text });
+            const append = this.dependencies.appendAgentConversation ?? appendAgentConversationToChat_ACU;
+            try {
+                await append([{ kind: 'user', text, digest }]);
+            }
+            catch (error) {
+                logAgentSession_ACU({
+                    kind: 'run_failed',
+                    title: '这条消息未能写入持久会话记录',
+                    detail: `${error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error)}\n本条消息只存在于当前界面，页面重载后会消失。`,
+                    ok: false,
+                });
+            }
+        }
         planningSummary_ACU(result) {
             return { attempts: result.attempts, apiPreset: result.apiPreset, requiresReview: result.requiresReview };
         }
@@ -104912,6 +105856,15 @@ $CONTENT
         invalidateLease_ACU(chatIdentity) {
             epochsByChat_ACU.set(chatIdentity, (epochsByChat_ACU.get(chatIdentity) ?? 0) + 1);
             leasesByChat_ACU.delete(chatIdentity);
+            // 作废租约的同时中断在途请求：两者必须同时发生，否则「停止」在用户看来要等一整个 AI 调用。
+            const controller = abortControllersByChat_ACU.get(chatIdentity);
+            if (controller) {
+                abortControllersByChat_ACU.delete(chatIdentity);
+                try {
+                    controller.abort();
+                }
+                catch { /* 中断失败不影响状态机推进。 */ }
+            }
         }
         isLeaseCurrent_ACU(chatIdentity, lease) {
             return this.dependencies.getChatIdentity() === chatIdentity && (epochsByChat_ACU.get(chatIdentity) ?? 0) === lease.epoch && leasesByChat_ACU.get(chatIdentity) === lease;
@@ -104984,9 +105937,10 @@ $CONTENT
          * @param existingAttempt 正文重试轮的既有身份；提供时禁止大纲操作且游标必须原样
          * @param applyOutline 大纲操作回调，由编排器在租约内执行
          * @param applyOutlineEdits 大纲句级编辑回调，由编排器在租约内执行
+         * @param signal 中断信号；用户停止或插话时用于真正取消在途的内部 AI 请求
          * @returns 最终身份与写作指导
          */
-        async prepareCurrentTurnInstruction(isLeaseCurrent = () => true, existingAttempt, applyOutline, applyOutlineEdits) {
+        async prepareCurrentTurnInstruction(isLeaseCurrent = () => true, existingAttempt, applyOutline, applyOutlineEdits, signal) {
             const chatIdentity = this.dependencies.getChatIdentity();
             const initial = currentAgentContext_ACU(this.dependencies.readEnvelope());
             const taskId = initial.task.taskId;
@@ -105022,6 +105976,7 @@ $CONTENT
                 isInternalRequestCurrent: isCurrent,
                 applyOutline: existingAttempt ? undefined : applyOutline,
                 applyOutlineEdits: existingAttempt ? undefined : applyOutlineEdits,
+                signal,
             });
             // 循环结束后按最终游标铸造身份：finalize 已由循环保证游标存在，这里的严格快照是最后防线。
             const snapshot = currentSnapshot_ACU(this.dependencies.readEnvelope());
@@ -105045,190 +106000,6 @@ $CONTENT
                 fail_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', '正文重试身份已不属于当前阶段游标');
             }
         }
-    }
-
-    /**
-     * service/continuation/agent/agent-session-log.ts — Agent 运行会话日志
-     *
-     * 纯内存、无框架依赖的旁路事件通道：主循环在关键节点发事件，UI 订阅后
-     * 以 coding 会话样式实时展示。它绝不参与业务决策——订阅者抛错被就地吞掉，
-     * 任何日志问题都不允许影响续写循环本身。
-     */
-    /** 会话条目上限。超出后丢最旧的，避免长循环把 UI 内存撑爆。 */
-    const SESSION_ENTRY_LIMIT_ACU = 300;
-    /** 单条 detail 的字符上限。会话流展示要点，不承载完整提示词或正文。 */
-    const SESSION_DETAIL_LIMIT_ACU = 2000;
-    let entries_ACU = [];
-    let nextId_ACU = 1;
-    let running_ACU = false;
-    const listeners_ACU = new Set();
-    function notify_ACU() {
-        for (const listener of listeners_ACU) {
-            try {
-                listener();
-            }
-            catch { /* 订阅者异常不允许影响续写循环。 */ }
-        }
-    }
-    function truncateDetail_ACU(text) {
-        if (text.length <= SESSION_DETAIL_LIMIT_ACU)
-            return text;
-        return `${text.slice(0, SESSION_DETAIL_LIMIT_ACU)}\n（内容过长，已截断）`;
-    }
-    /**
-     * 开始一次新的运行。
-     * @param label 本次运行的标题，如「第 2 阶段 · 第 3 轮」
-     * @param detail 起始说明
-     * @param resume 为 true 时保留既有会话记录并写入「恢复运行」条目——
-     *               从中断点恢复时用户必须能看到之前已完成的过程；缺省清空重来
-     */
-    function beginAgentSessionRun_ACU(label, detail = '', resume = false) {
-        if (!resume)
-            entries_ACU = [];
-        running_ACU = true;
-        logAgentSession_ACU({ kind: resume ? 'run_resumed' : 'run_started', title: label, detail });
-    }
-    /**
-     * 记录一条会话事件。
-     * @param input 事件内容；ok 缺省为 true，status 缺省按 ok 推导（false→failed，true→done）
-     * @returns 条目 id，可用于 updateAgentSession_ACU 原地更新（如 running→done）
-     */
-    function logAgentSession_ACU(input) {
-        const id = nextId_ACU++;
-        const ok = input.ok !== false;
-        entries_ACU.push({
-            id,
-            at: Date.now(),
-            kind: input.kind,
-            title: input.title,
-            detail: truncateDetail_ACU(String(input.detail ?? '')),
-            agentName: String(input.agentName ?? ''),
-            ok,
-            status: input.status ?? (ok ? 'done' : 'failed'),
-        });
-        if (entries_ACU.length > SESSION_ENTRY_LIMIT_ACU)
-            entries_ACU = entries_ACU.slice(-SESSION_ENTRY_LIMIT_ACU);
-        if (input.kind === 'run_completed' || input.kind === 'run_failed' || input.kind === 'block')
-            running_ACU = false;
-        notify_ACU();
-        return id;
-    }
-    /**
-     * 原地更新一条已有会话条目（典型用途：派工从 running 更新为成功/失败）。
-     * @param id logAgentSession_ACU 返回的条目 id
-     * @param patch 要更新的字段；条目已被上限截断淘汰时静默忽略
-     */
-    function updateAgentSession_ACU(id, patch) {
-        const entry = entries_ACU.find(item => item.id === id);
-        if (!entry)
-            return;
-        if (patch.title !== undefined)
-            entry.title = patch.title;
-        if (patch.detail !== undefined)
-            entry.detail = truncateDetail_ACU(String(patch.detail));
-        if (patch.ok !== undefined)
-            entry.ok = patch.ok;
-        if (patch.status !== undefined)
-            entry.status = patch.status;
-        else if (patch.ok !== undefined)
-            entry.status = patch.ok ? 'done' : 'failed';
-        notify_ACU();
-    }
-    /**
-     * 读取当前会话条目。
-     * @returns 条目数组的浅拷贝，调用方不可回写
-     */
-    function readAgentSessionLog_ACU() {
-        return [...entries_ACU];
-    }
-    /**
-     * 当前是否有运行中的 Agent 循环。
-     * @returns 运行标记
-     */
-    function isAgentSessionRunning_ACU() {
-        return running_ACU;
-    }
-    /**
-     * 订阅会话变化。
-     * @param listener 变化回调，回调内自行调用 readAgentSessionLog_ACU 取最新条目
-     * @returns 退订函数
-     */
-    function subscribeAgentSessionLog_ACU(listener) {
-        listeners_ACU.add(listener);
-        return () => { listeners_ACU.delete(listener); };
-    }
-    function resetAgentSessionLogForTests_ACU() {
-        entries_ACU = [];
-        nextId_ACU = 1;
-        running_ACU = false;
-        listeners_ACU.clear();
-    }
-
-    /**
-     * service/continuation/agent/agent-run-cache.ts — Agent 循环运行恢复缓存
-     *
-     * 纯内存缓存：主循环在每次迭代边界保存运行账本（派工结论、迭代进度），
-     * 失败中断后「继续当前轮次」据此从中断点恢复，而不是丢掉全部已获得的证据从头重跑。
-     * 键为聊天身份；恢复时按任务与大纲游标严格校验，任何不匹配都作废缓存。
-     * 页面重载会清空缓存——此时资料快照已持久化，从头重跑是安全降级而非错误。
-     */
-    const statesByChat_ACU = new Map();
-    /**
-     * 保存运行状态。同一聊天只保留最新一份（租约保证同聊天无并发循环）。
-     * @param chatIdentity 聊天身份
-     * @param state 运行状态；内部做深拷贝，调用方后续修改不影响缓存
-     */
-    function saveAgentRunState_ACU(chatIdentity, state) {
-        if (!chatIdentity)
-            return;
-        statesByChat_ACU.set(chatIdentity, {
-            taskId: state.taskId,
-            cursorKey: state.cursorKey,
-            nextIteration: state.nextIteration,
-            ledger: {
-                delegationsUsed: state.ledger.delegationsUsed,
-                perAgent: { ...state.ledger.perAgent },
-                outcomes: state.ledger.outcomes.map(outcome => ({ ...outcome })),
-            },
-        });
-    }
-    /**
-     * 读取可恢复的运行状态。任务或游标不匹配即作废并返回 null——
-     * 旧轮次的证据对新轮次而言是污染而不是资产。
-     * @param chatIdentity 聊天身份
-     * @param taskId 当前任务
-     * @param cursorKey 当前大纲游标指纹
-     * @returns 匹配的运行状态深拷贝；无缓存或不匹配时为 null
-     */
-    function readAgentRunState_ACU(chatIdentity, taskId, cursorKey) {
-        const cached = statesByChat_ACU.get(chatIdentity);
-        if (!cached)
-            return null;
-        if (cached.taskId !== taskId || cached.cursorKey !== cursorKey) {
-            statesByChat_ACU.delete(chatIdentity);
-            return null;
-        }
-        return {
-            taskId: cached.taskId,
-            cursorKey: cached.cursorKey,
-            nextIteration: cached.nextIteration,
-            ledger: {
-                delegationsUsed: cached.ledger.delegationsUsed,
-                perAgent: { ...cached.ledger.perAgent },
-                outcomes: cached.ledger.outcomes.map(outcome => ({ ...outcome })),
-            },
-        };
-    }
-    /**
-     * 清除运行状态。finalize 成功交付与主 Agent 主动 block 时调用：
-     * 前者本轮已完成，后者是明确的终局判断，重跑应给全新预算而不是复播旧证据。
-     * @param chatIdentity 聊天身份
-     */
-    function clearAgentRunState_ACU(chatIdentity) {
-        statesByChat_ACU.delete(chatIdentity);
-    }
-    function resetAgentRunCacheForTests_ACU() {
-        statesByChat_ACU.clear();
     }
 
     /**
@@ -105348,230 +106119,201 @@ $CONTENT
     }
 
     /**
-     * service/continuation/agent/agent-module-store.ts — 楼层锚定的叙事资料快照存储
+     * service/continuation/agent/agent-token-budget.ts — Agent 会话的 token 预算与压缩
      *
-     * 存储策略：全量快照写入被结算范围最后一楼的独立字段，读取时从尾向前找最近的合法快照。
-     * 删楼、Swipe、编辑替换都会让该楼层连同快照一起消失，资料自动回退到上一个快照，
-     * 因此这里不需要任何失效协调机制。
+     * 会话跨轮累积必然增长，因此需要一个可判定的上界。超出预算时按「整轮丢弃 + 交接报告」压缩：
+     * 被丢弃的轮次不是凭空消失，而是浓缩成一条交接报告放在历史开头，让主 Agent 始终知道走到哪了。
+     *
+     * 压缩时机固定在轮次边界（见 resolveAgentCompactionTiming_ACU）：一轮规划进行中到达阈值只登记，
+     * 等这一轮结束、下一轮开始时才真正压。否则模型会在同一轮内看到自己的历史突然换了形状。
+     *
+     * 交接报告在本地拼装而不是再发一次 AI 调用：需要保留的信息（每轮的用户指令、各次迭代的动作
+     * 标签、交付摘要）在消息追加时已经作为 digest 结构化落库，本地拼装是无损的；再走一次 AI 反而
+     * 是有损压缩，还会新增一条失败路径与额外延迟。
      */
-    const IMPORTANCE_WEIGHTS_ACU = { high: 3, mid: 2, low: 1 };
-    function isRecord_ACU$2(value) {
-        return value !== null && typeof value === 'object' && !Array.isArray(value);
-    }
-    function readText_ACU$1(value) {
-        return typeof value === 'string' ? value : '';
-    }
-    function readIndex_ACU(value) {
-        return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : -1;
-    }
-    function readEnum_ACU(value, allowed, fallback) {
-        return typeof value === 'string' && allowed.includes(value) ? value : fallback;
-    }
-    function buildEmptyAgentModuleSnapshot_ACU() {
-        return {
-            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
-            settledThroughIndex: -1,
-            updatedAt: 0,
-            revisions: { hooks: 0, infoGap: 0, constraints: 0 },
-            hooks: [],
-            infoGap: [],
-            constraints: [],
-        };
-    }
-    function validateHookEntry_ACU(raw) {
-        if (!isRecord_ACU$2(raw))
-            return null;
-        const id = readText_ACU$1(raw.id).trim();
-        const summary = readText_ACU$1(raw.summary).trim();
-        if (!id || !summary)
-            return null;
-        return {
-            id,
-            summary,
-            status: readEnum_ACU(raw.status, AGENT_HOOK_STATUSES_ACU, 'planted'),
-            importance: readEnum_ACU(raw.importance, AGENT_HOOK_IMPORTANCES_ACU, 'mid'),
-            plantedIndex: readIndex_ACU(raw.plantedIndex),
-            updatedIndex: readIndex_ACU(raw.updatedIndex),
-            plannedPayoff: readText_ACU$1(raw.plannedPayoff),
-            retired: raw.retired === true,
-            retiredReason: readText_ACU$1(raw.retiredReason),
-        };
-    }
-    function validateInfoGapEntry_ACU(raw) {
-        if (!isRecord_ACU$2(raw))
-            return null;
-        const id = readText_ACU$1(raw.id).trim();
-        const topic = readText_ACU$1(raw.topic).trim();
-        if (!id || !topic)
-            return null;
-        const knowledge = Array.isArray(raw.characterKnowledge) ? raw.characterKnowledge : [];
-        const revealStatus = readEnum_ACU(raw.revealStatus, AGENT_REVEAL_STATUSES_ACU, 'unrevealed');
-        const revealIndex = readIndex_ACU(raw.revealIndex);
-        return {
-            id,
-            topic,
-            objectiveFact: readText_ACU$1(raw.objectiveFact),
-            readerKnown: readText_ACU$1(raw.readerKnown),
-            characterKnowledge: knowledge.flatMap(item => {
-                if (!isRecord_ACU$2(item))
-                    return [];
-                const name = readText_ACU$1(item.name).trim();
-                return name ? [{ name, knows: readText_ACU$1(item.knows) }] : [];
-            }),
-            revealStatus,
-            // 未揭示的条目不允许携带揭示楼层，这是模型把计划写成事实的典型症状。
-            revealIndex: revealStatus === 'unrevealed' || revealIndex < 0 ? null : revealIndex,
-            retired: raw.retired === true,
-            retiredReason: readText_ACU$1(raw.retiredReason),
-        };
-    }
-    function validateConstraintEntry_ACU(raw) {
-        if (!isRecord_ACU$2(raw))
-            return null;
-        const id = readText_ACU$1(raw.id).trim();
-        const text = readText_ACU$1(raw.text).trim();
-        if (!id || !text)
-            return null;
-        return { id, text, reason: readText_ACU$1(raw.reason), createdIndex: readIndex_ACU(raw.createdIndex) };
+    /** 宿主分词器不可用时的字符→token 估算系数。中文在常见分词器下约 1 token / 1~1.5 字。 */
+    const FALLBACK_CHARS_PER_TOKEN_ACU = 1.5;
+    /** 交接报告里单条用户指令的摘录上限，避免报告本身变成新的膨胀源。 */
+    const HANDOFF_QUOTE_LIMIT_ACU = 160;
+    /**
+     * 统计一段文本的 token 数。
+     * @param text 待统计文本
+     * @returns token 数；宿主分词器不可用或抛错时按字符数估算，绝不把异常抛给调用方
+     */
+    async function countAgentTokens_ACU(text) {
+        const content = String(text ?? '');
+        if (!content)
+            return 0;
+        const counter = SillyTavern_API_ACU?.getTokenCountAsync;
+        if (typeof counter === 'function') {
+            try {
+                const counted = await counter.call(SillyTavern_API_ACU, content);
+                if (typeof counted === 'number' && Number.isFinite(counted) && counted >= 0)
+                    return Math.ceil(counted);
+            }
+            catch { /* 分词器异常降级为估算：token 统计只用于预算判定，不值得中断续写。 */ }
+        }
+        return Math.ceil(content.length / FALLBACK_CHARS_PER_TOKEN_ACU);
     }
     /**
-     * 校验一份持久化快照。非法返回 null 而不抛错，让读取端可以继续向前寻找上一个合法快照，
-     * 因为某一楼层的字段可能只是被外部工具污染，不代表整条链路不可用。
+     * 包一层按文本记忆的计数器。
+     *
+     * 一次运行内会先判定时机、再执行压缩，两处都要量同一批消息；宿主分词是逐条异步调用，
+     * 不记忆就等于把分词开销翻倍。
+     * @param count 底层计数函数，缺省用 countAgentTokens_ACU
+     * @returns 记忆化计数器；同一段文本只向宿主问一次
      */
-    function validateAgentModuleSnapshot_ACU(raw) {
-        if (!isRecord_ACU$2(raw))
-            return null;
-        if (raw.schemaVersion !== AGENT_MODULE_SCHEMA_VERSION_ACU)
-            return null;
-        if (!isRecord_ACU$2(raw.revisions))
-            return null;
-        if (!Array.isArray(raw.hooks) || !Array.isArray(raw.infoGap) || !Array.isArray(raw.constraints))
-            return null;
-        const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
-        if (settledThroughIndex < 0)
-            return null;
-        return {
-            schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
-            settledThroughIndex,
-            updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
-            revisions: {
-                hooks: Math.max(0, readIndex_ACU(raw.revisions.hooks)),
-                infoGap: Math.max(0, readIndex_ACU(raw.revisions.infoGap)),
-                constraints: Math.max(0, readIndex_ACU(raw.revisions.constraints)),
-            },
-            hooks: raw.hooks.flatMap(item => { const entry = validateHookEntry_ACU(item); return entry ? [entry] : []; }),
-            infoGap: raw.infoGap.flatMap(item => { const entry = validateInfoGapEntry_ACU(item); return entry ? [entry] : []; }),
-            constraints: raw.constraints.flatMap(item => { const entry = validateConstraintEntry_ACU(item); return entry ? [entry] : []; }),
+    function createAgentTokenCounter_ACU(count = countAgentTokens_ACU) {
+        const cache = new Map();
+        return async (text) => {
+            const key = String(text ?? '');
+            const cached = cache.get(key);
+            if (cached !== undefined)
+                return cached;
+            const counted = await count(key);
+            cache.set(key, counted);
+            return counted;
         };
     }
-    /**
-     * 读取当前生效的资料快照。
-     * @param chat 聊天数组，缺省取当前聊天
-     * @returns 最近的合法快照；全程无命中时返回 settledThroughIndex = -1 的空快照
-     */
-    function readAgentModuleSnapshot_ACU(chat) {
-        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
-        for (let index = messages.length - 1; index >= 0; index -= 1) {
-            const message = messages[index];
-            if (!message || typeof message !== 'object')
-                continue;
-            if (!Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU))
-                continue;
-            const snapshot = validateAgentModuleSnapshot_ACU(message[AGENT_MODULE_FIELD_ACU]);
-            if (!snapshot)
-                continue;
-            // 删楼后残留快照记录的水位可能指向已不存在的楼层，必须钳制，否则未结算区间会算成负数。
-            const highestIndex = messages.length - 1;
-            return snapshot.settledThroughIndex > highestIndex ? { ...snapshot, settledThroughIndex: highestIndex } : snapshot;
-        }
-        return buildEmptyAgentModuleSnapshot_ACU();
+    async function measureMessages_ACU(messages, count) {
+        const sizes = [];
+        for (const message of messages)
+            sizes.push(await count(message.text));
+        return sizes;
     }
     /**
-     * 把快照写入指定楼层并真实提交到宿主。
-     * @param chat 聊天数组
-     * @param targetIndex 承载快照的楼层下标，通常是被结算范围的最后一楼
-     * @param snapshot 待写入的全量快照
+     * 统计整份会话的 token 数。
+     * @param snapshot 会话快照
+     * @param count token 统计函数，缺省用 countAgentTokens_ACU
+     * @returns 全部消息的 token 之和
      */
-    async function writeAgentModuleSnapshot_ACU(chat, targetIndex, snapshot) {
-        const message = Array.isArray(chat) ? chat[targetIndex] : null;
-        if (!message || typeof message !== 'object') {
-            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照的目标楼层不可用', false, { targetIndex }));
-        }
-        const container = message;
-        const hadPrevious = Object.prototype.hasOwnProperty.call(container, AGENT_MODULE_FIELD_ACU);
-        const previous = container[AGENT_MODULE_FIELD_ACU];
-        try {
-            container[AGENT_MODULE_FIELD_ACU] = { ...snapshot, settledThroughIndex: targetIndex, updatedAt: Date.now() };
-            await saveChatToHostStrict_ACU();
-        }
-        catch (error) {
-            if (hadPrevious)
-                container[AGENT_MODULE_FIELD_ACU] = previous;
+    async function measureAgentConversationTokens_ACU(snapshot, count = countAgentTokens_ACU) {
+        const sizes = await measureMessages_ACU(snapshot.messages, count);
+        return sizes.reduce((sum, size) => sum + size, 0);
+    }
+    /**
+     * 判定压缩时机。
+     *
+     * 压缩会重塑模型看到的历史形状，落在一轮规划进行中就等于中途换掉它的上下文。因此到达阈值
+     * 只是「登记」，真正执行要等这一轮结束、下一轮开始——也就是游标变化的那一刻。
+     * @param snapshot 会话快照
+     * @param budgetTokens 预算上限；<= 0 视为不限
+     * @param continuingSameTurn 本次运行是否仍在会话里最后通告的那一轮内（中断恢复即为 true）
+     * @param count token 统计函数，缺省用 countAgentTokens_ACU
+     * @returns 时机判定结果
+     */
+    async function resolveAgentCompactionTiming_ACU(snapshot, budgetTokens, continuingSameTurn, count = countAgentTokens_ACU) {
+        if (!Number.isFinite(budgetTokens) || budgetTokens <= 0)
+            return { action: 'skip', totalTokens: 0, emergency: false };
+        if (!snapshot.messages.length)
+            return { action: 'skip', totalTokens: 0, emergency: false };
+        const totalTokens = await measureAgentConversationTokens_ACU(snapshot, count);
+        if (totalTokens <= budgetTokens)
+            return { action: 'skip', totalTokens, emergency: false };
+        if (!continuingSameTurn)
+            return { action: 'compact', totalTokens, emergency: false };
+        const emergency = totalTokens > budgetTokens * AGENT_HISTORY_EMERGENCY_FACTOR_ACU;
+        return { action: emergency ? 'compact' : 'defer', totalTokens, emergency };
+    }
+    /** 按 turnKey 的连续段分组。连续段而非全局分组，保证时间顺序不被打乱。 */
+    function groupByTurn_ACU(messages) {
+        const groups = [];
+        for (const message of messages) {
+            const tail = groups[groups.length - 1];
+            if (tail && tail[0].turnKey === message.turnKey)
+                tail.push(message);
             else
-                delete container[AGENT_MODULE_FIELD_ACU];
-            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 资料快照写盘失败，已还原楼层字段', false, { targetIndex, message: error instanceof Error ? error.message : String(error) }));
+                groups.push([message]);
         }
+        return groups;
     }
-    function truncateAgentBlock_ACU(text) {
-        if (text.length <= AGENT_BLOCK_CHAR_LIMIT_ACU)
-            return text;
-        return `${text.slice(0, AGENT_BLOCK_CHAR_LIMIT_ACU)}\n（本资料块超出 ${AGENT_BLOCK_CHAR_LIMIT_ACU} 字上限，已截断；未展示部分不代表不存在）`;
-    }
-    function compareHooks_ACU(left, right) {
-        const weight = (IMPORTANCE_WEIGHTS_ACU[right.importance] ?? 0) - (IMPORTANCE_WEIGHTS_ACU[left.importance] ?? 0);
-        return weight !== 0 ? weight : right.plantedIndex - left.plantedIndex;
+    function quote_ACU(text) {
+        const flat = text.replace(/\s+/g, ' ').trim();
+        return flat.length <= HANDOFF_QUOTE_LIMIT_ACU ? flat : `${flat.slice(0, HANDOFF_QUOTE_LIMIT_ACU)}…`;
     }
     /**
-     * 渲染伏笔账本的热上下文。
-     * @param snapshot 当前快照
-     * @returns 自然语言文本；活跃条目超过上限时如实标注未展示数量
+     * 把被丢弃的会话消息浓缩成一份交接报告。
+     * @param messages 被丢弃的消息，按时间顺序
+     * @returns 交接报告正文；无可报告内容时返回空串
      */
-    function renderAgentHooksLedger_ACU(snapshot) {
-        // 修订号必须放在首行：材料超长被截断时也不会丢失并发校验依据。
-        const head = `当前修订号=${snapshot.revisions.hooks}`;
-        const active = snapshot.hooks.filter(hook => !hook.retired);
-        if (!active.length)
-            return `${head}\n当前没有活跃伏笔。`;
-        const sorted = [...active].sort(compareHooks_ACU);
-        const shown = sorted.slice(0, AGENT_HOT_HOOK_LIMIT_ACU);
-        const lines = shown.map(hook => [
-            `- [${hook.id}] 重要度=${hook.importance} 状态=${hook.status} 埋设楼层=${hook.plantedIndex} 最近变动楼层=${hook.updatedIndex}`,
-            `  内容：${hook.summary}`,
-            hook.plannedPayoff ? `  计划回收：${hook.plannedPayoff}` : '',
-        ].filter(Boolean).join('\n'));
-        const hidden = sorted.length - shown.length;
-        const tail = hidden > 0 ? `\n另有 ${hidden} 条活跃伏笔未进入本次热上下文，需要时请派工读取完整账本。` : '';
-        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}${tail}`);
+    function buildAgentHandoffReport_ACU(messages) {
+        if (!messages.length)
+            return '';
+        // 之前压缩产生的交接报告原样保留在最前，避免多轮压缩后早期信息彻底丢失。
+        const inherited = messages.filter(message => message.kind === 'handoff').map(message => message.text.trim()).filter(Boolean);
+        const sections = [];
+        for (const group of groupByTurn_ACU(messages.filter(message => message.kind !== 'handoff'))) {
+            const lines = [];
+            const instructions = group.filter(message => message.kind === 'user').map(message => quote_ACU(message.text));
+            const announcements = group.filter(message => message.kind === 'turn').map(message => quote_ACU(message.digest || message.text));
+            const actions = group.filter(message => message.kind === 'agent').map(message => message.digest || '（未标注动作）');
+            const results = group.filter(message => message.kind === 'tool').map(message => message.digest).filter(Boolean);
+            if (announcements.length)
+                lines.push(`  轮次：${announcements.join('；')}`);
+            if (instructions.length)
+                lines.push(`  用户要求：${instructions.join('；')}`);
+            if (actions.length)
+                lines.push(`  我的动作：${actions.join(' → ')}`);
+            if (results.length)
+                lines.push(`  运行时结果：${results.join('；')}`);
+            if (!lines.length)
+                continue;
+            sections.push(`- ${group[0].turnKey || '未编号轮次'}\n${lines.join('\n')}`);
+        }
+        if (!sections.length && !inherited.length)
+            return '';
+        const head = '以下是更早会话的浓缩记录（原始消息已因 token 预算被移出上下文）。这些是已经发生的过程，不要重复执行：';
+        return [...inherited, `${head}\n${sections.join('\n')}`].join('\n\n');
     }
     /**
-     * 渲染认知与信息差时间线。
-     * @param snapshot 当前快照
-     * @returns 自然语言文本，包含客观事实、读者已知、各角色知晓与揭示状态
+     * 按 token 预算压缩会话。
+     * @param snapshot 当前会话
+     * @param budgetTokens 预算上限；<= 0 视为不限
+     * @param count token 统计函数，缺省用 countAgentTokens_ACU
+     * @returns 压缩结果；changed 为 false 时 snapshot 与入参同一引用
      */
-    function renderAgentInfoGap_ACU(snapshot) {
-        const head = `当前修订号=${snapshot.revisions.infoGap}`;
-        const active = snapshot.infoGap.filter(entry => !entry.retired);
-        if (!active.length)
-            return `${head}\n当前没有登记的信息差条目。`;
-        const lines = active.map(entry => [
-            `- [${entry.id}] ${entry.topic}（揭示状态=${entry.revealStatus}${entry.revealIndex === null ? '' : `，揭示楼层=${entry.revealIndex}`}）`,
-            `  客观事实：${entry.objectiveFact || '（未登记）'}`,
-            `  读者已知：${entry.readerKnown || '（未登记）'}`,
-            entry.characterKnowledge.length ? `  角色知晓：${entry.characterKnowledge.map(item => `${item.name}=${item.knows}`).join('；')}` : '',
-        ].filter(Boolean).join('\n'));
-        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
-    }
-    /**
-     * 渲染长期约束清单。
-     * @param snapshot 当前快照
-     * @returns 自然语言文本，每条包含约束内容与登记理由
-     */
-    function renderAgentConstraints_ACU(snapshot) {
-        const head = `当前修订号=${snapshot.revisions.constraints}`;
-        if (!snapshot.constraints.length)
-            return `${head}\n当前没有登记的长期约束。`;
-        const lines = snapshot.constraints.map(item => `- [${item.id}] ${item.text}${item.reason ? `（理由：${item.reason}）` : ''}`);
-        return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
+    async function compactAgentConversation_ACU(snapshot, budgetTokens, count = countAgentTokens_ACU) {
+        const unchanged = (totalTokens, withinBudget) => ({ snapshot, changed: false, droppedMessages: 0, droppedTurns: 0, totalTokens, withinBudget });
+        if (!Number.isFinite(budgetTokens) || budgetTokens <= 0)
+            return unchanged(0, true);
+        if (!snapshot.messages.length)
+            return unchanged(0, true);
+        const sizes = await measureMessages_ACU(snapshot.messages, count);
+        const total = sizes.reduce((sum, size) => sum + size, 0);
+        if (total <= budgetTokens)
+            return unchanged(total, true);
+        const groups = groupByTurn_ACU(snapshot.messages);
+        const groupSizes = (() => {
+            let cursor = 0;
+            return groups.map(group => {
+                const size = group.reduce((sum, _message, offset) => sum + sizes[cursor + offset], 0);
+                cursor += group.length;
+                return size;
+            });
+        })();
+        let firstKept = 0;
+        let remaining = total;
+        // 最近一轮永远完整保留：宁可超预算也不能让主 Agent 丢失当前轮的上下文。
+        while (firstKept < groups.length - 1 && remaining > budgetTokens) {
+            remaining -= groupSizes[firstKept];
+            firstKept += 1;
+        }
+        if (firstKept === 0)
+            return unchanged(total, false);
+        const dropped = groups.slice(0, firstKept).flat();
+        const kept = groups.slice(firstKept).flat();
+        const report = buildAgentHandoffReport_ACU(dropped);
+        const rebuilt = appendAgentConversation_ACU({ ...buildEmptyAgentConversation_ACU(), nextId: snapshot.nextId }, report ? [{ kind: 'handoff', text: report, digest: `交接报告（浓缩 ${firstKept} 个轮次）`, turnKey: '' }] : []);
+        const next = { ...rebuilt, messages: [...rebuilt.messages, ...kept] };
+        const reportTokens = report ? await count(report) : 0;
+        return {
+            snapshot: next,
+            changed: true,
+            droppedMessages: dropped.length,
+            droppedTurns: firstKept,
+            totalTokens: remaining + reportTokens,
+            withinBudget: remaining + reportTokens <= budgetTokens,
+        };
     }
 
     /**
@@ -106352,6 +107094,7 @@ $CONTENT
     const AGENT_TABLE_TOKEN_PREFIX_ACU = '$TABLE:';
     /** 每条虚拟/模块/表占位符对应的人类可读标题，进入材料块的分节标题。 */
     const READ_TOKEN_TITLES_ACU = {
+        $STORY_TEXT: '已经发生的小说正文（只含 AI 楼层）',
         $HISTORY_UNSETTLED: '尚未结算的真实历史',
         $HISTORY_RECENT: '最近已被采用的真实剧情',
         $OUTLINE_WINDOW: '当前大纲窗口',
@@ -106369,6 +107112,46 @@ $CONTENT
     }
     function messageText_ACU(message) {
         return String(message?.mes ?? '').trim();
+    }
+    /**
+     * 渲染已经发生的小说正文。
+     *
+     * 只取 AI 楼层——用户楼是操作指令而不是小说内容，把它当正文注入会让模型把指令误读成剧情。
+     * 分「已结算」「尚未结算」两段：已结算段按窗口取最近若干楼（更早部分已经沉淀进资料模块与纪要），
+     * 未结算段全量注入（它还没被任何资料模块吸收，是本轮必须亲自读的部分）。
+     * @param context 解析上下文
+     * @returns 分段的逐楼正文；没有 AI 楼层时如实说明
+     */
+    function renderAgentStoryText_ACU(context) {
+        const chat = Array.isArray(context.chat) ? context.chat : [];
+        const highestIndex = chat.length - 1;
+        if (highestIndex < 0)
+            return '当前聊天还没有任何楼层，也就没有已经发生的正文。';
+        // 删楼后残留的水位可能指向已不存在的楼层，必须钳制，否则未结算段起点会越过末楼输出空段。
+        const settledThrough = Math.min(context.settledThroughIndex, highestIndex);
+        const floors = chat
+            .map((message, index) => ({ index, text: messageText_ACU(message) }))
+            .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
+        if (!floors.length)
+            return '当前聊天还没有 AI 产出的正文楼层。';
+        const window = Math.max(0, context.storyWindowFloors ?? AGENT_STORY_WINDOW_DEFAULT_ACU);
+        const settled = floors.filter(item => item.index <= settledThrough);
+        const unsettled = floors.filter(item => item.index > settledThrough);
+        const shownSettled = window > 0 ? settled.slice(-window) : [];
+        const hiddenSettled = settled.length - shownSettled.length;
+        const render = (items) => items.map(item => `【楼层 ${item.index}】\n${item.text}`).join('\n\n');
+        const sections = [];
+        const settledHead = hiddenSettled > 0
+            ? `## 已结算正文（只列最近 ${shownSettled.length} 楼；更早的 ${hiddenSettled} 楼未注入，其事实已沉淀进资料模块与纪要，需要时派工读取）`
+            : '## 已结算正文';
+        if (shownSettled.length)
+            sections.push(`${settledHead}\n${render(shownSettled)}`);
+        else if (settled.length)
+            sections.push(`${settledHead}\n（本次未注入任何已结算正文。）`);
+        sections.push(unsettled.length
+            ? `## 尚未结算的最新正文（全量）\n${render(unsettled)}`
+            : '## 尚未结算的最新正文\n没有尚未结算的正文楼层；上一轮已结算到当前最后一楼。');
+        return sections.join('\n\n');
     }
     /**
      * 渲染尚未结算的真实历史。
@@ -106444,6 +107227,7 @@ $CONTENT
         }
         const title = READ_TOKEN_TITLES_ACU[normalized] ?? normalized;
         switch (normalized) {
+            case '$STORY_TEXT': return { title, text: renderAgentStoryText_ACU(context) };
             case '$HISTORY_UNSETTLED': return { title, text: renderAgentUnsettledHistory_ACU(context) };
             case '$HISTORY_RECENT': return { title, text: renderAgentRecentHistory_ACU(context) };
             case '$OUTLINE_WINDOW': return { title, text: renderAgentOutlineWindow_ACU(context) };
@@ -106681,10 +107465,14 @@ $CONTENT
      * 主 Agent 每次迭代只做一件事：读证据、输出一个协议动作。运行时执行该动作后把结果
      * 回灌成新的证据，再进入下一次迭代，直到 finalize / block / 预算耗尽。
      *
-     * 装配顺序：伪 role 提示词 → 真实历史 → 本回合运行时证据 → 尾部预填充。
-     * 真实历史插在 `$HISTORY_ANCHOR` 段的位置上，该段本身不发送。
+     * 装配顺序：伪 role 提示词 → Agent 自己的会话记录 → 本回合运行时证据 → 尾部预填充。
+     * 会话记录插在 `$HISTORY_ANCHOR` 段的位置上，该段本身不发送。
+     *
+     * 与 V8 的关键区别：小说正文不再当作对话历史，而是由 `$STORY_TEXT` 占位符独立摘取（只取
+     * AI 楼层）；`$HISTORY_ANCHOR` 改为承载主 Agent 自己的对话——用户输入、它历次迭代的原始
+     * 输出、运行时回灌的工具结果，按真实 role 跨轮持久累积。这样它才看得见自己走到哪了。
      */
-    /** 真实历史插入位置的内部哨兵。用不可见字符避免与提示词正文撞车。 */
+    /** 会话记录插入位置的内部哨兵。用不可见字符避免与提示词正文撞车。 */
     const HISTORY_SENTINEL_ACU = '\u0000__QRF_AGENT_HISTORY__\u0000';
     const defaultDependencies_ACU$1 = {
         resolveApiPreset: resolveContinuationAgentApiPreset_ACU,
@@ -106693,6 +107481,8 @@ $CONTENT
         readChat: getChatArray_ACU,
         readModuleSnapshot: readAgentModuleSnapshot_ACU,
         writeModuleSnapshot: writeAgentModuleSnapshot_ACU,
+        readConversation: readAgentConversation_ACU,
+        writeConversation: writeAgentConversation_ACU,
         budget: DEFAULT_AGENT_RUN_BUDGET_ACU,
     };
     function failLoop_ACU(code, message, details) {
@@ -106714,21 +107504,30 @@ $CONTENT
         return `第 ${execution.stage.stageNumber} 阶段 · 第 ${execution.turnNumber}/${execution.revision.outline.totalTurns} 轮`;
     }
     /**
-     * 把聊天数组投影成真实历史消息。
-     * @param chat 聊天数组
-     * @returns 逐楼消息，用户楼为 user，AI 楼为 assistant；空楼被跳过
+     * 描述一个协议动作，用作会话流标题与会话记录的 digest。
+     * @param action 已解析的主 Agent 动作
+     * @returns 一句话动作标签
      */
-    function buildAgentRealHistory_ACU(chat) {
-        const messages = [];
-        chat.forEach((message, index) => {
-            if (!message || typeof message !== 'object')
-                return;
-            const text = String(message.mes ?? '').trim();
-            if (!text)
-                return;
-            messages.push({ role: message.is_user ? 'user' : 'assistant', content: `【楼层 ${index}】\n${text}` });
-        });
-        return messages;
+    function describeAgentActionLabel_ACU(action) {
+        if (action.kind === 'delegate')
+            return `派工 ${action.delegations.length} 项`;
+        if (action.kind === 'edit_outline')
+            return `工具编辑大纲 ${action.edits.length} 处`;
+        if (action.kind === 'finalize')
+            return '交付写作指导';
+        return '阻断本轮';
+    }
+    /**
+     * 生成新轮次的开场通告。相当于人类在会话里下发一个新任务，让主 Agent 明确知道换轮了。
+     * @param context 解析上下文
+     * @returns 通告正文
+     */
+    function buildAgentTurnAnnouncement_ACU(context) {
+        return [
+            `开始新的一轮规划：${describeRunLabel_ACU(context)}`,
+            `本轮目标：${context.execution.turn?.goal || '（尚无可执行的大纲轮次，需先创建或继续大纲）'}`,
+            '请按协议输出一个动作。上文中我们此前的对话仍然有效，不要重复已经完成的工作。',
+        ].join('\n');
     }
     /**
      * 渲染本轮预算状态。
@@ -106752,14 +107551,14 @@ $CONTENT
         return lines.join('\n');
     }
     /**
-     * 渲染已完成的工具结果，作为下一次迭代的证据。
-     * @param ledger 运行账本
-     * @returns 自然语言文本；尚无结果时如实标注
+     * 渲染一批工具结果。作为工具消息追加进会话记录，也用于兼容自定义提示词里的 `$TOOL_RESULTS`。
+     * @param outcomes 待渲染的派工结论
+     * @returns 自然语言文本；列表为空时如实标注
      */
-    function renderAgentToolResults_ACU(ledger) {
-        if (!ledger.outcomes.length)
+    function renderAgentToolResults_ACU(outcomes) {
+        if (!outcomes.length)
             return '本轮尚未派工，还没有任何子代理结果。';
-        return ledger.outcomes
+        return outcomes
             .map((outcome, index) => {
             const head = `【结果 ${index + 1}｜${outcome.agentName}｜${outcome.ok ? '成功' : '失败'}】`;
             const body = outcome.ok
@@ -106813,6 +107612,7 @@ $CONTENT
                 execution: request.readContext(),
                 originInstruction: '',
                 recentTurnCount: request.settings.contextTurnCount,
+                storyWindowFloors: request.settings.storyWindowFloors,
             };
             context.originInstruction = context.execution.task.originInstruction;
             const identitySeed = request.createInternalRequestIdentity(0);
@@ -106834,7 +107634,6 @@ $CONTENT
                 nextIteration,
                 ledger: { delegationsUsed: ledger.delegationsUsed, perAgent: Object.fromEntries(ledger.perAgent), outcomes: ledger.outcomes },
             });
-            const history = buildAgentRealHistory_ACU(chat);
             let totalAttempts = 0;
             let terminalLogged = false;
             let lastConstraintRejection = '';
@@ -106842,22 +107641,45 @@ $CONTENT
             beginAgentSessionRun_ACU(describeRunLabel_ACU(context), resumedState
                 ? `从中断点恢复：继续第 ${iterationStart} 次迭代，已保留 ${ledger.outcomes.length} 条已完成结果`
                 : context.execution.turn?.goal ?? '本轮目标待大纲确定', resumedState !== null);
+            // 会话必须在 beginAgentSessionRun_ACU 之后打开：新运行会清空会话流，
+            // 压缩通知若先于它记录就会被清掉，用户再也看不到「历史被压缩过」这件事。
+            const session = await this.openConversation_ACU(chat, request, cursorKeyOf());
+            // 换轮通告只在游标真的变了时追加：同一轮内的中断恢复不重复通告，否则模型会以为又开了一轮。
+            if (session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) !== session.turnKey) {
+                session.record([{ kind: 'turn', text: buildAgentTurnAnnouncement_ACU(context), digest: describeRunLabel_ACU(context), turnKey: session.turnKey }]);
+                await session.flush();
+            }
+            /** 把本次动作新产生的运行时结论作为工具消息追加进会话，让下一次迭代按真实 role 读到它。 */
+            const commitOutcomes = async (before) => {
+                const fresh = ledger.outcomes.slice(before);
+                if (fresh.length) {
+                    session.record([{
+                            kind: 'tool',
+                            text: renderAgentToolResults_ACU(fresh),
+                            digest: fresh.map(outcome => `${outcome.agentName}${outcome.ok ? '成功' : '未采用'}`).join('、'),
+                            turnKey: session.turnKey,
+                        }]);
+                }
+                await session.flush();
+            };
             try {
                 for (let iteration = iterationStart; iteration <= budget.maxIterations; iteration += 1) {
+                    if (request.signal?.aborted) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '本轮规划已被用户中断', false));
+                    }
                     // 大纲操作会改变游标，每次迭代都从权威状态重读执行上下文。
                     context.execution = request.readContext();
                     currentIteration = iteration;
                     persistRunState(iteration);
                     const allowDelegate = iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations;
-                    const round = await this.callMainAgent(request, preset, history, context, ledger, budget, iteration, allowDelegate);
+                    const round = await this.callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate);
                     totalAttempts += round.attempts;
                     const action = round.action;
-                    const actionLabel = action.kind === 'delegate' ? `派工 ${action.delegations.length} 项`
-                        : action.kind === 'edit_outline' ? `工具编辑大纲 ${action.edits.length} 处`
-                            : action.kind === 'finalize' ? '交付写作指导' : '阻断本轮';
-                    logAgentSession_ACU({ kind: 'thought', title: `迭代 ${iteration} · ${actionLabel}`, detail: action.thought });
+                    logAgentSession_ACU({ kind: 'thought', title: `迭代 ${iteration} · ${describeAgentActionLabel_ACU(action)}`, detail: action.thought });
+                    const outcomesBefore = ledger.outcomes.length;
                     if (action.kind === 'edit_outline') {
                         await this.runOutlineEdits(action.edits, request, context, ledger);
+                        await commitOutcomes(outcomesBefore);
                         continue;
                     }
                     if (action.kind === 'finalize') {
@@ -106873,6 +107695,7 @@ $CONTENT
                                 lastConstraintRejection = error.error.message;
                                 ledger.outcomes.push({ agentName: 'finalize(约束登记)', ok: false, summary: '', detail: '', rejectedReason: `${error.error.message}。finalize 未被采纳，请修正 constraints 后重新交付` });
                                 logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 约束登记被拒绝`, detail: error.error.message, ok: false });
+                                await commitOutcomes(outcomesBefore);
                                 continue;
                             }
                             context.moduleSnapshot = snapshot;
@@ -106882,6 +107705,7 @@ $CONTENT
                         logAgentSession_ACU({ kind: 'run_completed', title: '本轮规划完成', detail: action.summary });
                         terminalLogged = true;
                         clearAgentRunState_ACU(identitySeed.chatIdentity);
+                        await session.flush();
                         return { instruction: action.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
                     }
                     if (action.kind === 'block') {
@@ -106889,9 +107713,11 @@ $CONTENT
                         terminalLogged = true;
                         // block 是明确的终局判断：重跑应给全新预算重新收集证据，而不是复播旧账本再次阻断。
                         clearAgentRunState_ACU(identitySeed.chatIdentity);
+                        await session.flush();
                         failLoop_ACU('CONTINUATION_AGENT_BLOCKED', `主 Agent 阻断本轮：${action.reason}`, { unresolved: action.unresolved });
                     }
                     snapshot = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies);
+                    await commitOutcomes(outcomesBefore);
                 }
                 failLoop_ACU('CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', lastConstraintRejection
                     ? `主 Agent 在 ${budget.maxIterations} 次迭代内没有交付最终指导；最后一次约束登记被拒绝：${lastConstraintRejection}`
@@ -106910,7 +107736,72 @@ $CONTENT
                 throw error;
             }
         }
-        async callMainAgent(request, preset, history, context, ledger, budget, iteration, allowDelegate) {
+        /**
+         * 打开本次运行的会话句柄：读出持久会话、按 token 预算压缩、提供追加与落盘能力。
+         * @param chat 聊天数组
+         * @param request 本轮请求（取设置里的 token 预算）
+         * @param turnKey 本次运行的大纲游标指纹
+         * @returns 会话句柄
+         */
+        async openConversation_ACU(chat, request, turnKey) {
+            let snapshot = this.dependencies.readConversation(chat);
+            let dirty = false;
+            const targetIndex = chat.length - 1;
+            const flush = async () => {
+                if (!dirty)
+                    return;
+                // 没有任何楼层时无处锚定；此时保持内存态而不是让整轮规划失败——空聊天本身已是退化场景。
+                if (targetIndex < 0) {
+                    dirty = false;
+                    return;
+                }
+                await this.dependencies.writeConversation(chat, targetIndex, snapshot);
+                dirty = false;
+            };
+            const budgetTokens = request.settings.agentHistoryTokenBudget;
+            // 本次运行是否仍在会话里最后通告的那一轮内。中断恢复、同一游标重跑都算「同一轮内」。
+            const continuingSameTurn = !!turnKey && lastAnnouncedTurnKey_ACU(snapshot) === turnKey;
+            const counter = createAgentTokenCounter_ACU();
+            const timing = await resolveAgentCompactionTiming_ACU(snapshot, budgetTokens, continuingSameTurn, counter);
+            if (timing.action === 'defer') {
+                logAgentSession_ACU({
+                    kind: 'thought',
+                    title: `会话历史已到 token 阈值（约 ${timing.totalTokens} tokens）`,
+                    detail: `超出预算 ${budgetTokens}，但本轮规划还没结束。压缩留到本轮完成、下一轮开始前再做，避免在一轮进行中换掉上下文。`,
+                });
+            }
+            if (timing.action === 'compact') {
+                const compaction = await compactAgentConversation_ACU(snapshot, budgetTokens, counter);
+                if (compaction.changed) {
+                    snapshot = compaction.snapshot;
+                    dirty = true;
+                    await flush();
+                    logAgentSession_ACU({
+                        kind: 'thought',
+                        title: `会话历史已压缩（约 ${compaction.totalTokens} tokens）`,
+                        detail: [
+                            `超出 token 预算 ${budgetTokens}，已把最早的 ${compaction.droppedTurns} 个轮次（${compaction.droppedMessages} 条消息）浓缩成交接报告。`,
+                            timing.emergency ? `本轮尚未结束，但历史已达预算的 ${AGENT_HISTORY_EMERGENCY_FACTOR_ACU} 倍，再不压缩这次请求会因超长直接失败，因此提前压缩。` : '',
+                            compaction.withinBudget ? '' : '压缩后仍超出预算：最近一轮的内容本身较大，已完整保留。',
+                        ].filter(Boolean).join(''),
+                    });
+                }
+            }
+            return {
+                snapshot: () => snapshot,
+                history: () => renderAgentConversationMessages_ACU(snapshot),
+                record: appends => {
+                    const next = appendAgentConversation_ACU(snapshot, appends);
+                    if (next === snapshot)
+                        return;
+                    snapshot = next;
+                    dirty = true;
+                },
+                flush,
+                turnKey,
+            };
+        }
+        async callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate) {
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
             let lastReason = '';
             for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -106919,11 +107810,9 @@ $CONTENT
                 if (!request.isInternalRequestCurrent(base)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 请求已失效', false));
                 }
-                const toolResults = lastReason
-                    ? `${renderAgentToolResults_ACU(ledger)}\n\n【上一次输出被拒绝】原因：${lastReason}\n请修正后重新输出符合协议的 JSON 对象。`
-                    : renderAgentToolResults_ACU(ledger);
                 const rendered = await renderContinuationPrompt_ACU(request.settings.agentPrompts.main, {
                     $HISTORY_ANCHOR: () => HISTORY_SENTINEL_ACU,
+                    $STORY_TEXT: () => renderAgentStoryText_ACU(context),
                     $USER_INTENT: () => context.originInstruction || '（用户未提供初始要求）',
                     $CURRENT_TURN_GOAL: () => context.execution.turn?.goal || '（尚无可执行的大纲轮次，需先创建或继续大纲）',
                     $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(context),
@@ -106931,14 +107820,17 @@ $CONTENT
                     $AGENT_CATALOG: () => renderAgentSubagentCatalog_ACU(),
                     $MODULE_CATALOG: () => renderAgentModuleCatalog_ACU(),
                     $TABLE_CATALOG: () => renderAgentTableCatalog_ACU(context.tableData),
+                    $ACTIVE_CONSTRAINTS: () => renderAgentConstraints_ACU(context.moduleSnapshot),
                     $BUDGET: () => renderAgentBudget_ACU(budget, iteration, ledger, resolveWaveLimit_ACU(request.settings, budget)),
-                    $TOOL_RESULTS: () => toolResults,
+                    // 默认提示词已不再使用 $TOOL_RESULTS（结果改走会话消息）；保留解析以兼容旧的自定义提示词。
+                    $TOOL_RESULTS: () => renderAgentToolResults_ACU(ledger.outcomes),
                 }, 'agent_loop');
-                const messages = this.spliceHistory_ACU(rendered.messages, history);
+                const messages = this.spliceHistory_ACU(rendered.messages, session.history());
                 const raw = await this.dependencies.callInternalAi(messages, preset, identity, request.signal);
                 if (!request.isInternalRequestCurrent(base)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 结果已失效', false));
                 }
+                const rawText = String(raw ?? '').trim();
                 try {
                     const payload = parseAgentJsonPayload_ACU(raw, AGENT_PREFILLS_ACU.main, ['action']);
                     const action = parseAgentMainAction_ACU(payload, allowDelegate);
@@ -106946,13 +107838,20 @@ $CONTENT
                     if (action.kind === 'finalize' && !request.readContext().turn) {
                         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '当前没有可执行的大纲轮次，不能 finalize；请先派工 outline-architect 创建或继续大纲', false));
                     }
+                    session.record([{ kind: 'agent', text: rawText || '(空输出)', digest: describeAgentActionLabel_ACU(action), turnKey: session.turnKey }]);
+                    await session.flush();
                     return { action, attempts: attempt + 1 };
                 }
                 catch (error) {
                     lastReason = compactAgentProtocolError_ACU(error);
+                    // 被拒绝的原文也要留在会话里：模型必须看到自己上一次到底写了什么才能真正修正。
+                    session.record([
+                        { kind: 'agent', text: rawText || '(空输出)', digest: '输出被协议层拒绝', turnKey: session.turnKey },
+                        { kind: 'tool', text: `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出一个符合协议的 JSON 对象。`, digest: `协议拒绝：${lastReason}`, turnKey: session.turnKey },
+                    ]);
+                    await session.flush();
                     // 会话流必须展示模型原文片段：解析被拒不等于模型没输出，用户要能看到它实际返回了什么。
-                    const snippet = String(raw ?? '').trim().slice(0, 300) || '(空)';
-                    logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 输出被拒绝`, detail: `${lastReason}\n模型返回片段：${snippet}`, ok: false });
+                    logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 输出被拒绝`, detail: `${lastReason}\n模型返回片段：${rawText.slice(0, 300) || '(空)'}`, ok: false });
                 }
             }
             failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', `主 Agent 连续 ${retries + 1} 次返回不符合协议：${lastReason}`, { lastReason });
@@ -106981,13 +107880,16 @@ $CONTENT
                 logAgentSession_ACU({ kind: 'outline_op', agentName: label, title: '工具编辑被拒绝', detail: error.error.message, ok: false });
             }
         }
+        /**
+         * 渲染未结算楼层区间。只报区间不带正文：正文已由 `$STORY_TEXT` 独立摘取，
+         * 这里再贴一遍会让同一段内容在提示词里出现两次，白烧 token。
+         */
         renderUnsettledRange_ACU(context) {
             const start = context.settledThroughIndex + 1;
             const last = context.chat.length - 1;
             if (start > last)
                 return '没有尚未结算的真实历史，无需派工结算维护类代理。';
-            const preview = renderAgentUnsettledHistory_ACU(context);
-            return `未结算楼层区间：${start} 到 ${last}（共 ${last - start + 1} 楼）。派工结算时请把 $HISTORY_UNSETTLED 放进读集。\n区间内容预览：\n${preview}`;
+            return `未结算楼层区间：${start} 到 ${last}（共 ${last - start + 1} 楼）。这些楼层的正文已在「已经发生的小说正文」中给出；派工结算时请把 $HISTORY_UNSETTLED 放进读集。`;
         }
         spliceHistory_ACU(messages, history) {
             const result = [];
@@ -107253,12 +108155,14 @@ $CONTENT
         }
         return (await getCurrentCharacterWorldbookBinding_ACU()).orderedNames;
     }
+    // 依赖表里的函数一律延迟绑定：直接引用会在模块求值时就解析 pipeline 的导出，
+    // 让「谁先被 import」决定本模块能否加载。改成调用时解析后，加载顺序不再影响可用性。
     const defaultDependencies_ACU = {
         resolveRelevantBookNames: resolveRelevantBookNames_ACU,
-        resolveInjectionTarget: getInjectionTargetLorebook_ACU,
-        getIsolationPrefix: getIsolationPrefix_ACU,
-        buildRelevantWorldbookContent: buildCombinedWorldbookContentByStrategy_ACU,
-        readLorebookEntries: getLorebookEntriesByNames_ACU,
+        resolveInjectionTarget: () => getInjectionTargetLorebook_ACU(),
+        getIsolationPrefix: () => getIsolationPrefix_ACU(),
+        buildRelevantWorldbookContent: options => buildCombinedWorldbookContentByStrategy_ACU(options),
+        readLorebookEntries: bookNames => getLorebookEntriesByNames_ACU(bookNames),
         logReadFailure: phase => logWarn_ACU('[Continuation] 世界书只读失败。', { phase, error: { category: 'read_failed' } }),
     };
     /**
@@ -107703,16 +108607,39 @@ $CONTENT
             .filter(Boolean)
             .join('\n\n');
     }
+    /** 阶段历史里保留逐轮目标的阶段数（从最新往前数）。更早的阶段只保留节点级摘要。 */
+    const STAGE_HISTORY_DETAILED_STAGES_ACU = 2;
+    /**
+     * 渲染阶段历史。
+     *
+     * 只给每个阶段的活动 revision：被替换掉的旧 revision 是作废的计划，对规划下一阶段没有信息价值，
+     * 全量塞进去只会让提示词随 revision 数线性膨胀。最近两个阶段给到逐轮目标，更早的压到节点级——
+     * 那些阶段的事实已经沉淀进纪要，这里只需要让模型知道故事大致走过哪些节点。
+     * 输出是可读文本而不是 JSON，避免诱导大纲模型用 JSON 回话。
+     * @param task 当前任务
+     * @returns 自然语言文本
+     */
     function serializeStageHistory_ACU(task) {
-        return JSON.stringify(task.stages.map(stage => ({
-            stageId: stage.stageId,
-            stageNumber: stage.stageNumber,
-            status: stage.status,
-            activeRevision: stage.activeRevision,
-            completedTurns: stage.completedTurns,
-            chronicleRange: stage.chronicleRange,
-            revisions: stage.revisions.map(revision => ({ revision: revision.revision, frozen: revision.frozen, outline: revision.outline })),
-        })));
+        if (!task.stages.length)
+            return '还没有任何阶段，本次是第一个阶段。';
+        const detailedFrom = Math.max(0, task.stages.length - STAGE_HISTORY_DETAILED_STAGES_ACU);
+        const sections = task.stages.map((stage, index) => {
+            const revision = stage.revisions.find(item => item.revision === stage.activeRevision) ?? null;
+            const head = `## 第 ${stage.stageNumber} 阶段（${stage.status}，已完成 ${stage.completedTurns}/${revision?.outline.totalTurns ?? 0} 轮${stage.chronicleRange ? `，纪要范围 ${stage.chronicleRange.first} → ${stage.chronicleRange.last}` : ''}）`;
+            if (!revision)
+                return `${head}\n（该阶段没有可读的大纲。）`;
+            const lines = [head, `标题：${revision.outline.title}`, `目标：${revision.outline.goal}`];
+            for (const node of revision.outline.nodes) {
+                lines.push(`- 节点「${node.title}」：${node.goal}`);
+                if (index >= detailedFrom)
+                    for (const turn of node.turns)
+                        lines.push(`  · ${turn.goal}`);
+            }
+            if (index < detailedFrom)
+                lines.push('（该阶段较早，已省略逐轮目标；其事实已进入纪要。）');
+            return lines.join('\n');
+        });
+        return sections.join('\n\n');
     }
     function previousStages_ACU(task, activeStage) {
         if (!activeStage)
@@ -132317,7 +133244,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     });
 
-    var _sfc_main$1a = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1c = /*@__PURE__*/ defineComponent({
         __name: 'AcuBadge',
         props: {
             variant: { default: 'neutral' }
@@ -132343,7 +133270,7 @@ Expected function or array of functions, received type ${typeof value}.`
       return target;
     };
 
-    function _sfc_render$1a(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1c(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-badge", $setup.variantClass]) },
@@ -132352,9 +133279,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuBadge = /*#__PURE__*/ _export_sfc(_sfc_main$1a, [["render", _sfc_render$1a], ["__scopeId", "data-v-925544ff"]]);
+    var AcuBadge = /*#__PURE__*/ _export_sfc(_sfc_main$1c, [["render", _sfc_render$1c], ["__scopeId", "data-v-925544ff"]]);
 
-    var _sfc_main$19 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1b = /*@__PURE__*/ defineComponent({
         __name: 'AcuButton',
         props: {
             variant: { default: 'default' },
@@ -132380,16 +133307,16 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-btn[data-v-85c19efd] {\n  font: inherit;\n  border: 0;\n  background: var(--acu-bg-2);\n  color: var(--acu-text-1);\n  border-radius: var(--acu-radius-sm);\n  cursor: pointer;\n  display: inline-flex; align-items: center; justify-content: center; gap: var(--acu-space-150, 6px);\n  min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere;\n  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;\n}\n.acu-btn--md[data-v-85c19efd] { min-height: var(--acu-button-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-btn--sm[data-v-85c19efd] { min-height: var(--acu-button-height-sm, 28px); padding: var(--acu-space-1, 4px) var(--acu-space-250, 10px); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-btn--block[data-v-85c19efd] { width: 100%; min-width: 0;\n}\n.acu-btn--icon-only[data-v-85c19efd] { min-width: var(--acu-button-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-space-2, 8px);\n}\n.acu-btn--icon-only.acu-btn--sm[data-v-85c19efd] { min-width: var(--acu-button-height-sm, 28px); padding: var(--acu-space-1, 4px) var(--acu-space-2, 8px);\n}\n.acu-btn[data-v-85c19efd]:hover:not(:disabled) {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-btn[data-v-85c19efd]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-btn--primary[data-v-85c19efd] {\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n  font-weight: 500;\n  box-shadow: none;\n}\n.acu-btn--primary[data-v-85c19efd]:hover:not(:disabled) {\n  background: var(--acu-accent-2);\n  box-shadow: none;\n}\n.acu-btn--danger[data-v-85c19efd] {\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\n  color: var(--acu-danger);\n}\n.acu-btn--danger[data-v-85c19efd]:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 18%, transparent);\n}\n.acu-btn[data-v-85c19efd]:focus-visible {\n  outline: none;\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-btn--loading[data-v-85c19efd] { cursor: wait;\n}\n.acu-btn__spinner[data-v-85c19efd] { font-size: 0.85em;\n}\n", "src/presentation-v2/components/_lib/AcuButton.vue#style-0-85c19efd");
     var AcuButton_vue_vue_type_style_index_0_scoped_85c19efd_lang = null;
 
-    const _hoisted_1$15 = [
+    const _hoisted_1$17 = [
 	"type",
 	"disabled",
 	"title"
     ];
-    const _hoisted_2$W = {
+    const _hoisted_2$Y = {
 	key: 0,
 	class: "fa-solid fa-spinner fa-spin acu-btn__spinner"
     };
-    function _sfc_render$19(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1b(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", {
 		type: $props.nativeType,
 		disabled: $props.disabled || $props.loading,
@@ -132404,11 +133331,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			}
 		]]),
 		onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("click", $event))
-	}, [$props.loading ? (openBlock(), createElementBlock("i", _hoisted_2$W)) : createCommentVNode("v-if", true), !$props.loading ? renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true) : renderSlot(_ctx.$slots, "loading-text", { key: 2 }, undefined, true)], 10, _hoisted_1$15);
+	}, [$props.loading ? (openBlock(), createElementBlock("i", _hoisted_2$Y)) : createCommentVNode("v-if", true), !$props.loading ? renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true) : renderSlot(_ctx.$slots, "loading-text", { key: 2 }, undefined, true)], 10, _hoisted_1$17);
     }
-    var AcuButton = /*#__PURE__*/ _export_sfc(_sfc_main$19, [["render", _sfc_render$19], ["__scopeId", "data-v-85c19efd"]]);
+    var AcuButton = /*#__PURE__*/ _export_sfc(_sfc_main$1b, [["render", _sfc_render$1b], ["__scopeId", "data-v-85c19efd"]]);
 
-    var _sfc_main$18 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1a = /*@__PURE__*/ defineComponent({
         ...{ inheritAttrs: false },
         __name: 'AcuCheckbox',
         props: {
@@ -132435,12 +133362,12 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-checkbox[data-v-8a9ddddb] {\r\n  display: inline-flex; align-items: flex-start; gap: var(--acu-space-175, 7px);\r\n  padding: 0; border: 0; background: transparent;\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-2);\r\n  cursor: pointer; user-select: none;\r\n  line-height: 1.5; text-align: left;\n}\n.acu-checkbox--disabled[data-v-8a9ddddb] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-checkbox__box[data-v-8a9ddddb] {\r\n  flex-shrink: 0;\r\n  width: var(--acu-checkbox-size, 16px); height: var(--acu-checkbox-size, 16px); margin-top: var(--acu-space-025, 1px);\r\n  display: flex; align-items: center; justify-content: center;\r\n  border: 0;\r\n  border-radius: var(--acu-space-075, 3px);\r\n  background: var(--acu-bg-2);\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-checkbox--checked .acu-checkbox__box[data-v-8a9ddddb] {\r\n  background: var(--acu-accent);\n}\n.acu-checkbox__icon[data-v-8a9ddddb] {\r\n  display: block;\r\n  width: var(--acu-checkbox-icon-size, 12px); height: var(--acu-checkbox-icon-size, 12px);\r\n  color: #fff;\r\n  fill: none;\r\n  stroke: currentColor;\r\n  stroke-width: 2.15;\r\n  stroke-linecap: round;\r\n  stroke-linejoin: round;\r\n  opacity: 0;\r\n  transform: scale(0.82);\r\n  transition: opacity 0.15s ease, transform 0.15s ease;\n}\n.acu-checkbox--checked .acu-checkbox__icon[data-v-8a9ddddb] {\r\n  opacity: 1;\r\n  transform: scale(1);\n}\n.acu-checkbox__label[data-v-8a9ddddb] { min-width: 0;\n}\n.acu-checkbox:hover:not(:disabled) .acu-checkbox__box[data-v-8a9ddddb] {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-checkbox--checked:hover:not(:disabled) .acu-checkbox__box[data-v-8a9ddddb] {\r\n  background: var(--acu-accent-2);\n}\n.acu-checkbox[data-v-8a9ddddb]:focus-visible {\r\n  outline: none;\n}\n.acu-checkbox:focus-visible .acu-checkbox__box[data-v-8a9ddddb] {\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuCheckbox.vue#style-0-8a9ddddb");
     var AcuCheckbox_vue_vue_type_style_index_0_scoped_8a9ddddb_lang = null;
 
-    const _hoisted_1$14 = ["aria-checked", "disabled"];
-    const _hoisted_2$V = {
+    const _hoisted_1$16 = ["aria-checked", "disabled"];
+    const _hoisted_2$X = {
 	key: 0,
 	class: "acu-checkbox__label"
     };
-    function _sfc_render$18(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1a(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", mergeProps({
 		type: "button",
 		class: ["acu-checkbox", {
@@ -132465,15 +133392,15 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CACHED */
 	)), $props.label ? (openBlock(), createElementBlock(
 		"span",
-		_hoisted_2$V,
+		_hoisted_2$X,
 		toDisplayString($props.label),
 		1
 		/* TEXT */
-	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$14);
+	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$16);
     }
-    var AcuCheckbox = /*#__PURE__*/ _export_sfc(_sfc_main$18, [["render", _sfc_render$18], ["__scopeId", "data-v-8a9ddddb"]]);
+    var AcuCheckbox = /*#__PURE__*/ _export_sfc(_sfc_main$1a, [["render", _sfc_render$1a], ["__scopeId", "data-v-8a9ddddb"]]);
 
-    var _sfc_main$17 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$19 = /*@__PURE__*/ defineComponent({
         __name: 'AcuInput',
         props: {
             modelValue: {},
@@ -132527,7 +133454,7 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-input-shell[data-v-41a82ceb] {\r\n  position: relative;\r\n  display: block;\r\n  width: 100%;\r\n  min-width: 0;\n}\n.acu-input[data-v-41a82ceb] {\r\n  width: 100%; box-sizing: border-box;\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm) !important;\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit !important;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-input--md[data-v-41a82ceb] { min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px) !important; font-size: var(--acu-font-size-body, 12px) !important;\n}\n.acu-input--sm[data-v-41a82ceb] { min-height: var(--acu-control-height-sm, 26px); padding: var(--acu-control-padding-y-sm, 3px) var(--acu-control-padding-x-sm, 7px) !important; font-size: var(--acu-font-size-caption, 11px) !important;\n}\n.acu-input-shell--number .acu-input--md[data-v-41a82ceb] { padding-right: calc(var(--acu-control-padding-x-md, 9px) + var(--acu-space-5, 20px)) !important;\n}\n.acu-input-shell--number .acu-input--sm[data-v-41a82ceb] { padding-right: calc(var(--acu-control-padding-x-sm, 7px) + var(--acu-space-450, 18px)) !important;\n}\n.acu-input[data-v-41a82ceb]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-input[data-v-41a82ceb]:focus {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-input[data-v-41a82ceb]:disabled,\r\n.acu-input--disabled[data-v-41a82ceb] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-input[type=\"number\"][data-v-41a82ceb] {\r\n  -moz-appearance: textfield;\r\n  font-variant-numeric: tabular-nums;\n}\n.acu-input[type=\"number\"][data-v-41a82ceb]::-webkit-inner-spin-button,\r\n.acu-input[type=\"number\"][data-v-41a82ceb]::-webkit-outer-spin-button {\r\n  -webkit-appearance: none; margin: 0;\n}\n.acu-input__number-indicator[data-v-41a82ceb] {\r\n  position: absolute;\r\n  top: 50%;\r\n  right: var(--acu-control-padding-x-md, 9px);\r\n  width: var(--acu-icon-inline-sm, 10px);\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: var(--acu-space-050, 2px);\r\n  color: var(--acu-text-3);\r\n  pointer-events: none;\r\n  transform: translateY(-50%);\r\n  opacity: 0.8;\n}\n.acu-input-shell--sm .acu-input__number-indicator[data-v-41a82ceb] {\r\n  right: var(--acu-control-padding-x-sm, 7px);\r\n  width: var(--acu-space-2, 8px);\r\n  gap: var(--acu-space-025, 1px);\n}\n.acu-input__number-caret[data-v-41a82ceb] {\r\n  width: 0;\r\n  height: 0;\r\n  border-left: var(--acu-space-1, 4px) solid transparent;\r\n  border-right: var(--acu-space-1, 4px) solid transparent;\n}\n.acu-input__number-caret--up[data-v-41a82ceb] { border-bottom: var(--acu-space-1, 4px) solid currentColor;\n}\n.acu-input__number-caret--down[data-v-41a82ceb] { border-top: var(--acu-space-1, 4px) solid currentColor;\n}\n.acu-input-shell--sm .acu-input__number-caret[data-v-41a82ceb] {\r\n  border-left-width: var(--acu-space-075, 3px);\r\n  border-right-width: var(--acu-space-075, 3px);\n}\n.acu-input-shell--sm .acu-input__number-caret--up[data-v-41a82ceb] { border-bottom-width: var(--acu-space-075, 3px);\n}\n.acu-input-shell--sm .acu-input__number-caret--down[data-v-41a82ceb] { border-top-width: var(--acu-space-075, 3px);\n}\r\n", "src/presentation-v2/components/_lib/AcuInput.vue#style-0-41a82ceb");
     var AcuInput_vue_vue_type_style_index_0_scoped_41a82ceb_lang = null;
 
-    const _hoisted_1$13 = [
+    const _hoisted_1$15 = [
 	"type",
 	"value",
 	"placeholder",
@@ -132537,12 +133464,12 @@ Expected function or array of functions, received type ${typeof value}.`
 	"step",
 	"autocomplete"
     ];
-    const _hoisted_2$U = {
+    const _hoisted_2$W = {
 	key: 0,
 	class: "acu-input__number-indicator",
 	"aria-hidden": "true"
     };
-    function _sfc_render$17(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$19(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-input-shell", [
@@ -132563,7 +133490,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			onInput: $setup.onInput,
 			onChange: $setup.onChangeEvent,
 			onWheel: $setup.onWheel
-		}, null, 42, _hoisted_1$13), $props.type === "number" ? (openBlock(), createElementBlock("span", _hoisted_2$U, [..._cache[0] || (_cache[0] = [createBaseVNode(
+		}, null, 42, _hoisted_1$15), $props.type === "number" ? (openBlock(), createElementBlock("span", _hoisted_2$W, [..._cache[0] || (_cache[0] = [createBaseVNode(
 			"span",
 			{ class: "acu-input__number-caret acu-input__number-caret--up" },
 			null,
@@ -132580,11 +133507,11 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuInput = /*#__PURE__*/ _export_sfc(_sfc_main$17, [["render", _sfc_render$17], ["__scopeId", "data-v-41a82ceb"]]);
+    var AcuInput = /*#__PURE__*/ _export_sfc(_sfc_main$19, [["render", _sfc_render$19], ["__scopeId", "data-v-41a82ceb"]]);
 
     const DIALOG_LEAVE_MS = 160;
     const titleId = "acu-dialog-title";
-    var _sfc_main$16 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$18 = /*@__PURE__*/ defineComponent({
         __name: 'AcuDialogHost',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -132627,27 +133554,27 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-dialog-layer[data-v-2a6a0bee] {\r\n  position: fixed;\r\n  inset: 0;\r\n  z-index: 9600;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  height: 100vh;\r\n  height: 100dvh;\r\n  padding:\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-top, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-right, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-bottom, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-left, 0px));\r\n  background: rgba(0, 0, 0, 0.52);\r\n  pointer-events: auto;\r\n  animation: acu-dialog-layer-in-2a6a0bee 0.16s ease-out both;\n}\n.acu-dialog-layer.is-closing[data-v-2a6a0bee] {\r\n  pointer-events: none;\r\n  animation: acu-dialog-layer-out-2a6a0bee 0.16s ease-in both;\n}\n.acu-dialog[data-v-2a6a0bee] {\r\n  width: min(var(--acu-dialog-width, 440px), 100%);\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100vh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100dvh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-page-gap, 14px);\r\n  padding: var(--acu-panel-padding, 16px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-bg-1);\r\n  color: var(--acu-text-1);\r\n  box-shadow: var(--acu-shadow);\r\n  overflow: auto;\r\n  animation: acu-dialog-panel-in-2a6a0bee 0.16s ease-out both;\n}\n.acu-dialog__header[data-v-2a6a0bee] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: var(--acu-panel-gap, 12px);\n}\n.acu-dialog__header h2[data-v-2a6a0bee] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.35;\r\n  font-weight: 700;\n}\n.acu-dialog__message[data-v-2a6a0bee] {\r\n  margin: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__danger-message[data-v-2a6a0bee] {\r\n  margin: 0;\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 700;\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__field[data-v-2a6a0bee] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-150, 6px);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\n}\n.acu-dialog__checklist[data-v-2a6a0bee] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-250, 10px);\r\n  min-width: 0;\r\n  padding: var(--acu-space-250, 10px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 74%, transparent);\n}\n.acu-dialog__checklist[data-v-2a6a0bee] .acu-checkbox {\r\n  width: 100%;\n}\n.acu-dialog__check-option[data-v-2a6a0bee] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-050, 2px);\r\n  min-width: 0;\n}\n.acu-dialog__check-label[data-v-2a6a0bee] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 600;\n}\n.acu-dialog__check-description[data-v-2a6a0bee] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.45;\n}\n.acu-dialog__actions[data-v-2a6a0bee] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex-wrap: wrap;\r\n  padding-top: var(--acu-space-050, 2px);\n}\n.acu-dialog__actions--stacked[data-v-2a6a0bee] .acu-btn {\r\n  flex: 1 1 var(--acu-dialog-choice-min-width, 128px);\n}\n.acu-dialog-layer.is-closing .acu-dialog[data-v-2a6a0bee] {\r\n  animation: acu-dialog-panel-out-2a6a0bee 0.16s ease-in both;\n}\n@keyframes acu-dialog-layer-in-2a6a0bee {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-dialog-layer-out-2a6a0bee {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-dialog-panel-in-2a6a0bee {\nfrom {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\nto {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\n}\n@keyframes acu-dialog-panel-out-2a6a0bee {\nfrom {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\nto {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\n}\n@media (max-width: 520px) {\n.acu-dialog-layer[data-v-2a6a0bee] {\r\n    align-items: flex-end;\r\n    padding:\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-top, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-right, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-bottom, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-left, 0px));\n}\n.acu-dialog[data-v-2a6a0bee] {\r\n    width: 100%;\r\n    max-height: calc(100vh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n    max-height: calc(100dvh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\n}\n.acu-dialog__actions[data-v-2a6a0bee],\r\n  .acu-dialog__actions--stacked[data-v-2a6a0bee] {\r\n    display: grid;\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuDialogHost.vue#style-0-2a6a0bee");
     var AcuDialogHost_vue_vue_type_style_index_0_scoped_2a6a0bee_lang = null;
 
-    const _hoisted_1$12 = { class: "acu-dialog__header" };
-    const _hoisted_2$T = { class: "acu-dialog__message" };
-    const _hoisted_3$K = {
+    const _hoisted_1$14 = { class: "acu-dialog__header" };
+    const _hoisted_2$V = { class: "acu-dialog__message" };
+    const _hoisted_3$M = {
 	key: 0,
 	class: "acu-dialog__danger-message"
     };
-    const _hoisted_4$B = {
+    const _hoisted_4$D = {
 	key: 1,
 	class: "acu-dialog__field"
     };
-    const _hoisted_5$u = {
+    const _hoisted_5$w = {
 	key: 2,
 	class: "acu-dialog__checklist"
     };
-    const _hoisted_6$s = { class: "acu-dialog__check-option" };
-    const _hoisted_7$p = { class: "acu-dialog__check-label" };
-    const _hoisted_8$n = {
+    const _hoisted_6$u = { class: "acu-dialog__check-option" };
+    const _hoisted_7$r = { class: "acu-dialog__check-label" };
+    const _hoisted_8$p = {
 	key: 0,
 	class: "acu-dialog__check-description"
     };
-    function _sfc_render$16(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$18(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.portalTarget ? (openBlock(), createBlock(Teleport, {
 		key: 0,
 		to: $setup.portalTarget
@@ -132666,7 +133593,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			"aria-labelledby": $setup.titleId,
 			onClick: _cache[3] || (_cache[3] = withModifiers(() => {}, ["stop"]))
 		}, [
-			createBaseVNode("header", _hoisted_1$12, [createBaseVNode(
+			createBaseVNode("header", _hoisted_1$14, [createBaseVNode(
 				"h2",
 				{ id: $setup.titleId },
 				toDisplayString($setup.renderedDialog.title),
@@ -132685,19 +133612,19 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, 8, ["variant"])) : createCommentVNode("v-if", true)]),
 			createBaseVNode(
 				"p",
-				_hoisted_2$T,
+				_hoisted_2$V,
 				toDisplayString($setup.renderedDialog.message),
 				1
 				/* TEXT */
 			),
 			$setup.renderedDialog.dangerMessage ? (openBlock(), createElementBlock(
 				"p",
-				_hoisted_3$K,
+				_hoisted_3$M,
 				toDisplayString($setup.renderedDialog.dangerMessage),
 				1
 				/* TEXT */
 			)) : createCommentVNode("v-if", true),
-			$setup.renderedDialog.kind === "prompt" ? (openBlock(), createElementBlock("label", _hoisted_4$B, [createBaseVNode(
+			$setup.renderedDialog.kind === "prompt" ? (openBlock(), createElementBlock("label", _hoisted_4$D, [createBaseVNode(
 				"span",
 				null,
 				toDisplayString($setup.renderedDialog.label),
@@ -132710,7 +133637,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				placeholder: $setup.renderedDialog.placeholder,
 				onKeyup: _cache[1] || (_cache[1] = withKeys(($event) => $setup.dialog.submitActive(), ["enter"]))
 			}, null, 8, ["modelValue", "placeholder"])])) : createCommentVNode("v-if", true),
-			$setup.renderedDialog.kind === "multiselect" ? (openBlock(), createElementBlock("div", _hoisted_5$u, [(openBlock(true), createElementBlock(
+			$setup.renderedDialog.kind === "multiselect" ? (openBlock(), createElementBlock("div", _hoisted_5$w, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.renderedDialog.checkboxOptions || [], (option) => {
@@ -132720,15 +133647,15 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: option.disabled,
 						"onUpdate:modelValue": ($event) => $setup.dialog.setCheckedValue(option.value, $event)
 					}, {
-						default: withCtx(() => [createBaseVNode("span", _hoisted_6$s, [createBaseVNode(
+						default: withCtx(() => [createBaseVNode("span", _hoisted_6$u, [createBaseVNode(
 							"span",
-							_hoisted_7$p,
+							_hoisted_7$r,
 							toDisplayString(option.label),
 							1
 							/* TEXT */
 						), option.description ? (openBlock(), createElementBlock(
 							"span",
-							_hoisted_8$n,
+							_hoisted_8$p,
 							toDisplayString(option.description),
 							1
 							/* TEXT */
@@ -132811,9 +133738,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	)) : createCommentVNode("v-if", true)], 8, ["to"])) : createCommentVNode("v-if", true);
     }
-    var AcuDialogHost = /*#__PURE__*/ _export_sfc(_sfc_main$16, [["render", _sfc_render$16], ["__scopeId", "data-v-2a6a0bee"]]);
+    var AcuDialogHost = /*#__PURE__*/ _export_sfc(_sfc_main$18, [["render", _sfc_render$18], ["__scopeId", "data-v-2a6a0bee"]]);
 
-    var _sfc_main$15 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$17 = /*@__PURE__*/ defineComponent({
         __name: 'AcuFileButton',
         props: {
             accept: { default: undefined },
@@ -132861,8 +133788,8 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-file-button[data-v-7b70c7ef] { display: inline-flex;\n}\n.acu-file-button--block[data-v-7b70c7ef] { width: 100%; min-width: 0;\n}\n.acu-file-button__input[data-v-7b70c7ef] { display: none;\n}\n.acu-file-button__button--icon-only-default[data-v-7b70c7ef] {\r\n  background: transparent;\r\n  color: var(--acu-text-2);\n}\n.acu-file-button__button--icon-only-default[data-v-7b70c7ef]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\r\n  color: var(--acu-text-1);\n}\n.acu-file-button__button--icon-only-default.acu-file-button__button--md[data-v-7b70c7ef] {\r\n  width: var(--acu-icon-button-size-md, 32px);\r\n  min-width: var(--acu-icon-button-size-md, 32px);\n}\n.acu-file-button__button--icon-only-default.acu-file-button__button--sm[data-v-7b70c7ef] {\r\n  width: var(--acu-icon-button-size-sm, 22px);\r\n  min-width: var(--acu-icon-button-size-sm, 22px);\r\n  min-height: var(--acu-icon-button-size-sm, 22px);\r\n  padding: var(--acu-space-1, 4px);\r\n  font-size: var(--acu-font-size-micro, 10px);\n}\r\n", "src/presentation-v2/components/_lib/AcuFileButton.vue#style-0-7b70c7ef");
     var AcuFileButton_vue_vue_type_style_index_0_scoped_7b70c7ef_lang = null;
 
-    const _hoisted_1$11 = ["accept"];
-    function _sfc_render$15(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$13 = ["accept"];
+    function _sfc_render$17(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-file-button", { "acu-file-button--block": $props.block }]) },
@@ -132878,14 +133805,14 @@ Expected function or array of functions, received type ${typeof value}.`
 			accept: $props.accept,
 			class: "acu-file-button__input",
 			onChange: $setup.onChange
-		}, null, 40, _hoisted_1$11)],
+		}, null, 40, _hoisted_1$13)],
 		2
 		/* CLASS */
 	);
     }
-    var AcuFileButton = /*#__PURE__*/ _export_sfc(_sfc_main$15, [["render", _sfc_render$15], ["__scopeId", "data-v-7b70c7ef"]]);
+    var AcuFileButton = /*#__PURE__*/ _export_sfc(_sfc_main$17, [["render", _sfc_render$17], ["__scopeId", "data-v-7b70c7ef"]]);
 
-    var _sfc_main$14 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$16 = /*@__PURE__*/ defineComponent({
         __name: 'AcuIconButton',
         props: {
             icon: {},
@@ -132907,12 +133834,12 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-icon-btn[data-v-70b36214] {\r\n  --acu-icon-btn-size: var(--acu-icon-button-size-md, 32px);\r\n  --acu-icon-btn-font-size: var(--acu-icon-inline-md, 13px);\r\n  appearance: none !important;\r\n  -webkit-appearance: none !important;\r\n  flex: 0 0 auto;\r\n  display: inline-flex !important;\r\n  align-items: center !important;\r\n  justify-content: center !important;\r\n  width: var(--acu-icon-btn-size) !important;\r\n  min-width: var(--acu-icon-btn-size) !important;\r\n  max-width: var(--acu-icon-btn-size) !important;\r\n  height: var(--acu-icon-btn-size) !important;\r\n  min-height: var(--acu-icon-btn-size) !important;\r\n  max-height: var(--acu-icon-btn-size) !important;\r\n  box-sizing: border-box !important;\r\n  margin: 0 !important;\r\n  padding: 0 !important;\r\n  border: 0 !important;\r\n  background: transparent !important;\r\n  color: var(--acu-text-2) !important;\r\n  border-radius: var(--acu-radius-sm) !important;\r\n  cursor: pointer;\r\n  font: inherit !important;\r\n  font-size: var(--acu-icon-btn-font-size) !important;\r\n  line-height: 1 !important;\r\n  text-align: center !important;\r\n  vertical-align: middle !important;\r\n  box-shadow: none !important;\r\n  outline: none !important;\r\n  -webkit-tap-highlight-color: transparent;\r\n  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n}\n.acu-icon-btn > i[data-v-70b36214] {\r\n  flex: 0 0 auto !important;\r\n  display: inline-block !important;\r\n  width: 1em !important;\r\n  min-width: 1em !important;\r\n  height: 1em !important;\r\n  min-height: 1em !important;\r\n  color: inherit !important;\r\n  font-size: inherit !important;\r\n  line-height: 1 !important;\r\n  text-align: center !important;\r\n  vertical-align: -0.125em !important;\n}\n.acu-icon-btn > i[data-v-70b36214]::before {\r\n  display: block !important;\r\n  width: 1em !important;\r\n  height: 1em !important;\r\n  color: inherit !important;\r\n  font-size: inherit !important;\r\n  line-height: 1 !important;\n}\n.acu-icon-btn--md[data-v-70b36214] {\r\n  --acu-icon-btn-size: var(--acu-icon-button-size-md, 32px);\r\n  --acu-icon-btn-font-size: var(--acu-icon-inline-md, 13px);\n}\n.acu-icon-btn--sm[data-v-70b36214] {\r\n  --acu-icon-btn-size: var(--acu-icon-button-size-sm, 22px);\r\n  --acu-icon-btn-font-size: var(--acu-icon-inline-sm, 10px);\r\n  background: var(--acu-bg-2) !important;\n}\n.acu-icon-btn--default[data-v-70b36214]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\n}\n.acu-icon-btn--danger[data-v-70b36214]:hover:not(:disabled) {\r\n  color: var(--acu-danger) !important;\r\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent) !important;\n}\n.acu-icon-btn--accent[data-v-70b36214] {\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\n}\n.acu-icon-btn--accent[data-v-70b36214]:hover:not(:disabled) {\r\n  background: var(--acu-accent-glow) !important; color: var(--acu-accent) !important;\n}\n.acu-icon-btn[data-v-70b36214]:focus-visible {\r\n  outline: none !important;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-icon-btn[data-v-70b36214]:disabled { opacity: 0.4; cursor: not-allowed;\n}\r\n", "src/presentation-v2/components/_lib/AcuIconButton.vue#style-0-70b36214");
     var AcuIconButton_vue_vue_type_style_index_0_scoped_70b36214_lang = null;
 
-    const _hoisted_1$10 = [
+    const _hoisted_1$12 = [
 	"disabled",
 	"title",
 	"aria-label"
     ];
-    function _sfc_render$14(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$16(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", {
 		type: "button",
 		disabled: $props.disabled,
@@ -132926,11 +133853,11 @@ Expected function or array of functions, received type ${typeof value}.`
 		null,
 		2
 		/* CLASS */
-	)], 10, _hoisted_1$10);
+	)], 10, _hoisted_1$12);
     }
-    var AcuIconButton = /*#__PURE__*/ _export_sfc(_sfc_main$14, [["render", _sfc_render$14], ["__scopeId", "data-v-70b36214"]]);
+    var AcuIconButton = /*#__PURE__*/ _export_sfc(_sfc_main$16, [["render", _sfc_render$16], ["__scopeId", "data-v-70b36214"]]);
 
-    var _sfc_main$13 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$15 = /*@__PURE__*/ defineComponent({
         __name: 'AcuSegmentedControl',
         props: {
             options: {},
@@ -132978,14 +133905,14 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-segmented[data-v-e3d985dd] {\r\n  position: relative;\r\n  display: grid;\r\n  grid-auto-flow: column;\r\n  grid-auto-columns: minmax(0, 1fr);\r\n  min-width: 0;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  padding: var(--acu-space-075, 3px);\r\n  overflow: hidden;\n}\n.acu-segmented--disabled[data-v-e3d985dd] {\r\n  opacity: 0.55;\n}\n.acu-segmented__thumb[data-v-e3d985dd] {\r\n  position: absolute;\r\n  inset: var(--acu-space-075, 3px) auto var(--acu-space-075, 3px) var(--acu-space-075, 3px);\r\n  width: calc((100% - var(--acu-space-150, 6px)) / var(--acu-segment-count));\r\n  border-radius: calc(var(--acu-radius-sm) - var(--acu-space-050, 2px));\r\n  background: var(--acu-accent);\r\n  transform: translateX(calc(var(--acu-segment-index) * 100%));\r\n  transition: transform 0.16s ease, background 0.16s ease;\r\n  pointer-events: none;\n}\n.acu-segmented__item[data-v-e3d985dd] {\r\n  position: relative;\r\n  min-width: 0;\r\n  margin: 0;\r\n  border: 0;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  cursor: pointer;\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: var(--acu-space-150, 6px);\r\n  transition: background 0.15s ease, color 0.15s ease;\r\n  z-index: 1;\n}\n.acu-segmented__item[data-v-e3d985dd]:not(.acu-segmented__item--active):hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-segmented__item[data-v-e3d985dd]:disabled {\r\n  cursor: not-allowed;\r\n  color: var(--acu-text-3);\n}\n.acu-segmented__item--active[data-v-e3d985dd] {\r\n  color: var(--acu-on-accent);\n}\n.acu-segmented__item[data-v-e3d985dd]:focus-visible {\r\n  outline: none;\n}\n.acu-segmented__item[data-v-e3d985dd]:focus-visible::before {\r\n  content: '';\r\n  position: absolute;\r\n  inset: var(--acu-space-050, 2px);\r\n  border-radius: var(--acu-radius-sm);\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\r\n  pointer-events: none;\r\n  z-index: 2;\n}\n.acu-segmented--md .acu-segmented__item[data-v-e3d985dd] {\r\n  min-height: var(--acu-segment-height-md, 30px);\r\n  padding: 0 var(--acu-space-2, 8px);\r\n  border-radius: calc(var(--acu-radius-sm) - var(--acu-space-050, 2px));\n}\n.acu-segmented--sm .acu-segmented__item[data-v-e3d985dd] {\r\n  min-height: var(--acu-segment-height-sm, 24px);\r\n  padding: 0 var(--acu-space-175, 7px);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  border-radius: calc(var(--acu-radius-sm) - var(--acu-space-050, 2px));\n}\n.acu-segmented__label[data-v-e3d985dd] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\r\n", "src/presentation-v2/components/_lib/AcuSegmentedControl.vue#style-0-e3d985dd");
     var AcuSegmentedControl_vue_vue_type_style_index_0_scoped_e3d985dd_lang = null;
 
-    const _hoisted_1$$ = ["aria-label"];
-    const _hoisted_2$S = [
+    const _hoisted_1$11 = ["aria-label"];
+    const _hoisted_2$U = [
 	"aria-checked",
 	"disabled",
 	"onClick"
     ];
-    const _hoisted_3$J = { class: "acu-segmented__label" };
-    function _sfc_render$13(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$L = { class: "acu-segmented__label" };
+    function _sfc_render$15(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", {
 		class: normalizeClass(["acu-segmented", [`acu-segmented--${$props.size}`, { "acu-segmented--disabled": $props.disabled }]]),
 		role: "radiogroup",
@@ -133020,17 +133947,17 @@ Expected function or array of functions, received type ${typeof value}.`
 				]
 			}, [createBaseVNode(
 				"span",
-				_hoisted_3$J,
+				_hoisted_3$L,
 				toDisplayString(opt.label),
 				1
 				/* TEXT */
-			)], 42, _hoisted_2$S);
+			)], 42, _hoisted_2$U);
 		}),
 		128
 		/* KEYED_FRAGMENT */
-	))], 14, _hoisted_1$$);
+	))], 14, _hoisted_1$11);
     }
-    var AcuSegmentedControl = /*#__PURE__*/ _export_sfc(_sfc_main$13, [["render", _sfc_render$13], ["__scopeId", "data-v-e3d985dd"]]);
+    var AcuSegmentedControl = /*#__PURE__*/ _export_sfc(_sfc_main$15, [["render", _sfc_render$15], ["__scopeId", "data-v-e3d985dd"]]);
 
     const DEFAULT_DURATION_BY_KIND = {
         info: 2600,
@@ -133165,7 +134092,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const TOAST_LEAVE_MS = 160;
     const DEFAULT_VISIBLE_TOAST_LIMIT = 4;
-    var _sfc_main$12 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$14 = /*@__PURE__*/ defineComponent({
         __name: 'AcuToastViewport',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -133262,25 +134189,25 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-toast-viewport[data-v-9146b9ef] {\r\n  position: fixed;\r\n  top: 0;\r\n  right: 0;\r\n  bottom: 0;\r\n  left: 0;\r\n  inset: 0;\r\n  z-index: 9410;\r\n  box-sizing: border-box;\r\n  width: 100%;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  min-height: 100%;\r\n  min-height: 100vh;\r\n  min-height: 100dvh;\r\n  overflow: hidden;\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-ui);\r\n  font-size: var(--acu-font-size-body);\r\n  pointer-events: none;\n}\n.acu-toast-viewport[data-v-9146b9ef],\r\n.acu-toast-viewport[data-v-9146b9ef] * {\r\n  box-sizing: border-box;\n}\n.acu-toast-viewport__list[data-v-9146b9ef] {\r\n  position: absolute;\r\n  top: calc(var(--acu-toast-top, 62px) + var(--acu-safe-top, 0px));\r\n  right: calc(var(--acu-toast-edge-gap, 18px) + var(--acu-safe-right, 0px));\r\n  bottom: auto;\r\n  width: min(var(--acu-toast-width, 360px), calc(100% - var(--acu-toast-edge-gap, 18px) - var(--acu-toast-edge-gap, 18px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\r\n  max-height: calc(100% - var(--acu-toast-top, 62px) - var(--acu-toast-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-2, 8px);\r\n  margin: 0;\r\n  padding: 0;\r\n  overflow: visible;\r\n  list-style: none;\n}\n.acu-v2-toast[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-accent);\r\n  position: relative;\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: var(--acu-control-height-sm, 26px) minmax(0, 1fr) auto auto;\r\n  align-items: center;\r\n  gap: var(--acu-space-2, 8px);\r\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\r\n  overflow: hidden;\r\n  border: 1px solid color-mix(in srgb, var(--acu-toast-tone) 22%, var(--acu-border-2));\r\n  border-radius: var(--acu-radius-md);\r\n  background:\r\n    linear-gradient(\r\n      90deg,\r\n      color-mix(in srgb, var(--acu-toast-tone) 7%, transparent),\r\n      transparent 48%\r\n    ),\r\n    color-mix(in srgb, var(--acu-bg-1) 97%, var(--acu-text-1) 3%);\r\n  box-shadow:\r\n    0 18px 46px rgba(0, 0, 0, 0.18),\r\n    0 4px 16px rgba(0, 0, 0, 0.12),\r\n    inset 0 1px 0 color-mix(in srgb, var(--acu-text-1) 8%, transparent);\r\n  color: var(--acu-text-1);\r\n  pointer-events: auto;\r\n  animation: acu-toast-in-9146b9ef 0.16s ease-out both;\n}\n.acu-v2-toast--success[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-success);\n}\n.acu-v2-toast--warning[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-warning);\n}\n.acu-v2-toast--error[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-danger);\n}\n.acu-v2-toast.is-closing[data-v-9146b9ef] {\r\n  pointer-events: none;\r\n  animation: acu-toast-out-9146b9ef 0.16s ease-in both;\n}\n.acu-v2-toast__icon[data-v-9146b9ef] {\r\n  --acu-icon-color: var(--acu-toast-tone);\r\n  min-width: 0;\r\n  width: var(--acu-control-height-sm, 26px);\r\n  height: var(--acu-control-height-sm, 26px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-toast-tone) 13%, transparent);\r\n  color: var(--acu-toast-tone);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1;\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-toast-tone) 18%, transparent);\n}\n.acu-v2-toast__text[data-v-9146b9ef] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.45;\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-toast__action[data-v-9146b9ef] {\r\n  white-space: nowrap;\n}\n.acu-v2-toast__dismiss[data-v-9146b9ef] {\r\n  flex: 0 0 auto;\n}\n@keyframes acu-toast-in-9146b9ef {\nfrom {\r\n    opacity: 0;\r\n    transform: translateY(-6px);\n}\nto {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\n}\n@keyframes acu-toast-out-9146b9ef {\nfrom {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\nto {\r\n    opacity: 0;\r\n    transform: translateY(-6px);\n}\n}\n@media (max-width: 640px) {\n.acu-toast-viewport__list[data-v-9146b9ef] {\r\n    top: calc(var(--acu-toast-top-compact, 58px) + var(--acu-safe-top, 0px));\r\n    right: auto;\r\n    bottom: auto;\r\n    left: calc(50% + (var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)) / 2);\r\n    width: clamp(var(--acu-menu-min-width, 240px), 70vw, calc(100% - var(--acu-toast-edge-gap-compact, 12px) - var(--acu-toast-edge-gap-compact, 12px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\r\n    max-height: calc(100% - var(--acu-toast-top-compact, 58px) - var(--acu-toast-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n    transform: translateX(-50%);\n}\n.acu-v2-toast[data-v-9146b9ef] {\r\n    grid-template-columns: var(--acu-icon-button-size-sm, 22px) minmax(0, 1fr) auto;\r\n    gap: var(--acu-space-175, 7px);\r\n    padding: var(--acu-space-2, 8px) var(--acu-space-225, 9px);\n}\n.acu-v2-toast__icon[data-v-9146b9ef] {\r\n    width: var(--acu-icon-button-size-sm, 22px);\r\n    height: var(--acu-icon-button-size-sm, 22px);\r\n    font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-toast__text[data-v-9146b9ef] {\r\n    font-size: var(--acu-font-size-caption, 11px);\r\n    line-height: 1.4;\n}\n.acu-v2-toast__action[data-v-9146b9ef] {\r\n    grid-column: 2 / 4;\r\n    justify-self: start;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuToastViewport.vue#style-0-9146b9ef");
     var AcuToastViewport_vue_vue_type_style_index_0_scoped_9146b9ef_lang = null;
 
-    const _hoisted_1$_ = {
+    const _hoisted_1$10 = {
 	key: 0,
 	class: "acu-toast-viewport",
 	role: "status",
 	"aria-label": "通知",
 	style: { zIndex: 9410 }
     };
-    const _hoisted_2$R = { class: "acu-toast-viewport__list" };
-    const _hoisted_3$I = ["role"];
-    const _hoisted_4$A = {
+    const _hoisted_2$T = { class: "acu-toast-viewport__list" };
+    const _hoisted_3$K = ["role"];
+    const _hoisted_4$C = {
 	class: "acu-v2-toast__icon",
 	"aria-hidden": "true"
     };
-    const _hoisted_5$t = { class: "acu-v2-toast__text" };
-    function _sfc_render$12(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_5$v = { class: "acu-v2-toast__text" };
+    function _sfc_render$14(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.portalTarget ? (openBlock(), createBlock(Teleport, {
 		key: 0,
 		to: $setup.portalTarget
-	}, [$setup.renderedItems.length ? (openBlock(), createElementBlock("div", _hoisted_1$_, [createBaseVNode("ol", _hoisted_2$R, [(openBlock(true), createElementBlock(
+	}, [$setup.renderedItems.length ? (openBlock(), createElementBlock("div", _hoisted_1$10, [createBaseVNode("ol", _hoisted_2$T, [(openBlock(true), createElementBlock(
 		Fragment,
 		null,
 		renderList($setup.renderedItems, (entry) => {
@@ -133293,7 +134220,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				role: entry.item.kind === "error" ? "alert" : "status"
 			}, [
-				createBaseVNode("span", _hoisted_4$A, [createBaseVNode(
+				createBaseVNode("span", _hoisted_4$C, [createBaseVNode(
 					"i",
 					{ class: normalizeClass($setup.iconForKind(entry.item.kind)) },
 					null,
@@ -133302,7 +134229,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				createBaseVNode(
 					"p",
-					_hoisted_5$t,
+					_hoisted_5$v,
 					toDisplayString(entry.item.text),
 					1
 					/* TEXT */
@@ -133329,15 +134256,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					title: "关闭通知",
 					onClick: ($event) => $setup.toast.dismiss(entry.item.id)
 				}, null, 8, ["onClick"])) : createCommentVNode("v-if", true)
-			], 10, _hoisted_3$I);
+			], 10, _hoisted_3$K);
 		}),
 		128
 		/* KEYED_FRAGMENT */
 	))])])) : createCommentVNode("v-if", true)], 8, ["to"])) : createCommentVNode("v-if", true);
     }
-    var AcuToastViewport = /*#__PURE__*/ _export_sfc(_sfc_main$12, [["render", _sfc_render$12], ["__scopeId", "data-v-9146b9ef"]]);
+    var AcuToastViewport = /*#__PURE__*/ _export_sfc(_sfc_main$14, [["render", _sfc_render$14], ["__scopeId", "data-v-9146b9ef"]]);
 
-    var _sfc_main$11 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$13 = /*@__PURE__*/ defineComponent({
         __name: 'AcuMobilePanelNav',
         props: {
             items: {}
@@ -133518,24 +134445,24 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-mobile-panel-nav[data-v-614843e5] {\r\n  display: none;\n}\n@media (max-width: 860px) {\n.acu-mobile-panel-nav[data-v-614843e5] {\r\n    position: sticky;\r\n    top: 0;\r\n    z-index: 30;\r\n    display: block;\r\n    margin: -20px -20px 4px;\r\n    padding: 0;\r\n    border-top: 0;\r\n    border-bottom: 1px solid var(--acu-border-2);\r\n    background: color-mix(in srgb, var(--acu-bg-0) 94%, transparent);\r\n    backdrop-filter: blur(10px);\r\n    -webkit-backdrop-filter: blur(10px);\n}\n.acu-mobile-panel-nav[data-v-614843e5]::before,\r\n  .acu-mobile-panel-nav[data-v-614843e5]::after {\r\n    content: \"\";\r\n    position: absolute;\r\n    top: 0;\r\n    bottom: 1px;\r\n    z-index: 2;\r\n    width: 22px;\r\n    pointer-events: none;\n}\n.acu-mobile-panel-nav[data-v-614843e5]::before {\r\n    left: 0;\r\n    background: linear-gradient(to right, var(--acu-bg-0), transparent);\n}\n.acu-mobile-panel-nav[data-v-614843e5]::after {\r\n    right: 0;\r\n    background: linear-gradient(to left, var(--acu-bg-0), transparent);\n}\n.acu-mobile-panel-nav__track[data-v-614843e5] {\r\n    min-width: 0;\r\n    display: flex;\r\n    gap: 0;\r\n    overflow-x: auto;\r\n    overscroll-behavior-x: contain;\r\n    scroll-padding-inline: 18px;\r\n    scrollbar-width: none;\r\n    padding: 0 18px;\r\n    border: 0;\r\n    border-radius: 0;\r\n    background: transparent;\n}\n.acu-mobile-panel-nav__track[data-v-614843e5]::-webkit-scrollbar {\r\n    display: none;\n}\n.acu-mobile-panel-nav__item[data-v-614843e5] {\r\n    flex: 0 0 auto;\r\n    position: relative;\r\n    min-width: 84px;\r\n    min-height: 44px;\r\n    max-width: none;\r\n    padding: 0 12px;\r\n    border: 0;\r\n    border-radius: 0;\r\n    background: transparent;\r\n    color: var(--acu-text-3);\r\n    font: inherit;\r\n    font-size: var(--acu-font-size-body, 12px);\r\n    font-weight: 650;\r\n    line-height: 1.2;\r\n    white-space: nowrap;\r\n    overflow: hidden;\r\n    text-overflow: ellipsis;\r\n    cursor: pointer;\r\n    transition:\r\n      background 0.15s ease,\r\n      border-color 0.15s ease,\r\n      color 0.15s ease,\r\n      box-shadow 0.15s ease;\n}\n.acu-mobile-panel-nav__item[data-v-614843e5]:hover {\r\n    background: var(--acu-hover-overlay);\r\n    color: var(--acu-text-1);\n}\n.acu-mobile-panel-nav__item[data-v-614843e5]::after {\r\n    content: \"\";\r\n    position: absolute;\r\n    right: 12px;\r\n    bottom: 0;\r\n    left: 12px;\r\n    height: 2px;\r\n    border-radius: 2px 2px 0 0;\r\n    background: transparent;\r\n    transition: background 0.15s ease, opacity 0.15s ease;\n}\n.acu-mobile-panel-nav__item.is-active[data-v-614843e5] {\r\n    background: transparent;\r\n    color: var(--acu-text-1);\r\n    box-shadow: none;\n}\n.acu-mobile-panel-nav__item.is-active[data-v-614843e5]::after {\r\n    background: var(--acu-accent);\n}\n.acu-mobile-panel-nav__item[data-v-614843e5]:focus-visible {\r\n    outline: none;\r\n    box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-mobile-panel-nav__item.is-active[data-v-614843e5]:focus-visible {\r\n    box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n}\n@media (max-width: 720px) {\n.acu-mobile-panel-nav[data-v-614843e5] {\r\n    margin: -14px -14px 4px;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuMobilePanelNav.vue#style-0-614843e5");
     var AcuMobilePanelNav_vue_vue_type_style_index_0_scoped_614843e5_lang = null;
 
-    const _hoisted_1$Z = {
+    const _hoisted_1$$ = {
 	ref: "rootRef",
 	class: "acu-mobile-panel-nav",
 	"aria-label": "页面板块"
     };
-    const _hoisted_2$Q = {
+    const _hoisted_2$S = {
 	ref: "trackRef",
 	class: "acu-mobile-panel-nav__track",
 	role: "list"
     };
-    const _hoisted_3$H = ["aria-current", "onClick"];
-    function _sfc_render$11(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$J = ["aria-current", "onClick"];
+    function _sfc_render$13(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"nav",
-		_hoisted_1$Z,
+		_hoisted_1$$,
 		[createBaseVNode(
 			"div",
-			_hoisted_2$Q,
+			_hoisted_2$S,
 			[(openBlock(true), createElementBlock(
 				Fragment,
 				null,
@@ -133546,7 +134473,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						class: normalizeClass(["acu-mobile-panel-nav__item", { "is-active": item.id === $setup.activeId }]),
 						"aria-current": item.id === $setup.activeId ? "location" : undefined,
 						onClick: ($event) => $setup.scrollToPanel(item.id)
-					}, toDisplayString(item.label), 11, _hoisted_3$H);
+					}, toDisplayString(item.label), 11, _hoisted_3$J);
 				}),
 				128
 				/* KEYED_FRAGMENT */
@@ -133558,9 +134485,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var AcuMobilePanelNav = /*#__PURE__*/ _export_sfc(_sfc_main$11, [["render", _sfc_render$11], ["__scopeId", "data-v-614843e5"]]);
+    var AcuMobilePanelNav = /*#__PURE__*/ _export_sfc(_sfc_main$13, [["render", _sfc_render$13], ["__scopeId", "data-v-614843e5"]]);
 
-    var _sfc_main$10 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$12 = /*@__PURE__*/ defineComponent({
         __name: 'AcuPanelGrid',
         props: {
             columns: { default: 2 },
@@ -133581,7 +134508,7 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-panel-grid[data-v-b00ea74c] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: repeat(var(--acu-panel-grid-columns), minmax(0, 1fr));\r\n  gap: var(--acu-panel-grid-gap, 16px);\r\n  align-items: stretch;\n}\n.acu-panel-grid[data-v-b00ea74c] >  * {\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-panel-grid--collapse-md[data-v-b00ea74c] {\r\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 1080px) {\n.acu-panel-grid--collapse-lg[data-v-b00ea74c] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuPanelGrid.vue#style-0-b00ea74c");
     var AcuPanelGrid_vue_vue_type_style_index_0_scoped_b00ea74c_lang = null;
 
-    function _sfc_render$10(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$12(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -133593,7 +134520,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS, STYLE */
 	);
     }
-    var AcuPanelGrid = /*#__PURE__*/ _export_sfc(_sfc_main$10, [["render", _sfc_render$10], ["__scopeId", "data-v-b00ea74c"]]);
+    var AcuPanelGrid = /*#__PURE__*/ _export_sfc(_sfc_main$12, [["render", _sfc_render$12], ["__scopeId", "data-v-b00ea74c"]]);
 
     function connectionModeFromDraft(draft) {
         if (draft.apiMode === 'tavern')
@@ -133852,7 +134779,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     });
 
-    var _sfc_main$$ = /*@__PURE__*/ defineComponent({
+    var _sfc_main$11 = /*@__PURE__*/ defineComponent({
         __name: 'AcuFormRow',
         props: {
             label: {},
@@ -133869,20 +134796,20 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-form-row[data-v-16cf0b7e] {\r\n  display: flex; flex-direction: column; gap: var(--acu-space-125, 5px);\r\n  color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\r\n  min-width: 0;\n}\n.acu-form-row__label[data-v-16cf0b7e] { font-weight: 500;\n}\n.acu-form-row__hint[data-v-16cf0b7e] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: var(--acu-line-height-caption, 1.5);\n}\n.acu-form-row[data-v-16cf0b7e] input[type=\"text\"],\r\n.acu-form-row[data-v-16cf0b7e] input[type=\"password\"],\r\n.acu-form-row[data-v-16cf0b7e] input[type=\"number\"],\r\n.acu-form-row[data-v-16cf0b7e] select,\r\n.acu-form-row[data-v-16cf0b7e] textarea {\r\n  min-width: 0; min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-form-row[data-v-16cf0b7e] textarea {\r\n  min-height: unset;\r\n  resize: none;\n}\n.acu-form-row[data-v-16cf0b7e] select {\r\n  appearance: none;\r\n  -webkit-appearance: none;\r\n  padding-right: var(--acu-space-7, 28px);\r\n  background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236b7280' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\") !important;\r\n  background-repeat: no-repeat !important;\r\n  background-position: right var(--acu-control-padding-x-md, 9px) center !important;\r\n  background-size: var(--acu-space-250, 10px) var(--acu-space-150, 6px) !important;\r\n  cursor: pointer;\n}\n.acu-form-row[data-v-16cf0b7e] input:focus,\r\n.acu-form-row[data-v-16cf0b7e] select:focus,\r\n.acu-form-row[data-v-16cf0b7e] textarea:focus {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuFormRow.vue#style-0-16cf0b7e");
     var AcuFormRow_vue_vue_type_style_index_0_scoped_16cf0b7e_lang = null;
 
-    const _hoisted_1$Y = { class: "acu-form-row" };
-    const _hoisted_2$P = {
+    const _hoisted_1$_ = { class: "acu-form-row" };
+    const _hoisted_2$R = {
 	key: 0,
 	class: "acu-form-row__label"
     };
-    const _hoisted_3$G = {
+    const _hoisted_3$I = {
 	key: 1,
 	class: "acu-form-row__hint"
     };
-    function _sfc_render$$(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$Y, [
+    function _sfc_render$11(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$_, [
 		$props.label ? (openBlock(), createElementBlock(
 			"span",
-			_hoisted_2$P,
+			_hoisted_2$R,
 			toDisplayString($props.label),
 			1
 			/* TEXT */
@@ -133890,16 +134817,16 @@ Expected function or array of functions, received type ${typeof value}.`
 		renderSlot(_ctx.$slots, "default", {}, undefined, true),
 		$props.hint ? (openBlock(), createElementBlock(
 			"span",
-			_hoisted_3$G,
+			_hoisted_3$I,
 			toDisplayString($props.hint),
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var AcuFormRow = /*#__PURE__*/ _export_sfc(_sfc_main$$, [["render", _sfc_render$$], ["__scopeId", "data-v-16cf0b7e"]]);
+    var AcuFormRow = /*#__PURE__*/ _export_sfc(_sfc_main$11, [["render", _sfc_render$11], ["__scopeId", "data-v-16cf0b7e"]]);
 
-    var _sfc_main$_ = /*@__PURE__*/ defineComponent({
+    var _sfc_main$10 = /*@__PURE__*/ defineComponent({
         __name: 'AcuMessage',
         props: {
             kind: { default: 'info' },
@@ -133918,7 +134845,7 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-message[data-v-9bfe58b8] {\r\n  padding: 8px 0 8px 10px;\r\n  border-radius: 0;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  border: 0;\r\n  border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\r\n  line-height: 1.5;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\n}\n.acu-message--info[data-v-9bfe58b8] {\r\n  border-left-color: color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n.acu-message--success[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-success);\n}\n.acu-message--warning[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-warning);\n}\n.acu-message--error[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-danger);\n}\r\n", "src/presentation-v2/components/_lib/AcuMessage.vue#style-0-9bfe58b8");
     var AcuMessage_vue_vue_type_style_index_0_scoped_9bfe58b8_lang = null;
 
-    function _sfc_render$_(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$10(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.visible ? (openBlock(), createElementBlock(
 		"div",
 		{
@@ -133931,9 +134858,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	)) : createCommentVNode("v-if", true);
     }
-    var AcuMessage = /*#__PURE__*/ _export_sfc(_sfc_main$_, [["render", _sfc_render$_], ["__scopeId", "data-v-9bfe58b8"]]);
+    var AcuMessage = /*#__PURE__*/ _export_sfc(_sfc_main$10, [["render", _sfc_render$10], ["__scopeId", "data-v-9bfe58b8"]]);
 
-    var _sfc_main$Z = /*@__PURE__*/ defineComponent({
+    var _sfc_main$$ = /*@__PURE__*/ defineComponent({
         __name: 'AcuInfoBanner',
         props: {
             text: { default: '' },
@@ -133957,8 +134884,8 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-info-banner[data-v-5b9a5d77] {\r\n  display: flex;\r\n  align-items: flex-start;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-225, 9px) var(--acu-space-250, 10px);\r\n  border-radius: var(--acu-radius-sm);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1.55;\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  color: var(--acu-text-2);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  min-width: 0;\n}\n.acu-info-banner__icon[data-v-5b9a5d77] {\r\n  flex-shrink: 0;\r\n  margin-top: var(--acu-space-050, 2px);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1.55;\n}\n.acu-info-banner__content[data-v-5b9a5d77] {\r\n  min-width: 0;\r\n  width: 100%;\r\n  word-wrap: break-word;\r\n  overflow-wrap: anywhere;\n}\n.acu-info-banner--info[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\n}\n.acu-info-banner--info .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\n}\n.acu-info-banner--tip[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-accent) 10%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 18%, transparent);\n}\n.acu-info-banner--tip .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-accent);\r\n  color: var(--acu-accent);\n}\n.acu-info-banner--warning[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-warning) 10%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-warning) 20%, transparent);\n}\n.acu-info-banner--warning .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-warning);\r\n  color: var(--acu-warning);\n}\r\n", "src/presentation-v2/components/_lib/AcuInfoBanner.vue#style-0-5b9a5d77");
     var AcuInfoBanner_vue_vue_type_style_index_0_scoped_5b9a5d77_lang = null;
 
-    const _hoisted_1$X = { class: "acu-info-banner__content" };
-    function _sfc_render$Z(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$Z = { class: "acu-info-banner__content" };
+    function _sfc_render$$(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -133975,7 +134902,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			null,
 			2
 			/* CLASS */
-		)) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_1$X, [renderSlot(_ctx.$slots, "default", {}, () => [createTextVNode(
+		)) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_1$Z, [renderSlot(_ctx.$slots, "default", {}, () => [createTextVNode(
 			toDisplayString($props.text),
 			1
 			/* TEXT */
@@ -133984,7 +134911,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuInfoBanner = /*#__PURE__*/ _export_sfc(_sfc_main$Z, [["render", _sfc_render$Z], ["__scopeId", "data-v-5b9a5d77"]]);
+    var AcuInfoBanner = /*#__PURE__*/ _export_sfc(_sfc_main$$, [["render", _sfc_render$$], ["__scopeId", "data-v-5b9a5d77"]]);
 
     const MIN_DURATION_MS = 100;
     const MAX_DURATION_MS = 200;
@@ -134113,7 +135040,7 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    var _sfc_main$Y = /*@__PURE__*/ defineComponent({
+    var _sfc_main$_ = /*@__PURE__*/ defineComponent({
         __name: 'AcuPanel',
         props: {
             title: { default: undefined },
@@ -134168,35 +135095,35 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-panel[data-v-c4139d23] {\r\n  min-width: 0; padding: var(--acu-panel-padding, 16px);\r\n  background: var(--acu-bg-1);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  display: flex; flex-direction: column; gap: 0;\r\n  height: 100%;\n}\n.acu-panel__header[data-v-c4139d23] {\r\n  display: flex; align-items: center; justify-content: space-between;\r\n  gap: var(--acu-panel-gap, 12px); margin-bottom: var(--acu-panel-gap, 12px);\r\n  min-height: var(--acu-control-height-md, 32px);\r\n  transition: margin-bottom 0.15s ease;\n}\n.acu-panel__header--description-open[data-v-c4139d23] {\r\n  margin-bottom: var(--acu-space-2, 8px);\n}\n.acu-panel__title[data-v-c4139d23] {\r\n  margin: 0;\r\n  min-width: 0;\r\n  flex: 1 1 auto;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.3;\r\n  color: var(--acu-text-1);\n}\n.acu-panel__header-right[data-v-c4139d23] {\r\n  margin-left: auto;\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex-shrink: 0;\n}\n.acu-panel__actions[data-v-c4139d23] { display: flex; align-items: center; gap: var(--acu-space-2, 8px); flex-shrink: 0;\n}\n.acu-panel__description-button[data-v-c4139d23] {\r\n  width: var(--acu-button-height-sm, 28px);\r\n  height: var(--acu-button-height-sm, 28px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-3);\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;\n}\n.acu-panel__description-button[data-v-c4139d23]:hover {\r\n  background: var(--acu-bg-2);\r\n  color: var(--acu-text-1);\n}\n.acu-panel__description-button--open[data-v-c4139d23] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\n}\n.acu-panel__description-button[data-v-c4139d23]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-panel__body[data-v-c4139d23] { display: flex; flex-direction: column; gap: var(--acu-panel-gap, 12px); min-width: 0; flex: 1 1 auto;\n}\n.acu-panel__description-region[data-v-c4139d23] {\r\n  min-width: 0;\r\n  overflow: hidden;\n}\n.acu-panel__description-region-inner[data-v-c4139d23] {\r\n  padding-bottom: var(--acu-panel-gap, 12px);\r\n  overflow: hidden;\n}\r\n", "src/presentation-v2/components/_lib/AcuPanel.vue#style-0-c4139d23");
     var AcuPanel_vue_vue_type_style_index_0_scoped_c4139d23_lang = null;
 
-    const _hoisted_1$W = { class: "acu-panel" };
-    const _hoisted_2$O = {
+    const _hoisted_1$Y = { class: "acu-panel" };
+    const _hoisted_2$Q = {
 	key: 0,
 	class: "acu-panel__title"
     };
-    const _hoisted_3$F = {
+    const _hoisted_3$H = {
 	key: 1,
 	class: "acu-panel__header-right"
     };
-    const _hoisted_4$z = {
+    const _hoisted_4$B = {
 	key: 0,
 	class: "acu-panel__actions"
     };
-    const _hoisted_5$s = ["id", "aria-hidden"];
-    const _hoisted_6$r = { class: "acu-panel__description-region-inner" };
-    const _hoisted_7$o = { class: "acu-panel__body" };
-    function _sfc_render$Y(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$W, [
+    const _hoisted_5$u = ["id", "aria-hidden"];
+    const _hoisted_6$t = { class: "acu-panel__description-region-inner" };
+    const _hoisted_7$q = { class: "acu-panel__body" };
+    function _sfc_render$_(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$Y, [
 		$props.title || _ctx.$slots.title || _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock(
 			"header",
 			{
 				key: 0,
 				class: normalizeClass(["acu-panel__header", { "acu-panel__header--description-open": $setup.descriptionOpen }])
 			},
-			[$props.title || _ctx.$slots.title ? (openBlock(), createElementBlock("h3", _hoisted_2$O, [renderSlot(_ctx.$slots, "title", {}, () => [createTextVNode(
+			[$props.title || _ctx.$slots.title ? (openBlock(), createElementBlock("h3", _hoisted_2$Q, [renderSlot(_ctx.$slots, "title", {}, () => [createTextVNode(
 				toDisplayString($props.title),
 				1
 				/* TEXT */
-			)], true)])) : createCommentVNode("v-if", true), _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock("div", _hoisted_3$F, [_ctx.$slots.actions ? (openBlock(), createElementBlock("div", _hoisted_4$z, [renderSlot(_ctx.$slots, "actions", {}, undefined, true)])) : createCommentVNode("v-if", true), $setup.hasDescription ? (openBlock(), createBlock($setup["AcuIconButton"], {
+			)], true)])) : createCommentVNode("v-if", true), _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock("div", _hoisted_3$H, [_ctx.$slots.actions ? (openBlock(), createElementBlock("div", _hoisted_4$B, [renderSlot(_ctx.$slots, "actions", {}, undefined, true)])) : createCommentVNode("v-if", true), $setup.hasDescription ? (openBlock(), createBlock($setup["AcuIconButton"], {
 				key: 1,
 				class: normalizeClass(["acu-panel__description-button", { "acu-panel__description-button--open": $setup.descriptionOpen }]),
 				icon: "fa-solid fa-circle-info",
@@ -134231,7 +135158,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				id: $setup.descriptionId,
 				class: "acu-panel__description-region",
 				"aria-hidden": !$setup.descriptionOpen
-			}, [createBaseVNode("div", _hoisted_6$r, [createVNode($setup["AcuInfoBanner"], {
+			}, [createBaseVNode("div", _hoisted_6$t, [createVNode($setup["AcuInfoBanner"], {
 				class: "acu-panel__description-banner",
 				tone: $props.descriptionTone
 			}, {
@@ -134241,15 +135168,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* TEXT */
 				)], true)]),
 				_: 3
-			}, 8, ["tone"])])], 8, _hoisted_5$s)), [[vShow, $setup.descriptionOpen]]) : createCommentVNode("v-if", true)]),
+			}, 8, ["tone"])])], 8, _hoisted_5$u)), [[vShow, $setup.descriptionOpen]]) : createCommentVNode("v-if", true)]),
 			_: 3
 		}),
-		createBaseVNode("div", _hoisted_7$o, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])
+		createBaseVNode("div", _hoisted_7$q, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])
 	]);
     }
-    var AcuPanel = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-c4139d23"]]);
+    var AcuPanel = /*#__PURE__*/ _export_sfc(_sfc_main$_, [["render", _sfc_render$_], ["__scopeId", "data-v-c4139d23"]]);
 
-    var _sfc_main$X = /*@__PURE__*/ defineComponent({
+    var _sfc_main$Z = /*@__PURE__*/ defineComponent({
         __name: 'AcuTextarea',
         props: {
             modelValue: {},
@@ -134388,13 +135315,13 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-textarea[data-v-cbb35e09] {\r\n  appearance: none !important;\r\n  -webkit-appearance: none !important;\r\n  display: block !important;\r\n  width: 100% !important;\r\n  min-width: 0 !important;\r\n  box-sizing: border-box !important;\r\n  margin: 0 !important;\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px) !important;\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm) !important;\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit !important;\r\n  font-size: var(--acu-font-size-body, 12px) !important;\r\n  line-height: 1.45 !important;\r\n  letter-spacing: 0 !important;\r\n  text-align: start !important;\r\n  resize: none !important;\r\n  outline: none !important;\r\n  box-shadow: none !important;\r\n  caret-color: var(--acu-text-1);\r\n  -webkit-tap-highlight-color: transparent;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-textarea--auto-resize[data-v-cbb35e09] {\r\n  overflow-x: hidden !important;\r\n  overflow-y: auto;\n}\n.acu-textarea[data-v-cbb35e09]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-textarea[data-v-cbb35e09]:focus {\r\n  outline: none !important;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-textarea[data-v-cbb35e09]:disabled {\r\n  opacity: 0.5; cursor: not-allowed;\n}\r\n", "src/presentation-v2/components/_lib/AcuTextarea.vue#style-0-cbb35e09");
     var AcuTextarea_vue_vue_type_style_index_0_scoped_cbb35e09_lang = null;
 
-    const _hoisted_1$V = [
+    const _hoisted_1$X = [
 	"value",
 	"placeholder",
 	"rows",
 	"disabled"
     ];
-    function _sfc_render$X(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$Z(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("textarea", {
 		ref: "textareaRef",
 		class: normalizeClass(["acu-textarea", { "acu-textarea--auto-resize": $props.autoResize }]),
@@ -134405,11 +135332,11 @@ Expected function or array of functions, received type ${typeof value}.`
 		onInput: $setup.onInput,
 		onFocus: $setup.onFocus,
 		onBlur: $setup.onBlur
-	}, null, 42, _hoisted_1$V);
+	}, null, 42, _hoisted_1$X);
     }
-    var AcuTextarea = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-cbb35e09"]]);
+    var AcuTextarea = /*#__PURE__*/ _export_sfc(_sfc_main$Z, [["render", _sfc_render$Z], ["__scopeId", "data-v-cbb35e09"]]);
 
-    var _sfc_main$W = /*@__PURE__*/ defineComponent({
+    var _sfc_main$Y = /*@__PURE__*/ defineComponent({
         __name: 'AcuPresetDropdown',
         props: {
             items: {},
@@ -134470,28 +135397,28 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-preset-dd[data-v-da92b393] { position: relative; flex: 1; min-width: 0;\n}\n.acu-preset-dd__trigger[data-v-da92b393] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\r\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  background: var(--acu-bg-2); border: 0;\r\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-preset-dd__trigger[data-v-da92b393]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-preset-dd__trigger[data-v-da92b393]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-preset-dd__trigger[data-v-da92b393]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-preset-dd--disabled[data-v-da92b393] { pointer-events: none; opacity: 0.5;\n}\n.acu-preset-dd__label[data-v-da92b393] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-preset-dd__caret[data-v-da92b393] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease;\n}\n.acu-preset-dd__caret--open[data-v-da92b393] { transform: rotate(180deg);\n}\n.acu-preset-dd__menu[data-v-da92b393] {\r\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\r\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\r\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\r\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-preset-dd__item[data-v-da92b393] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px);\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2); transition: background 0.1s ease;\n}\n.acu-preset-dd__item[data-v-da92b393]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active[data-v-da92b393] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-preset-dd__item-name[data-v-da92b393] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500;\n}\n.acu-preset-dd__item-meta[data-v-da92b393] { font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); white-space: nowrap;\n}\n.acu-preset-dd__star[data-v-da92b393] {\r\n  width: var(--acu-menu-action-size, 24px); height: var(--acu-menu-action-size, 24px); display: flex; align-items: center; justify-content: center;\r\n  border: 0; background: transparent; color: var(--acu-text-3); cursor: pointer;\r\n  border-radius: var(--acu-radius-sm); font-size: var(--acu-font-size-body, 12px); transition: color 0.15s ease;\n}\n.acu-preset-dd__star[data-v-da92b393]:hover { color: var(--acu-text-1); background: var(--acu-hover-overlay);\n}\n.acu-preset-dd__star--active[data-v-da92b393] { color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active .acu-preset-dd__item-meta[data-v-da92b393],\r\n.acu-preset-dd__item--active .acu-preset-dd__star[data-v-da92b393],\r\n.acu-preset-dd__item--active .acu-preset-dd__check[data-v-da92b393] { --acu-icon-color: var(--acu-on-accent); color: var(--acu-on-accent);\n}\n.acu-preset-dd__check[data-v-da92b393] { font-size: var(--acu-font-size-caption, 11px); --acu-icon-color: var(--acu-text-1); color: var(--acu-text-1);\n}\n.acu-preset-dd__empty[data-v-da92b393] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\r\n", "src/presentation-v2/components/_lib/AcuPresetDropdown.vue#style-0-da92b393");
     var AcuPresetDropdown_vue_vue_type_style_index_0_scoped_da92b393_lang = null;
 
-    const _hoisted_1$U = ["disabled"];
-    const _hoisted_2$N = { class: "acu-preset-dd__label" };
-    const _hoisted_3$E = {
+    const _hoisted_1$W = ["disabled"];
+    const _hoisted_2$P = { class: "acu-preset-dd__label" };
+    const _hoisted_3$G = {
 	key: 0,
 	class: "acu-preset-dd__menu"
     };
-    const _hoisted_4$y = ["onClick"];
-    const _hoisted_5$r = { class: "acu-preset-dd__item-name" };
-    const _hoisted_6$q = {
+    const _hoisted_4$A = ["onClick"];
+    const _hoisted_5$t = { class: "acu-preset-dd__item-name" };
+    const _hoisted_6$s = {
 	key: 0,
 	class: "acu-preset-dd__item-meta"
     };
-    const _hoisted_7$n = ["title", "onClick"];
-    const _hoisted_8$m = {
+    const _hoisted_7$p = ["title", "onClick"];
+    const _hoisted_8$o = {
 	key: 2,
 	class: "fa-solid fa-check acu-preset-dd__check"
     };
-    const _hoisted_9$i = {
+    const _hoisted_9$k = {
 	key: 0,
 	class: "acu-preset-dd__empty"
     };
-    function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$Y(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -134505,7 +135432,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			onClick: $setup.toggleOpen
 		}, [createBaseVNode(
 			"span",
-			_hoisted_2$N,
+			_hoisted_2$P,
 			toDisplayString($setup.selectedLabel),
 			1
 			/* TEXT */
@@ -134515,7 +135442,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			null,
 			2
 			/* CLASS */
-		)], 8, _hoisted_1$U), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$E, [(openBlock(true), createElementBlock(
+		)], 8, _hoisted_1$W), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$G, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.items, (item) => {
@@ -134526,14 +135453,14 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, [
 					createBaseVNode(
 						"span",
-						_hoisted_5$r,
+						_hoisted_5$t,
 						toDisplayString($setup.itemLabel(item)),
 						1
 						/* TEXT */
 					),
 					item.meta ? (openBlock(), createElementBlock(
 						"span",
-						_hoisted_6$q,
+						_hoisted_6$s,
 						toDisplayString(item.meta),
 						1
 						/* TEXT */
@@ -134550,15 +135477,15 @@ Expected function or array of functions, received type ${typeof value}.`
 						null,
 						2
 						/* CLASS */
-					)], 10, _hoisted_7$n)) : createCommentVNode("v-if", true),
-					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$m)) : createCommentVNode("v-if", true)
-				], 10, _hoisted_4$y);
+					)], 10, _hoisted_7$p)) : createCommentVNode("v-if", true),
+					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$o)) : createCommentVNode("v-if", true)
+				], 10, _hoisted_4$A);
 			}),
 			128
 			/* KEYED_FRAGMENT */
 		)), !$props.items.length ? (openBlock(), createElementBlock(
 			"li",
-			_hoisted_9$i,
+			_hoisted_9$k,
 			toDisplayString($props.emptyText),
 			1
 			/* TEXT */
@@ -134567,9 +135494,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuPresetDropdown = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-da92b393"]]);
+    var AcuPresetDropdown = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-da92b393"]]);
 
-    var _sfc_main$V = /*@__PURE__*/ defineComponent({
+    var _sfc_main$X = /*@__PURE__*/ defineComponent({
         __name: 'AcuSelect',
         props: {
             options: {},
@@ -134620,17 +135547,17 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-select[data-v-da549440] {\n  position: relative;\n  display: block;\n  width: 100%;\n  min-width: 0;\n  max-width: 100%;\n  box-sizing: border-box;\n  margin: 0 !important;\n  padding: 0 !important;\n  border: 0 !important;\n  outline: 0 !important;\n  background: transparent !important;\n  box-shadow: none !important;\n}\n.acu-select__trigger[data-v-da549440] {\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\n  min-width: 0; max-width: 100%; box-sizing: border-box;\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\n  margin: 0 !important;\n  background: var(--acu-bg-2) !important; border: 0 !important;\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n  box-shadow: none;\n}\n.acu-select__trigger[data-v-da549440]:hover {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-select__trigger[data-v-da549440]:focus { outline: none !important;\n}\n.acu-select__trigger[data-v-da549440]:focus:not(:focus-visible) { box-shadow: none !important;\n}\n.acu-select__trigger[data-v-da549440]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-select__trigger[data-v-da549440]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-select__label[data-v-da549440] {\n  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-select__label--placeholder[data-v-da549440] { color: var(--acu-text-3);\n}\n.acu-select__caret[data-v-da549440] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease; flex-shrink: 0;\n}\n.acu-select__caret--open[data-v-da549440] { transform: rotate(180deg);\n}\n.acu-select__menu[data-v-da549440] {\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\n  min-width: 0; max-width: 100%; box-sizing: border-box;\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-select__item[data-v-da549440] {\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-2); transition: background 0.1s ease;\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-select__item[data-v-da549440]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-select__item--active[data-v-da549440] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-select__empty[data-v-da549440] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n\n/* ── sm variant ── */\n.acu-select--sm .acu-select__trigger[data-v-da549440] { min-height: var(--acu-control-height-sm, 26px); padding: var(--acu-control-padding-y-sm, 3px) var(--acu-control-padding-x-sm, 7px); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-select--sm .acu-select__item[data-v-da549440] { padding: var(--acu-space-150, 6px) var(--acu-space-250, 10px); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-select--disabled[data-v-da549440] { pointer-events: none; opacity: 0.5;\n}\n", "src/presentation-v2/components/_lib/AcuSelect.vue#style-0-da549440");
     var AcuSelect_vue_vue_type_style_index_0_scoped_da549440_lang = null;
 
-    const _hoisted_1$T = ["disabled"];
-    const _hoisted_2$M = {
+    const _hoisted_1$V = ["disabled"];
+    const _hoisted_2$O = {
 	key: 0,
 	class: "acu-select__menu"
     };
-    const _hoisted_3$D = ["onClick"];
-    const _hoisted_4$x = {
+    const _hoisted_3$F = ["onClick"];
+    const _hoisted_4$z = {
 	key: 0,
 	class: "acu-select__empty"
     };
-    function _sfc_render$V(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$X(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -134654,7 +135581,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			null,
 			2
 			/* CLASS */
-		)], 8, _hoisted_1$T), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_2$M, [(openBlock(true), createElementBlock(
+		)], 8, _hoisted_1$V), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_2$O, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.options, (opt) => {
@@ -134662,18 +135589,18 @@ Expected function or array of functions, received type ${typeof value}.`
 					key: opt.value,
 					class: normalizeClass(["acu-select__item", { "acu-select__item--active": opt.value === $props.modelValue }]),
 					onClick: ($event) => $setup.select(opt.value)
-				}, toDisplayString(opt.label), 11, _hoisted_3$D);
+				}, toDisplayString(opt.label), 11, _hoisted_3$F);
 			}),
 			128
 			/* KEYED_FRAGMENT */
-		)), !$props.options.length ? (openBlock(), createElementBlock("li", _hoisted_4$x, "无可选项")) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
+		)), !$props.options.length ? (openBlock(), createElementBlock("li", _hoisted_4$z, "无可选项")) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
 		2
 		/* CLASS */
 	);
     }
-    var AcuSelect = /*#__PURE__*/ _export_sfc(_sfc_main$V, [["render", _sfc_render$V], ["__scopeId", "data-v-da549440"]]);
+    var AcuSelect = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-da549440"]]);
 
-    var _sfc_main$U = /*@__PURE__*/ defineComponent({
+    var _sfc_main$W = /*@__PURE__*/ defineComponent({
         __name: 'ApiConfigPanel',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -134830,28 +135757,28 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-c3462564] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\n  gap: 6px;\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-c3462564] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-c3462564] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-c3462564] {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-c3462564] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-c3462564] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-c3462564] {\n  color: var(--acu-danger);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-c3462564] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n}\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-c3462564");
     var ApiConfigPanel_vue_vue_type_style_index_0_scoped_c3462564_lang = null;
 
-    const _hoisted_1$S = { class: "acu-api-config-panel__select-row" };
-    const _hoisted_2$L = { class: "acu-api-config-panel__editor-section" };
-    const _hoisted_3$C = { class: "acu-api-config-panel__inline-action" };
-    const _hoisted_4$w = {
+    const _hoisted_1$U = { class: "acu-api-config-panel__select-row" };
+    const _hoisted_2$N = { class: "acu-api-config-panel__editor-section" };
+    const _hoisted_3$E = { class: "acu-api-config-panel__inline-action" };
+    const _hoisted_4$y = {
 	key: 0,
 	class: "acu-api-config-panel__muted"
     };
-    const _hoisted_5$q = {
+    const _hoisted_5$s = {
 	key: 1,
 	class: "acu-api-config-panel__danger"
     };
-    const _hoisted_6$p = { class: "acu-api-config-panel__inline-action" };
-    const _hoisted_7$m = {
+    const _hoisted_6$r = { class: "acu-api-config-panel__inline-action" };
+    const _hoisted_7$o = {
 	key: 0,
 	class: "acu-api-config-panel__two-col"
     };
-    const _hoisted_8$l = {
+    const _hoisted_8$n = {
 	key: 1,
 	class: "acu-api-config-panel__editor-section"
     };
-    const _hoisted_9$h = { class: "acu-api-config-panel__actions" };
-    function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_9$j = { class: "acu-api-config-panel__actions" };
+    function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.apiCopy.panels.preset.title,
 		description: $setup.apiCopy.panels.preset.description
@@ -134872,7 +135799,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				label: "当前 API 预设",
 				hint: "星标表示新聊天默认使用的预设。"
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_1$S, [
+				default: withCtx(() => [createBaseVNode("div", _hoisted_1$U, [
 					createVNode($setup["AcuPresetDropdown"], {
 						items: $setup.presetDropdownItems,
 						"model-value": $setup.store.activePresetName,
@@ -134919,7 +135846,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					}),
-					createBaseVNode("div", _hoisted_2$L, [
+					createBaseVNode("div", _hoisted_2$N, [
 						createVNode($setup["AcuFormRow"], { label: "连接方式" }, {
 							default: withCtx(() => [createVNode($setup["AcuSegmentedControl"], {
 								options: $setup.connectionModeOptions,
@@ -134959,16 +135886,16 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, null, 8, ["modelValue"])]),
 									_: 1
 								}),
-								createBaseVNode("div", _hoisted_3$C, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
+								createBaseVNode("div", _hoisted_3$E, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
 									default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
 										"加载模型",
 										-1
 										/* CACHED */
 									)])]),
 									_: 1
-								}), $setup.store.modelLoadStatus === "loading" ? (openBlock(), createElementBlock("span", _hoisted_4$w, "加载中...")) : $setup.store.modelLoadStatus === "error" ? (openBlock(), createElementBlock(
+								}), $setup.store.modelLoadStatus === "loading" ? (openBlock(), createElementBlock("span", _hoisted_4$y, "加载中...")) : $setup.store.modelLoadStatus === "error" ? (openBlock(), createElementBlock(
 									"span",
-									_hoisted_5$q,
+									_hoisted_5$s,
 									toDisplayString($setup.store.modelLoadError),
 									1
 									/* TEXT */
@@ -135000,7 +135927,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.activeDraft.tavernProfile = $event)
 								}, null, 8, ["options", "model-value"])]),
 								_: 1
-							}), createBaseVNode("div", _hoisted_6$p, [createVNode($setup["AcuButton"], { onClick: $setup.store.refreshTavernProfiles }, {
+							}), createBaseVNode("div", _hoisted_6$r, [createVNode($setup["AcuButton"], { onClick: $setup.store.refreshTavernProfiles }, {
 								default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
 									"刷新列表",
 									-1
@@ -135012,7 +135939,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* STABLE_FRAGMENT */
 						)) : createCommentVNode("v-if", true)
 					]),
-					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_7$m, [createVNode($setup["AcuFormRow"], { label: "最大回复长度" }, {
+					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_7$o, [createVNode($setup["AcuFormRow"], { label: "最大回复长度" }, {
 						default: withCtx(() => [createVNode($setup["AcuInput"], {
 							modelValue: $setup.activeDraft.max_tokens,
 							"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.activeDraft.max_tokens = $event),
@@ -135032,7 +135959,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					})])) : createCommentVNode("v-if", true),
-					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$l, [
+					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$n, [
 						createVNode($setup["AcuFormRow"], {
 							label: "附加主体参数",
 							hint: "SillyTavern custom_include_body，填写 YAML object，会合并到最终模型请求体。"
@@ -135081,7 +136008,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_9$h, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_9$j, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.activeDraftDirty,
 						onClick: $setup.syncActiveDraft
 					}, {
@@ -135121,7 +136048,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-c3462564"]]);
+    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-c3462564"]]);
 
     // ═══════════════════════════════════════════════════════════
     // service/settings/feature-preset-reference-service.ts — 功能级 API 预设引用
@@ -136379,7 +137306,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$T = /*@__PURE__*/ defineComponent({
+    var _sfc_main$V = /*@__PURE__*/ defineComponent({
         __name: 'AcuDisclosureGroup',
         props: {
             label: { default: '' },
@@ -136446,13 +137373,13 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-disclosure-group[data-v-621985bb] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 0;\r\n  overflow: hidden;\r\n  border-radius: var(--acu-radius-md);\r\n  background: transparent;\n}\n.acu-disclosure-group__header[data-v-621985bb] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  width: 100%;\r\n  min-height: 34px;\r\n  appearance: none;\r\n  border: 0;\r\n  border-radius: 0;\r\n  padding: 7px 10px;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.35;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  user-select: none;\r\n  transition: background-color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-disclosure-group__header[data-v-621985bb]:hover {\r\n  background: var(--acu-hover-overlay);\n}\n.acu-disclosure-group__header[data-v-621985bb]:focus-visible {\r\n  outline: none;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-disclosure-group__chevron[data-v-621985bb] {\r\n  flex: 0 0 10px;\r\n  width: 10px;\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\r\n  transition: transform 0.15s ease;\n}\n.acu-disclosure-group__chevron--open[data-v-621985bb] {\r\n  transform: rotate(90deg);\n}\n.acu-disclosure-group__label[data-v-621985bb] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-weight: 500;\r\n  color: var(--acu-text-2);\n}\n.acu-disclosure-group__meta[data-v-621985bb] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  font-variant-numeric: tabular-nums;\r\n  white-space: nowrap;\n}\n.acu-disclosure-group__body[data-v-621985bb] {\r\n  box-sizing: border-box;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  padding: 8px;\r\n  opacity: 1;\r\n  transform: translateY(0);\r\n  overflow-x: hidden;\n}\r\n", "src/presentation-v2/components/_lib/AcuDisclosureGroup.vue#style-0-621985bb");
     var AcuDisclosureGroup_vue_vue_type_style_index_0_scoped_621985bb_lang = null;
 
-    const _hoisted_1$R = ["aria-expanded", "aria-controls"];
-    const _hoisted_2$K = [
+    const _hoisted_1$T = ["aria-expanded", "aria-controls"];
+    const _hoisted_2$M = [
 	"id",
 	"aria-hidden",
 	"inert"
     ];
-    function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$V(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{ class: normalizeClass(["acu-disclosure-group", [$props.rootClass, { "acu-disclosure-group--expanded": $props.expanded }]]) },
@@ -136501,7 +137428,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				2
 				/* CLASS */
 			)) : createCommentVNode("v-if", true)
-		], 10, _hoisted_1$R), createVNode(Transition, {
+		], 10, _hoisted_1$T), createVNode(Transition, {
 			css: false,
 			onBeforeEnter: $setup.beforeEnter,
 			onEnter: $setup.enter,
@@ -136519,16 +137446,16 @@ Expected function or array of functions, received type ${typeof value}.`
 				style: normalizeStyle($setup.bodyStyle),
 				"aria-hidden": !$props.expanded ? "true" : undefined,
 				inert: !$props.expanded ? true : undefined
-			}, [renderSlot(_ctx.$slots, "default", {}, undefined, true)], 14, _hoisted_2$K)), [[vShow, $props.expanded]]) : createCommentVNode("v-if", true)]),
+			}, [renderSlot(_ctx.$slots, "default", {}, undefined, true)], 14, _hoisted_2$M)), [[vShow, $props.expanded]]) : createCommentVNode("v-if", true)]),
 			_: 3
 		})],
 		2
 		/* CLASS */
 	);
     }
-    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-621985bb"]]);
+    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$V, [["render", _sfc_render$V], ["__scopeId", "data-v-621985bb"]]);
 
-    var _sfc_main$S = /*@__PURE__*/ defineComponent({
+    var _sfc_main$U = /*@__PURE__*/ defineComponent({
         ...{ inheritAttrs: false },
         __name: 'AcuToggle',
         props: {
@@ -136555,12 +137482,12 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-toggle[data-v-61c4c790] {\r\n  display: inline-flex; align-items: center; gap: var(--acu-space-2, 8px);\r\n  flex: 0 0 auto;\r\n  padding: 0; border: 0; background: transparent;\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-2);\r\n  cursor: pointer; user-select: none;\n}\n.acu-toggle--disabled[data-v-61c4c790] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-toggle__track[data-v-61c4c790] {\r\n  position: relative; flex-shrink: 0;\r\n  width: var(--acu-toggle-width, 36px); height: var(--acu-toggle-height, 20px);\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  border-radius: var(--acu-toggle-radius, 10px);\r\n  transition: background 0.2s ease, box-shadow 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__track[data-v-61c4c790] {\r\n  background: var(--acu-accent);\n}\n.acu-toggle__thumb[data-v-61c4c790] {\r\n  position: absolute; top: var(--acu-space-050, 2px); left: var(--acu-space-050, 2px);\r\n  width: var(--acu-toggle-thumb-size, 16px); height: var(--acu-toggle-thumb-size, 16px);\r\n  background: #fff;\r\n  border-radius: 50%;\r\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);\r\n  transition: transform 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__thumb[data-v-61c4c790] {\r\n  transform: translateX(var(--acu-toggle-thumb-shift, 16px));\n}\n.acu-toggle__label[data-v-61c4c790] { white-space: nowrap;\n}\n.acu-toggle:hover:not(.acu-toggle--disabled) .acu-toggle__track[data-v-61c4c790] {\r\n  box-shadow: inset 0 0 0 1px var(--acu-border-2);\n}\n.acu-toggle:focus-visible .acu-toggle__track[data-v-61c4c790] {\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuToggle.vue#style-0-61c4c790");
     var AcuToggle_vue_vue_type_style_index_0_scoped_61c4c790_lang = null;
 
-    const _hoisted_1$Q = ["aria-checked", "disabled"];
-    const _hoisted_2$J = {
+    const _hoisted_1$S = ["aria-checked", "disabled"];
+    const _hoisted_2$L = {
 	key: 0,
 	class: "acu-toggle__label"
     };
-    function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", mergeProps({
 		type: "button",
 		class: ["acu-toggle", {
@@ -136581,15 +137508,15 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CACHED */
 	)), $props.label ? (openBlock(), createElementBlock(
 		"span",
-		_hoisted_2$J,
+		_hoisted_2$L,
 		toDisplayString($props.label),
 		1
 		/* TEXT */
-	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$Q);
+	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$S);
     }
-    var AcuToggle = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-61c4c790"]]);
+    var AcuToggle = /*#__PURE__*/ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-61c4c790"]]);
 
-    var _sfc_main$R = /*@__PURE__*/ defineComponent({
+    var _sfc_main$T = /*@__PURE__*/ defineComponent({
         __name: 'FormFillUpdateSettingsPanel',
         props: {
             showAdvanced: { type: Boolean, default: true }
@@ -136674,15 +137601,15 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-form-fill-update-settings-panel__settings-groups[data-v-eaa556c7] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-form-fill-update-settings-panel__setting-group\r\n  + .acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border-2);\n}\n.acu-form-fill-update-settings-panel__advanced[data-v-eaa556c7] {\r\n  border: 0;\r\n  background: transparent;\n}\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n@media (max-width: 560px) {\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/FormFillUpdateSettingsPanel.vue#style-0-eaa556c7");
     var FormFillUpdateSettingsPanel_vue_vue_type_style_index_0_scoped_eaa556c7_lang = null;
 
-    const _hoisted_1$P = { class: "acu-form-fill-update-settings-panel__settings-groups" };
-    const _hoisted_2$I = { class: "acu-form-fill-update-settings-panel__setting-group" };
-    const _hoisted_3$B = { class: "acu-form-fill-update-settings-panel__number-grid" };
-    function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$R = { class: "acu-form-fill-update-settings-panel__settings-groups" };
+    const _hoisted_2$K = { class: "acu-form-fill-update-settings-panel__setting-group" };
+    const _hoisted_3$D = { class: "acu-form-fill-update-settings-panel__number-grid" };
+    function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.formFillCopy.panels.update.title,
 		description: $setup.formFillCopy.panels.update.description
 	}, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_1$P, [createBaseVNode("section", _hoisted_2$I, [
+		default: withCtx(() => [createBaseVNode("div", _hoisted_1$R, [createBaseVNode("section", _hoisted_2$K, [
 			createVNode($setup["AcuFormRow"], {
 				label: "填表 API 预设",
 				hint: "默认使用当前 API，选择后仅影响填表功能。"
@@ -136731,7 +137658,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			"body-mode": "if",
 			onToggle: _cache[1] || (_cache[1] = ($event) => $setup.advancedExpanded = !$setup.advancedExpanded)
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_3$B, [(openBlock(true), createElementBlock(
+			default: withCtx(() => [createBaseVNode("div", _hoisted_3$D, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.advancedFields, (field) => {
@@ -136763,7 +137690,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var FormFillUpdateSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-eaa556c7"]]);
+    var FormFillUpdateSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-eaa556c7"]]);
 
     /**
      * legacy-ui-menu-entry — 旧 UI 菜单入口的显示状态。
@@ -137762,7 +138689,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$Q = /*@__PURE__*/ defineComponent({
+    var _sfc_main$S = /*@__PURE__*/ defineComponent({
         __name: 'AcuText',
         props: {
             as: { default: 'p' },
@@ -137781,16 +138708,16 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-text[data-v-7abe2621] {\r\n  margin: 0;\r\n  min-width: 0;\n}\n.acu-text--caption[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-text--meta[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--hint[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\n}\n.acu-text--status-line[data-v-7abe2621] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  min-height: 22px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--empty[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\r\n  text-align: center;\n}\n.acu-text--error[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-danger);\n}\n.acu-text--section-label[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 600;\r\n  color: var(--acu-text-2);\n}\n.acu-text--list-title[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\n}\n[data-v-7abe2621] .acu-text__value {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n", "src/presentation-v2/components/_lib/AcuText.vue#style-0-7abe2621");
     var AcuText_vue_vue_type_style_index_0_scoped_7abe2621_lang = null;
 
-    function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock(resolveDynamicComponent($props.as), { class: normalizeClass(["acu-text", $setup.variantClass]) }, {
 		default: withCtx(() => [renderSlot(_ctx.$slots, "default", {}, undefined, true)]),
 		_: 3
 	}, 8, ["class"]);
     }
-    var AcuText = /*#__PURE__*/ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-7abe2621"]]);
+    var AcuText = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-7abe2621"]]);
 
     const DRAWER_LEAVE_MS = 150;
-    var _sfc_main$P = /*@__PURE__*/ defineComponent({
+    var _sfc_main$R = /*@__PURE__*/ defineComponent({
         __name: 'AcuDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -137877,10 +138804,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-drawer-layer[data-v-6c795a65] {\n  position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 9200;\n  width: 100%; width: 100vw; width: 100dvw;\n  height: 100%; height: 100vh; height: 100dvh;\n  display: flex; justify-content: flex-end;\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\n  background: rgba(0, 0, 0, 0.38);\n  overflow: hidden;\n  animation: acu-drawer-layer-in-6c795a65 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing[data-v-6c795a65] {\n  pointer-events: none;\n  animation: acu-drawer-layer-out-6c795a65 0.15s ease-in both;\n}\n.acu-v2-drawer[data-v-6c795a65] {\n  max-width: 100%;\n  height: 100%; max-height: 100%;\n  display: flex; flex-direction: column;\n  background: var(--acu-bg-1);\n  border-left: 0;\n  box-shadow: var(--acu-shadow);\n  min-width: 0; min-height: 0;\n  overflow: hidden;\n  animation: acu-drawer-panel-in-6c795a65 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing .acu-v2-drawer[data-v-6c795a65] {\n  animation: acu-drawer-panel-out-6c795a65 0.15s ease-in both;\n}\n@supports (max-height: 100dvh) {\n.acu-v2-drawer[data-v-6c795a65] { max-height: 100%;\n}\n}\n.acu-v2-drawer__header[data-v-6c795a65] {\n  flex: 0 0 auto;\n  display: flex; align-items: center; justify-content: space-between;\n  min-width: 0;\n  gap: var(--acu-panel-gap, 12px); padding: var(--acu-page-gap, 14px) var(--acu-panel-padding, 16px);\n  border-bottom: 0;\n}\n.acu-v2-drawer__header-left[data-v-6c795a65] { display: flex; align-items: center; gap: var(--acu-space-250, 10px); min-width: 0;\n}\n.acu-v2-drawer__header h3[data-v-6c795a65] { margin: 0; min-width: 0; font-size: var(--acu-font-size-panel-title, 15px); overflow-wrap: anywhere;\n}\n.acu-v2-drawer__body[data-v-6c795a65] {\n  flex: 1; min-height: 0;\n  min-width: 0; overflow-y: auto; overflow-x: hidden; padding: var(--acu-panel-padding, 16px);\n  display: flex; flex-direction: column; gap: var(--acu-page-gap, 14px);\n}\n@keyframes acu-drawer-layer-in-6c795a65 {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-drawer-panel-in-6c795a65 {\nfrom { transform: translateX(100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes acu-drawer-layer-out-6c795a65 {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-drawer-panel-out-6c795a65 {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(100%);\n}\n}\n@media (max-width: 860px) {\n.acu-v2-drawer[data-v-6c795a65] { width: 100vw !important; max-width: 100vw; border-left: 0;\n}\n}\n", "src/presentation-v2/components/_lib/AcuDrawer.vue#style-0-6c795a65");
     var AcuDrawer_vue_vue_type_style_index_0_scoped_6c795a65_lang = null;
 
-    const _hoisted_1$O = { class: "acu-v2-drawer__header" };
-    const _hoisted_2$H = { class: "acu-v2-drawer__header-left" };
-    const _hoisted_3$A = { class: "acu-v2-drawer__body" };
-    function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$Q = { class: "acu-v2-drawer__header" };
+    const _hoisted_2$J = { class: "acu-v2-drawer__header-left" };
+    const _hoisted_3$C = { class: "acu-v2-drawer__body" };
+    function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.isRendered ? (openBlock(), createElementBlock(
 		"div",
 		{
@@ -137899,7 +138826,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				role: "dialog",
 				onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
 			},
-			[createBaseVNode("header", _hoisted_1$O, [createBaseVNode("div", _hoisted_2$H, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
+			[createBaseVNode("header", _hoisted_1$Q, [createBaseVNode("div", _hoisted_2$J, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
 				key: 0,
 				icon: "fa-solid fa-arrow-left",
 				title: "返回",
@@ -137915,7 +138842,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				"aria-label": "关闭",
 				title: "关闭",
 				onClick: $setup.requestClose
-			})]), createBaseVNode("div", _hoisted_3$A, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
+			})]), createBaseVNode("div", _hoisted_3$C, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
 			4
 			/* STYLE */
 		)],
@@ -137923,9 +138850,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS, NEED_HYDRATION */
 	)) : createCommentVNode("v-if", true);
     }
-    var AcuDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$P, [["render", _sfc_render$P], ["__scopeId", "data-v-6c795a65"]]);
+    var AcuDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-6c795a65"]]);
 
-    var _sfc_main$O = /*@__PURE__*/ defineComponent({
+    var _sfc_main$Q = /*@__PURE__*/ defineComponent({
         __name: 'AcuRulePairList',
         props: {
             modelValue: {},
@@ -137976,20 +138903,20 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-rule-pair-list--standalone[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list__body[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list--standalone .acu-rule-pair-list__body[data-v-c9426b22] {\r\n  /* 老接口：未提供 label 时直接展示，无外层 padding */\r\n  border-top: 0;\r\n  padding: 0;\n}\n.acu-rule-pair-list__row[data-v-c9426b22] {\r\n  display: flex; align-items: center; gap: 6px;\n}\n.acu-rule-pair-list__field[data-v-c9426b22] { flex: 1; min-width: 0;\n}\n.acu-rule-pair-list__sep[data-v-c9426b22] {\r\n  flex-shrink: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-rule-pair-list__empty[data-v-c9426b22] {\r\n  padding: 8px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-rule-pair-list__add[data-v-c9426b22] {\r\n  align-self: flex-start;\n}\r\n", "src/presentation-v2/components/_lib/AcuRulePairList.vue#style-0-c9426b22");
     var AcuRulePairList_vue_vue_type_style_index_0_scoped_c9426b22_lang = null;
 
-    const _hoisted_1$N = {
+    const _hoisted_1$P = {
 	key: 0,
 	class: "acu-rule-pair-list__empty"
     };
-    const _hoisted_2$G = {
+    const _hoisted_2$I = {
 	key: 1,
 	class: "acu-rule-pair-list acu-rule-pair-list--standalone"
     };
-    const _hoisted_3$z = { class: "acu-rule-pair-list__body" };
-    const _hoisted_4$v = {
+    const _hoisted_3$B = { class: "acu-rule-pair-list__body" };
+    const _hoisted_4$x = {
 	key: 0,
 	class: "acu-rule-pair-list__empty"
     };
-    function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
 	return $props.label ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
 		key: 0,
 		"root-class": "acu-rule-pair-list",
@@ -138055,7 +138982,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				128
 				/* KEYED_FRAGMENT */
 			)),
-			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$N, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
+			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$P, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
 			createVNode($setup["AcuButton"], {
 				size: "sm",
 				class: "acu-rule-pair-list__add",
@@ -138080,7 +139007,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		"label",
 		"meta",
 		"expanded"
-	])) : (openBlock(), createElementBlock("div", _hoisted_2$G, [createBaseVNode("div", _hoisted_3$z, [
+	])) : (openBlock(), createElementBlock("div", _hoisted_2$I, [createBaseVNode("div", _hoisted_3$B, [
 		(openBlock(true), createElementBlock(
 			Fragment,
 			null,
@@ -138130,7 +139057,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			128
 			/* KEYED_FRAGMENT */
 		)),
-		!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_4$v, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
+		!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_4$x, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
 		createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-rule-pair-list__add",
@@ -138151,9 +139078,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})
 	])]));
     }
-    var AcuRulePairList = /*#__PURE__*/ _export_sfc(_sfc_main$O, [["render", _sfc_render$O], ["__scopeId", "data-v-c9426b22"]]);
+    var AcuRulePairList = /*#__PURE__*/ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-c9426b22"]]);
 
-    var _sfc_main$N = /*@__PURE__*/ defineComponent({
+    var _sfc_main$P = /*@__PURE__*/ defineComponent({
         __name: 'PlotMatchReplaceFields',
         props: {
             rateMain: {},
@@ -138178,10 +139105,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-match-fields[data-v-8649d835] {\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-match-fields legend[data-v-8649d835] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-match-fields__grid[data-v-8649d835] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));\r\n  gap: 10px;\n}\r\n", "src/presentation-v2/components/PlotMatchReplaceFields.vue#style-0-8649d835");
     var PlotMatchReplaceFields_vue_vue_type_style_index_0_scoped_8649d835_lang = null;
 
-    const _hoisted_1$M = { class: "acu-v2-plot-match-fields" };
-    const _hoisted_2$F = { class: "acu-v2-plot-match-fields__grid" };
-    function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("fieldset", _hoisted_1$M, [
+    const _hoisted_1$O = { class: "acu-v2-plot-match-fields" };
+    const _hoisted_2$H = { class: "acu-v2-plot-match-fields__grid" };
+    function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("fieldset", _hoisted_1$O, [
 		_cache[6] || (_cache[6] = createBaseVNode(
 			"legend",
 			null,
@@ -138200,7 +139127,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			)])]),
 			_: 1
 		}),
-		createBaseVNode("div", _hoisted_2$F, [
+		createBaseVNode("div", _hoisted_2$H, [
 			createVNode($setup["AcuFormRow"], { label: "sulv1" }, {
 				default: withCtx(() => [createVNode($setup["AcuInput"], {
 					type: "number",
@@ -138250,7 +139177,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var PlotMatchReplaceFields = /*#__PURE__*/ _export_sfc(_sfc_main$N, [["render", _sfc_render$N], ["__scopeId", "data-v-8649d835"]]);
+    var PlotMatchReplaceFields = /*#__PURE__*/ _export_sfc(_sfc_main$P, [["render", _sfc_render$P], ["__scopeId", "data-v-8649d835"]]);
 
     const DEFAULT_ROLE_OPTIONS = [
         { value: 'SYSTEM', label: 'SYSTEM' },
@@ -138262,7 +139189,7 @@ Expected function or array of functions, received type ${typeof value}.`
         { value: 'A', label: '主插槽 A' },
         { value: 'B', label: '主插槽 B' },
     ];
-    var _sfc_main$M = /*@__PURE__*/ defineComponent({
+    var _sfc_main$O = /*@__PURE__*/ defineComponent({
         __name: 'AcuPromptSegments',
         props: {
             segments: {},
@@ -138291,20 +139218,20 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-prompt-segs[data-v-7a7ca5ef] { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add[data-v-7a7ca5ef] { display: flex; justify-content: center; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add-btn[data-v-7a7ca5ef] { max-width: 100%; white-space: normal;\n}\n.acu-prompt-segs__list[data-v-7a7ca5ef] {\n  list-style: none; margin: 0; padding: 0;\n  display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-7a7ca5ef] {\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent; padding: 0 0 12px;\n  display: flex; flex-direction: column; gap: 8px;\n  min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-7a7ca5ef]:last-child {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-prompt-segs__item-head[data-v-7a7ca5ef] {\n  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__index[data-v-7a7ca5ef] {\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n  min-width: 26px;\n  font-family: var(--acu-font-mono);\n}\n.acu-prompt-segs__role[data-v-7a7ca5ef] { flex: 1 1 110px; min-width: 0; max-width: 180px;\n}\n.acu-prompt-segs__slot[data-v-7a7ca5ef] { flex: 1 1 120px; min-width: 0; max-width: 200px;\n}\n.acu-prompt-segs__actions[data-v-7a7ca5ef] {\n  margin-left: auto;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  flex-wrap: wrap;\n  min-width: 0;\n}\n.acu-prompt-segs[data-v-7a7ca5ef] .acu-textarea,\n.acu-prompt-segs[data-v-7a7ca5ef] textarea {\n  width: 100%;\n  min-width: 0;\n  max-width: 100%;\n  box-sizing: border-box;\n}\n.acu-prompt-segs__empty[data-v-7a7ca5ef] {\n  padding: 10px 0; text-align: center;\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  overflow-wrap: anywhere;\n}\n@media (max-width: 480px) {\n.acu-prompt-segs__item-head[data-v-7a7ca5ef] { align-items: stretch;\n}\n.acu-prompt-segs__index[data-v-7a7ca5ef] { flex: 0 0 100%;\n}\n.acu-prompt-segs__role[data-v-7a7ca5ef],\n  .acu-prompt-segs__slot[data-v-7a7ca5ef] { flex-basis: 100%; max-width: 100%;\n}\n.acu-prompt-segs__actions[data-v-7a7ca5ef] { width: 100%; margin-left: 0; justify-content: flex-end;\n}\n}\n", "src/presentation-v2/components/_lib/AcuPromptSegments.vue#style-0-7a7ca5ef");
     var AcuPromptSegments_vue_vue_type_style_index_0_scoped_7a7ca5ef_lang = null;
 
-    const _hoisted_1$L = { class: "acu-prompt-segs" };
-    const _hoisted_2$E = { class: "acu-prompt-segs__add" };
-    const _hoisted_3$y = { class: "acu-prompt-segs__list" };
-    const _hoisted_4$u = { class: "acu-prompt-segs__item-head" };
-    const _hoisted_5$p = { class: "acu-prompt-segs__index" };
-    const _hoisted_6$o = { class: "acu-prompt-segs__actions" };
-    const _hoisted_7$l = {
+    const _hoisted_1$N = { class: "acu-prompt-segs" };
+    const _hoisted_2$G = { class: "acu-prompt-segs__add" };
+    const _hoisted_3$A = { class: "acu-prompt-segs__list" };
+    const _hoisted_4$w = { class: "acu-prompt-segs__item-head" };
+    const _hoisted_5$r = { class: "acu-prompt-segs__index" };
+    const _hoisted_6$q = { class: "acu-prompt-segs__actions" };
+    const _hoisted_7$n = {
 	key: 0,
 	class: "acu-prompt-segs__empty"
     };
-    const _hoisted_8$k = { class: "acu-prompt-segs__add" };
-    function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$L, [
-		createBaseVNode("div", _hoisted_2$E, [createVNode($setup["AcuButton"], {
+    const _hoisted_8$m = { class: "acu-prompt-segs__add" };
+    function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$N, [
+		createBaseVNode("div", _hoisted_2$G, [createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-prompt-segs__add-btn",
 			onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("add", "top"))
@@ -138322,17 +139249,17 @@ Expected function or array of functions, received type ${typeof value}.`
 			)])]),
 			_: 1
 		})]),
-		createBaseVNode("ol", _hoisted_3$y, [(openBlock(true), createElementBlock(
+		createBaseVNode("ol", _hoisted_3$A, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.segments, (seg, index) => {
 				return openBlock(), createElementBlock("li", {
 					key: index,
 					class: "acu-prompt-segs__item"
-				}, [createBaseVNode("header", _hoisted_4$u, [
+				}, [createBaseVNode("header", _hoisted_4$w, [
 					createBaseVNode(
 						"span",
-						_hoisted_5$p,
+						_hoisted_5$r,
 						"#" + toDisplayString(index + 1),
 						1
 						/* TEXT */
@@ -138367,7 +139294,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"model-value",
 						"onUpdate:modelValue"
 					])) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_6$o, [$props.allowMove ? (openBlock(), createElementBlock(
+					createBaseVNode("div", _hoisted_6$q, [$props.allowMove ? (openBlock(), createElementBlock(
 						Fragment,
 						{ key: 0 },
 						[createVNode($setup["AcuIconButton"], {
@@ -138420,12 +139347,12 @@ Expected function or array of functions, received type ${typeof value}.`
 			/* KEYED_FRAGMENT */
 		)), !$props.segments.length ? (openBlock(), createElementBlock(
 			"li",
-			_hoisted_7$l,
+			_hoisted_7$n,
 			toDisplayString($props.emptyText),
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true)]),
-		createBaseVNode("div", _hoisted_8$k, [createVNode($setup["AcuButton"], {
+		createBaseVNode("div", _hoisted_8$m, [createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-prompt-segs__add-btn",
 			onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("add", "bottom"))
@@ -138445,9 +139372,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})])
 	]);
     }
-    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$M, [["render", _sfc_render$M], ["__scopeId", "data-v-7a7ca5ef"]]);
+    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$O, [["render", _sfc_render$O], ["__scopeId", "data-v-7a7ca5ef"]]);
 
-    var _sfc_main$L = /*@__PURE__*/ defineComponent({
+    var _sfc_main$N = /*@__PURE__*/ defineComponent({
         __name: 'PlotPromptSegments',
         props: {
             segments: {}
@@ -138461,7 +139388,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPromptSegments"], {
 		segments: $props.segments,
 		"show-slot": true,
@@ -138474,9 +139401,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		onUpdate: _cache[3] || (_cache[3] = (i, p) => _ctx.$emit("update", i, p))
 	}, null, 8, ["segments"]);
     }
-    var PlotPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L]]);
+    var PlotPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$N, [["render", _sfc_render$N]]);
 
-    var _sfc_main$K = /*@__PURE__*/ defineComponent({
+    var _sfc_main$M = /*@__PURE__*/ defineComponent({
         __name: 'PlotTaskEditor',
         props: {
             task: {},
@@ -138541,27 +139468,27 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-task-editor[data-v-0d30f745] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-0d30f745] {\n  margin: 0;\n  padding: 0 0 14px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-0d30f745]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-plot-task-editor__section legend[data-v-0d30f745] {\n  padding: 0;\n  font-size: var(--acu-font-size-section-title, 12px);\n  font-weight: 600;\n  color: var(--acu-text-2);\n}\n.acu-v2-plot-task-editor__grid[data-v-0d30f745] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));\n  gap: 10px;\n}\n.acu-v2-plot-task-editor__grid--wide[data-v-0d30f745] {\n  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));\n}\n.acu-v2-plot-task-editor__toggles[data-v-0d30f745] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));\n  gap: 8px 12px;\n  padding: 8px 0;\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__toggles[data-v-0d30f745] .acu-toggle {\n  align-items: flex-start;\n  width: 100%;\n  min-width: 0;\n  min-height: var(--acu-control-height-sm, 26px);\n}\n.acu-v2-plot-task-editor__toggles[data-v-0d30f745] .acu-toggle__label {\n  min-width: 0;\n  white-space: normal;\n  line-height: var(--acu-line-height-body, 1.45);\n  overflow-wrap: anywhere;\n}\n.acu-v2-plot-task-editor__hint[data-v-0d30f745] {\n  margin: 0;\n  font-size: var(--acu-font-size-caption, 11px);\n  color: var(--acu-text-3);\n  line-height: var(--acu-line-height-caption, 1.5);\n}\n.acu-v2-plot-task-editor__empty[data-v-0d30f745] {\n  padding: 18px 0;\n  border: 0;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n  text-align: center;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n", "src/presentation-v2/components/PlotTaskEditor.vue#style-0-0d30f745");
     var PlotTaskEditor_vue_vue_type_style_index_0_scoped_0d30f745_lang = null;
 
-    const _hoisted_1$K = {
+    const _hoisted_1$M = {
 	key: 0,
 	class: "acu-v2-plot-task-editor"
     };
-    const _hoisted_2$D = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_3$x = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_4$t = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_5$o = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_6$n = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
-    const _hoisted_7$k = { class: "acu-v2-plot-task-editor__toggles" };
-    const _hoisted_8$j = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_9$g = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
-    const _hoisted_10$f = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_11$e = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_12$b = {
+    const _hoisted_2$F = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_3$z = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_4$v = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_5$q = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_6$p = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
+    const _hoisted_7$m = { class: "acu-v2-plot-task-editor__toggles" };
+    const _hoisted_8$l = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_9$i = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
+    const _hoisted_10$h = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_11$f = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_12$c = {
 	key: 1,
 	class: "acu-v2-plot-task-editor__empty"
     };
-    function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
-	return $props.task ? (openBlock(), createElementBlock("div", _hoisted_1$K, [
-		createBaseVNode("fieldset", _hoisted_2$D, [
+    function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
+	return $props.task ? (openBlock(), createElementBlock("div", _hoisted_1$M, [
+		createBaseVNode("fieldset", _hoisted_2$F, [
 			_cache[23] || (_cache[23] = createBaseVNode(
 				"legend",
 				null,
@@ -138569,7 +139496,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				-1
 				/* CACHED */
 			)),
-			createBaseVNode("div", _hoisted_3$x, [
+			createBaseVNode("div", _hoisted_3$z, [
 				createVNode($setup["AcuFormRow"], { label: "任务名称" }, {
 					default: withCtx(() => [createVNode($setup["AcuInput"], {
 						type: "text",
@@ -138611,7 +139538,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					_: 1
 				})
 			]),
-			createBaseVNode("div", _hoisted_4$t, [
+			createBaseVNode("div", _hoisted_4$v, [
 				createVNode($setup["AcuFormRow"], {
 					label: "标签摘取",
 					hint: "例如 recall,supplement，仅作用于本任务"
@@ -138649,7 +139576,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				})
 			])
 		]),
-		createBaseVNode("fieldset", _hoisted_5$o, [
+		createBaseVNode("fieldset", _hoisted_5$q, [
 			_cache[24] || (_cache[24] = createBaseVNode(
 				"legend",
 				null,
@@ -138664,7 +139591,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				-1
 				/* CACHED */
 			)),
-			createBaseVNode("div", _hoisted_6$n, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_6$p, [createVNode($setup["AcuFormRow"], {
 				label: "任务描述",
 				hint: "说明这个推进任务负责什么。留空时不参与 Agent Skill 判断。"
 			}, {
@@ -138691,7 +139618,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value"])]),
 				_: 1
 			})]),
-			createBaseVNode("div", _hoisted_7$k, [
+			createBaseVNode("div", _hoisted_7$m, [
 				createVNode($setup["AcuToggle"], {
 					"model-value": $props.task.agentControl.enabled,
 					label: $props.task.agentControl.enabled ? "Agent 可控制此任务" : "Agent 不控制此任务",
@@ -138718,7 +139645,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.patchAgentControl({ allowParallel: $event }))
 				}, null, 8, ["model-value"])
 			]),
-			createBaseVNode("div", _hoisted_8$j, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_8$l, [createVNode($setup["AcuFormRow"], {
 				label: "偏好阶段",
 				hint: "Agent 排序参考；留空则不指定。"
 			}, {
@@ -138743,7 +139670,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value"])]),
 				_: 1
 			})]),
-			createBaseVNode("div", _hoisted_9$g, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_9$i, [createVNode($setup["AcuFormRow"], {
 				label: "依赖任务 ID",
 				hint: "逗号分隔。Agent 排序时应先执行这些任务；非法或循环依赖会在运行时校验。"
 			}, {
@@ -138767,7 +139694,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				_: 1
 			})])
 		]),
-		createBaseVNode("fieldset", _hoisted_10$f, [_cache[26] || (_cache[26] = createBaseVNode(
+		createBaseVNode("fieldset", _hoisted_10$h, [_cache[26] || (_cache[26] = createBaseVNode(
 			"legend",
 			null,
 			"当前任务使用的 API",
@@ -138785,7 +139712,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, null, 8, ["options", "model-value"])]),
 			_: 1
 		})]),
-		createBaseVNode("fieldset", _hoisted_11$e, [_cache[27] || (_cache[27] = createBaseVNode(
+		createBaseVNode("fieldset", _hoisted_11$f, [_cache[27] || (_cache[27] = createBaseVNode(
 			"legend",
 			null,
 			"提示词段（promptGroup）",
@@ -138798,11 +139725,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			onMove: _cache[21] || (_cache[21] = (index, delta) => _ctx.$emit("segment-move", index, delta)),
 			onUpdate: _cache[22] || (_cache[22] = (index, patch) => _ctx.$emit("segment-update", index, patch))
 		}, null, 8, ["segments"])])
-	])) : (openBlock(), createElementBlock("div", _hoisted_12$b, " 请在上方选择一个任务进行编辑。 "));
+	])) : (openBlock(), createElementBlock("div", _hoisted_12$c, " 请在上方选择一个任务进行编辑。 "));
     }
-    var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-0d30f745"]]);
+    var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$M, [["render", _sfc_render$M], ["__scopeId", "data-v-0d30f745"]]);
 
-    var _sfc_main$J = /*@__PURE__*/ defineComponent({
+    var _sfc_main$L = /*@__PURE__*/ defineComponent({
         __name: 'PlotTaskList',
         props: {
             tasks: {},
@@ -138828,32 +139755,32 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-tasks[data-v-ee3c6f4c] {\r\n  margin: 0; padding: 0 0 14px;\r\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex; flex-direction: column; gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-tasks > legend[data-v-ee3c6f4c] {\r\n  padding: 0;\r\n  font-size: var(--acu-font-size-section-title, 12px); font-weight: 600; color: var(--acu-text-2);\r\n  display: flex; align-items: center; gap: 10px;\n}\n.acu-v2-plot-tasks__toolbar[data-v-ee3c6f4c] { display: inline-flex; gap: 4px;\n}\n.acu-v2-plot-tasks__cards[data-v-ee3c6f4c] {\r\n  display: flex; gap: 8px;\r\n  min-width: 0;\r\n  overflow-x: auto;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c] {\r\n  flex: 0 0 140px;\r\n  min-height: 100px;\r\n  display: flex; flex-direction: column; gap: 6px;\r\n  padding: 10px 12px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  color: inherit;\r\n  cursor: pointer;\r\n  font: inherit;\r\n  text-align: left;\r\n  transition: box-shadow 0.15s ease, color 0.15s ease, opacity 0.15s ease;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:hover,\r\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:focus-visible {\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\r\n  outline: none;\n}\n.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__card--disabled[data-v-ee3c6f4c] {\r\n  opacity: 0.5;\n}\n.acu-v2-plot-tasks__card--disabled.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  opacity: 0.7;\n}\n.acu-v2-plot-tasks__card--disabled .acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  text-decoration: line-through;\n}\n.acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-list-title, 13px); color: var(--acu-text-1); font-weight: 500;\r\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__name[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__stage[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__stage[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\r\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-text-3);\r\n  margin-top: auto;\n}\n.acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-warning);\r\n  font-weight: 500;\n}\n.acu-v2-plot-tasks__empty[data-v-ee3c6f4c] {\r\n  padding: 16px 12px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  flex: 1;\n}\r\n", "src/presentation-v2/components/PlotTaskList.vue#style-0-ee3c6f4c");
     var PlotTaskList_vue_vue_type_style_index_0_scoped_ee3c6f4c_lang = null;
 
-    const _hoisted_1$J = { class: "acu-v2-plot-tasks" };
-    const _hoisted_2$C = { class: "acu-v2-plot-tasks__toolbar" };
-    const _hoisted_3$w = { class: "acu-v2-plot-tasks__cards" };
-    const _hoisted_4$s = ["onClick"];
-    const _hoisted_5$n = { class: "acu-v2-plot-tasks__name" };
-    const _hoisted_6$m = {
+    const _hoisted_1$L = { class: "acu-v2-plot-tasks" };
+    const _hoisted_2$E = { class: "acu-v2-plot-tasks__toolbar" };
+    const _hoisted_3$y = { class: "acu-v2-plot-tasks__cards" };
+    const _hoisted_4$u = ["onClick"];
+    const _hoisted_5$p = { class: "acu-v2-plot-tasks__name" };
+    const _hoisted_6$o = {
 	class: "acu-v2-plot-tasks__stage",
 	title: "阶段号 — 同阶段并发，跨阶段串行"
     };
-    const _hoisted_7$j = { class: "acu-v2-plot-tasks__seg-count" };
-    const _hoisted_8$i = {
+    const _hoisted_7$l = { class: "acu-v2-plot-tasks__seg-count" };
+    const _hoisted_8$k = {
 	key: 0,
 	class: "acu-v2-plot-tasks__disabled-label"
     };
-    const _hoisted_9$f = {
+    const _hoisted_9$h = {
 	key: 0,
 	class: "acu-v2-plot-tasks__empty"
     };
-    function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("fieldset", _hoisted_1$J, [createBaseVNode("legend", null, [_cache[4] || (_cache[4] = createBaseVNode(
+    function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("fieldset", _hoisted_1$L, [createBaseVNode("legend", null, [_cache[4] || (_cache[4] = createBaseVNode(
 		"span",
 		null,
 		"剧情任务列表",
 		-1
 		/* CACHED */
-	)), createBaseVNode("span", _hoisted_2$C, [
+	)), createBaseVNode("span", _hoisted_2$E, [
 		createVNode($setup["AcuIconButton"], {
 			icon: "fa-solid fa-arrow-left",
 			size: "sm",
@@ -138883,7 +139810,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			title: "新增任务",
 			onClick: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("add"))
 		})
-	])]), createBaseVNode("div", _hoisted_3$w, [(openBlock(true), createElementBlock(
+	])]), createBaseVNode("div", _hoisted_3$y, [(openBlock(true), createElementBlock(
 		Fragment,
 		null,
 		renderList($props.tasks, (task) => {
@@ -138898,35 +139825,35 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, [
 				createBaseVNode(
 					"span",
-					_hoisted_5$n,
+					_hoisted_5$p,
 					toDisplayString(task.name),
 					1
 					/* TEXT */
 				),
 				createBaseVNode(
 					"span",
-					_hoisted_6$m,
+					_hoisted_6$o,
 					"阶段 " + toDisplayString(task.stage),
 					1
 					/* TEXT */
 				),
 				createBaseVNode(
 					"span",
-					_hoisted_7$j,
+					_hoisted_7$l,
 					toDisplayString(task.promptGroup.length) + " 段",
 					1
 					/* TEXT */
 				),
-				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$i, "已禁用")) : createCommentVNode("v-if", true)
-			], 10, _hoisted_4$s);
+				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$k, "已禁用")) : createCommentVNode("v-if", true)
+			], 10, _hoisted_4$u);
 		}),
 		128
 		/* KEYED_FRAGMENT */
-	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$f, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
+	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$h, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
     }
-    var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-ee3c6f4c"]]);
+    var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-ee3c6f4c"]]);
 
-    var _sfc_main$I = /*@__PURE__*/ defineComponent({
+    var _sfc_main$K = /*@__PURE__*/ defineComponent({
         __name: 'PlotPresetDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -138961,18 +139888,18 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-drawer__create-btn[data-v-47605d60] {\r\n  width: 100%;\n}\n.acu-v2-plot-drawer__empty[data-v-47605d60] {\r\n  margin-top: 20px;\n}\n.acu-v2-plot-drawer__actions[data-v-47605d60] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  padding-top: 12px;\r\n  margin-top: 12px;\n}\r\n\r\n/* manage list */\n.acu-v2-manage-list[data-v-47605d60] {\r\n  list-style: none;\r\n  margin: 0;\r\n  padding: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-47605d60] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 10px;\r\n  padding: 10px 12px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-47605d60]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-47605d60] {\r\n  flex: 1;\r\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-47605d60] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-47605d60] {\r\n  display: block;\r\n  margin-top: 2px;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-47605d60] {\r\n  display: flex;\r\n  gap: 4px;\n}\r\n\r\n/* form */\n.acu-v2-form[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-form__section[data-v-47605d60] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-v2-form__section[data-v-47605d60]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-form__section legend[data-v-47605d60] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-drawer__rules[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-error[data-v-47605d60] {\r\n  padding: 8px 10px;\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\n}\r\n", "src/presentation-v2/components/PlotPresetDrawer.vue#style-0-47605d60");
     var PlotPresetDrawer_vue_vue_type_style_index_0_scoped_47605d60_lang = null;
 
-    const _hoisted_1$I = {
+    const _hoisted_1$K = {
 	key: 0,
 	class: "acu-v2-manage-list"
     };
-    const _hoisted_2$B = { class: "acu-v2-manage-item__info" };
-    const _hoisted_3$v = { class: "acu-v2-manage-item__actions" };
-    const _hoisted_4$r = { class: "acu-v2-form__section" };
-    const _hoisted_5$m = { class: "acu-v2-form__section" };
-    const _hoisted_6$l = { class: "acu-v2-plot-drawer__rules" };
-    const _hoisted_7$i = { class: "acu-v2-form__section" };
-    const _hoisted_8$h = { class: "acu-v2-plot-drawer__actions" };
-    function _sfc_render$I(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_2$D = { class: "acu-v2-manage-item__info" };
+    const _hoisted_3$x = { class: "acu-v2-manage-item__actions" };
+    const _hoisted_4$t = { class: "acu-v2-form__section" };
+    const _hoisted_5$o = { class: "acu-v2-form__section" };
+    const _hoisted_6$n = { class: "acu-v2-plot-drawer__rules" };
+    const _hoisted_7$k = { class: "acu-v2-form__section" };
+    const _hoisted_8$j = { class: "acu-v2-plot-drawer__actions" };
+    function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: $props.title,
@@ -139002,14 +139929,14 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* CACHED */
 				)])]),
 				_: 1
-			}), $props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_1$I, [(openBlock(true), createElementBlock(
+			}), $props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_1$K, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($props.presetMeta, (meta) => {
 					return openBlock(), createElementBlock("li", {
 						key: meta.name,
 						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_2$B, [createVNode(
+					}, [createBaseVNode("div", _hoisted_2$D, [createVNode(
 						$setup["AcuText"],
 						{
 							as: "span",
@@ -139049,7 +139976,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						},
 						1024
 						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_3$v, [
+					)]), createBaseVNode("div", _hoisted_3$x, [
 						createVNode($setup["AcuIconButton"], {
 							icon: meta.name === $props.defaultPresetName ? "fa-solid fa-star" : "fa-regular fa-star",
 							title: "设为全局默认",
@@ -139104,7 +140031,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onSubmit: _cache[14] || (_cache[14] = withModifiers(($event) => _ctx.$emit("save"), ["prevent"]))
 				},
 				[
-					createBaseVNode("fieldset", _hoisted_4$r, [_cache[19] || (_cache[19] = createBaseVNode(
+					createBaseVNode("fieldset", _hoisted_4$t, [_cache[19] || (_cache[19] = createBaseVNode(
 						"legend",
 						null,
 						"基础信息",
@@ -139119,7 +140046,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"])]),
 						_: 1
 					})]),
-					createBaseVNode("fieldset", _hoisted_5$m, [
+					createBaseVNode("fieldset", _hoisted_5$o, [
 						_cache[21] || (_cache[21] = createBaseVNode(
 							"legend",
 							null,
@@ -139138,7 +140065,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)])]),
 							_: 1
 						}),
-						createBaseVNode("div", _hoisted_6$l, [createVNode($setup["AcuRulePairList"], {
+						createBaseVNode("div", _hoisted_6$n, [createVNode($setup["AcuRulePairList"], {
 							label: "提取规则",
 							"model-value": $props.contextRules.extractRules,
 							"start-placeholder": "提取开始边界",
@@ -139197,7 +140124,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"api-preset-options",
 						"task-api-override"
 					]),
-					createBaseVNode("fieldset", _hoisted_7$i, [_cache[22] || (_cache[22] = createBaseVNode(
+					createBaseVNode("fieldset", _hoisted_7$k, [_cache[22] || (_cache[22] = createBaseVNode(
 						"legend",
 						null,
 						"最终注入指令",
@@ -139222,7 +140149,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("footer", _hoisted_8$h, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
+					createBaseVNode("footer", _hoisted_8$j, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
 						default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
 							"关闭",
 							-1
@@ -139255,9 +140182,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		"before-close"
 	]);
     }
-    var PlotPresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-47605d60"]]);
+    var PlotPresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-47605d60"]]);
 
-    var _sfc_main$H = /*@__PURE__*/ defineComponent({
+    var _sfc_main$J = /*@__PURE__*/ defineComponent({
         __name: 'PlotPresetPanel',
         props: {
             showEdit: { type: Boolean, default: true },
@@ -139356,10 +140283,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-plot-preset-panel__status-line[data-v-021e572f] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-plot-preset-panel__select-row[data-v-021e572f] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  margin-bottom: 12px;\r\n  min-width: 0;\n}\r\n", "src/presentation-v2/components/PlotPresetPanel.vue#style-0-021e572f");
     var PlotPresetPanel_vue_vue_type_style_index_0_scoped_021e572f_lang = null;
 
-    const _hoisted_1$H = { class: "acu-text__value" };
-    const _hoisted_2$A = { class: "acu-text__value" };
-    const _hoisted_3$u = { class: "acu-plot-preset-panel__select-row" };
-    function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$J = { class: "acu-text__value" };
+    const _hoisted_2$C = { class: "acu-text__value" };
+    const _hoisted_3$w = { class: "acu-plot-preset-panel__select-row" };
+    function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.plotCopy.panels.preset.title,
 		description: $setup.plotCopy.panels.preset.description
@@ -139388,7 +140315,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					)),
 					createBaseVNode(
 						"strong",
-						_hoisted_1$H,
+						_hoisted_1$J,
 						toDisplayString($setup.store.activePresetName || "默认预设"),
 						1
 						/* TEXT */
@@ -139402,7 +140329,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* CACHED */
 						)), createBaseVNode(
 							"strong",
-							_hoisted_2$A,
+							_hoisted_2$C,
 							toDisplayString($setup.store.defaultPresetName),
 							1
 							/* TEXT */
@@ -139437,7 +140364,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				_: 1
 			}),
-			createBaseVNode("div", _hoisted_3$u, [
+			createBaseVNode("div", _hoisted_3$w, [
 				createVNode($setup["AcuPresetDropdown"], {
 					items: $setup.presetDropdownItems,
 					"model-value": $setup.store.activePresetName,
@@ -139548,9 +140475,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var PlotPresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-021e572f"]]);
+    var PlotPresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-021e572f"]]);
 
-    var _sfc_main$G = /*@__PURE__*/ defineComponent({
+    var _sfc_main$I = /*@__PURE__*/ defineComponent({
         __name: 'TablePresetDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -139572,14 +140499,14 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-table-drawer__top-actions[data-v-6ee589ee] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n}\n.acu-v2-manage-list[data-v-6ee589ee] {\n  list-style: none;\n  margin: 0;\n  padding: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-6ee589ee] {\n  display: flex;\n  align-items: center;\n  gap: 10px;\n  padding: 10px 12px;\n  border: 0;\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-6ee589ee]:last-child {\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-6ee589ee] {\n  flex: 1;\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-6ee589ee] {\n  display: block;\n  font-size: var(--acu-font-size-list-title, 13px);\n  line-height: var(--acu-line-height-body, 1.45);\n  font-weight: 500;\n  color: var(--acu-text-1);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-6ee589ee] {\n  display: block;\n  margin-top: 2px;\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: var(--acu-line-height-caption, 1.5);\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-6ee589ee] {\n  display: flex;\n  gap: 4px;\n}\n.acu-v2-table-drawer__empty[data-v-6ee589ee] {\n  margin: 12px 0;\n}\n\n", "src/presentation-v2/components/TablePresetDrawer.vue#style-0-6ee589ee");
     var TablePresetDrawer_vue_vue_type_style_index_0_scoped_6ee589ee_lang = null;
 
-    const _hoisted_1$G = { class: "acu-v2-table-drawer__top-actions" };
-    const _hoisted_2$z = {
+    const _hoisted_1$I = { class: "acu-v2-table-drawer__top-actions" };
+    const _hoisted_2$B = {
 	key: 1,
 	class: "acu-v2-manage-list"
     };
-    const _hoisted_3$t = { class: "acu-v2-manage-item__info" };
-    const _hoisted_4$q = { class: "acu-v2-manage-item__actions" };
-    function _sfc_render$G(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$v = { class: "acu-v2-manage-item__info" };
+    const _hoisted_4$s = { class: "acu-v2-manage-item__actions" };
+    function _sfc_render$I(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: $props.title,
@@ -139598,7 +140525,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$G, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_1$I, [createVNode($setup["AcuButton"], {
 				variant: "primary",
 				disabled: $props.busy,
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("create-blank"))
@@ -139616,14 +140543,14 @@ Expected function or array of functions, received type ${typeof value}.`
 				)])]),
 				_: 1
 			}, 8, ["disabled"])]),
-			$props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_2$z, [(openBlock(true), createElementBlock(
+			$props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_2$B, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($props.presetMeta, (meta) => {
 					return openBlock(), createElementBlock("li", {
 						key: meta.name,
 						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_3$t, [createVNode(
+					}, [createBaseVNode("div", _hoisted_3$v, [createVNode(
 						$setup["AcuText"],
 						{
 							as: "span",
@@ -139675,7 +140602,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						},
 						1024
 						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_4$q, [meta.kind === "runtime" ? (openBlock(), createElementBlock(
+					)]), createBaseVNode("div", _hoisted_4$s, [meta.kind === "runtime" ? (openBlock(), createElementBlock(
 						Fragment,
 						{ key: 0 },
 						[createCommentVNode(" 只读 runtime 项：仅导出，不渲染 star/rename/edit/delete "), createVNode($setup["AcuIconButton"], {
@@ -139761,7 +140688,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var TablePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$G, [["render", _sfc_render$G], ["__scopeId", "data-v-6ee589ee"]]);
+    var TablePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-6ee589ee"]]);
 
     /**
      * root-shell-store — 顶层外壳状态（开关、挂载次数）
@@ -141800,7 +142727,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$F = /*@__PURE__*/ defineComponent({
+    var _sfc_main$H = /*@__PURE__*/ defineComponent({
         __name: 'TableTemplatePresetPanel',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -141822,11 +142749,11 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-table-template-panel__status-line[data-v-1ca9c708] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-table-template-panel__preset-row[data-v-1ca9c708] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);\n  gap: 6px;\n  align-items: stretch;\n  min-width: 0;\n}\n.acu-table-template-panel__action-area[data-v-1ca9c708] {\n  margin-top: 10px;\n}\n.acu-table-template-panel__visualizer-button[data-v-1ca9c708] {\n  width: 100%;\n}\n\n", "src/presentation-v2/components/TableTemplatePresetPanel.vue#style-0-1ca9c708");
     var TableTemplatePresetPanel_vue_vue_type_style_index_0_scoped_1ca9c708_lang = null;
 
-    const _hoisted_1$F = { class: "acu-text__value" };
-    const _hoisted_2$y = { class: "acu-text__value" };
-    const _hoisted_3$s = { class: "acu-table-template-panel__preset-row" };
-    const _hoisted_4$p = { class: "acu-table-template-panel__action-area" };
-    function _sfc_render$F(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$H = { class: "acu-text__value" };
+    const _hoisted_2$A = { class: "acu-text__value" };
+    const _hoisted_3$u = { class: "acu-table-template-panel__preset-row" };
+    const _hoisted_4$r = { class: "acu-table-template-panel__action-area" };
+    function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.tableCopy.panels.templatePreset.title,
 		description: $setup.tableCopy.panels.templatePreset.description
@@ -141866,7 +142793,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					)),
 					createBaseVNode(
 						"strong",
-						_hoisted_1$F,
+						_hoisted_1$H,
 						toDisplayString($setup.templates.selectedChatPresetLabel.value),
 						1
 						/* TEXT */
@@ -141880,7 +142807,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* CACHED */
 						)), createBaseVNode(
 							"strong",
-							_hoisted_2$y,
+							_hoisted_2$A,
 							toDisplayString($setup.templates.selectedGlobalPreset.value),
 							1
 							/* TEXT */
@@ -141926,7 +142853,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				_: 1
 			}),
-			createBaseVNode("div", _hoisted_3$s, [
+			createBaseVNode("div", _hoisted_3$u, [
 				createVNode($setup["AcuPresetDropdown"], {
 					items: $setup.templates.chatPresetItems.value,
 					"model-value": $setup.templates.selectedChatPreset.value,
@@ -141976,7 +142903,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onClick: $setup.management.openManage
 				}, null, 8, ["disabled", "onClick"])
 			]),
-			createBaseVNode("div", _hoisted_4$p, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_4$r, [createVNode($setup["AcuButton"], {
 				variant: "primary",
 				class: "acu-table-template-panel__visualizer-button",
 				title: "打开可视化表格编辑器",
@@ -142024,7 +142951,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$F, [["render", _sfc_render$F], ["__scopeId", "data-v-1ca9c708"]]);
+    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-1ca9c708"]]);
 
     const basicConfigCopy = {
         nav: {
@@ -142035,7 +142962,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$E = /*@__PURE__*/ defineComponent({
+    var _sfc_main$G = /*@__PURE__*/ defineComponent({
         __name: 'BasicConfigPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -142054,9 +142981,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-basic-config-page[data-v-f7cbbc38] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-basic-config-page__grid[data-v-f7cbbc38] {\r\n  grid-template-areas:\r\n    \"api update\"\r\n    \"api table\"\r\n    \"api plot\";\n}\n.acu-v2-basic-config-page__api[data-v-f7cbbc38] {\r\n  grid-area: api;\n}\n.acu-v2-basic-config-page__update[data-v-f7cbbc38] {\r\n  grid-area: update;\n}\n.acu-v2-basic-config-page__table[data-v-f7cbbc38] {\r\n  grid-area: table;\n}\n.acu-v2-basic-config-page__plot[data-v-f7cbbc38] {\r\n  grid-area: plot;\n}\n@media (max-width: 860px) {\n.acu-v2-basic-config-page[data-v-f7cbbc38] {\r\n    padding: 14px;\n}\n.acu-v2-basic-config-page__grid[data-v-f7cbbc38] {\r\n    grid-template-areas:\r\n      \"api\"\r\n      \"update\"\r\n      \"table\"\r\n      \"plot\";\n}\n}\r\n", "src/presentation-v2/pages/BasicConfigPage.vue#style-0-f7cbbc38");
     var BasicConfigPage_vue_vue_type_style_index_0_scoped_f7cbbc38_lang = null;
 
-    const _hoisted_1$E = { class: "acu-v2-basic-config-page" };
-    function _sfc_render$E(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$E, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-basic-config-page__grid" }, {
+    const _hoisted_1$G = { class: "acu-v2-basic-config-page" };
+    function _sfc_render$G(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$G, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-basic-config-page__grid" }, {
 		default: withCtx(() => [
 			createVNode($setup["ApiConfigPanel"], {
 				id: "basic-config-api-panel",
@@ -142079,7 +143006,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var BasicConfigPage = /*#__PURE__*/ _export_sfc(_sfc_main$E, [["render", _sfc_render$E], ["__scopeId", "data-v-f7cbbc38"]]);
+    var BasicConfigPage = /*#__PURE__*/ _export_sfc(_sfc_main$G, [["render", _sfc_render$G], ["__scopeId", "data-v-f7cbbc38"]]);
 
     const dashboardCopy = {
         pageTitle: "仪表盘",
@@ -142341,7 +143268,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$D = /*@__PURE__*/ defineComponent({
+    var _sfc_main$F = /*@__PURE__*/ defineComponent({
         __name: 'DashboardStorageModeSection',
         props: {
             options: {},
@@ -142377,28 +143304,28 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-dashboard-storage-mode[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-dashboard-storage-mode__head[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\n.acu-dashboard-storage-mode__label[data-v-12a63c98] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 500;\n}\n.acu-dashboard-storage-mode__desc-main[data-v-12a63c98] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-dashboard-storage-mode__switch[data-v-12a63c98] {\r\n  flex: 0 0 auto;\r\n  width: 92px;\n}\n.acu-dashboard-storage-mode__cards[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\r\n  margin-top: 4px;\n}\n.acu-dashboard-storage-mode__card[data-v-12a63c98] {\r\n  position: relative;\r\n  min-width: 0;\r\n  padding: 5px 0 5px 8px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  display: grid;\r\n  grid-template-columns: 26px minmax(0, 1fr);\r\n  gap: 8px;\r\n  align-items: center;\r\n  transition:\r\n    background 0.15s ease,\r\n    box-shadow 0.15s ease;\n}\n.acu-dashboard-storage-mode__card--active[data-v-12a63c98] {\r\n  background: color-mix(in srgb, var(--acu-accent) 8%, transparent);\r\n  box-shadow:\r\n    inset 0 0 0 1px\r\n    color-mix(in srgb, var(--acu-accent) 30%, transparent);\n}\n.acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n  width: 26px;\r\n  height: 26px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-3);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  font-size: 15px;\n}\n.acu-dashboard-storage-mode__card--active .acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n  color: var(--acu-accent);\r\n  background: transparent;\n}\n.acu-dashboard-storage-mode__body[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\n}\n.acu-dashboard-storage-mode__card-head[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  flex-wrap: wrap;\r\n  gap: 6px;\n}\n.acu-dashboard-storage-mode__name[data-v-12a63c98] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 600;\r\n  line-height: 1.25;\n}\n.acu-dashboard-storage-mode__badge[data-v-12a63c98] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  min-height: 18px;\r\n  padding: 1px 6px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  line-height: 1.2;\r\n  white-space: nowrap;\n}\n.acu-dashboard-storage-mode__card--active .acu-dashboard-storage-mode__badge[data-v-12a63c98] {\r\n  background: color-mix(in srgb, var(--acu-accent) 16%, transparent);\r\n  color: var(--acu-accent);\n}\n.acu-dashboard-storage-mode__desc[data-v-12a63c98] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n@media (max-width: 640px) {\n.acu-dashboard-storage-mode__head[data-v-12a63c98] {\r\n    align-items: center;\n}\n.acu-dashboard-storage-mode__switch[data-v-12a63c98] {\r\n    width: 88px;\n}\n.acu-dashboard-storage-mode__card[data-v-12a63c98] {\r\n    grid-template-columns: minmax(0, 1fr);\n}\n.acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n    display: none;\n}\n}\r\n", "src/presentation-v2/components/DashboardStorageModeSection.vue#style-0-12a63c98");
     var DashboardStorageModeSection_vue_vue_type_style_index_0_scoped_12a63c98_lang = null;
 
-    const _hoisted_1$D = ["aria-label"];
-    const _hoisted_2$x = { class: "acu-dashboard-storage-mode__head" };
-    const _hoisted_3$r = { class: "acu-dashboard-storage-mode__label" };
-    const _hoisted_4$o = { class: "acu-dashboard-storage-mode__desc-main" };
-    const _hoisted_5$l = { class: "acu-dashboard-storage-mode__cards" };
-    const _hoisted_6$k = {
+    const _hoisted_1$F = ["aria-label"];
+    const _hoisted_2$z = { class: "acu-dashboard-storage-mode__head" };
+    const _hoisted_3$t = { class: "acu-dashboard-storage-mode__label" };
+    const _hoisted_4$q = { class: "acu-dashboard-storage-mode__desc-main" };
+    const _hoisted_5$n = { class: "acu-dashboard-storage-mode__cards" };
+    const _hoisted_6$m = {
 	class: "acu-dashboard-storage-mode__icon",
 	"aria-hidden": "true"
     };
-    const _hoisted_7$h = { class: "acu-dashboard-storage-mode__body" };
-    const _hoisted_8$g = { class: "acu-dashboard-storage-mode__card-head" };
-    const _hoisted_9$e = { class: "acu-dashboard-storage-mode__name" };
-    const _hoisted_10$e = { class: "acu-dashboard-storage-mode__badge" };
-    const _hoisted_11$d = { class: "acu-dashboard-storage-mode__desc" };
-    function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_7$j = { class: "acu-dashboard-storage-mode__body" };
+    const _hoisted_8$i = { class: "acu-dashboard-storage-mode__card-head" };
+    const _hoisted_9$g = { class: "acu-dashboard-storage-mode__name" };
+    const _hoisted_10$g = { class: "acu-dashboard-storage-mode__badge" };
+    const _hoisted_11$e = { class: "acu-dashboard-storage-mode__desc" };
+    function _sfc_render$F(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", {
 		class: "acu-dashboard-storage-mode",
 		"aria-label": $setup.dashboardCopy.storage.sectionLabel
 	}, [
-		createBaseVNode("div", _hoisted_2$x, [createBaseVNode(
+		createBaseVNode("div", _hoisted_2$z, [createBaseVNode(
 			"span",
-			_hoisted_3$r,
+			_hoisted_3$t,
 			toDisplayString($setup.dashboardCopy.storage.sectionLabel),
 			1
 			/* TEXT */
@@ -142416,12 +143343,12 @@ Expected function or array of functions, received type ${typeof value}.`
 		])]),
 		createBaseVNode(
 			"p",
-			_hoisted_4$o,
+			_hoisted_4$q,
 			toDisplayString($setup.dashboardCopy.storage.description),
 			1
 			/* TEXT */
 		),
-		createBaseVNode("div", _hoisted_5$l, [(openBlock(true), createElementBlock(
+		createBaseVNode("div", _hoisted_5$n, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($setup.decoratedOptions, (option) => {
@@ -142431,27 +143358,27 @@ Expected function or array of functions, received type ${typeof value}.`
 						key: option.value,
 						class: normalizeClass(["acu-dashboard-storage-mode__card", { "acu-dashboard-storage-mode__card--active": option.value === $props.modelValue }])
 					},
-					[createBaseVNode("span", _hoisted_6$k, [createBaseVNode(
+					[createBaseVNode("span", _hoisted_6$m, [createBaseVNode(
 						"i",
 						{ class: normalizeClass(option.iconClass) },
 						null,
 						2
 						/* CLASS */
-					)]), createBaseVNode("span", _hoisted_7$h, [createBaseVNode("span", _hoisted_8$g, [createBaseVNode(
+					)]), createBaseVNode("span", _hoisted_7$j, [createBaseVNode("span", _hoisted_8$i, [createBaseVNode(
 						"span",
-						_hoisted_9$e,
+						_hoisted_9$g,
 						toDisplayString(option.label),
 						1
 						/* TEXT */
 					), createBaseVNode(
 						"span",
-						_hoisted_10$e,
+						_hoisted_10$g,
 						toDisplayString(option.badge),
 						1
 						/* TEXT */
 					)]), createBaseVNode(
 						"span",
-						_hoisted_11$d,
+						_hoisted_11$e,
 						toDisplayString(option.description),
 						1
 						/* TEXT */
@@ -142463,11 +143390,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			128
 			/* KEYED_FRAGMENT */
 		))])
-	], 8, _hoisted_1$D);
+	], 8, _hoisted_1$F);
     }
-    var DashboardStorageModeSection = /*#__PURE__*/ _export_sfc(_sfc_main$D, [["render", _sfc_render$D], ["__scopeId", "data-v-12a63c98"]]);
+    var DashboardStorageModeSection = /*#__PURE__*/ _export_sfc(_sfc_main$F, [["render", _sfc_render$F], ["__scopeId", "data-v-12a63c98"]]);
 
-    var _sfc_main$C = /*@__PURE__*/ defineComponent({
+    var _sfc_main$E = /*@__PURE__*/ defineComponent({
         __name: 'DashboardToggleRow',
         props: {
             item: {}
@@ -142491,17 +143418,17 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-dashboard-toggle-row[data-v-52f8e493] {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-dashboard-toggle-row__head[data-v-52f8e493] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n}\n.acu-dashboard-toggle-row__label[data-v-52f8e493] {\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n  color: var(--acu-text-1);\n  min-width: 0;\n}\n.acu-dashboard-toggle-row__desc[data-v-52f8e493] {\n  margin: 0;\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n  color: var(--acu-text-3);\n}\n", "src/presentation-v2/components/DashboardToggleRow.vue#style-0-52f8e493");
     var DashboardToggleRow_vue_vue_type_style_index_0_scoped_52f8e493_lang = null;
 
-    const _hoisted_1$C = { class: "acu-dashboard-toggle-row" };
-    const _hoisted_2$w = { class: "acu-dashboard-toggle-row__head" };
-    const _hoisted_3$q = { class: "acu-dashboard-toggle-row__label" };
-    const _hoisted_4$n = {
+    const _hoisted_1$E = { class: "acu-dashboard-toggle-row" };
+    const _hoisted_2$y = { class: "acu-dashboard-toggle-row__head" };
+    const _hoisted_3$s = { class: "acu-dashboard-toggle-row__label" };
+    const _hoisted_4$p = {
 	key: 0,
 	class: "acu-dashboard-toggle-row__desc"
     };
-    function _sfc_render$C(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$C, [createBaseVNode("div", _hoisted_2$w, [createBaseVNode(
+    function _sfc_render$E(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$E, [createBaseVNode("div", _hoisted_2$y, [createBaseVNode(
 		"span",
-		_hoisted_3$q,
+		_hoisted_3$s,
 		toDisplayString($props.item.label),
 		1
 		/* TEXT */
@@ -142518,13 +143445,13 @@ Expected function or array of functions, received type ${typeof value}.`
 		"disabled"
 	])]), $props.item.description ? (openBlock(), createElementBlock(
 		"p",
-		_hoisted_4$n,
+		_hoisted_4$p,
 		toDisplayString($props.item.description),
 		1
 		/* TEXT */
 	)) : createCommentVNode("v-if", true)]);
     }
-    var ToggleRow = /*#__PURE__*/ _export_sfc(_sfc_main$C, [["render", _sfc_render$C], ["__scopeId", "data-v-52f8e493"]]);
+    var ToggleRow = /*#__PURE__*/ _export_sfc(_sfc_main$E, [["render", _sfc_render$E], ["__scopeId", "data-v-52f8e493"]]);
 
     const FLIGHT_MODE_BIG_SUMMARY_ENTRY_PLACEMENT_ACU = {
         position: 'at_depth_as_system',
@@ -143673,7 +144600,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     }
 
-    var _sfc_main$B = /*@__PURE__*/ defineComponent({
+    var _sfc_main$D = /*@__PURE__*/ defineComponent({
         __name: 'DashboardPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -143778,23 +144705,23 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-dashboard-page[data-v-369cb872] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-dashboard-page__toggle-list[data-v-369cb872] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n  margin-top: 14px;\n}\n.acu-v2-dashboard-page__health-list[data-v-369cb872] {\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-item[data-v-369cb872] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: 30px minmax(0, 1fr) max-content;\n  column-gap: 10px;\n  row-gap: 8px;\n  align-items: center;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n  transition:\n    border-color 0.15s ease,\n    background 0.15s ease;\n}\n.acu-v2-dashboard-page__health-item--error[data-v-369cb872] {\n  border-color: color-mix(in srgb, var(--acu-danger) 38%, var(--acu-border));\n}\n.acu-v2-dashboard-page__health-icon[data-v-369cb872] {\n  width: 30px;\n  height: 30px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-2);\n}\n.acu-v2-dashboard-page__health-item--ok .acu-v2-dashboard-page__health-icon[data-v-369cb872] {\n  color: var(--acu-success);\n  background: color-mix(in srgb, var(--acu-success) 10%, transparent);\n}\n.acu-v2-dashboard-page__health-item--warning\n  .acu-v2-dashboard-page__health-icon[data-v-369cb872] {\n  color: var(--acu-warning);\n  background: color-mix(in srgb, var(--acu-warning) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-item--error .acu-v2-dashboard-page__health-icon[data-v-369cb872] {\n  color: var(--acu-danger);\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-body[data-v-369cb872] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-v2-dashboard-page__health-heading[data-v-369cb872] {\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-heading strong[data-v-369cb872] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 650;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-dashboard-page__health-body p[data-v-369cb872] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-dashboard-page__health-side[data-v-369cb872] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 8px;\n  justify-self: end;\n}\n.acu-v2-dashboard-page__health-action[data-v-369cb872] {\n  white-space: nowrap;\n}\n@media (max-width: 860px) {\n.acu-v2-dashboard-page[data-v-369cb872] {\n    padding: 14px;\n}\n.acu-v2-dashboard-page__health-item[data-v-369cb872] {\n    grid-template-columns: 30px minmax(0, 1fr);\n    align-items: center;\n}\n.acu-v2-dashboard-page__health-side[data-v-369cb872] {\n    grid-column: 2;\n    align-items: flex-start;\n    justify-self: start;\n    flex-direction: row;\n    flex-wrap: wrap;\n}\n.acu-v2-dashboard-page__health-action[data-v-369cb872] {\n    justify-self: start;\n}\n}\n", "src/presentation-v2/pages/DashboardPage.vue#style-0-369cb872");
     var DashboardPage_vue_vue_type_style_index_0_scoped_369cb872_lang = null;
 
-    const _hoisted_1$B = { class: "acu-v2-dashboard-page" };
-    const _hoisted_2$v = { class: "acu-v2-dashboard-page__health-list" };
-    const _hoisted_3$p = {
+    const _hoisted_1$D = { class: "acu-v2-dashboard-page" };
+    const _hoisted_2$x = { class: "acu-v2-dashboard-page__health-list" };
+    const _hoisted_3$r = {
 	class: "acu-v2-dashboard-page__health-icon",
 	"aria-hidden": "true"
     };
-    const _hoisted_4$m = { class: "acu-v2-dashboard-page__health-body" };
-    const _hoisted_5$k = { class: "acu-v2-dashboard-page__health-heading" };
-    const _hoisted_6$j = { class: "acu-v2-dashboard-page__health-side" };
-    const _hoisted_7$g = ["data-acu-toggle-group"];
-    function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$B, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-dashboard-page__grid" }, {
+    const _hoisted_4$o = { class: "acu-v2-dashboard-page__health-body" };
+    const _hoisted_5$m = { class: "acu-v2-dashboard-page__health-heading" };
+    const _hoisted_6$l = { class: "acu-v2-dashboard-page__health-side" };
+    const _hoisted_7$i = ["data-acu-toggle-group"];
+    function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$D, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-dashboard-page__grid" }, {
 		default: withCtx(() => [createVNode($setup["AcuPanel"], {
 			title: $setup.dashboardCopy.panels.healthTitle,
 			description: $setup.dashboardCopy.panels.healthDescription
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_2$v, [(openBlock(true), createElementBlock(
+			default: withCtx(() => [createBaseVNode("div", _hoisted_2$x, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.dashboard.healthItems.value, (item) => {
@@ -143805,14 +144732,14 @@ Expected function or array of functions, received type ${typeof value}.`
 							class: normalizeClass(["acu-v2-dashboard-page__health-item", `acu-v2-dashboard-page__health-item--${item.kind}`])
 						},
 						[
-							createBaseVNode("div", _hoisted_3$p, [createBaseVNode(
+							createBaseVNode("div", _hoisted_3$r, [createBaseVNode(
 								"i",
 								{ class: normalizeClass(item.iconClass) },
 								null,
 								2
 								/* CLASS */
 							)]),
-							createBaseVNode("div", _hoisted_4$m, [createBaseVNode("div", _hoisted_5$k, [createBaseVNode(
+							createBaseVNode("div", _hoisted_4$o, [createBaseVNode("div", _hoisted_5$m, [createBaseVNode(
 								"strong",
 								null,
 								toDisplayString(item.title),
@@ -143825,7 +144752,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								1
 								/* TEXT */
 							)]),
-							createBaseVNode("div", _hoisted_6$j, [createVNode($setup["AcuBadge"], { variant: item.badgeVariant }, {
+							createBaseVNode("div", _hoisted_6$l, [createVNode($setup["AcuBadge"], { variant: item.badgeVariant }, {
 								default: withCtx(() => [createTextVNode(
 									toDisplayString(item.badge),
 									1
@@ -143921,15 +144848,15 @@ Expected function or array of functions, received type ${typeof value}.`
 				],
 				64
 				/* STABLE_FRAGMENT */
-			))], 8, _hoisted_7$g)]),
+			))], 8, _hoisted_7$i)]),
 			_: 1
 		}, 8, ["title", "description"])]),
 		_: 1
 	})]);
     }
-    var DashboardPage = /*#__PURE__*/ _export_sfc(_sfc_main$B, [["render", _sfc_render$B], ["__scopeId", "data-v-369cb872"]]);
+    var DashboardPage = /*#__PURE__*/ _export_sfc(_sfc_main$D, [["render", _sfc_render$D], ["__scopeId", "data-v-369cb872"]]);
 
-    var _sfc_main$A = /*@__PURE__*/ defineComponent({
+    var _sfc_main$C = /*@__PURE__*/ defineComponent({
         __name: 'TableSelector',
         props: {
             sheetKeys: {},
@@ -143967,29 +144894,29 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-table-selector[data-v-b306689c] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-table-selector__empty[data-v-b306689c] {\n  padding: 10px 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n  border: 0;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n}\n.acu-v2-table-selector__actions[data-v-b306689c] { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;\n}\n.acu-v2-table-selector__count[data-v-b306689c] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-table-selector__grid[data-v-b306689c] {\n  display: grid; gap: 6px;\n  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));\n  max-height: 240px; overflow: auto;\n  padding: 0;\n  border: 0; border-radius: 0;\n  background: transparent;\n}\n.acu-v2-table-selector__item[data-v-b306689c] {\n  padding: 8px 10px;\n  border: 0; border-radius: var(--acu-radius-sm);\n  background: transparent; min-width: 0;\n}\n", "src/presentation-v2/components/TableSelector.vue#style-0-b306689c");
     var TableSelector_vue_vue_type_style_index_0_scoped_b306689c_lang = null;
 
-    const _hoisted_1$A = { class: "acu-v2-table-selector" };
-    const _hoisted_2$u = {
+    const _hoisted_1$C = { class: "acu-v2-table-selector" };
+    const _hoisted_2$w = {
 	key: 0,
 	class: "acu-v2-table-selector__empty"
     };
-    const _hoisted_3$o = { class: "acu-v2-table-selector__actions" };
-    const _hoisted_4$l = { class: "acu-v2-table-selector__count" };
-    const _hoisted_5$j = {
+    const _hoisted_3$q = { class: "acu-v2-table-selector__actions" };
+    const _hoisted_4$n = { class: "acu-v2-table-selector__count" };
+    const _hoisted_5$l = {
 	key: 0,
 	class: "acu-v2-table-selector__readonly-hint"
     };
-    const _hoisted_6$i = { class: "acu-v2-table-selector__grid" };
-    function _sfc_render$A(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$A, [!$props.sheetKeys.length ? (openBlock(), createElementBlock(
+    const _hoisted_6$k = { class: "acu-v2-table-selector__grid" };
+    function _sfc_render$C(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$C, [!$props.sheetKeys.length ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_2$u,
+		_hoisted_2$w,
 		toDisplayString($setup.emptyText),
 		1
 		/* TEXT */
 	)) : (openBlock(), createElementBlock(
 		Fragment,
 		{ key: 1 },
-		[createBaseVNode("div", _hoisted_3$o, [
+		[createBaseVNode("div", _hoisted_3$q, [
 			createVNode($setup["AcuButton"], {
 				size: "sm",
 				disabled: $props.disabled,
@@ -144016,13 +144943,13 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, 8, ["disabled"]),
 			createBaseVNode(
 				"span",
-				_hoisted_4$l,
+				_hoisted_4$n,
 				"已选 " + toDisplayString($props.selectedKeys.length) + " / " + toDisplayString($props.sheetKeys.length),
 				1
 				/* TEXT */
 			),
-			$props.disabled ? (openBlock(), createElementBlock("span", _hoisted_5$j, "仅展示模板：数据库运行时未加载，暂不可选择执行目标")) : createCommentVNode("v-if", true)
-		]), createBaseVNode("div", _hoisted_6$i, [(openBlock(true), createElementBlock(
+			$props.disabled ? (openBlock(), createElementBlock("span", _hoisted_5$l, "仅展示模板：数据库运行时未加载，暂不可选择执行目标")) : createCommentVNode("v-if", true)
+		]), createBaseVNode("div", _hoisted_6$k, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.sheetKeys, (key) => {
@@ -144048,7 +144975,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* STABLE_FRAGMENT */
 	))]);
     }
-    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$A, [["render", _sfc_render$A], ["__scopeId", "data-v-b306689c"]]);
+    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$C, [["render", _sfc_render$C], ["__scopeId", "data-v-b306689c"]]);
 
     function currentSheetKeys() {
         try {
@@ -144664,7 +145591,7 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    var _sfc_main$z = /*@__PURE__*/ defineComponent({
+    var _sfc_main$B = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -144698,19 +145625,19 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-form-fill-page[data-v-400489db] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-400489db] {\n  grid-template-areas:\n    \"status update\"\n    \"manual template\"\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-400489db] {\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-400489db] {\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-400489db] {\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-400489db] {\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-400489db] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-400489db] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-400489db] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-400489db] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-400489db] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-400489db] {\n  color: var(--acu-danger);\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-400489db] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-400489db] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-400489db],\n.acu-v2-form-fill-page__status-table td[data-v-400489db] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-400489db] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-400489db] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-400489db] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-400489db] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-400489db] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-400489db] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-400489db] {\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-400489db] {\n    grid-template-areas:\n      \"status\"\n      \"update\"\n      \"manual\"\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-400489db] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-400489db");
     var FormFillPage_vue_vue_type_style_index_0_scoped_400489db_lang = null;
 
-    const _hoisted_1$z = { class: "acu-v2-form-fill-page" };
-    const _hoisted_2$t = ["title"];
-    const _hoisted_3$n = { class: "acu-text__value" };
-    const _hoisted_4$k = { class: "acu-text__value acu-v2-form-fill-page__checkpoint-label" };
-    const _hoisted_5$i = { class: "acu-v2-form-fill-page__table-wrap" };
-    const _hoisted_6$h = { class: "acu-v2-form-fill-page__status-table" };
-    const _hoisted_7$f = { key: 0 };
-    const _hoisted_8$f = { key: 1 };
-    const _hoisted_9$d = { class: "acu-v2-form-fill-page__manual-number-grid" };
-    const _hoisted_10$d = { class: "acu-v2-form-fill-page__manual-extra" };
-    const _hoisted_11$c = { class: "acu-v2-form-fill-page__actions" };
-    function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$z, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
+    const _hoisted_1$B = { class: "acu-v2-form-fill-page" };
+    const _hoisted_2$v = ["title"];
+    const _hoisted_3$p = { class: "acu-text__value" };
+    const _hoisted_4$m = { class: "acu-text__value acu-v2-form-fill-page__checkpoint-label" };
+    const _hoisted_5$k = { class: "acu-v2-form-fill-page__table-wrap" };
+    const _hoisted_6$j = { class: "acu-v2-form-fill-page__status-table" };
+    const _hoisted_7$h = { key: 0 };
+    const _hoisted_8$h = { key: 1 };
+    const _hoisted_9$f = { class: "acu-v2-form-fill-page__manual-number-grid" };
+    const _hoisted_10$f = { class: "acu-v2-form-fill-page__manual-extra" };
+    const _hoisted_11$d = { class: "acu-v2-form-fill-page__actions" };
+    function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$B, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
 		default: withCtx(() => [
 			createVNode($setup["AcuPanel"], {
 				id: "form-fill-status-panel",
@@ -144733,7 +145660,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							createBaseVNode("strong", {
 								class: "acu-text__value acu-v2-form-fill-page__status-chat",
 								title: $setup.dashboard.chatFileIdentifier.value || "未初始化"
-							}, toDisplayString($setup.dashboard.chatFileIdentifier.value || "未初始化"), 9, _hoisted_2$t),
+							}, toDisplayString($setup.dashboard.chatFileIdentifier.value || "未初始化"), 9, _hoisted_2$v),
 							_cache[5] || (_cache[5] = createTextVNode(
 								" · AI回复累计层数: ",
 								-1
@@ -144741,7 +145668,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)),
 							createBaseVNode(
 								"strong",
-								_hoisted_3$n,
+								_hoisted_3$p,
 								toDisplayString($setup.dashboard.aiMessageCount.value),
 								1
 								/* TEXT */
@@ -144753,7 +145680,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)),
 							createBaseVNode(
 								"strong",
-								_hoisted_4$k,
+								_hoisted_4$m,
 								toDisplayString($setup.manualUpdate.checkpointFloorsLabel.value),
 								1
 								/* TEXT */
@@ -144780,7 +145707,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)])]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_5$i, [createBaseVNode("table", _hoisted_6$h, [_cache[10] || (_cache[10] = createBaseVNode(
+					createBaseVNode("div", _hoisted_5$k, [createBaseVNode("table", _hoisted_6$j, [_cache[10] || (_cache[10] = createBaseVNode(
 						"thead",
 						null,
 						[createBaseVNode("tr", null, [
@@ -144792,7 +145719,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						])],
 						-1
 						/* CACHED */
-					)), createBaseVNode("tbody", null, [!$setup.dashboard.tableRows.value.length ? (openBlock(), createElementBlock("tr", _hoisted_7$f, [..._cache[8] || (_cache[8] = [createBaseVNode(
+					)), createBaseVNode("tbody", null, [!$setup.dashboard.tableRows.value.length ? (openBlock(), createElementBlock("tr", _hoisted_7$h, [..._cache[8] || (_cache[8] = [createBaseVNode(
 						"td",
 						{
 							colspan: "5",
@@ -144852,7 +145779,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										_: 1
 									})) : (openBlock(), createElementBlock(
 										"span",
-										_hoisted_8$f,
+										_hoisted_8$h,
 										toDisplayString(row.nextTriggerLabel),
 										1
 										/* TEXT */
@@ -144883,7 +145810,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				description: $setup.formFillCopy.panels.manual.description
 			}, {
 				default: withCtx(() => [
-					createBaseVNode("div", _hoisted_9$d, [createVNode($setup["AcuFormRow"], {
+					createBaseVNode("div", _hoisted_9$f, [createVNode($setup["AcuFormRow"], {
 						label: "手动处理最近 N 层",
 						hint: "从可用 AI 回复中取最近 N 层执行手动填表。"
 					}, {
@@ -144933,7 +145860,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"onSelectAll",
 						"onSelectNone"
 					]),
-					createBaseVNode("div", _hoisted_10$d, [createVNode($setup["AcuFormRow"], {
+					createBaseVNode("div", _hoisted_10$f, [createVNode($setup["AcuFormRow"], {
 						label: "本次填表附加要求",
 						hint: "留空时不会给本次手动填表追加额外要求。"
 					}, {
@@ -144964,7 +145891,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					}),
-					createBaseVNode("div", _hoisted_11$c, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_11$d, [createVNode($setup["AcuButton"], {
 						variant: "secondary",
 						disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.catchUpBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
 						onClick: $setup.manualUpdate.runManualCatchUp
@@ -144994,9 +145921,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$z, [["render", _sfc_render$z], ["__scopeId", "data-v-400489db"]]);
+    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$B, [["render", _sfc_render$B], ["__scopeId", "data-v-400489db"]]);
 
-    var _sfc_main$y = /*@__PURE__*/ defineComponent({
+    var _sfc_main$A = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPromptDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -145033,9 +145960,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-form-fill-prompt-drawer__toolbar[data-v-2d4e260e] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-form-fill-prompt-drawer__actions[data-v-2d4e260e] {\r\n  position: sticky;\r\n  bottom: -16px;\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding: 12px 0 0;\r\n  background: var(--acu-bg-1);\n}\r\n", "src/presentation-v2/components/FormFillPromptDrawer.vue#style-0-2d4e260e");
     var FormFillPromptDrawer_vue_vue_type_style_index_0_scoped_2d4e260e_lang = null;
 
-    const _hoisted_1$y = { class: "acu-form-fill-prompt-drawer__toolbar" };
-    const _hoisted_2$s = { class: "acu-form-fill-prompt-drawer__actions" };
-    function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$A = { class: "acu-form-fill-prompt-drawer__toolbar" };
+    const _hoisted_2$u = { class: "acu-form-fill-prompt-drawer__actions" };
+    function _sfc_render$A(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: "编辑填表提示词",
@@ -145055,7 +145982,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$y, [
+			createBaseVNode("div", _hoisted_1$A, [
 				createVNode($setup["AcuFileButton"], {
 					size: "sm",
 					accept: "application/json,.json",
@@ -145110,7 +146037,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				onDelete: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("delete", $event)),
 				onUpdate: _cache[5] || (_cache[5] = (index, patch) => _ctx.$emit("update", index, patch))
 			}, null, 8, ["segments"]),
-			createBaseVNode("footer", _hoisted_2$s, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
+			createBaseVNode("footer", _hoisted_2$u, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
 				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
 					"关闭",
 					-1
@@ -145133,9 +146060,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open"]);
     }
-    var FormFillPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-2d4e260e"]]);
+    var FormFillPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$A, [["render", _sfc_render$A], ["__scopeId", "data-v-2d4e260e"]]);
 
-    var _sfc_main$x = /*@__PURE__*/ defineComponent({
+    var _sfc_main$z = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookSelector',
         props: {
             modelValue: {},
@@ -145181,9 +146108,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-selector[data-v-3ed3b837] { display: flex; flex-direction: column; gap: 10px; min-width: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSelector.vue#style-0-3ed3b837");
     var WorldbookSelector_vue_vue_type_style_index_0_scoped_3ed3b837_lang = null;
 
-    const _hoisted_1$x = { class: "acu-v2-wb-selector" };
-    function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$x, [
+    const _hoisted_1$z = { class: "acu-v2-wb-selector" };
+    function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$z, [
 		$props.filterable ? (openBlock(), createBlock($setup["AcuFormRow"], {
 			key: 0,
 			label: "筛选"
@@ -145224,9 +146151,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldbookSelector = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-3ed3b837"]]);
+    var WorldbookSelector = /*#__PURE__*/ _export_sfc(_sfc_main$z, [["render", _sfc_render$z], ["__scopeId", "data-v-3ed3b837"]]);
 
-    var _sfc_main$w = /*@__PURE__*/ defineComponent({
+    var _sfc_main$y = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookSourcePicker',
         props: {
             source: {},
@@ -145265,19 +146192,19 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-source-picker[data-v-3bd327f1] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-wb-source-picker__list[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  max-height: 180px;\r\n  overflow-y: auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  padding: 8px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\n}\n.acu-v2-wb-source-picker__list--disabled[data-v-3bd327f1] {\r\n  opacity: 0.65;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  min-height: 32px;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 10px;\r\n  margin: 0;\r\n  padding: 7px 9px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:disabled {\r\n  cursor: not-allowed;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1] {\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 42%, transparent);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: color-mix(in srgb, var(--acu-accent) 20%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 54%, transparent);\n}\n.acu-v2-wb-source-picker__item-label[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-accent);\r\n  opacity: 0;\r\n  transform: scale(0.86);\r\n  transition: opacity 0.15s ease, transform 0.15s ease;\n}\n.acu-v2-wb-source-picker__item--selected .acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  opacity: 1;\r\n  transform: scale(1);\n}\n.acu-v2-wb-source-picker__empty[data-v-3bd327f1] {\r\n  padding: 8px 2px;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  text-align: center;\n}\n.acu-v2-wb-source-picker__error[data-v-3bd327f1] {\r\n  margin: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSourcePicker.vue#style-0-3bd327f1");
     var WorldbookSourcePicker_vue_vue_type_style_index_0_scoped_3bd327f1_lang = null;
 
-    const _hoisted_1$w = { class: "acu-v2-wb-source-picker" };
-    const _hoisted_2$r = [
+    const _hoisted_1$y = { class: "acu-v2-wb-source-picker" };
+    const _hoisted_2$t = [
 	"aria-checked",
 	"disabled",
 	"onClick"
     ];
-    const _hoisted_3$m = { class: "acu-v2-wb-source-picker__item-label" };
-    const _hoisted_4$j = {
+    const _hoisted_3$o = { class: "acu-v2-wb-source-picker__item-label" };
+    const _hoisted_4$l = {
 	key: 0,
 	class: "acu-v2-wb-source-picker__empty"
     };
-    function _sfc_render$w(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$w, [
+    function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$y, [
 		createVNode($setup["AcuFormRow"], { label: "来源" }, {
 			default: withCtx(() => [createVNode($setup["AcuSegmentedControl"], {
 				"model-value": $props.source,
@@ -145318,7 +146245,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							onClick: ($event) => _ctx.$emit("toggle-book", name, !$setup.selectedSet.has(name))
 						}, [createBaseVNode(
 							"span",
-							_hoisted_3$m,
+							_hoisted_3$o,
 							toDisplayString(name),
 							1
 							/* TEXT */
@@ -145331,13 +146258,13 @@ Expected function or array of functions, received type ${typeof value}.`
 							null,
 							-1
 							/* CACHED */
-						))], 10, _hoisted_2$r);
+						))], 10, _hoisted_2$t);
 					}),
 					128
 					/* KEYED_FRAGMENT */
 				)), !$setup.filteredNames.length ? (openBlock(), createElementBlock(
 					"div",
-					_hoisted_4$j,
+					_hoisted_4$l,
 					toDisplayString($props.status === "loading" ? "正在加载世界书..." : "无可选世界书"),
 					1
 					/* TEXT */
@@ -145362,9 +146289,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldbookSourcePicker = /*#__PURE__*/ _export_sfc(_sfc_main$w, [["render", _sfc_render$w], ["__scopeId", "data-v-3bd327f1"]]);
+    var WorldbookSourcePicker = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-3bd327f1"]]);
 
-    var _sfc_main$v = /*@__PURE__*/ defineComponent({
+    var _sfc_main$x = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryList',
         props: {
             groups: {},
@@ -145470,52 +146397,52 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-entries[data-v-c56bd63a] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-c56bd63a] {\r\n  padding: 8px 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entries__status--error[data-v-c56bd63a] { color: var(--acu-danger);\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 6px 8px;\r\n  align-items: center;\r\n  padding: 3px 10px;\r\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-c56bd63a] {\r\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-c56bd63a] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\r\n\r\n/* 剧情页 / 填表页走 AcuCheckbox 分支；:deep 把夹断锁在本列表内，避免改动全局组件 */\n.acu-v2-wb-entry-item[data-v-c56bd63a] .acu-checkbox__label {\r\n  min-width: 0;\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\r\n  color: var(--acu-warning);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n  grid-column: 1 / -1;\r\n  display: grid;\r\n  gap: 8px;\r\n  margin: 4px 0 6px 24px;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border-1);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-c56bd63a] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n    justify-content: flex-start;\r\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n    margin-left: 0;\n}\n}\r\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-c56bd63a");
     var WorldbookEntryList_vue_vue_type_style_index_0_scoped_c56bd63a_lang = null;
 
-    const _hoisted_1$v = { class: "acu-v2-wb-entries" };
-    const _hoisted_2$q = {
+    const _hoisted_1$x = { class: "acu-v2-wb-entries" };
+    const _hoisted_2$s = {
 	key: 0,
 	class: "acu-v2-wb-entries__status"
     };
-    const _hoisted_3$l = {
+    const _hoisted_3$n = {
 	key: 1,
 	class: "acu-v2-wb-entries__status acu-v2-wb-entries__status--error",
 	role: "alert"
     };
-    const _hoisted_4$i = {
+    const _hoisted_4$k = {
 	key: 2,
 	class: "acu-v2-wb-entries__status"
     };
-    const _hoisted_5$h = ["title"];
-    const _hoisted_6$g = {
+    const _hoisted_5$j = ["title"];
+    const _hoisted_6$i = {
 	key: 2,
 	class: "acu-v2-wb-entry-item__actions"
     };
-    const _hoisted_7$e = {
+    const _hoisted_7$g = {
 	key: 0,
 	class: "acu-v2-wb-entry-item__skill-badge"
     };
-    const _hoisted_8$e = {
+    const _hoisted_8$g = {
 	key: 1,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
-    const _hoisted_9$c = {
+    const _hoisted_9$e = {
 	key: 2,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
-    const _hoisted_10$c = {
+    const _hoisted_10$e = {
 	key: 3,
 	class: "acu-v2-wb-entry-skill"
     };
-    const _hoisted_11$b = { class: "acu-v2-wb-entry-skill__actions" };
-    function _sfc_render$v(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$v, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$q, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
+    const _hoisted_11$c = { class: "acu-v2-wb-entry-skill__actions" };
+    function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$x, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$s, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_3$l,
+		_hoisted_3$n,
 		toDisplayString($props.error || "加载条目失败"),
 		1
 		/* TEXT */
 	)) : $props.groups.length === 0 ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_4$i,
+		_hoisted_4$k,
 		toDisplayString($props.emptyText),
 		1
 		/* TEXT */
@@ -145567,13 +146494,13 @@ Expected function or array of functions, received type ${typeof value}.`
 									key: 1,
 									class: "acu-v2-wb-entry-item__label",
 									title: entry.label
-								}, toDisplayString(entry.label), 9, _hoisted_5$h)),
-								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$g, [
-									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$e, "Skill")) : createCommentVNode("v-if", true),
-									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$e, "常量")) : createCommentVNode("v-if", true),
+								}, toDisplayString(entry.label), 9, _hoisted_5$j)),
+								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$i, [
+									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$g, "Skill")) : createCommentVNode("v-if", true),
+									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$g, "常量")) : createCommentVNode("v-if", true),
 									$props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_9$c,
+										_hoisted_9$e,
 										toDisplayString($setup.formatAgentTakeoverState(entry)),
 										1
 										/* TEXT */
@@ -145602,7 +146529,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										_: 2
 									}, 1032, ["onClick"])) : createCommentVNode("v-if", true)
 								])) : createCommentVNode("v-if", true),
-								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_10$c, [
+								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_10$e, [
 									createVNode($setup["AcuTextarea"], {
 										"model-value": $setup.getSkillDraft(entry).description,
 										label: "Skill 描述",
@@ -145621,7 +146548,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										"auto-resize": "",
 										"onUpdate:modelValue": ($event) => $setup.patchSkillDraft(entry, { triggerWhen: String($event) })
 									}, null, 8, ["model-value", "onUpdate:modelValue"]),
-									createBaseVNode("div", _hoisted_11$b, [createVNode($setup["AcuButton"], {
+									createBaseVNode("div", _hoisted_11$c, [createVNode($setup["AcuButton"], {
 										size: "sm",
 										variant: "primary",
 										onClick: ($event) => $setup.saveSkill(entry)
@@ -145666,9 +146593,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* KEYED_FRAGMENT */
 	))]);
     }
-    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$v, [["render", _sfc_render$v], ["__scopeId", "data-v-c56bd63a"]]);
+    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-c56bd63a"]]);
 
-    var _sfc_main$u = /*@__PURE__*/ defineComponent({
+    var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryToolbar',
         props: {
             filter: {},
@@ -145687,9 +146614,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-entry-toolbar[data-v-6263d003] {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  margin-top: 10px;\n  padding-top: 10px;\n  flex-wrap: wrap;\n}\n.acu-v2-wb-entry-toolbar__filter[data-v-6263d003] {\n  flex: 1;\n  min-width: 160px;\n}\n", "src/presentation-v2/components/WorldbookEntryToolbar.vue#style-0-6263d003");
     var WorldbookEntryToolbar_vue_vue_type_style_index_0_scoped_6263d003_lang = null;
 
-    const _hoisted_1$u = { class: "acu-v2-wb-entry-toolbar" };
-    function _sfc_render$u(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$u, [
+    const _hoisted_1$w = { class: "acu-v2-wb-entry-toolbar" };
+    function _sfc_render$w(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$w, [
 		$props.showEntrySelectionControls ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 0 },
@@ -145757,9 +146684,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})
 	]);
     }
-    var WorldbookEntryToolbar = /*#__PURE__*/ _export_sfc(_sfc_main$u, [["render", _sfc_render$u], ["__scopeId", "data-v-6263d003"]]);
+    var WorldbookEntryToolbar = /*#__PURE__*/ _export_sfc(_sfc_main$w, [["render", _sfc_render$w], ["__scopeId", "data-v-6263d003"]]);
 
-    var _sfc_main$t = /*@__PURE__*/ defineComponent({
+    var _sfc_main$v = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryPickerBody',
         props: {
             source: {},
@@ -145788,10 +146715,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-entry-picker[data-v-648a8ff3] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-wb-entry-picker__hint[data-v-648a8ff3] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-wb-entry-picker__hint strong[data-v-648a8ff3] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n\r\n\r\n", "src/presentation-v2/components/WorldbookEntryPickerBody.vue#style-0-648a8ff3");
     var WorldbookEntryPickerBody_vue_vue_type_style_index_0_scoped_648a8ff3_lang = null;
 
-    const _hoisted_1$t = { class: "acu-v2-wb-entry-picker" };
-    const _hoisted_2$p = { class: "acu-v2-wb-entry-picker__hint" };
-    function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$t, [
+    const _hoisted_1$v = { class: "acu-v2-wb-entry-picker" };
+    const _hoisted_2$r = { class: "acu-v2-wb-entry-picker__hint" };
+    function _sfc_render$v(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$v, [
 		createVNode($setup["WorldbookSourcePicker"], {
 			source: $props.source,
 			"selected-names": $props.selectedNames,
@@ -145809,7 +146736,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			"error",
 			"filterable"
 		]),
-		createBaseVNode("p", _hoisted_2$p, [_cache[7] || (_cache[7] = createTextVNode(
+		createBaseVNode("p", _hoisted_2$r, [_cache[7] || (_cache[7] = createTextVNode(
 			" 目前已选: ",
 			-1
 			/* CACHED */
@@ -145849,7 +146776,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-648a8ff3"]]);
+    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$v, [["render", _sfc_render$v], ["__scopeId", "data-v-648a8ff3"]]);
 
     /**
      * useFormFillInjectionTarget — 填表"注入目标世界书"（Component A，§4.2）
@@ -146298,7 +147225,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return { names, charPrimary, status, error, refresh };
     }
 
-    var _sfc_main$s = /*@__PURE__*/ defineComponent({
+    var _sfc_main$u = /*@__PURE__*/ defineComponent({
         __name: 'TablePage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -146406,21 +147333,21 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-table-page[data-v-fb8884e1] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-table-page__col[data-v-fb8884e1] {\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n  min-width: 0;\n}\n.acu-v2-table-page__filter[data-v-fb8884e1] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-table-page__toggle-row[data-v-fb8884e1] {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-v2-table-page__toggle-head[data-v-fb8884e1] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n}\n.acu-v2-table-page__toggle-label[data-v-fb8884e1] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n  line-height: 1.35;\n}\n.acu-v2-table-page__toggle-desc[data-v-fb8884e1] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-table-page__actions[data-v-fb8884e1] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-table-page__status-line[data-v-fb8884e1] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  flex-wrap: wrap;\n}\n.acu-v2-table-page__status-line strong[data-v-fb8884e1] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n.acu-v2-table-page__preset-row[data-v-fb8884e1] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\n  gap: 6px;\n  align-items: stretch;\n  min-width: 0;\n}\n.acu-v2-table-page__badge[data-v-fb8884e1] {\n  display: inline-flex;\n  align-items: center;\n  padding: 2px 8px;\n  border-radius: var(--acu-radius-sm);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 500;\n}\n.acu-v2-table-page__badge--inherit[data-v-fb8884e1] {\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  color: var(--acu-text-2);\n}\n.acu-v2-table-page__badge--override[data-v-fb8884e1] {\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-table-page__hint[data-v-fb8884e1] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n}\n.acu-v2-table-page__hint strong[data-v-fb8884e1] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n@media (max-width: 860px) {\n.acu-v2-table-page[data-v-fb8884e1] {\n    padding: 14px;\n}\n}\n", "src/presentation-v2/pages/TablePage.vue#style-0-fb8884e1");
     var TablePage_vue_vue_type_style_index_0_scoped_fb8884e1_lang = null;
 
-    const _hoisted_1$s = { class: "acu-v2-table-page" };
-    const _hoisted_2$o = { class: "acu-v2-table-page__col" };
-    const _hoisted_3$k = { class: "acu-v2-table-page__actions" };
-    const _hoisted_4$h = { class: "acu-v2-table-page__col" };
-    const _hoisted_5$g = { class: "acu-v2-table-page__filter" };
-    const _hoisted_6$f = { class: "acu-v2-table-page__toggle-row" };
-    const _hoisted_7$d = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_8$d = { class: "acu-v2-table-page__toggle-row" };
-    const _hoisted_9$b = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_10$b = { class: "acu-v2-table-page__hint" };
-    function _sfc_render$s(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$s, [
+    const _hoisted_1$u = { class: "acu-v2-table-page" };
+    const _hoisted_2$q = { class: "acu-v2-table-page__col" };
+    const _hoisted_3$m = { class: "acu-v2-table-page__actions" };
+    const _hoisted_4$j = { class: "acu-v2-table-page__col" };
+    const _hoisted_5$i = { class: "acu-v2-table-page__filter" };
+    const _hoisted_6$h = { class: "acu-v2-table-page__toggle-row" };
+    const _hoisted_7$f = { class: "acu-v2-table-page__toggle-head" };
+    const _hoisted_8$f = { class: "acu-v2-table-page__toggle-row" };
+    const _hoisted_9$d = { class: "acu-v2-table-page__toggle-head" };
+    const _hoisted_10$d = { class: "acu-v2-table-page__hint" };
+    function _sfc_render$u(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$u, [
 		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }),
 		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-table-page__grid" }, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_2$o, [createVNode($setup["AcuPanel"], {
+			default: withCtx(() => [createBaseVNode("div", _hoisted_2$q, [createVNode($setup["AcuPanel"], {
 				id: "table-entries-panel",
 				title: $setup.tableCopy.panels.entries.title,
 				description: $setup.tableCopy.panels.entries.description
@@ -146479,7 +147406,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* CACHED */
 					)])]),
 					_: 1
-				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_3$k, [createVNode($setup["AcuButton"], {
+				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_3$m, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					onClick: _cache[6] || (_cache[6] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
@@ -146491,13 +147418,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					_: 1
 				})])]),
 				_: 1
-			}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_4$h, [createVNode($setup["AcuPanel"], {
+			}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_4$j, [createVNode($setup["AcuPanel"], {
 				id: "table-filter-panel",
 				title: $setup.formFillCopy.panels.filter.title,
 				description: $setup.formFillCopy.panels.filter.description
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_5$g, [
-					createBaseVNode("div", _hoisted_6$f, [createBaseVNode("div", _hoisted_7$d, [_cache[18] || (_cache[18] = createBaseVNode(
+				default: withCtx(() => [createBaseVNode("div", _hoisted_5$i, [
+					createBaseVNode("div", _hoisted_6$h, [createBaseVNode("div", _hoisted_7$f, [_cache[18] || (_cache[18] = createBaseVNode(
 						"span",
 						{ class: "acu-v2-table-page__toggle-label" },
 						" 丢弃纯越权 SQL 语句 ",
@@ -146515,7 +147442,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						-1
 						/* CACHED */
 					))]),
-					createBaseVNode("div", _hoisted_8$d, [createBaseVNode("div", _hoisted_9$b, [_cache[20] || (_cache[20] = createBaseVNode(
+					createBaseVNode("div", _hoisted_8$f, [createBaseVNode("div", _hoisted_9$d, [_cache[20] || (_cache[20] = createBaseVNode(
 						"span",
 						{ class: "acu-v2-table-page__toggle-label" },
 						" 仅识别最后一对 <tableEdit> 标签 ",
@@ -146572,7 +147499,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"char-primary",
 					"status",
 					"error"
-				]), createBaseVNode("p", _hoisted_10$b, [_cache[22] || (_cache[22] = createTextVNode(
+				]), createBaseVNode("p", _hoisted_10$d, [_cache[22] || (_cache[22] = createTextVNode(
 					" 目前已选: ",
 					-1
 					/* CACHED */
@@ -146611,9 +147538,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var TablePage = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-fb8884e1"]]);
+    var TablePage = /*#__PURE__*/ _export_sfc(_sfc_main$u, [["render", _sfc_render$u], ["__scopeId", "data-v-fb8884e1"]]);
 
-    var _sfc_main$r = /*@__PURE__*/ defineComponent({
+    var _sfc_main$t = /*@__PURE__*/ defineComponent({
         __name: 'ApiPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -146626,9 +147553,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-api-page[data-v-5b9b27d1] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-api-page__spacer[data-v-5b9b27d1] {\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-api-page[data-v-5b9b27d1] {\r\n    padding: 14px;\n}\n.acu-v2-api-page__spacer[data-v-5b9b27d1] {\r\n    display: none;\n}\n}\r\n", "src/presentation-v2/pages/ApiPage.vue#style-0-5b9b27d1");
     var ApiPage_vue_vue_type_style_index_0_scoped_5b9b27d1_lang = null;
 
-    const _hoisted_1$r = { class: "acu-v2-api-page" };
-    function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$r, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-api-page__grid" }, {
+    const _hoisted_1$t = { class: "acu-v2-api-page" };
+    function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$t, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-api-page__grid" }, {
 		default: withCtx(() => [createVNode($setup["ApiConfigPanel"]), _cache[0] || (_cache[0] = createBaseVNode(
 			"div",
 			{
@@ -146642,7 +147569,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var ApiPage = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-5b9b27d1"]]);
+    var ApiPage = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-5b9b27d1"]]);
 
     /**
      * usePlotWorldbookConfig — 剧情推进世界书配置（D23.1）
@@ -146906,7 +147833,7 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    var _sfc_main$q = /*@__PURE__*/ defineComponent({
+    var _sfc_main$s = /*@__PURE__*/ defineComponent({
         __name: 'PlotPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -146969,9 +147896,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-page[data-v-1dff2b19] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n@media (max-width: 860px) {\n.acu-v2-plot-page[data-v-1dff2b19] { padding: 14px;\n}\n}\r\n", "src/presentation-v2/pages/PlotPage.vue#style-0-1dff2b19");
     var PlotPage_vue_vue_type_style_index_0_scoped_1dff2b19_lang = null;
 
-    const _hoisted_1$q = { class: "acu-v2-plot-page" };
-    function _sfc_render$q(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$q, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-plot-page__grid" }, {
+    const _hoisted_1$s = { class: "acu-v2-plot-page" };
+    function _sfc_render$s(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$s, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-plot-page__grid" }, {
 		default: withCtx(() => [
 			createVNode($setup["PlotPresetPanel"]),
 			createCommentVNode(" 世界书选择 "),
@@ -147019,9 +147946,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var PlotPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-1dff2b19"]]);
+    var PlotPage = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-1dff2b19"]]);
 
-    var _sfc_main$p = /*@__PURE__*/ defineComponent({
+    var _sfc_main$r = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentAdvancedPanel',
         props: {
             open: { type: Boolean },
@@ -147211,25 +148138,25 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-agent-advanced[data-v-9f89b5d2] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-9f89b5d2] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-9f89b5d2] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-9f89b5d2] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-9f89b5d2],\n.acu-agent-advanced__prompt-head h5[data-v-9f89b5d2] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-9f89b5d2] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-9f89b5d2] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-9f89b5d2] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-9f89b5d2] .acu-form-row,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-form-row__control,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-input,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-segmented,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-prompt-segs {\n  min-width: 0;\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-9f89b5d2] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-9f89b5d2] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-9f89b5d2] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-9f89b5d2],\n  .acu-agent-advanced__prompt-head[data-v-9f89b5d2] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-9f89b5d2] { padding: 8px;\n}\n}\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-9f89b5d2");
     var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_9f89b5d2_lang = null;
 
-    const _hoisted_1$p = { class: "acu-agent-advanced" };
-    const _hoisted_2$n = { class: "acu-agent-advanced__section" };
-    const _hoisted_3$j = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_4$g = { class: "acu-agent-advanced__section" };
-    const _hoisted_5$f = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_6$e = { class: "acu-agent-advanced__grid" };
-    const _hoisted_7$c = { class: "acu-agent-advanced__section" };
-    const _hoisted_8$c = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_9$a = { class: "acu-agent-advanced__grid" };
-    const _hoisted_10$a = { class: "acu-agent-advanced__section" };
-    const _hoisted_11$a = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_12$a = { class: "acu-agent-advanced__grid" };
+    const _hoisted_1$r = { class: "acu-agent-advanced" };
+    const _hoisted_2$p = { class: "acu-agent-advanced__section" };
+    const _hoisted_3$l = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_4$i = { class: "acu-agent-advanced__section" };
+    const _hoisted_5$h = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_6$g = { class: "acu-agent-advanced__grid" };
+    const _hoisted_7$e = { class: "acu-agent-advanced__section" };
+    const _hoisted_8$e = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_9$c = { class: "acu-agent-advanced__grid" };
+    const _hoisted_10$c = { class: "acu-agent-advanced__section" };
+    const _hoisted_11$b = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_12$b = { class: "acu-agent-advanced__grid" };
     const _hoisted_13$8 = { class: "acu-agent-advanced__section" };
     const _hoisted_14$8 = { class: "acu-agent-advanced__section-head" };
     const _hoisted_15$8 = { class: "acu-agent-advanced__prompt-scope" };
     const _hoisted_16$8 = { class: "acu-agent-advanced__prompt-actions" };
     const _hoisted_17$7 = { class: "acu-agent-advanced__prompt-head" };
-    const _hoisted_18$6 = { class: "acu-agent-advanced__prompt-head" };
-    function _sfc_render$p(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_18$7 = { class: "acu-agent-advanced__prompt-head" };
+    function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.open,
 		title: $setup.plotCopy.agentControl.advanced.title,
@@ -147237,7 +148164,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		"before-close": $setup.confirmClose,
 		onClose: _cache[10] || (_cache[10] = ($event) => _ctx.$emit("close"))
 	}, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_1$p, [
+		default: withCtx(() => [createBaseVNode("div", _hoisted_1$r, [
 			createVNode($setup["AcuMessage"], { kind: "info" }, {
 				default: withCtx(() => [createTextVNode(
 					toDisplayString($setup.plotCopy.agentControl.advanced.description),
@@ -147246,7 +148173,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				_: 1
 			}),
-			createBaseVNode("section", _hoisted_2$n, [createBaseVNode("header", _hoisted_3$j, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_2$p, [createBaseVNode("header", _hoisted_3$l, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.executionMode.label),
@@ -147266,7 +148193,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				disabled: !$setup.agentControl.isReady.value,
 				"onUpdate:modelValue": $setup.onExecutionModeChange
 			}, null, 8, ["model-value", "disabled"])]),
-			createBaseVNode("section", _hoisted_4$g, [createBaseVNode("header", _hoisted_5$f, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_4$i, [createBaseVNode("header", _hoisted_5$h, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.contextSettings.title),
@@ -147289,7 +148216,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* TEXT */
 				)]),
 				_: 1
-			}, 8, ["disabled"])]), createBaseVNode("div", _hoisted_6$e, [(openBlock(true), createElementBlock(
+			}, 8, ["disabled"])]), createBaseVNode("div", _hoisted_6$g, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.contextFields, (field) => {
@@ -147319,7 +148246,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				128
 				/* KEYED_FRAGMENT */
 			))])]),
-			createBaseVNode("section", _hoisted_7$c, [createBaseVNode("header", _hoisted_8$c, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_7$e, [createBaseVNode("header", _hoisted_8$e, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.decisionSettings.title),
@@ -147331,7 +148258,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				toDisplayString($setup.plotCopy.agentControl.decisionSettings.description),
 				1
 				/* TEXT */
-			)])]), createBaseVNode("div", _hoisted_9$a, [createVNode($setup["AcuFormRow"], {
+			)])]), createBaseVNode("div", _hoisted_9$c, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.decisionSettings.concurrency.label,
 				hint: $setup.plotCopy.agentControl.decisionSettings.concurrency.hint
 			}, {
@@ -147346,7 +148273,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value", "disabled"])]),
 				_: 1
 			}, 8, ["label", "hint"])])]),
-			createBaseVNode("section", _hoisted_10$a, [createBaseVNode("header", _hoisted_11$a, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_10$c, [createBaseVNode("header", _hoisted_11$b, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.skillifySettings.title),
@@ -147358,7 +148285,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				toDisplayString($setup.plotCopy.agentControl.skillifySettings.description),
 				1
 				/* TEXT */
-			)])]), createBaseVNode("div", _hoisted_12$a, [createVNode($setup["AcuFormRow"], {
+			)])]), createBaseVNode("div", _hoisted_12$b, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.skillifySettings.maxConcurrency.label,
 				hint: $setup.plotCopy.agentControl.skillifySettings.maxConcurrency.hint
 			}, {
@@ -147498,7 +148425,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							onMove: _cache[3] || (_cache[3] = (index, delta) => $setup.movePromptSegment("decision", index, delta)),
 							onUpdate: _cache[4] || (_cache[4] = (index, patch) => $setup.updatePromptSegment("decision", index, patch))
 						}, null, 8, ["segments", "empty-text"]),
-						createBaseVNode("div", _hoisted_18$6, [createBaseVNode(
+						createBaseVNode("div", _hoisted_18$7, [createBaseVNode(
 							"h5",
 							null,
 							toDisplayString($setup.plotCopy.agentControl.prompts.skillifyTitle),
@@ -147536,9 +148463,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$p, [["render", _sfc_render$p], ["__scopeId", "data-v-9f89b5d2"]]);
+    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-9f89b5d2"]]);
 
-    var _sfc_main$o = /*@__PURE__*/ defineComponent({
+    var _sfc_main$q = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentControlBar',
         props: {
             agentControl: {}
@@ -147584,25 +148511,25 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-agent-wb-control[data-v-b1d37101] { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 10px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-v2-agent-wb-control__head[data-v-b1d37101] { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__title[data-v-b1d37101] { font-size: var(--acu-font-size-body-lg, 13px); font-weight: 600; color: var(--acu-text-1);\n}\n.acu-v2-agent-wb-control__desc[data-v-b1d37101] { margin: 3px 0 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); line-height: 1.5;\n}\n.acu-v2-agent-wb-control__body[data-v-b1d37101] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__config-source[data-v-b1d37101] { flex: 1 1 100%; min-width: 0; margin: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-v2-agent-wb-control__api-selects[data-v-b1d37101] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; flex: 1 1 380px; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__actions[data-v-b1d37101] { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-v2-agent-wb-control__api-selects[data-v-b1d37101] { flex-basis: 100%; grid-template-columns: minmax(0, 1fr);\n}\n}\n@media (max-width: 480px) {\n.acu-v2-agent-wb-control__actions[data-v-b1d37101] { width: 100%;\n}\n.acu-v2-agent-wb-control__actions[data-v-b1d37101] .acu-btn { flex: 1 1 100%;\n}\n}\n", "src/presentation-v2/components/WorldbookAgentControlBar.vue#style-0-b1d37101");
     var WorldbookAgentControlBar_vue_vue_type_style_index_0_scoped_b1d37101_lang = null;
 
-    const _hoisted_1$o = { class: "acu-v2-agent-wb-control" };
-    const _hoisted_2$m = { class: "acu-v2-agent-wb-control__head" };
-    const _hoisted_3$i = { class: "acu-v2-agent-wb-control__title" };
-    const _hoisted_4$f = { class: "acu-v2-agent-wb-control__desc" };
-    const _hoisted_5$e = { class: "acu-v2-agent-wb-control__body" };
-    const _hoisted_6$d = { class: "acu-v2-agent-wb-control__config-source" };
-    const _hoisted_7$b = { class: "acu-v2-agent-wb-control__api-selects" };
-    const _hoisted_8$b = { class: "acu-v2-agent-wb-control__actions" };
-    function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$o, [
-		createBaseVNode("div", _hoisted_2$m, [createBaseVNode("div", null, [createBaseVNode(
+    const _hoisted_1$q = { class: "acu-v2-agent-wb-control" };
+    const _hoisted_2$o = { class: "acu-v2-agent-wb-control__head" };
+    const _hoisted_3$k = { class: "acu-v2-agent-wb-control__title" };
+    const _hoisted_4$h = { class: "acu-v2-agent-wb-control__desc" };
+    const _hoisted_5$g = { class: "acu-v2-agent-wb-control__body" };
+    const _hoisted_6$f = { class: "acu-v2-agent-wb-control__config-source" };
+    const _hoisted_7$d = { class: "acu-v2-agent-wb-control__api-selects" };
+    const _hoisted_8$d = { class: "acu-v2-agent-wb-control__actions" };
+    function _sfc_render$q(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$q, [
+		createBaseVNode("div", _hoisted_2$o, [createBaseVNode("div", null, [createBaseVNode(
 			"div",
-			_hoisted_3$i,
+			_hoisted_3$k,
 			toDisplayString($setup.plotCopy.agentControl.title),
 			1
 			/* TEXT */
 		), createBaseVNode(
 			"p",
-			_hoisted_4$f,
+			_hoisted_4$h,
 			toDisplayString($setup.plotCopy.agentControl.description),
 			1
 			/* TEXT */
@@ -147614,10 +148541,10 @@ Expected function or array of functions, received type ${typeof value}.`
 			)]),
 			_: 1
 		}, 8, ["variant"])]),
-		createBaseVNode("div", _hoisted_5$e, [
+		createBaseVNode("div", _hoisted_5$g, [
 			createBaseVNode(
 				"p",
-				_hoisted_6$d,
+				_hoisted_6$f,
 				toDisplayString($setup.agentControl.configStatusText.value),
 				1
 				/* TEXT */
@@ -147629,7 +148556,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				"aria-label": "Agent 世界书模式",
 				"onUpdate:modelValue": $setup.onModeChange
 			}, null, 8, ["model-value"]),
-			createBaseVNode("div", _hoisted_7$b, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_7$d, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.apiPresets.decisionLabel,
 				hint: $setup.plotCopy.agentControl.apiPresets.decisionHint
 			}, {
@@ -147664,7 +148591,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				])]),
 				_: 1
 			}, 8, ["label", "hint"])]),
-			createBaseVNode("div", _hoisted_8$b, [
+			createBaseVNode("div", _hoisted_8$d, [
 				createVNode($setup["AcuButton"], {
 					size: "sm",
 					onClick: _cache[0] || (_cache[0] = ($event) => $setup.advancedOpen = true)
@@ -147728,7 +148655,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		}, null, 8, ["open", "agent-control"])
 	]);
     }
-    var WorldbookAgentControlBar = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-b1d37101"]]);
+    var WorldbookAgentControlBar = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-b1d37101"]]);
 
     function getEntryLabel_ACU(entry) {
         return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);
@@ -148485,7 +149412,7 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    var _sfc_main$n = /*@__PURE__*/ defineComponent({
+    var _sfc_main$p = /*@__PURE__*/ defineComponent({
         __name: 'AgentPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -148545,10 +149472,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-agent-page[data-v-02722bdf] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n.acu-v2-agent-page__hint[data-v-02722bdf] { margin: 12px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-agent-page__hint strong[data-v-02722bdf] { color: var(--acu-text-1); font-weight: 500;\n}\n@media (max-width: 860px) {\n.acu-v2-agent-page[data-v-02722bdf] { padding: 14px;\n}\n}\n", "src/presentation-v2/pages/AgentPage.vue#style-0-02722bdf");
     var AgentPage_vue_vue_type_style_index_0_scoped_02722bdf_lang = null;
 
-    const _hoisted_1$n = { class: "acu-v2-agent-page" };
-    const _hoisted_2$l = { class: "acu-v2-agent-page__hint" };
-    function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$n, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-agent-page__grid" }, {
+    const _hoisted_1$p = { class: "acu-v2-agent-page" };
+    const _hoisted_2$n = { class: "acu-v2-agent-page__hint" };
+    function _sfc_render$p(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$p, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-agent-page__grid" }, {
 		default: withCtx(() => [createVNode($setup["AcuPanel"], {
 			title: "Agent 世界书",
 			description: "独立管理 Agent 的世界书范围、Skill 元数据和接管状态。"
@@ -148573,7 +149500,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"status",
 					"error"
 				]),
-				createBaseVNode("p", _hoisted_2$l, [_cache[5] || (_cache[5] = createTextVNode(
+				createBaseVNode("p", _hoisted_2$n, [_cache[5] || (_cache[5] = createTextVNode(
 					"当前范围: ",
 					-1
 					/* CACHED */
@@ -148615,9 +149542,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var AgentPage = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-02722bdf"]]);
+    var AgentPage = /*#__PURE__*/ _export_sfc(_sfc_main$p, [["render", _sfc_render$p], ["__scopeId", "data-v-02722bdf"]]);
 
-    var _sfc_main$m = /*@__PURE__*/ defineComponent({
+    var _sfc_main$o = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationSessionFeed',
         props: {
             entries: {},
@@ -148632,6 +149559,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const KIND_LABELS = {
                 run_started: '开始',
                 run_resumed: '恢复',
+                user_message: '你',
                 thought: '思考',
                 main_action: '主 Agent',
                 protocol_retry: '重试',
@@ -148678,53 +149606,57 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-session-feed[data-v-bd8acd2d] { display: grid; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed__empty[data-v-bd8acd2d] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-bd8acd2d] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-bd8acd2d]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-bd8acd2d] { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-bd8acd2d] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-bd8acd2d] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-bd8acd2d] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-bd8acd2d] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\r\n\r\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-bd8acd2d] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-bd8acd2d 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-bd8acd2d], .acu-v2-session-feed__card--outline_op[data-v-bd8acd2d], .acu-v2-session-feed__card--protocol_retry[data-v-bd8acd2d] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-bd8acd2d], .acu-v2-session-feed__card--run_completed[data-v-bd8acd2d] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-bd8acd2d] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-bd8acd2d] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-session-feed__card-head[data-v-bd8acd2d] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-bd8acd2d] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-bd8acd2d] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-bd8acd2d] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-bd8acd2d] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-bd8acd2d] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-bd8acd2d 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-bd8acd2d] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-bd8acd2d] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-bd8acd2d] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-bd8acd2d] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-bd8acd2d] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-bd8acd2d] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-bd8acd2d] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-bd8acd2d] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-bd8acd2d] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-bd8acd2d 1.1s ease-in-out infinite;\n}\n@keyframes acu-v2-session-feed-in-bd8acd2d {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-bd8acd2d {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-bd8acd2d {\nto { transform: rotate(360deg);\n}\n}\r\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-bd8acd2d");
-    var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_bd8acd2d_lang = null;
+    injectSfcStyle("\n.acu-v2-session-feed[data-v-32088769] { display: grid; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed__empty[data-v-32088769] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-32088769] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-32088769]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-32088769] { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-32088769] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-32088769] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-32088769] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-32088769] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-32088769] { display: block; margin: 3px 0 0; text-align: right;\n}\r\n\r\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-32088769] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-32088769] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-32088769] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\r\n\r\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-32088769] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-32088769 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-32088769], .acu-v2-session-feed__card--outline_op[data-v-32088769], .acu-v2-session-feed__card--protocol_retry[data-v-32088769] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-32088769], .acu-v2-session-feed__card--run_completed[data-v-32088769] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-32088769] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-32088769] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-session-feed__card-head[data-v-32088769] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-32088769] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-32088769] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-32088769] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-32088769] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-32088769] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-32088769 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-32088769] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-32088769] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-32088769] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-32088769] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-32088769] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-32088769] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-32088769] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-32088769] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-32088769] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-32088769 1.1s ease-in-out infinite;\n}\n@keyframes acu-v2-session-feed-in-32088769 {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-32088769 {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-32088769 {\nto { transform: rotate(360deg);\n}\n}\r\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-32088769");
+    var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_32088769_lang = null;
 
-    const _hoisted_1$m = {
+    const _hoisted_1$o = {
 	ref: "feedElement",
 	class: "acu-v2-session-feed"
     };
-    const _hoisted_2$k = {
+    const _hoisted_2$m = {
 	key: 0,
 	class: "acu-v2-session-feed__empty"
     };
-    const _hoisted_3$h = {
+    const _hoisted_3$j = {
 	key: 0,
 	class: "acu-v2-session-feed__run-divider"
     };
-    const _hoisted_4$e = { class: "acu-v2-session-feed__run-divider-badge" };
-    const _hoisted_5$d = { class: "acu-v2-session-feed__run-divider-title" };
-    const _hoisted_6$c = { class: "acu-v2-session-feed__time" };
-    const _hoisted_7$a = { class: "acu-v2-session-feed__thought" };
-    const _hoisted_8$a = { class: "acu-v2-session-feed__thought-label" };
-    const _hoisted_9$9 = {
+    const _hoisted_4$g = { class: "acu-v2-session-feed__run-divider-badge" };
+    const _hoisted_5$f = { class: "acu-v2-session-feed__run-divider-title" };
+    const _hoisted_6$e = { class: "acu-v2-session-feed__time" };
+    const _hoisted_7$c = { class: "acu-v2-session-feed__user" };
+    const _hoisted_8$c = { class: "acu-v2-session-feed__user-bubble" };
+    const _hoisted_9$b = { class: "acu-v2-session-feed__user-text" };
+    const _hoisted_10$b = { class: "acu-v2-session-feed__time" };
+    const _hoisted_11$a = { class: "acu-v2-session-feed__thought" };
+    const _hoisted_12$a = { class: "acu-v2-session-feed__thought-label" };
+    const _hoisted_13$7 = {
 	key: 0,
 	class: "acu-v2-session-feed__thought-text"
     };
-    const _hoisted_10$9 = ["onClick"];
-    const _hoisted_11$9 = {
+    const _hoisted_14$7 = ["onClick"];
+    const _hoisted_15$7 = {
 	key: 0,
 	class: "acu-v2-session-feed__spinner"
     };
-    const _hoisted_12$9 = { class: "acu-v2-session-feed__badge" };
-    const _hoisted_13$7 = { class: "acu-v2-session-feed__title" };
-    const _hoisted_14$7 = { class: "acu-v2-session-feed__time" };
-    const _hoisted_15$7 = ["onClick"];
-    const _hoisted_16$7 = {
+    const _hoisted_16$7 = { class: "acu-v2-session-feed__badge" };
+    const _hoisted_17$6 = { class: "acu-v2-session-feed__title" };
+    const _hoisted_18$6 = { class: "acu-v2-session-feed__time" };
+    const _hoisted_19$6 = ["onClick"];
+    const _hoisted_20$5 = {
 	key: 1,
 	class: "acu-v2-session-feed__detail"
     };
-    const _hoisted_17$6 = {
+    const _hoisted_21$5 = {
 	key: 1,
 	class: "acu-v2-session-feed__running"
     };
-    function _sfc_render$m(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
-		_hoisted_1$m,
+		_hoisted_1$o,
 		[
-			!$props.entries.length ? (openBlock(), createElementBlock("p", _hoisted_2$k, " 还没有运行记录。点击「继续当前轮次」后，主 Agent 的思考、派工、大纲操作与交付过程会实时显示在这里。 ")) : createCommentVNode("v-if", true),
+			!$props.entries.length ? (openBlock(), createElementBlock("p", _hoisted_2$m, " 还没有运行记录。点击「继续当前轮次」后，主 Agent 的思考、派工、大纲操作与交付过程会实时显示在这里。 ")) : createCommentVNode("v-if", true),
 			(openBlock(true), createElementBlock(
 				Fragment,
 				null,
@@ -148732,40 +149664,58 @@ Expected function or array of functions, received type ${typeof value}.`
 					return openBlock(), createElementBlock(
 						Fragment,
 						{ key: entry.id },
-						[createCommentVNode(" 运行分隔条：一次运行（或恢复）的起点 "), entry.kind === "run_started" || entry.kind === "run_resumed" ? (openBlock(), createElementBlock("div", _hoisted_3$h, [
+						[createCommentVNode(" 运行分隔条：一次运行（或恢复）的起点 "), entry.kind === "run_started" || entry.kind === "run_resumed" ? (openBlock(), createElementBlock("div", _hoisted_3$j, [
 							createBaseVNode(
 								"span",
-								_hoisted_4$e,
+								_hoisted_4$g,
 								toDisplayString(entry.kind === "run_resumed" ? "恢复运行" : "开始运行"),
 								1
 								/* TEXT */
 							),
 							createBaseVNode(
 								"span",
-								_hoisted_5$d,
+								_hoisted_5$f,
 								toDisplayString(entry.title),
 								1
 								/* TEXT */
 							),
 							createBaseVNode(
 								"span",
-								_hoisted_6$c,
+								_hoisted_6$e,
 								toDisplayString($setup.formatTime(entry.at)),
 								1
 								/* TEXT */
 							)
-						])) : entry.kind === "thought" ? (openBlock(), createElementBlock(
+						])) : entry.kind === "user_message" ? (openBlock(), createElementBlock(
 							Fragment,
 							{ key: 1 },
-							[createCommentVNode(" 思考条目：弱化渲染，像 coding agent 的推理气泡 "), createBaseVNode("div", _hoisted_7$a, [createBaseVNode(
+							[createCommentVNode(" 用户消息：右对齐气泡，和 coding agent 的对话界面一致 "), createBaseVNode("div", _hoisted_7$c, [createBaseVNode("div", _hoisted_8$c, [createBaseVNode(
+								"p",
+								_hoisted_9$b,
+								toDisplayString(entry.detail || entry.title),
+								1
+								/* TEXT */
+							), createBaseVNode(
 								"span",
-								_hoisted_8$a,
+								_hoisted_10$b,
+								toDisplayString($setup.formatTime(entry.at)),
+								1
+								/* TEXT */
+							)])])],
+							2112
+							/* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */
+						)) : entry.kind === "thought" ? (openBlock(), createElementBlock(
+							Fragment,
+							{ key: 2 },
+							[createCommentVNode(" 思考条目：弱化渲染，像 coding agent 的推理气泡 "), createBaseVNode("div", _hoisted_11$a, [createBaseVNode(
+								"span",
+								_hoisted_12$a,
 								toDisplayString(entry.title),
 								1
 								/* TEXT */
 							), entry.detail ? (openBlock(), createElementBlock(
 								"p",
-								_hoisted_9$9,
+								_hoisted_13$7,
 								toDisplayString(entry.detail),
 								1
 								/* TEXT */
@@ -148774,7 +149724,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */
 						)) : (openBlock(), createElementBlock(
 							Fragment,
-							{ key: 2 },
+							{ key: 3 },
 							[createCommentVNode(" 工具调用卡片：派工 / 大纲 / 重试 / 交付 / 终态 "), createBaseVNode(
 								"div",
 								{ class: normalizeClass(["acu-v2-session-feed__card", [`acu-v2-session-feed__card--${entry.kind}`, `acu-v2-session-feed__card--${entry.status}`]]) },
@@ -148787,7 +149737,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										createBaseVNode(
 											"span",
 											{ class: normalizeClass(["acu-v2-session-feed__status", `acu-v2-session-feed__status--${entry.status}`]) },
-											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_11$9)) : entry.status === "failed" ? (openBlock(), createElementBlock(
+											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_15$7)) : entry.status === "failed" ? (openBlock(), createElementBlock(
 												Fragment,
 												{ key: 1 },
 												[createTextVNode("✕")],
@@ -148805,21 +149755,21 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_12$9,
+											_hoisted_16$7,
 											toDisplayString($setup.kindLabel(entry)),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_13$7,
+											_hoisted_17$6,
 											toDisplayString(entry.title),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_14$7,
+											_hoisted_18$6,
 											toDisplayString($setup.formatTime(entry.at)),
 											1
 											/* TEXT */
@@ -148834,15 +149784,15 @@ Expected function or array of functions, received type ${typeof value}.`
 											2
 											/* CLASS */
 										)) : createCommentVNode("v-if", true)
-									], 8, _hoisted_10$9),
+									], 8, _hoisted_14$7),
 									entry.detail && !$setup.isExpanded(entry) ? (openBlock(), createElementBlock("p", {
 										key: 0,
 										class: "acu-v2-session-feed__preview",
 										onClick: ($event) => $setup.toggle(entry)
-									}, toDisplayString(entry.detail), 9, _hoisted_15$7)) : createCommentVNode("v-if", true),
+									}, toDisplayString(entry.detail), 9, _hoisted_19$6)) : createCommentVNode("v-if", true),
 									entry.detail && $setup.isExpanded(entry) ? (openBlock(), createElementBlock(
 										"p",
-										_hoisted_16$7,
+										_hoisted_20$5,
 										toDisplayString(entry.detail),
 										1
 										/* TEXT */
@@ -148861,7 +149811,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				128
 				/* KEYED_FRAGMENT */
 			)),
-			$props.running ? (openBlock(), createElementBlock("div", _hoisted_17$6, [..._cache[0] || (_cache[0] = [createBaseVNode(
+			$props.running ? (openBlock(), createElementBlock("div", _hoisted_21$5, [..._cache[0] || (_cache[0] = [createBaseVNode(
 				"span",
 				{ class: "acu-v2-session-feed__pulse" },
 				null,
@@ -148877,7 +149827,707 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-bd8acd2d"]]);
+    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-32088769"]]);
+
+    var _sfc_main$n = /*@__PURE__*/ defineComponent({
+        __name: 'ContinuationChat',
+        props: {
+            task: {},
+            entries: {},
+            running: { type: Boolean },
+            busy: { type: Boolean },
+            statusText: {},
+            stageText: {},
+            completedTurns: {},
+            totalTurns: {},
+            revisionText: {},
+            deadlineText: {},
+            awaitingHost: { type: Boolean },
+            canContinue: { type: Boolean },
+            canRetry: { type: Boolean }
+        },
+        emits: ["send", "stop", "continue", "retry"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const draft = ref('');
+            const inputElement = ref(null);
+            /** 只有「循环真在跑」才给停止：等待宿主正文时停的是酒馆的生成，不属于这里的职责。 */
+            const canStop = computed(() => !!props.task && props.task.status === 'running' && !props.awaitingHost);
+            const statusTone = computed(() => {
+                if (!props.task)
+                    return 'idle';
+                if (props.task.status === 'running')
+                    return 'running';
+                if (props.task.lastError)
+                    return 'failed';
+                return 'idle';
+            });
+            const placeholder = computed(() => {
+                if (!props.task)
+                    return '描述你想要的续写方向，发送后主 Agent 会创建任务并开始规划...';
+                if (props.awaitingHost)
+                    return '酒馆正在生成正文；现在发送的消息会在下一轮开始时被读到...';
+                if (props.task.status === 'running')
+                    return '主 Agent 正在工作；发送消息会打断当前迭代并带着你的话重新开始...';
+                return '继续和主 Agent 对话，或直接给出下一步要求...';
+            });
+            const notice = computed(() => {
+                if (props.awaitingHost)
+                    return '当前轮次正在等待酒馆的正文生成结束，这期间不能重规划或重复发送。';
+                if (props.task?.stopReason && props.task.stopReason !== 'manual')
+                    return `任务已停止：${props.task.stopReason}。这类停止不能直接继续，请清空后重新规划。`;
+                if (props.task?.lastError)
+                    return `上一次失败：${props.task.lastError.message}`;
+                return '';
+            });
+            function onInput(event) {
+                draft.value = event.target.value;
+            }
+            function send() {
+                const text = draft.value.trim();
+                if (!text || props.busy)
+                    return;
+                draft.value = '';
+                emit('send', text);
+            }
+            function onKeydown(event) {
+                if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey))
+                    return;
+                event.preventDefault();
+                send();
+            }
+            const __returned__ = { props, emit, draft, inputElement, canStop, statusTone, placeholder, notice, onInput, send, onKeydown, AcuButton, ContinuationSessionFeed };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-continuation-chat[data-v-c592a8dd] { display: grid; gap: 10px;\n}\n.acu-v2-continuation-chat__status[data-v-c592a8dd] { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-chat__badge[data-v-c592a8dd] { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2);\n}\n.acu-v2-continuation-chat__badge--running[data-v-c592a8dd] { background: color-mix(in srgb, var(--acu-primary, #5b8def) 20%, transparent); color: var(--acu-primary, #5b8def);\n}\n.acu-v2-continuation-chat__badge--failed[data-v-c592a8dd] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-continuation-chat__status-item[data-v-c592a8dd] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-chat__notice[data-v-c592a8dd] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-chat__composer[data-v-c592a8dd] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2);\n}\n.acu-v2-continuation-chat__input[data-v-c592a8dd] { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-chat__input[data-v-c592a8dd]:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-continuation-chat__composer-actions[data-v-c592a8dd] { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-chat__hint[data-v-c592a8dd] { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\r\n", "src/presentation-v2/components/ContinuationChat.vue#style-0-c592a8dd");
+    var ContinuationChat_vue_vue_type_style_index_0_scoped_c592a8dd_lang = null;
+
+    const _hoisted_1$n = { class: "acu-v2-continuation-chat" };
+    const _hoisted_2$l = { class: "acu-v2-continuation-chat__status" };
+    const _hoisted_3$i = { class: "acu-v2-continuation-chat__status-item" };
+    const _hoisted_4$f = { class: "acu-v2-continuation-chat__status-item" };
+    const _hoisted_5$e = {
+	key: 0,
+	class: "acu-v2-continuation-chat__status-item"
+    };
+    const _hoisted_6$d = { class: "acu-v2-continuation-chat__status-item" };
+    const _hoisted_7$b = {
+	key: 0,
+	class: "acu-v2-continuation-chat__notice"
+    };
+    const _hoisted_8$b = { class: "acu-v2-continuation-chat__composer" };
+    const _hoisted_9$a = ["value", "placeholder"];
+    const _hoisted_10$a = { class: "acu-v2-continuation-chat__composer-actions" };
+    function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$n, [
+		createBaseVNode("div", _hoisted_2$l, [
+			createBaseVNode(
+				"span",
+				{ class: normalizeClass(["acu-v2-continuation-chat__badge", `acu-v2-continuation-chat__badge--${$setup.statusTone}`]) },
+				toDisplayString($props.statusText),
+				3
+				/* TEXT, CLASS */
+			),
+			createBaseVNode(
+				"span",
+				_hoisted_3$i,
+				toDisplayString($props.stageText),
+				1
+				/* TEXT */
+			),
+			createBaseVNode(
+				"span",
+				_hoisted_4$f,
+				"已完成 " + toDisplayString($props.completedTurns) + " / " + toDisplayString($props.totalTurns) + " 轮",
+				1
+				/* TEXT */
+			),
+			$props.revisionText ? (openBlock(), createElementBlock(
+				"span",
+				_hoisted_5$e,
+				"大纲 " + toDisplayString($props.revisionText),
+				1
+				/* TEXT */
+			)) : createCommentVNode("v-if", true),
+			createBaseVNode(
+				"span",
+				_hoisted_6$d,
+				"倒计时 " + toDisplayString($props.deadlineText),
+				1
+				/* TEXT */
+			)
+		]),
+		createVNode($setup["ContinuationSessionFeed"], {
+			entries: $props.entries,
+			running: $props.running
+		}, null, 8, ["entries", "running"]),
+		$setup.notice ? (openBlock(), createElementBlock(
+			"p",
+			_hoisted_7$b,
+			toDisplayString($setup.notice),
+			1
+			/* TEXT */
+		)) : createCommentVNode("v-if", true),
+		createBaseVNode("div", _hoisted_8$b, [createBaseVNode("textarea", {
+			ref: "inputElement",
+			class: "acu-v2-continuation-chat__input",
+			value: $setup.draft,
+			rows: 3,
+			placeholder: $setup.placeholder,
+			onInput: $setup.onInput,
+			onKeydown: $setup.onKeydown
+		}, null, 40, _hoisted_9$a), createBaseVNode("div", _hoisted_10$a, [
+			_cache[7] || (_cache[7] = createBaseVNode(
+				"span",
+				{ class: "acu-v2-continuation-chat__hint" },
+				"Ctrl / ⌘ + Enter 发送",
+				-1
+				/* CACHED */
+			)),
+			$setup.canStop ? (openBlock(), createBlock($setup["AcuButton"], {
+				key: 0,
+				variant: "danger",
+				loading: $props.busy && !$props.running,
+				onClick: _cache[0] || (_cache[0] = ($event) => $setup.emit("stop"))
+			}, {
+				default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
+					"停止生成",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["loading"])) : createCommentVNode("v-if", true),
+			$props.canContinue ? (openBlock(), createBlock($setup["AcuButton"], {
+				key: 1,
+				loading: $props.busy,
+				onClick: _cache[1] || (_cache[1] = ($event) => $setup.emit("continue"))
+			}, {
+				default: withCtx(() => [..._cache[4] || (_cache[4] = [createTextVNode(
+					"继续当前轮次",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["loading"])) : createCommentVNode("v-if", true),
+			$props.canRetry ? (openBlock(), createBlock($setup["AcuButton"], {
+				key: 2,
+				loading: $props.busy,
+				onClick: _cache[2] || (_cache[2] = ($event) => $setup.emit("retry"))
+			}, {
+				default: withCtx(() => [..._cache[5] || (_cache[5] = [createTextVNode(
+					"重试当前轮次",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["loading"])) : createCommentVNode("v-if", true),
+			createVNode($setup["AcuButton"], {
+				variant: "primary",
+				loading: $props.busy,
+				disabled: !$setup.draft.trim(),
+				onClick: $setup.send
+			}, {
+				default: withCtx(() => [..._cache[6] || (_cache[6] = [createTextVNode(
+					"发送",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["loading", "disabled"])
+		])])
+	]);
+    }
+    var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-c592a8dd"]]);
+
+    function errorMessage_ACU$1(error) {
+        if (error instanceof ContinuationValidationError_ACU)
+            return error.error.message;
+        return error instanceof Error ? error.message : '资料操作失败';
+    }
+    /** 用户可编辑的三项资料。schemaVersion 等运行时字段不进草稿，避免用户改坏结构版本。 */
+    function toDraft_ACU(snapshot) {
+        return JSON.stringify({ hooks: snapshot.hooks, infoGap: snapshot.infoGap, constraints: snapshot.constraints }, null, 2);
+    }
+    /**
+     * 本地资料快照的阅览与编辑。
+     *
+     * 读取直接走楼层锚定存储（资料不在首楼信封里，与任务生命周期无关）；保存走领域层的
+     * 用户写入路径，由它执行结构校验并推进修订号，页面不自行拼装快照对象。
+     */
+    function useContinuationMaterials() {
+        const toast = useToastStore();
+        const snapshot = ref(null);
+        const draft = ref('');
+        const error = ref('');
+        const saving = ref(false);
+        const dirty = ref(false);
+        function reload() {
+            try {
+                const current = readAgentModuleSnapshot_ACU();
+                snapshot.value = current;
+                draft.value = toDraft_ACU(current);
+                error.value = '';
+                dirty.value = false;
+            }
+            catch (caught) {
+                snapshot.value = null;
+                draft.value = '';
+                error.value = errorMessage_ACU$1(caught);
+            }
+        }
+        function updateDraft(value) {
+            draft.value = value;
+            dirty.value = true;
+        }
+        async function save() {
+            if (saving.value)
+                return false;
+            let parsed;
+            try {
+                parsed = JSON.parse(draft.value);
+            }
+            catch (caught) {
+                error.value = caught instanceof Error ? `资料 JSON 无法解析：${caught.message}` : '资料 JSON 无法解析';
+                return false;
+            }
+            saving.value = true;
+            try {
+                const saved = await replaceAgentModuleSnapshotByUser_ACU(parsed);
+                snapshot.value = saved;
+                draft.value = toDraft_ACU(saved);
+                error.value = '';
+                dirty.value = false;
+                toast.success('资料已保存，修订号已推进。');
+                return true;
+            }
+            catch (caught) {
+                error.value = errorMessage_ACU$1(caught);
+                return false;
+            }
+            finally {
+                saving.value = false;
+            }
+        }
+        return { snapshot, draft, dirty, error, saving, reload, save, updateDraft };
+    }
+
+    var _sfc_main$m = /*@__PURE__*/ defineComponent({
+        __name: 'ContinuationMaterialsPanel',
+        props: {
+            task: {},
+            activeStage: {},
+            activeRevision: {},
+            busy: { type: Boolean }
+        },
+        emits: ["save-outline", "clear"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            const props = __props;
+            const emit = __emit;
+            const TABS = [
+                { id: 'outline', label: '阶段大纲' },
+                { id: 'modules', label: '本地资料' },
+                { id: 'timeline', label: '事件时间线' },
+            ];
+            const activeTab = ref('outline');
+            const materials = useContinuationMaterials();
+            const outlineDraft = ref('');
+            const outlineError = ref('');
+            const outlineDirty = ref(false);
+            const clearPending = ref(false);
+            const reversedTimeline = computed(() => (props.task ? [...props.task.timeline].reverse() : []));
+            function stageTotalTurns(stage) {
+                return stage.revisions.find(item => item.revision === stage.activeRevision)?.outline.totalTurns ?? 0;
+            }
+            function syncOutlineDraft() {
+                outlineDraft.value = props.activeRevision ? JSON.stringify(props.activeRevision.outline, null, 2) : '';
+                outlineError.value = '';
+                outlineDirty.value = false;
+            }
+            function onOutlineInput(value) {
+                outlineDraft.value = value;
+                outlineDirty.value = true;
+            }
+            function saveOutline() {
+                let parsed;
+                try {
+                    parsed = JSON.parse(outlineDraft.value);
+                }
+                catch (error) {
+                    outlineError.value = error instanceof Error ? `大纲 JSON 无法解析：${error.message}` : '大纲 JSON 无法解析';
+                    return;
+                }
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    outlineError.value = '大纲必须是 JSON 对象';
+                    return;
+                }
+                outlineError.value = '';
+                emit('save-outline', parsed);
+            }
+            function reload() {
+                materials.reload();
+                syncOutlineDraft();
+            }
+            function requestClear() {
+                clearPending.value = true;
+            }
+            function confirmClear() {
+                clearPending.value = false;
+                emit('clear');
+            }
+            onMounted(reload);
+            /** 权威大纲变更（Agent 改写、保存成功）后重置草稿；用户正在编辑时不覆盖他的输入。 */
+            watch(() => `${props.activeStage?.stageId ?? ''}:${props.activeRevision?.revision ?? ''}`, () => {
+                if (!outlineDirty.value)
+                    syncOutlineDraft();
+            }, { immediate: true });
+            __expose({ reload });
+            const __returned__ = { props, emit, TABS, activeTab, materials, outlineDraft, outlineError, outlineDirty, clearPending, reversedTimeline, stageTotalTurns, syncOutlineDraft, onOutlineInput, saveOutline, reload, requestClear, confirmClear, AcuButton, AcuTextarea };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-continuation-materials[data-v-9d05f6dd] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-9d05f6dd] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-9d05f6dd] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-9d05f6dd] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-9d05f6dd] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-9d05f6dd] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-9d05f6dd] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__editor[data-v-9d05f6dd] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-9d05f6dd] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-9d05f6dd] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-9d05f6dd] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-9d05f6dd] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-9d05f6dd] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-9d05f6dd] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__list[data-v-9d05f6dd], .acu-v2-continuation-materials__timeline[data-v-9d05f6dd] { display: grid; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__timeline[data-v-9d05f6dd] { max-height: 320px; overflow-y: auto;\n}\r\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-9d05f6dd");
+    var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_9d05f6dd_lang = null;
+
+    const _hoisted_1$m = { class: "acu-v2-continuation-materials" };
+    const _hoisted_2$k = { class: "acu-v2-continuation-materials__tabs" };
+    const _hoisted_3$h = ["onClick"];
+    const _hoisted_4$e = { class: "acu-v2-continuation-materials__tab-actions" };
+    const _hoisted_5$d = {
+	key: 0,
+	class: "acu-v2-continuation-materials__confirm"
+    };
+    const _hoisted_6$c = { class: "acu-v2-continuation-materials__confirm-actions" };
+    const _hoisted_7$a = {
+	key: 0,
+	class: "acu-v2-continuation-materials__empty"
+    };
+    const _hoisted_8$a = {
+	key: 0,
+	class: "acu-v2-continuation-materials__editor"
+    };
+    const _hoisted_9$9 = { class: "acu-v2-continuation-materials__meta" };
+    const _hoisted_10$9 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__error"
+    };
+    const _hoisted_11$9 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_12$9 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__empty"
+    };
+    const _hoisted_13$6 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__meta"
+    };
+    const _hoisted_14$6 = { class: "acu-v2-continuation-materials__meta" };
+    const _hoisted_15$6 = { class: "acu-v2-continuation-materials__list" };
+    const _hoisted_16$6 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__meta"
+    };
+    const _hoisted_17$5 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__error"
+    };
+    const _hoisted_18$5 = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_19$5 = {
+	key: 0,
+	class: "acu-v2-continuation-materials__empty"
+    };
+    const _hoisted_20$4 = {
+	key: 1,
+	class: "acu-v2-continuation-materials__timeline"
+    };
+    const _hoisted_21$4 = { key: 0 };
+    function _sfc_render$m(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$m, [
+		createBaseVNode("div", _hoisted_2$k, [(openBlock(), createElementBlock(
+			Fragment,
+			null,
+			renderList($setup.TABS, (tab) => {
+				return createBaseVNode("button", {
+					key: tab.id,
+					type: "button",
+					class: normalizeClass(["acu-v2-continuation-materials__tab", { "acu-v2-continuation-materials__tab--active": $setup.activeTab === tab.id }]),
+					onClick: ($event) => $setup.activeTab = tab.id
+				}, toDisplayString(tab.label), 11, _hoisted_3$h);
+			}),
+			64
+			/* STABLE_FRAGMENT */
+		)), createBaseVNode("div", _hoisted_4$e, [createVNode($setup["AcuButton"], {
+			loading: $props.busy,
+			onClick: $setup.reload
+		}, {
+			default: withCtx(() => [..._cache[1] || (_cache[1] = [createTextVNode(
+				"刷新",
+				-1
+				/* CACHED */
+			)])]),
+			_: 1
+		}, 8, ["loading"]), createVNode($setup["AcuButton"], {
+			variant: "danger",
+			loading: $props.busy,
+			onClick: $setup.requestClear
+		}, {
+			default: withCtx(() => [..._cache[2] || (_cache[2] = [createTextVNode(
+				"一键清空",
+				-1
+				/* CACHED */
+			)])]),
+			_: 1
+		}, 8, ["loading"])])]),
+		$setup.clearPending ? (openBlock(), createElementBlock("p", _hoisted_5$d, [_cache[5] || (_cache[5] = createTextVNode(
+			" 清空会删除当前续写任务、主 Agent 的会话记录与本地资料快照（伏笔、信息差、长期约束）。 小说正文楼层不受影响，清空后可以从当前剧情重新开始规划。 ",
+			-1
+			/* CACHED */
+		)), createBaseVNode("span", _hoisted_6$c, [createVNode($setup["AcuButton"], {
+			variant: "danger",
+			loading: $props.busy,
+			onClick: $setup.confirmClear
+		}, {
+			default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
+				"确认清空",
+				-1
+				/* CACHED */
+			)])]),
+			_: 1
+		}, 8, ["loading"]), createVNode($setup["AcuButton"], { onClick: _cache[0] || (_cache[0] = ($event) => $setup.clearPending = false) }, {
+			default: withCtx(() => [..._cache[4] || (_cache[4] = [createTextVNode(
+				"取消",
+				-1
+				/* CACHED */
+			)])]),
+			_: 1
+		})])])) : createCommentVNode("v-if", true),
+		createCommentVNode(" 阶段大纲：当前阶段可编辑，历史阶段只读折叠 "),
+		$setup.activeTab === "outline" ? (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 1 },
+			[!$props.task ? (openBlock(), createElementBlock("p", _hoisted_7$a, "还没有续写任务，也就没有阶段大纲。")) : (openBlock(), createElementBlock(
+				Fragment,
+				{ key: 1 },
+				[$props.activeRevision ? (openBlock(), createElementBlock("div", _hoisted_8$a, [
+					createBaseVNode(
+						"p",
+						_hoisted_9$9,
+						" 当前：第 " + toDisplayString($props.activeStage?.stageNumber) + " 阶段 · revision " + toDisplayString($props.activeRevision.revision) + " · 已完成 " + toDisplayString($props.activeStage?.completedTurns ?? 0) + " 轮。 已完成轮次与正在执行的轮次不可删除或替换，总轮数必须留在阶段规模范围内。 ",
+						1
+						/* TEXT */
+					),
+					createVNode($setup["AcuTextarea"], {
+						"model-value": $setup.outlineDraft,
+						rows: 16,
+						"onUpdate:modelValue": $setup.onOutlineInput
+					}, null, 8, ["model-value"]),
+					$setup.outlineError ? (openBlock(), createElementBlock(
+						"p",
+						_hoisted_10$9,
+						toDisplayString($setup.outlineError),
+						1
+						/* TEXT */
+					)) : createCommentVNode("v-if", true),
+					createBaseVNode("div", _hoisted_11$9, [createVNode($setup["AcuButton"], {
+						disabled: !$setup.outlineDirty,
+						onClick: $setup.syncOutlineDraft
+					}, {
+						default: withCtx(() => [..._cache[6] || (_cache[6] = [createTextVNode(
+							"放弃修改",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled"]), createVNode($setup["AcuButton"], {
+						variant: "primary",
+						loading: $props.busy,
+						disabled: !$setup.outlineDirty,
+						onClick: $setup.saveOutline
+					}, {
+						default: withCtx(() => [..._cache[7] || (_cache[7] = [createTextVNode(
+							"保存大纲",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["loading", "disabled"])])
+				])) : (openBlock(), createElementBlock("p", _hoisted_12$9, "当前没有已冻结的阶段大纲可编辑。")), (openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($props.task.stages, (stage) => {
+						return openBlock(), createElementBlock("details", {
+							key: stage.stageId,
+							class: "acu-v2-continuation-materials__block"
+						}, [
+							createBaseVNode(
+								"summary",
+								null,
+								"第 " + toDisplayString(stage.stageNumber) + " 阶段 · " + toDisplayString(stage.status) + " · " + toDisplayString(stage.completedTurns) + " / " + toDisplayString($setup.stageTotalTurns(stage)) + " 轮",
+								1
+								/* TEXT */
+							),
+							stage.chronicleRange ? (openBlock(), createElementBlock(
+								"p",
+								_hoisted_13$6,
+								"纪要范围：" + toDisplayString(stage.chronicleRange.first) + " → " + toDisplayString(stage.chronicleRange.last),
+								1
+								/* TEXT */
+							)) : createCommentVNode("v-if", true),
+							(openBlock(true), createElementBlock(
+								Fragment,
+								null,
+								renderList(stage.revisions, (revision) => {
+									return openBlock(), createElementBlock("div", { key: revision.revision }, [createBaseVNode(
+										"p",
+										_hoisted_14$6,
+										" revision " + toDisplayString(revision.revision) + " · " + toDisplayString(revision.reason) + " · " + toDisplayString(revision.frozen ? "已冻结" : "待确认") + " · " + toDisplayString(revision.outline.title),
+										1
+										/* TEXT */
+									), createBaseVNode("ol", _hoisted_15$6, [(openBlock(true), createElementBlock(
+										Fragment,
+										null,
+										renderList(revision.outline.nodes, (node) => {
+											return openBlock(), createElementBlock("li", { key: node.id }, [
+												createBaseVNode(
+													"strong",
+													null,
+													toDisplayString(node.title),
+													1
+													/* TEXT */
+												),
+												createTextVNode(
+													"：" + toDisplayString(node.goal) + " ",
+													1
+													/* TEXT */
+												),
+												createBaseVNode("ol", null, [(openBlock(true), createElementBlock(
+													Fragment,
+													null,
+													renderList(node.turns, (turn) => {
+														return openBlock(), createElementBlock(
+															"li",
+															{ key: turn.id },
+															toDisplayString(turn.goal),
+															1
+															/* TEXT */
+														);
+													}),
+													128
+													/* KEYED_FRAGMENT */
+												))])
+											]);
+										}),
+										128
+										/* KEYED_FRAGMENT */
+									))])]);
+								}),
+								128
+								/* KEYED_FRAGMENT */
+							))
+						]);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))],
+				64
+				/* STABLE_FRAGMENT */
+			))],
+			64
+			/* STABLE_FRAGMENT */
+		)) : $setup.activeTab === "modules" ? (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 2 },
+			[
+				createCommentVNode(" 资料快照：伏笔 / 信息差 / 长期约束，先给可读概览再给 JSON 编辑 "),
+				_cache[10] || (_cache[10] = createBaseVNode(
+					"p",
+					{ class: "acu-v2-continuation-materials__meta" },
+					" 本地资料由子代理结算写入，也可以在这里手动修正。保存会走与子代理相同的结构校验并推进修订号， 任何一条记录缺少 id 或关键文本都会整份拒绝，不会静默丢条目。 ",
+					-1
+					/* CACHED */
+				)),
+				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
+					"p",
+					_hoisted_16$6,
+					" 结算水位：楼层 " + toDisplayString($setup.materials.snapshot.value.settledThroughIndex) + " · 伏笔 " + toDisplayString($setup.materials.snapshot.value.hooks.length) + " 条 · 信息差 " + toDisplayString($setup.materials.snapshot.value.infoGap.length) + " 条 · 长期约束 " + toDisplayString($setup.materials.snapshot.value.constraints.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.hooks) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.infoGap) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.constraints),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true),
+				createVNode($setup["AcuTextarea"], {
+					"model-value": $setup.materials.draft.value,
+					rows: 18,
+					"onUpdate:modelValue": $setup.materials.updateDraft
+				}, null, 8, ["model-value", "onUpdate:modelValue"]),
+				$setup.materials.error.value ? (openBlock(), createElementBlock(
+					"p",
+					_hoisted_17$5,
+					toDisplayString($setup.materials.error.value),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true),
+				createBaseVNode("div", _hoisted_18$5, [createVNode($setup["AcuButton"], {
+					disabled: !$setup.materials.dirty.value,
+					onClick: $setup.materials.reload
+				}, {
+					default: withCtx(() => [..._cache[8] || (_cache[8] = [createTextVNode(
+						"放弃修改",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, ["disabled", "onClick"]), createVNode($setup["AcuButton"], {
+					variant: "primary",
+					loading: $setup.materials.saving.value,
+					disabled: !$setup.materials.dirty.value,
+					onClick: $setup.materials.save
+				}, {
+					default: withCtx(() => [..._cache[9] || (_cache[9] = [createTextVNode(
+						"保存资料",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, [
+					"loading",
+					"disabled",
+					"onClick"
+				])])
+			],
+			64
+			/* STABLE_FRAGMENT */
+		)) : (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 3 },
+			[createCommentVNode(" 事件时间线：只读 "), !$props.task?.timeline.length ? (openBlock(), createElementBlock("p", _hoisted_19$5, "还没有事件记录。")) : (openBlock(), createElementBlock("ol", _hoisted_20$4, [(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($setup.reversedTimeline, (entry) => {
+					return openBlock(), createElementBlock("li", { key: entry.id }, [createTextVNode(
+						toDisplayString(new Date(entry.at).toLocaleString()) + " · " + toDisplayString(entry.kind),
+						1
+						/* TEXT */
+					), entry.errorCode ? (openBlock(), createElementBlock(
+						"span",
+						_hoisted_21$4,
+						" · " + toDisplayString(entry.errorCode),
+						1
+						/* TEXT */
+					)) : createCommentVNode("v-if", true)]);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))]))],
+			64
+			/* STABLE_FRAGMENT */
+		))
+	]);
+    }
+    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-9d05f6dd"]]);
 
     function errorMessage_ACU(error) {
         if (error instanceof ContinuationValidationError_ACU)
@@ -148971,6 +150621,25 @@ Expected function or array of functions, received type ${typeof value}.`
             if (created && canContinue.value)
                 await continueTask();
         }
+        /**
+         * 在 Agent 会话里以用户身份发言。没有任务时等价于创建任务，运行中会先打断当前循环。
+         * @param text 用户输入
+         * @returns 是否成功发出
+         */
+        async function sendAgentMessage(text) {
+            if (!text.trim())
+                return false;
+            let shouldContinue = false;
+            const sent = await run_ACU(async () => {
+                const result = await runtime.orchestrator.sendAgentMessage({ text });
+                shouldContinue = result.shouldContinue;
+                return result;
+            });
+            // 打断后的续跑必须是独立一次租约操作：run_ACU 内嵌套会撞上「操作正在执行」。
+            if (sent && shouldContinue)
+                await continueTask();
+            return sent;
+        }
         async function continueTask() {
             await run_ACU(() => runtime.orchestrator.continueTask());
         }
@@ -148998,7 +150667,55 @@ Expected function or array of functions, received type ${typeof value}.`
         async function saveSettings(settings) {
             return run_ACU(() => runtime.orchestrator.replaceSettings({ settings }));
         }
+        /**
+         * 保存用户手动编辑的当前阶段大纲。
+         * @param outline 编辑后的完整大纲
+         * @returns 是否保存成功
+         */
+        /**
+         * 把某一类提示词恢复成内置默认值。
+         *
+         * 默认值属于领域知识，页面只负责把结果放回草稿：恢复动作本身不落盘，
+         * 由设置面板既有的保存链路决定何时写入，避免绕过设置校验。
+         * @param settings 当前设置草稿
+         * @param kind 提示词种类
+         * @returns 恢复默认值后的设置草稿
+         */
+        function restorePromptDefault(settings, kind) {
+            return restoreContinuationPromptDefault_ACU(settings, kind);
+        }
+        async function saveActiveOutline(outline) {
+            return run_ACU(() => runtime.orchestrator.replaceActiveOutline({ outline }));
+        }
+        /**
+         * 一键清空：丢弃任务、Agent 会话记录与本地资料快照，正文楼层不动。
+         * @returns 是否清空成功
+         */
+        async function clearData() {
+            if (busy.value)
+                return false;
+            busy.value = true;
+            try {
+                const result = await runtime.orchestrator.clearContinuationData();
+                envelope.value = result.envelope;
+                refresh();
+                toast.success('已清空续写任务、会话记录与本地资料，正文未改动。');
+                return true;
+            }
+            catch (error) {
+                toast.error(errorMessage_ACU(error), { muteable: false });
+                refresh();
+                return false;
+            }
+            finally {
+                busy.value = false;
+            }
+        }
         return {
+            clearData,
+            restorePromptDefault,
+            saveActiveOutline,
+            sendAgentMessage,
             activeStage,
             activeNode,
             activeRevision,
@@ -149025,8 +150742,29 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     /**
+     * 把一条持久会话消息映射成会话流条目。
+     *
+     * 会话流是展示通道，持久会话是模型通道，两者字段不同源：这里只做单向投影，
+     * 让页面重载后仍能看到既往对话，而不是把持久会话当成 UI 状态直接渲染。
+     * @param message 持久会话消息
+     * @returns 会话流条目输入
+     */
+    function projectMessage_ACU(message) {
+        if (message.kind === 'user')
+            return { kind: 'user_message', title: message.digest || '你的消息', detail: message.text };
+        if (message.kind === 'turn')
+            return { kind: 'run_started', title: message.digest || '新的一轮', detail: message.text };
+        if (message.kind === 'handoff')
+            return { kind: 'thought', title: '早期会话交接报告', detail: message.text };
+        if (message.kind === 'tool')
+            return { kind: 'delegation', title: message.digest || '运行时结果', detail: message.text };
+        return { kind: 'main_action', title: message.digest || '主 Agent 输出', detail: message.text };
+    }
+    /**
      * 订阅智能续写 Agent 的会话日志。
-     * 返回响应式的会话条目与运行标记，供会话流面板实时渲染；组件卸载时自动退订。
+     *
+     * 挂载时若会话流为空，先从楼层锚定的持久会话回灌历史；随后订阅内存事件通道实时更新。
+     * 组件卸载时自动退订。
      */
     function useContinuationSession() {
         const entries = ref(readAgentSessionLog_ACU());
@@ -149036,15 +150774,31 @@ Expected function or array of functions, received type ${typeof value}.`
             entries.value = readAgentSessionLog_ACU();
             running.value = isAgentSessionRunning_ACU();
         }
+        /**
+         * 从持久会话回灌历史条目。切换聊天后也应调用：不同聊天的会话记录互不相干。
+         * 读取失败不影响页面可用性——回灌只是历史展示，实时通道仍然工作。
+         */
+        function hydrate() {
+            if (hasAgentSessionEntries_ACU())
+                return;
+            try {
+                const snapshot = readAgentConversation_ACU();
+                if (snapshot.messages.length)
+                    hydrateAgentSessionLog_ACU(snapshot.messages.map(projectMessage_ACU));
+            }
+            catch { /* 持久会话不可读时保持空会话流，实时事件仍会显示。 */ }
+            sync();
+        }
         onMounted(() => {
             unsubscribe = subscribeAgentSessionLog_ACU(sync);
+            hydrate();
             sync();
         });
         onBeforeUnmount(() => {
             unsubscribe?.();
             unsubscribe = null;
         });
-        return { entries, running };
+        return { entries, running, hydrate };
     }
 
     const INHERIT_CHANNEL_VALUE = '__inherit__';
@@ -149060,11 +150814,15 @@ Expected function or array of functions, received type ${typeof value}.`
             const outlineDraft = ref('');
             const outlineDraftError = ref('');
             const settingsError = ref('');
-            const replacementInstruction = ref('');
-            const confirmAbandon = ref(false);
-            const replanInstruction = ref('');
+            const materialsPanel = ref(null);
             const clock = ref(Date.now());
             let countdownTimer;
+            const stageText = computed(() => {
+                const stage = runtime.activeStage.value;
+                if (!runtime.task.value)
+                    return '尚未创建任务';
+                return stage ? `第 ${stage.stageNumber} 阶段` : '大纲待创建';
+            });
             const deadlineText = computed(() => {
                 const deadlineAt = runtime.task.value?.deadlineAt;
                 if (deadlineAt === null || deadlineAt === undefined)
@@ -149181,18 +150939,18 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (await runtime.acceptOutline(outline))
                     syncOutlineDraft();
             }
-            async function replan() {
-                const succeeded = await runtime.replanRemainingWithInstruction(replanInstruction.value);
-                if (succeeded)
-                    replanInstruction.value = '';
+            /** 会话发送：没有任务时创建任务，运行中会打断当前迭代并带着这句话重新开始。 */
+            async function sendMessage(text) {
+                await runtime.sendAgentMessage(text);
             }
-            async function abandonAndCreate() {
-                if (!confirmAbandon.value || !replacementInstruction.value.trim())
-                    return;
-                if (await runtime.abandonAndCreate(replacementInstruction.value)) {
-                    replacementInstruction.value = '';
-                    confirmAbandon.value = false;
-                }
+            /** 用户手动改写的大纲保存成功后刷新资料面板，让它读到新的 revision。 */
+            async function saveOutline(outline) {
+                if (await runtime.saveActiveOutline(outline))
+                    materialsPanel.value?.reload();
+            }
+            async function clearData() {
+                if (await runtime.clearData())
+                    materialsPanel.value?.reload();
             }
             function requiredInteger(value, label) {
                 const numeric = typeof value === 'number' ? value : Number(value);
@@ -149220,8 +150978,10 @@ Expected function or array of functions, received type ${typeof value}.`
                     retryDelaySeconds: requiredInteger(source.retryDelaySeconds, '重试延迟'),
                     totalDurationMinutes: requiredInteger(source.totalDurationMinutes, '总时长'),
                     contextTurnCount: requiredInteger(source.contextTurnCount, '最近剧情轮数'),
+                    storyWindowFloors: requiredInteger(source.storyWindowFloors, '正文窗口楼数'),
+                    agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, 'Agent 会话 token 预算'),
                 };
-                if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.contextTurnCount < 0) {
+                if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.contextTurnCount < 0 || normalized.storyWindowFloors < 0 || normalized.agentHistoryTokenBudget < 0) {
                     throw new Error('续写设置中的数值不能低于允许范围');
                 }
                 if (normalized.apiPresetMode === 'fixed') {
@@ -149312,7 +151072,7 @@ Expected function or array of functions, received type ${typeof value}.`
             function restorePrompt(kind) {
                 if (!settingsDraft.value)
                     return;
-                settingsDraft.value = restoreContinuationPromptDefault_ACU(settingsDraft.value, kind);
+                settingsDraft.value = runtime.restorePromptDefault(settingsDraft.value, kind);
             }
             /** 刷新页面依赖的全部数据源：API 预设列表必须在挂载与聊天切换时重新读取，否则预设下拉是空的。 */
             function refreshAll() {
@@ -149343,377 +151103,101 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, replacementInstruction, confirmAbandon, replanInstruction, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, replan, abandonAndCreate, requiredInteger, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationSessionFeed };
+            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, sendMessage, saveOutline, clearData, requiredInteger, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-3347c131] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__actions[data-v-3347c131] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__status-grid[data-v-3347c131] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0;\n}\n.acu-v2-continuation-page__status-grid div[data-v-3347c131] { border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent); padding-left: 10px;\n}\n.acu-v2-continuation-page__status-grid dt[data-v-3347c131] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-page__status-grid dd[data-v-3347c131] { margin: 3px 0 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-page__instruction[data-v-3347c131], .acu-v2-continuation-page__notice[data-v-3347c131] { margin: 14px 0 0; color: var(--acu-text-2); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__notice[data-v-3347c131] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-page__error[data-v-3347c131] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-3347c131] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__stage[data-v-3347c131], .acu-v2-continuation-page__revision[data-v-3347c131] { margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-page__stage > summary[data-v-3347c131], .acu-v2-continuation-page__revision > summary[data-v-3347c131] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__outline[data-v-3347c131], .acu-v2-continuation-page__timeline[data-v-3347c131] { display: grid; gap: 8px; padding-left: 22px; color: var(--acu-text-2);\n}\n.acu-v2-continuation-page__settings-grid[data-v-3347c131] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-3347c131] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-3347c131] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-3347c131] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-3347c131] { padding: 14px;\n}\n.acu-v2-continuation-page__status-grid[data-v-3347c131] { grid-template-columns: repeat(2, minmax(0, 1fr));\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-3347c131] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-3347c131");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_3347c131_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-d8338f61] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-d8338f61] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-d8338f61] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__error[data-v-d8338f61] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-d8338f61] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-d8338f61] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-d8338f61] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-d8338f61] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-d8338f61] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-d8338f61] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-d8338f61] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-d8338f61");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_d8338f61_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-continuation-page" };
-    const _hoisted_2$j = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_3$g = { class: "acu-v2-continuation-page__status-grid" };
-    const _hoisted_4$d = { class: "acu-v2-continuation-page__instruction" };
-    const _hoisted_5$c = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_2$j = {
+	key: 0,
+	class: "acu-v2-continuation-page__error"
+    };
+    const _hoisted_3$g = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_4$d = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_5$c = { class: "acu-v2-continuation-page__toggles" };
     const _hoisted_6$b = {
 	key: 0,
-	class: "acu-v2-continuation-page__notice"
-    };
-    const _hoisted_7$9 = ["open"];
-    const _hoisted_8$9 = {
-	key: 0,
-	class: "acu-v2-continuation-page__meta"
-    };
-    const _hoisted_9$8 = ["open"];
-    const _hoisted_10$8 = { class: "acu-v2-continuation-page__meta" };
-    const _hoisted_11$8 = { class: "acu-v2-continuation-page__outline" };
-    const _hoisted_12$8 = { class: "acu-v2-continuation-page__timeline" };
-    const _hoisted_13$6 = { key: 0 };
-    const _hoisted_14$6 = {
-	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_15$6 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_16$6 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_17$5 = { class: "acu-v2-continuation-page__settings-grid" };
-    const _hoisted_18$5 = { class: "acu-v2-continuation-page__toggles" };
-    const _hoisted_19$5 = {
-	key: 0,
-	class: "acu-v2-continuation-page__error"
-    };
-    const _hoisted_20$4 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_21$4 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_22$3 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_23$3 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_24$3 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_25$3 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_7$9 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_8$9 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_9$8 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_10$8 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_11$8 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_12$8 = { class: "acu-v2-continuation-page__actions" };
     function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$l, [
 		createVNode($setup["AcuPanel"], {
 			title: "Agent 会话",
-			description: "主 Agent 按需派工子代理并管理大纲（创建 / 维护 / 继续）；运行过程实时显示在会话流中，最终正文仍由酒馆模型生成。"
+			description: "像和 coding agent 对话一样使用：随时输入、随时打断。主 Agent 按需派工子代理并管理大纲，最终正文仍由酒馆模型生成。"
 		}, {
-			default: withCtx(() => [!$setup.runtime.task.value ? (openBlock(), createElementBlock(
-				Fragment,
-				{ key: 0 },
-				[createVNode($setup["AcuTextarea"], {
-					"model-value": $setup.runtime.originInstruction.value,
-					rows: 5,
-					disabled: $setup.runtime.busy.value,
-					placeholder: "输入本次智能续写的初始剧情要求...",
-					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.runtime.originInstruction.value = $event)
-				}, null, 8, ["model-value", "disabled"]), createBaseVNode("div", _hoisted_2$j, [createVNode($setup["AcuButton"], {
-					variant: "primary",
-					loading: $setup.runtime.busy.value,
-					disabled: !$setup.runtime.originInstruction.value.trim(),
-					onClick: $setup.runtime.createTask
-				}, {
-					default: withCtx(() => [..._cache[49] || (_cache[49] = [createTextVNode(
-						"创建续写任务",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, [
-					"loading",
-					"disabled",
-					"onClick"
-				])])],
-				64
-				/* STABLE_FRAGMENT */
-			)) : (openBlock(), createElementBlock(
-				Fragment,
-				{ key: 1 },
-				[
-					createBaseVNode("dl", _hoisted_3$g, [
-						createBaseVNode("div", null, [_cache[50] || (_cache[50] = createBaseVNode(
-							"dt",
-							null,
-							"任务状态",
-							-1
-							/* CACHED */
-						)), createBaseVNode(
-							"dd",
-							null,
-							toDisplayString($setup.runtime.statusText.value),
-							1
-							/* TEXT */
-						)]),
-						createBaseVNode("div", null, [_cache[51] || (_cache[51] = createBaseVNode(
-							"dt",
-							null,
-							"当前阶段",
-							-1
-							/* CACHED */
-						)), createBaseVNode(
-							"dd",
-							null,
-							toDisplayString($setup.runtime.activeStage.value ? `第 ${$setup.runtime.activeStage.value.stageNumber} 阶段` : "大纲待创建"),
-							1
-							/* TEXT */
-						)]),
-						createBaseVNode("div", null, [_cache[52] || (_cache[52] = createBaseVNode(
-							"dt",
-							null,
-							"完成轮次",
-							-1
-							/* CACHED */
-						)), createBaseVNode(
-							"dd",
-							null,
-							toDisplayString($setup.runtime.activeStage.value?.completedTurns ?? 0),
-							1
-							/* TEXT */
-						)]),
-						createBaseVNode("div", null, [_cache[53] || (_cache[53] = createBaseVNode(
-							"dt",
-							null,
-							"大纲 revision",
-							-1
-							/* CACHED */
-						)), createBaseVNode(
-							"dd",
-							null,
-							toDisplayString($setup.runtime.activeStage.value?.activeRevision ?? "-"),
-							1
-							/* TEXT */
-						)]),
-						createBaseVNode("div", null, [_cache[54] || (_cache[54] = createBaseVNode(
-							"dt",
-							null,
-							"总倒计时",
-							-1
-							/* CACHED */
-						)), createBaseVNode(
-							"dd",
-							null,
-							toDisplayString($setup.deadlineText),
-							1
-							/* TEXT */
-						)])
-					]),
-					createBaseVNode(
-						"p",
-						_hoisted_4$d,
-						toDisplayString($setup.runtime.task.value.originInstruction),
-						1
-						/* TEXT */
-					),
-					createVNode($setup["ContinuationSessionFeed"], {
-						entries: $setup.session.entries.value,
-						running: $setup.session.running.value
-					}, null, 8, ["entries", "running"]),
-					createBaseVNode("div", _hoisted_5$c, [
-						$setup.runtime.canContinue.value ? (openBlock(), createBlock($setup["AcuButton"], {
-							key: 0,
-							variant: "primary",
-							loading: $setup.runtime.busy.value,
-							onClick: $setup.runtime.continueTask
-						}, {
-							default: withCtx(() => [..._cache[55] || (_cache[55] = [createTextVNode(
-								"继续当前轮次",
-								-1
-								/* CACHED */
-							)])]),
-							_: 1
-						}, 8, ["loading", "onClick"])) : createCommentVNode("v-if", true),
-						$setup.runtime.task.value?.pendingHostTurn?.status === "retry_ready" ? (openBlock(), createBlock($setup["AcuButton"], {
-							key: 1,
-							variant: "primary",
-							loading: $setup.runtime.busy.value,
-							onClick: $setup.runtime.retryCurrentTurn
-						}, {
-							default: withCtx(() => [..._cache[56] || (_cache[56] = [createTextVNode(
-								"重试当前轮次",
-								-1
-								/* CACHED */
-							)])]),
-							_: 1
-						}, 8, ["loading", "onClick"])) : createCommentVNode("v-if", true),
-						$setup.runtime.task.value && !$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createBlock($setup["AcuButton"], {
-							key: 2,
-							loading: $setup.runtime.busy.value,
-							onClick: $setup.replan
-						}, {
-							default: withCtx(() => [..._cache[57] || (_cache[57] = [createTextVNode(
-								"重新规划剩余阶段",
-								-1
-								/* CACHED */
-							)])]),
-							_: 1
-						}, 8, ["loading"])) : createCommentVNode("v-if", true),
-						$setup.runtime.task.value && !$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createBlock($setup["AcuButton"], {
-							key: 3,
-							variant: "danger",
-							loading: $setup.runtime.busy.value,
-							onClick: $setup.runtime.stopTask
-						}, {
-							default: withCtx(() => [..._cache[58] || (_cache[58] = [createTextVNode(
-								"停止智能续写",
-								-1
-								/* CACHED */
-							)])]),
-							_: 1
-						}, 8, ["loading", "onClick"])) : createCommentVNode("v-if", true)
-					]),
-					$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createElementBlock("p", _hoisted_6$b, " 当前轮次正在等待宿主生成结束事件，不能重复发送或重规划。 ")) : createCommentVNode("v-if", true),
-					$setup.runtime.task.value && !$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createBlock($setup["AcuTextarea"], {
-						key: 1,
-						"model-value": $setup.replanInstruction,
-						rows: 3,
-						placeholder: "可选：说明本次重新规划要调整的方向...",
-						"onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => $setup.replanInstruction = $event)
-					}, null, 8, ["model-value"])) : createCommentVNode("v-if", true)
-				],
-				64
-				/* STABLE_FRAGMENT */
-			))]),
+			default: withCtx(() => [createVNode($setup["ContinuationChat"], {
+				task: $setup.runtime.task.value,
+				entries: $setup.session.entries.value,
+				running: $setup.session.running.value,
+				busy: $setup.runtime.busy.value,
+				"status-text": $setup.runtime.statusText.value,
+				"stage-text": $setup.stageText,
+				"completed-turns": $setup.runtime.activeStage.value?.completedTurns ?? 0,
+				"total-turns": $setup.runtime.activeRevision.value?.outline.totalTurns ?? 0,
+				"revision-text": $setup.runtime.activeStage.value ? `revision ${$setup.runtime.activeStage.value.activeRevision}` : "",
+				"deadline-text": $setup.deadlineText,
+				"awaiting-host": $setup.runtime.isAwaitingHostResult.value,
+				"can-continue": $setup.runtime.canContinue.value,
+				"can-retry": $setup.runtime.task.value?.pendingHostTurn?.status === "retry_ready",
+				onSend: $setup.sendMessage,
+				onStop: $setup.runtime.stopTask,
+				onContinue: $setup.runtime.continueTask,
+				onRetry: $setup.runtime.retryCurrentTurn
+			}, null, 8, [
+				"task",
+				"entries",
+				"running",
+				"busy",
+				"status-text",
+				"stage-text",
+				"completed-turns",
+				"total-turns",
+				"revision-text",
+				"deadline-text",
+				"awaiting-host",
+				"can-continue",
+				"can-retry",
+				"onStop",
+				"onContinue",
+				"onRetry"
+			])]),
 			_: 1
 		}),
-		$setup.runtime.task.value ? (openBlock(), createBlock($setup["AcuPanel"], {
-			key: 0,
-			title: "阶段大纲与执行回执",
-			description: "阶段历史默认折叠；当前阶段与其当前 revision 展开。"
-		}, {
-			default: withCtx(() => [(openBlock(true), createElementBlock(
-				Fragment,
-				null,
-				renderList($setup.runtime.task.value.stages, (stage) => {
-					return openBlock(), createElementBlock("details", {
-						key: stage.stageId,
-						class: "acu-v2-continuation-page__stage",
-						open: stage.stageId === $setup.runtime.task.value.activeStageId
-					}, [
-						createBaseVNode(
-							"summary",
-							null,
-							"第 " + toDisplayString(stage.stageNumber) + " 阶段 · " + toDisplayString(stage.status) + " · " + toDisplayString(stage.completedTurns) + " / " + toDisplayString(stage.revisions.find((item) => item.revision === stage.activeRevision)?.outline.totalTurns ?? 0) + " 轮",
-							1
-							/* TEXT */
-						),
-						stage.chronicleRange ? (openBlock(), createElementBlock(
-							"p",
-							_hoisted_8$9,
-							"AM 范围：" + toDisplayString(stage.chronicleRange.first) + " → " + toDisplayString(stage.chronicleRange.last),
-							1
-							/* TEXT */
-						)) : createCommentVNode("v-if", true),
-						(openBlock(true), createElementBlock(
-							Fragment,
-							null,
-							renderList(stage.revisions, (revision) => {
-								return openBlock(), createElementBlock("details", {
-									key: revision.revision,
-									class: "acu-v2-continuation-page__revision",
-									open: revision.revision === stage.activeRevision
-								}, [
-									createBaseVNode(
-										"summary",
-										null,
-										"revision " + toDisplayString(revision.revision) + " · " + toDisplayString(revision.reason) + " · " + toDisplayString(revision.frozen ? "已冻结" : "待确认"),
-										1
-										/* TEXT */
-									),
-									createBaseVNode(
-										"p",
-										_hoisted_10$8,
-										toDisplayString(revision.outline.title) + "：" + toDisplayString(revision.outline.goal),
-										1
-										/* TEXT */
-									),
-									createBaseVNode("ol", _hoisted_11$8, [(openBlock(true), createElementBlock(
-										Fragment,
-										null,
-										renderList(revision.outline.nodes, (node) => {
-											return openBlock(), createElementBlock("li", { key: node.id }, [
-												createBaseVNode(
-													"strong",
-													null,
-													toDisplayString(node.title),
-													1
-													/* TEXT */
-												),
-												createTextVNode(
-													"：" + toDisplayString(node.goal) + " ",
-													1
-													/* TEXT */
-												),
-												createBaseVNode("ol", null, [(openBlock(true), createElementBlock(
-													Fragment,
-													null,
-													renderList(node.turns, (turn) => {
-														return openBlock(), createElementBlock(
-															"li",
-															{ key: turn.id },
-															toDisplayString(turn.goal),
-															1
-															/* TEXT */
-														);
-													}),
-													128
-													/* KEYED_FRAGMENT */
-												))])
-											]);
-										}),
-										128
-										/* KEYED_FRAGMENT */
-									))])
-								], 8, _hoisted_9$8);
-							}),
-							128
-							/* KEYED_FRAGMENT */
-						))
-					], 8, _hoisted_7$9);
-				}),
-				128
-				/* KEYED_FRAGMENT */
-			)), createBaseVNode("ol", _hoisted_12$8, [(openBlock(true), createElementBlock(
-				Fragment,
-				null,
-				renderList($setup.runtime.task.value.timeline, (entry) => {
-					return openBlock(), createElementBlock("li", { key: entry.id }, [createTextVNode(
-						toDisplayString(new Date(entry.at).toLocaleString()) + " · " + toDisplayString(entry.kind),
-						1
-						/* TEXT */
-					), entry.errorCode ? (openBlock(), createElementBlock(
-						"span",
-						_hoisted_13$6,
-						" · " + toDisplayString(entry.errorCode),
-						1
-						/* TEXT */
-					)) : createCommentVNode("v-if", true)]);
-				}),
-				128
-				/* KEYED_FRAGMENT */
-			))])]),
-			_: 1
-		})) : createCommentVNode("v-if", true),
 		$setup.runtime.task.value && $setup.runtime.task.value.status === "awaiting_outline_review" && $setup.runtime.activeRevision.value ? (openBlock(), createBlock($setup["AcuPanel"], {
-			key: 1,
-			title: "大纲预览",
-			description: "保存前会在领域层重新执行严格 Schema 与 revision 校验；页面不直接写入聊天数组。"
+			key: 0,
+			title: "待确认的大纲",
+			description: "确认前会在领域层重新执行严格 Schema 与 revision 校验；页面不直接写入聊天数组。"
 		}, {
 			default: withCtx(() => [
 				createVNode($setup["AcuTextarea"], {
 					"model-value": $setup.outlineDraft,
 					rows: 16,
-					"onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.outlineDraft = $event)
+					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.outlineDraft = $event)
 				}, null, 8, ["model-value"]),
 				$setup.outlineDraftError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_14$6,
+					_hoisted_2$j,
 					toDisplayString($setup.outlineDraftError),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_15$6, [createVNode($setup["AcuButton"], {
+				createBaseVNode("div", _hoisted_3$g, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.acceptOutlineDraft
 				}, {
-					default: withCtx(() => [..._cache[59] || (_cache[59] = [createTextVNode(
+					default: withCtx(() => [..._cache[47] || (_cache[47] = [createTextVNode(
 						"确认大纲并继续",
 						-1
 						/* CACHED */
@@ -149723,251 +151207,259 @@ Expected function or array of functions, received type ${typeof value}.`
 			]),
 			_: 1
 		})) : createCommentVNode("v-if", true),
-		$setup.runtime.task.value && !$setup.runtime.isAwaitingHostResult.value ? (openBlock(), createBlock($setup["AcuPanel"], {
-			key: 2,
-			title: "放弃并新建",
-			description: "未完成任务默认只能继续；放弃必须显式确认。"
-		}, {
-			default: withCtx(() => [
-				createVNode($setup["AcuTextarea"], {
-					"model-value": $setup.replacementInstruction,
-					rows: 3,
-					placeholder: "输入新任务的初始剧情要求...",
-					"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.replacementInstruction = $event)
-				}, null, 8, ["model-value"]),
-				createVNode($setup["AcuCheckbox"], {
-					modelValue: $setup.confirmAbandon,
-					"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.confirmAbandon = $event),
-					label: "我确认放弃当前未完成任务并创建新任务"
-				}, null, 8, ["modelValue"]),
-				createBaseVNode("div", _hoisted_16$6, [createVNode($setup["AcuButton"], {
-					variant: "danger",
-					disabled: !$setup.confirmAbandon || !$setup.replacementInstruction.trim(),
-					loading: $setup.runtime.busy.value,
-					onClick: $setup.abandonAndCreate
-				}, {
-					default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
-						"放弃并创建新任务",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, ["disabled", "loading"])])
-			]),
-			_: 1
-		})) : createCommentVNode("v-if", true),
-		$setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
-			key: 3,
-			title: "续写设置",
-			description: "修改后自动保存并立即生效；宿主生成进行中暂不能保存，生成结束后再修改即可。"
-		}, {
-			default: withCtx(() => [
-				createBaseVNode("div", _hoisted_17$5, [
-					createVNode($setup["AcuFormRow"], { label: "阶段规模" }, {
-						default: withCtx(() => [withDirectives(createBaseVNode(
-							"select",
-							{ "onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.settingsDraft.stageSize = $event) },
-							[..._cache[61] || (_cache[61] = [
-								createBaseVNode(
-									"option",
-									{ value: "short" },
-									"短（3–5）",
-									-1
-									/* CACHED */
-								),
-								createBaseVNode(
-									"option",
-									{ value: "standard" },
-									"标准（6–10）",
-									-1
-									/* CACHED */
-								),
-								createBaseVNode(
-									"option",
-									{ value: "long" },
-									"长（11–20）",
-									-1
-									/* CACHED */
-								),
-								createBaseVNode(
-									"option",
-									{ value: "custom" },
-									"自定义",
-									-1
-									/* CACHED */
-								)
-							])],
-							512
-							/* NEED_PATCH */
-						), [[vModelSelect, $setup.settingsDraft.stageSize]])]),
-						_: 1
-					}),
-					$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createBlock($setup["AcuFormRow"], {
-						key: 0,
-						label: "最少轮次"
-					}, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.customTurnMin,
-							"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.settingsDraft.customTurnMin = $event),
-							type: "number",
-							min: 1,
-							max: 50
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					})) : createCommentVNode("v-if", true),
-					$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createBlock($setup["AcuFormRow"], {
-						key: 1,
-						label: "最多轮次"
-					}, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.customTurnMax,
-							"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settingsDraft.customTurnMax = $event),
-							type: "number",
-							min: 1,
-							max: 50
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					})) : createCommentVNode("v-if", true),
-					createVNode($setup["AcuFormRow"], { label: "自动阶段上限" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.maxAutomaticStages,
-							"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
-							type: "number",
-							min: 1
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					}),
-					createVNode($setup["AcuFormRow"], { label: "正文重试次数" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.generationRetryLimit,
-							"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
-							type: "number",
-							min: 0
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					}),
-					createVNode($setup["AcuFormRow"], { label: "内部 AI 重试次数" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.internalAiRetryLimit,
-							"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
-							type: "number",
-							min: 0
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					}),
-					createVNode($setup["AcuFormRow"], { label: "轮次延迟（秒）" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.loopDelaySeconds,
-							"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
-							type: "number",
-							min: 0
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					}),
-					createVNode($setup["AcuFormRow"], { label: "重试延迟（秒）" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.retryDelaySeconds,
-							"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
-							type: "number",
-							min: 0
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					}),
-					createVNode($setup["AcuFormRow"], { label: "总时长（分钟，0 为不设总时长）" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.totalDurationMinutes,
-							"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.totalDurationMinutes = $event),
-							type: "number",
-							min: 0
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					}),
-					createVNode($setup["AcuFormRow"], { label: "最近剧情轮数" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.contextTurnCount,
-							"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.contextTurnCount = $event),
-							type: "number",
-							min: 0
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					}),
-					createVNode($setup["AcuFormRow"], { label: "循环标签" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							modelValue: $setup.settingsDraft.loopTags,
-							"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.loopTags = $event),
-							type: "text"
-						}, null, 8, ["modelValue"])]),
-						_: 1
-					}),
-					createVNode($setup["AcuFormRow"], { label: "API 预设（全局默认）" }, {
-						default: withCtx(() => [createVNode($setup["AcuSelect"], {
-							options: $setup.continuationApiPresetOptions,
-							"model-value": $setup.continuationApiPresetValue,
-							placeholder: $setup.followActiveApiLabel,
-							"onUpdate:modelValue": $setup.applyContinuationApiPreset
-						}, null, 8, [
-							"options",
-							"model-value",
-							"placeholder"
-						])]),
-						_: 1
-					}),
-					(openBlock(), createElementBlock(
-						Fragment,
-						null,
-						renderList($setup.agentChannelRoles, (channel) => {
-							return createVNode($setup["AcuFormRow"], {
-								key: channel.role,
-								label: `渠道 · ${channel.label}`
-							}, {
-								default: withCtx(() => [createVNode($setup["AcuSelect"], {
-									options: $setup.agentChannelOptions,
-									"model-value": $setup.agentChannelValue(channel.role),
-									"onUpdate:modelValue": (value) => $setup.applyAgentChannel(channel.role, value)
-								}, null, 8, [
-									"options",
-									"model-value",
-									"onUpdate:modelValue"
-								])]),
-								_: 2
-							}, 1032, ["label"]);
+		createCommentVNode(" 会话独占整宽，资料与设置并列在其下：会话是主操作面，资料与设置是查阅面。 "),
+		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-continuation-page__layout" }, {
+			default: withCtx(() => [createVNode($setup["AcuPanel"], {
+				title: "已有资料",
+				description: "阶段大纲与本地资料都可以直接编辑保存；一键清空只丢任务、会话记录与本地资料，不动小说正文。"
+			}, {
+				default: withCtx(() => [createVNode($setup["ContinuationMaterialsPanel"], {
+					ref: "materialsPanel",
+					task: $setup.runtime.task.value,
+					"active-stage": $setup.runtime.activeStage.value,
+					"active-revision": $setup.runtime.activeRevision.value,
+					busy: $setup.runtime.busy.value,
+					onSaveOutline: $setup.saveOutline,
+					onClear: $setup.clearData
+				}, null, 8, [
+					"task",
+					"active-stage",
+					"active-revision",
+					"busy"
+				])]),
+				_: 1
+			}), $setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
+				key: 0,
+				title: "续写设置",
+				description: "修改后自动保存并立即生效；宿主生成进行中暂不能保存，生成结束后再修改即可。"
+			}, {
+				default: withCtx(() => [
+					createBaseVNode("div", _hoisted_4$d, [
+						createVNode($setup["AcuFormRow"], { label: "阶段规模" }, {
+							default: withCtx(() => [withDirectives(createBaseVNode(
+								"select",
+								{ "onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => $setup.settingsDraft.stageSize = $event) },
+								[..._cache[48] || (_cache[48] = [
+									createBaseVNode(
+										"option",
+										{ value: "short" },
+										"短（3–5）",
+										-1
+										/* CACHED */
+									),
+									createBaseVNode(
+										"option",
+										{ value: "standard" },
+										"标准（6–10）",
+										-1
+										/* CACHED */
+									),
+									createBaseVNode(
+										"option",
+										{ value: "long" },
+										"长（11–20）",
+										-1
+										/* CACHED */
+									),
+									createBaseVNode(
+										"option",
+										{ value: "custom" },
+										"自定义",
+										-1
+										/* CACHED */
+									)
+								])],
+								512
+								/* NEED_PATCH */
+							), [[vModelSelect, $setup.settingsDraft.stageSize]])]),
+							_: 1
 						}),
-						64
-						/* STABLE_FRAGMENT */
-					))
+						$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createBlock($setup["AcuFormRow"], {
+							key: 0,
+							label: "最少轮次"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.customTurnMin,
+								"onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.settingsDraft.customTurnMin = $event),
+								type: "number",
+								min: 1,
+								max: 50
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						})) : createCommentVNode("v-if", true),
+						$setup.settingsDraft.stageSize === "custom" ? (openBlock(), createBlock($setup["AcuFormRow"], {
+							key: 1,
+							label: "最多轮次"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.customTurnMax,
+								"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.settingsDraft.customTurnMax = $event),
+								type: "number",
+								min: 1,
+								max: 50
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						})) : createCommentVNode("v-if", true),
+						createVNode($setup["AcuFormRow"], { label: "自动阶段上限" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.maxAutomaticStages,
+								"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.settingsDraft.maxAutomaticStages = $event),
+								type: "number",
+								min: 1
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "正文重试次数" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.generationRetryLimit,
+								"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.settingsDraft.generationRetryLimit = $event),
+								type: "number",
+								min: 0
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "内部 AI 重试次数" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.internalAiRetryLimit,
+								"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.settingsDraft.internalAiRetryLimit = $event),
+								type: "number",
+								min: 0
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "轮次延迟（秒）" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.loopDelaySeconds,
+								"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settingsDraft.loopDelaySeconds = $event),
+								type: "number",
+								min: 0
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "重试延迟（秒）" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.retryDelaySeconds,
+								"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settingsDraft.retryDelaySeconds = $event),
+								type: "number",
+								min: 0
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "总时长（分钟，0 为不设总时长）" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.totalDurationMinutes,
+								"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settingsDraft.totalDurationMinutes = $event),
+								type: "number",
+								min: 0
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "最近剧情轮数" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.contextTurnCount,
+								"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settingsDraft.contextTurnCount = $event),
+								type: "number",
+								min: 0
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "正文窗口楼数（已结算部分，0 为只给未结算）" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.storyWindowFloors,
+								"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settingsDraft.storyWindowFloors = $event),
+								type: "number",
+								min: 0
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "Agent 会话 token 预算（0 为不限制，超限在下一轮开始前浓缩）" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.agentHistoryTokenBudget,
+								"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.settingsDraft.agentHistoryTokenBudget = $event),
+								type: "number",
+								min: 0
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "循环标签" }, {
+							default: withCtx(() => [createVNode($setup["AcuInput"], {
+								modelValue: $setup.settingsDraft.loopTags,
+								"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.loopTags = $event),
+								type: "text"
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], { label: "API 预设（全局默认）" }, {
+							default: withCtx(() => [createVNode($setup["AcuSelect"], {
+								options: $setup.continuationApiPresetOptions,
+								"model-value": $setup.continuationApiPresetValue,
+								placeholder: $setup.followActiveApiLabel,
+								"onUpdate:modelValue": $setup.applyContinuationApiPreset
+							}, null, 8, [
+								"options",
+								"model-value",
+								"placeholder"
+							])]),
+							_: 1
+						}),
+						(openBlock(), createElementBlock(
+							Fragment,
+							null,
+							renderList($setup.agentChannelRoles, (channel) => {
+								return createVNode($setup["AcuFormRow"], {
+									key: channel.role,
+									label: `渠道 · ${channel.label}`
+								}, {
+									default: withCtx(() => [createVNode($setup["AcuSelect"], {
+										options: $setup.agentChannelOptions,
+										"model-value": $setup.agentChannelValue(channel.role),
+										"onUpdate:modelValue": (value) => $setup.applyAgentChannel(channel.role, value)
+									}, null, 8, [
+										"options",
+										"model-value",
+										"onUpdate:modelValue"
+									])]),
+									_: 2
+								}, 1032, ["label"]);
+							}),
+							64
+							/* STABLE_FRAGMENT */
+						))
+					]),
+					createBaseVNode("div", _hoisted_5$c, [createVNode($setup["AcuCheckbox"], {
+						modelValue: $setup.settingsDraft.outlinePreview,
+						"onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => $setup.settingsDraft.outlinePreview = $event),
+						label: "大纲产出后先预览再执行"
+					}, null, 8, ["modelValue"])]),
+					createVNode($setup["AcuRulePairList"], {
+						modelValue: $setup.settingsDraft.contextExtractRules,
+						"onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
+						label: "上下文提取规则"
+					}, null, 8, ["modelValue"]),
+					createVNode($setup["AcuRulePairList"], {
+						modelValue: $setup.settingsDraft.contextExcludeRules,
+						"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
+						label: "上下文排除规则"
+					}, null, 8, ["modelValue"]),
+					$setup.settingsError ? (openBlock(), createElementBlock(
+						"p",
+						_hoisted_6$b,
+						toDisplayString($setup.settingsError),
+						1
+						/* TEXT */
+					)) : createCommentVNode("v-if", true)
 				]),
-				createBaseVNode("div", _hoisted_18$5, [createVNode($setup["AcuCheckbox"], {
-					modelValue: $setup.settingsDraft.outlinePreview,
-					"onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => $setup.settingsDraft.outlinePreview = $event),
-					label: "大纲产出后先预览再执行"
-				}, null, 8, ["modelValue"])]),
-				createVNode($setup["AcuRulePairList"], {
-					modelValue: $setup.settingsDraft.contextExtractRules,
-					"onUpdate:modelValue": _cache[17] || (_cache[17] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
-					label: "上下文提取规则"
-				}, null, 8, ["modelValue"]),
-				createVNode($setup["AcuRulePairList"], {
-					modelValue: $setup.settingsDraft.contextExcludeRules,
-					"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
-					label: "上下文排除规则"
-				}, null, 8, ["modelValue"]),
-				$setup.settingsError ? (openBlock(), createElementBlock(
-					"p",
-					_hoisted_19$5,
-					toDisplayString($setup.settingsError),
-					1
-					/* TEXT */
-				)) : createCommentVNode("v-if", true)
-			]),
+				_: 1
+			})) : createCommentVNode("v-if", true)]),
 			_: 1
-		})) : createCommentVNode("v-if", true),
+		}),
 		$setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
-			key: 4,
+			key: 1,
 			title: "伪 Role 提示词",
 			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。"
 		}, {
 			default: withCtx(() => [
-				_cache[68] || (_cache[68] = createBaseVNode(
+				_cache[55] || (_cache[55] = createBaseVNode(
 					"h3",
 					null,
 					"大纲子代理（outline-architect）提示词",
@@ -149980,27 +151472,27 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[19] || (_cache[19] = ($event) => $setup.addPrompt("outlinePrompt")),
-					onDelete: _cache[20] || (_cache[20] = (index) => $setup.deletePrompt("outlinePrompt", index)),
-					onMove: _cache[21] || (_cache[21] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
-					onUpdate: _cache[22] || (_cache[22] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
+					onAdd: _cache[17] || (_cache[17] = ($event) => $setup.addPrompt("outlinePrompt")),
+					onDelete: _cache[18] || (_cache[18] = (index) => $setup.deletePrompt("outlinePrompt", index)),
+					onMove: _cache[19] || (_cache[19] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
+					onUpdate: _cache[20] || (_cache[20] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_20$4, [createVNode($setup["AcuButton"], { onClick: _cache[23] || (_cache[23] = ($event) => $setup.restorePrompt("outline")) }, {
-					default: withCtx(() => [..._cache[62] || (_cache[62] = [createTextVNode(
+				createBaseVNode("div", _hoisted_7$9, [createVNode($setup["AcuButton"], { onClick: _cache[21] || (_cache[21] = ($event) => $setup.restorePrompt("outline")) }, {
+					default: withCtx(() => [..._cache[49] || (_cache[49] = [createTextVNode(
 						"恢复大纲提示词默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[69] || (_cache[69] = createBaseVNode(
+				_cache[56] || (_cache[56] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$VALIDATION_ERRORS。",
 					-1
 					/* CACHED */
 				)),
-				_cache[70] || (_cache[70] = createBaseVNode(
+				_cache[57] || (_cache[57] = createBaseVNode(
 					"h3",
 					null,
 					"主 Agent 提示词",
@@ -150013,27 +151505,27 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[24] || (_cache[24] = ($event) => $setup.addPrompt("main")),
-					onDelete: _cache[25] || (_cache[25] = (index) => $setup.deletePrompt("main", index)),
-					onMove: _cache[26] || (_cache[26] = (index, delta) => $setup.movePrompt("main", index, delta)),
-					onUpdate: _cache[27] || (_cache[27] = (index, patch) => $setup.updatePrompt("main", index, patch))
+					onAdd: _cache[22] || (_cache[22] = ($event) => $setup.addPrompt("main")),
+					onDelete: _cache[23] || (_cache[23] = (index) => $setup.deletePrompt("main", index)),
+					onMove: _cache[24] || (_cache[24] = (index, delta) => $setup.movePrompt("main", index, delta)),
+					onUpdate: _cache[25] || (_cache[25] = (index, patch) => $setup.updatePrompt("main", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_21$4, [createVNode($setup["AcuButton"], { onClick: _cache[28] || (_cache[28] = ($event) => $setup.restorePrompt("agent_main")) }, {
-					default: withCtx(() => [..._cache[63] || (_cache[63] = [createTextVNode(
+				createBaseVNode("div", _hoisted_8$9, [createVNode($setup["AcuButton"], { onClick: _cache[26] || (_cache[26] = ($event) => $setup.restorePrompt("agent_main")) }, {
+					default: withCtx(() => [..._cache[50] || (_cache[50] = [createTextVNode(
 						"恢复主 Agent 默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[71] || (_cache[71] = createBaseVNode(
+				_cache[58] || (_cache[58] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
-					"$HISTORY_ANCHOR 标记真实历史插入位置，该段本身不发送。删掉它会让真实历史退回到序列最前面。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$OUTLINE_WINDOW、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET、$TOOL_RESULTS。",
+					"$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。小说正文由 $STORY_TEXT 单独摘取（只含 AI 楼层）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$OUTLINE_WINDOW、$UNSETTLED_RANGE、$ACTIVE_CONSTRAINTS、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET。",
 					-1
 					/* CACHED */
 				)),
-				_cache[72] || (_cache[72] = createBaseVNode(
+				_cache[59] || (_cache[59] = createBaseVNode(
 					"h3",
 					null,
 					"伏笔与认知维护子代理提示词",
@@ -150046,20 +151538,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[29] || (_cache[29] = ($event) => $setup.addPrompt("maintainer")),
-					onDelete: _cache[30] || (_cache[30] = (index) => $setup.deletePrompt("maintainer", index)),
-					onMove: _cache[31] || (_cache[31] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
-					onUpdate: _cache[32] || (_cache[32] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
+					onAdd: _cache[27] || (_cache[27] = ($event) => $setup.addPrompt("maintainer")),
+					onDelete: _cache[28] || (_cache[28] = (index) => $setup.deletePrompt("maintainer", index)),
+					onMove: _cache[29] || (_cache[29] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
+					onUpdate: _cache[30] || (_cache[30] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_22$3, [createVNode($setup["AcuButton"], { onClick: _cache[33] || (_cache[33] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
-					default: withCtx(() => [..._cache[64] || (_cache[64] = [createTextVNode(
+				createBaseVNode("div", _hoisted_9$8, [createVNode($setup["AcuButton"], { onClick: _cache[31] || (_cache[31] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
+					default: withCtx(() => [..._cache[51] || (_cache[51] = [createTextVNode(
 						"恢复维护子代理默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[73] || (_cache[73] = createBaseVNode(
+				_cache[60] || (_cache[60] = createBaseVNode(
 					"h3",
 					null,
 					"主线推进策划子代理提示词",
@@ -150072,20 +151564,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[34] || (_cache[34] = ($event) => $setup.addPrompt("mainlinePlanner")),
-					onDelete: _cache[35] || (_cache[35] = (index) => $setup.deletePrompt("mainlinePlanner", index)),
-					onMove: _cache[36] || (_cache[36] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
-					onUpdate: _cache[37] || (_cache[37] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
+					onAdd: _cache[32] || (_cache[32] = ($event) => $setup.addPrompt("mainlinePlanner")),
+					onDelete: _cache[33] || (_cache[33] = (index) => $setup.deletePrompt("mainlinePlanner", index)),
+					onMove: _cache[34] || (_cache[34] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
+					onUpdate: _cache[35] || (_cache[35] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_23$3, [createVNode($setup["AcuButton"], { onClick: _cache[38] || (_cache[38] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
-					default: withCtx(() => [..._cache[65] || (_cache[65] = [createTextVNode(
+				createBaseVNode("div", _hoisted_10$8, [createVNode($setup["AcuButton"], { onClick: _cache[36] || (_cache[36] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
+					default: withCtx(() => [..._cache[52] || (_cache[52] = [createTextVNode(
 						"恢复主线策划默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[74] || (_cache[74] = createBaseVNode(
+				_cache[61] || (_cache[61] = createBaseVNode(
 					"h3",
 					null,
 					"伏笔与节拍策划子代理提示词",
@@ -150098,20 +151590,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[39] || (_cache[39] = ($event) => $setup.addPrompt("beatPlanner")),
-					onDelete: _cache[40] || (_cache[40] = (index) => $setup.deletePrompt("beatPlanner", index)),
-					onMove: _cache[41] || (_cache[41] = (index, delta) => $setup.movePrompt("beatPlanner", index, delta)),
-					onUpdate: _cache[42] || (_cache[42] = (index, patch) => $setup.updatePrompt("beatPlanner", index, patch))
+					onAdd: _cache[37] || (_cache[37] = ($event) => $setup.addPrompt("beatPlanner")),
+					onDelete: _cache[38] || (_cache[38] = (index) => $setup.deletePrompt("beatPlanner", index)),
+					onMove: _cache[39] || (_cache[39] = (index, delta) => $setup.movePrompt("beatPlanner", index, delta)),
+					onUpdate: _cache[40] || (_cache[40] = (index, patch) => $setup.updatePrompt("beatPlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_24$3, [createVNode($setup["AcuButton"], { onClick: _cache[43] || (_cache[43] = ($event) => $setup.restorePrompt("agent_beat")) }, {
-					default: withCtx(() => [..._cache[66] || (_cache[66] = [createTextVNode(
+				createBaseVNode("div", _hoisted_11$8, [createVNode($setup["AcuButton"], { onClick: _cache[41] || (_cache[41] = ($event) => $setup.restorePrompt("agent_beat")) }, {
+					default: withCtx(() => [..._cache[53] || (_cache[53] = [createTextVNode(
 						"恢复节拍策划默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[75] || (_cache[75] = createBaseVNode(
+				_cache[62] || (_cache[62] = createBaseVNode(
 					"h3",
 					null,
 					"连续性审查子代理提示词",
@@ -150124,20 +151616,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[44] || (_cache[44] = ($event) => $setup.addPrompt("reviewer")),
-					onDelete: _cache[45] || (_cache[45] = (index) => $setup.deletePrompt("reviewer", index)),
-					onMove: _cache[46] || (_cache[46] = (index, delta) => $setup.movePrompt("reviewer", index, delta)),
-					onUpdate: _cache[47] || (_cache[47] = (index, patch) => $setup.updatePrompt("reviewer", index, patch))
+					onAdd: _cache[42] || (_cache[42] = ($event) => $setup.addPrompt("reviewer")),
+					onDelete: _cache[43] || (_cache[43] = (index) => $setup.deletePrompt("reviewer", index)),
+					onMove: _cache[44] || (_cache[44] = (index, delta) => $setup.movePrompt("reviewer", index, delta)),
+					onUpdate: _cache[45] || (_cache[45] = (index, patch) => $setup.updatePrompt("reviewer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_25$3, [createVNode($setup["AcuButton"], { onClick: _cache[48] || (_cache[48] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
-					default: withCtx(() => [..._cache[67] || (_cache[67] = [createTextVNode(
+				createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuButton"], { onClick: _cache[46] || (_cache[46] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
+					default: withCtx(() => [..._cache[54] || (_cache[54] = [createTextVNode(
 						"恢复审查子代理默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[76] || (_cache[76] = createBaseVNode(
+				_cache[63] || (_cache[63] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"子代理可用占位符：$AGENT_READ_MATERIALS（按授权读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（本次写入权限）。",
@@ -150149,7 +151641,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-3347c131"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-d8338f61"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
