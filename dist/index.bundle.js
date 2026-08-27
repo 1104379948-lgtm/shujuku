@@ -104055,8 +104055,36 @@ $CONTENT
         return createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'outline_call', '阶段大纲内部 AI 调用失败', true);
     }
     function compactValidationError_ACU(error) {
-        // 附上 message：标签口径下剩余的校验错误（轮数超范围、goal 为空）只有带原因模型才能自愈。
-        return `${error.code}@${error.phase}: ${error.message}`;
+        // 附上 message 与 details：轮数超范围这类错误只有带上具体数字（min/max/actual）模型才能自愈，
+        // 光说「超出范围」等于没说。
+        const base = `${error.code}@${error.phase}: ${error.message}`;
+        if (!error.details || !Object.keys(error.details).length)
+            return base;
+        try {
+            return `${base}（${JSON.stringify(error.details)}）`;
+        }
+        catch {
+            return base;
+        }
+    }
+    /**
+     * 渲染 $TURN_RANGE 的权威文案。planner 是唯一同时掌握阶段规模范围与重规划约束的模块，
+     * 因此该占位符在这里注入并覆盖外部同名解析器。
+     * @param range 阶段总轮数范围
+     * @param constraints 重规划约束；提供时模型只规划剩余轮次，需换算剩余轮数允许区间
+     * @returns 给大纲 AI 的范围说明；剩余额度不足时如实说明真实约束
+     */
+    function renderContinuationTurnRange_ACU(range, constraints) {
+        const total = `本阶段总轮数（全部 <turn> 的数量）必须在 ${range.min} 到 ${range.max} 之间。`;
+        if (!constraints || constraints.completedTurns <= 0)
+            return total;
+        const completed = constraints.completedTurns;
+        const remainingMin = Math.max(1, range.min - completed);
+        const remainingMax = range.max - completed;
+        if (remainingMax < remainingMin) {
+            return `${total}已完成 ${completed} 轮不可改动，剩余轮数额度不足（最多还能规划 ${Math.max(0, remainingMax)} 轮），当前阶段无法在范围内继续扩展。`;
+        }
+        return `${total}其中已完成 ${completed} 轮不可改动；你只规划剩余轮次，剩余的 <turn> 数量必须在 ${remainingMin} 到 ${remainingMax} 之间（拼接后总轮数才会落在范围内）。`;
     }
     function isRetryableOutlineError_ACU(error) {
         if (error.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' || error.code === 'CONTINUATION_OUTLINE_JSON_INVALID')
@@ -104083,6 +104111,8 @@ $CONTENT
                         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
                     }
                     const resolvers = { ...request.resolvers };
+                    // $TURN_RANGE 由 planner 权威注入：只有这里同时知道范围与重规划约束。
+                    resolvers.$TURN_RANGE = () => renderContinuationTurnRange_ACU(range, request.replanConstraints);
                     if (attempt > 0 && lastError)
                         resolvers.$VALIDATION_ERRORS = () => compactValidationError_ACU(lastError);
                     const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
@@ -105046,33 +105076,62 @@ $CONTENT
         return `${text.slice(0, SESSION_DETAIL_LIMIT_ACU)}\n（内容过长，已截断）`;
     }
     /**
-     * 开始一次新的运行。清空上一次会话并写入起始条目。
+     * 开始一次新的运行。
      * @param label 本次运行的标题，如「第 2 阶段 · 第 3 轮」
      * @param detail 起始说明
+     * @param resume 为 true 时保留既有会话记录并写入「恢复运行」条目——
+     *               从中断点恢复时用户必须能看到之前已完成的过程；缺省清空重来
      */
-    function beginAgentSessionRun_ACU(label, detail = '') {
-        entries_ACU = [];
+    function beginAgentSessionRun_ACU(label, detail = '', resume = false) {
+        if (!resume)
+            entries_ACU = [];
         running_ACU = true;
-        logAgentSession_ACU({ kind: 'run_started', title: label, detail });
+        logAgentSession_ACU({ kind: resume ? 'run_resumed' : 'run_started', title: label, detail });
     }
     /**
      * 记录一条会话事件。
-     * @param input 事件内容；ok 缺省为 true
+     * @param input 事件内容；ok 缺省为 true，status 缺省按 ok 推导（false→failed，true→done）
+     * @returns 条目 id，可用于 updateAgentSession_ACU 原地更新（如 running→done）
      */
     function logAgentSession_ACU(input) {
+        const id = nextId_ACU++;
+        const ok = input.ok !== false;
         entries_ACU.push({
-            id: nextId_ACU++,
+            id,
             at: Date.now(),
             kind: input.kind,
             title: input.title,
             detail: truncateDetail_ACU(String(input.detail ?? '')),
             agentName: String(input.agentName ?? ''),
-            ok: input.ok !== false,
+            ok,
+            status: input.status ?? (ok ? 'done' : 'failed'),
         });
         if (entries_ACU.length > SESSION_ENTRY_LIMIT_ACU)
             entries_ACU = entries_ACU.slice(-SESSION_ENTRY_LIMIT_ACU);
         if (input.kind === 'run_completed' || input.kind === 'run_failed' || input.kind === 'block')
             running_ACU = false;
+        notify_ACU();
+        return id;
+    }
+    /**
+     * 原地更新一条已有会话条目（典型用途：派工从 running 更新为成功/失败）。
+     * @param id logAgentSession_ACU 返回的条目 id
+     * @param patch 要更新的字段；条目已被上限截断淘汰时静默忽略
+     */
+    function updateAgentSession_ACU(id, patch) {
+        const entry = entries_ACU.find(item => item.id === id);
+        if (!entry)
+            return;
+        if (patch.title !== undefined)
+            entry.title = patch.title;
+        if (patch.detail !== undefined)
+            entry.detail = truncateDetail_ACU(String(patch.detail));
+        if (patch.ok !== undefined)
+            entry.ok = patch.ok;
+        if (patch.status !== undefined)
+            entry.status = patch.status;
+        else if (patch.ok !== undefined)
+            entry.status = patch.ok ? 'done' : 'failed';
         notify_ACU();
     }
     /**
@@ -105103,6 +105162,73 @@ $CONTENT
         nextId_ACU = 1;
         running_ACU = false;
         listeners_ACU.clear();
+    }
+
+    /**
+     * service/continuation/agent/agent-run-cache.ts — Agent 循环运行恢复缓存
+     *
+     * 纯内存缓存：主循环在每次迭代边界保存运行账本（派工结论、迭代进度），
+     * 失败中断后「继续当前轮次」据此从中断点恢复，而不是丢掉全部已获得的证据从头重跑。
+     * 键为聊天身份；恢复时按任务与大纲游标严格校验，任何不匹配都作废缓存。
+     * 页面重载会清空缓存——此时资料快照已持久化，从头重跑是安全降级而非错误。
+     */
+    const statesByChat_ACU = new Map();
+    /**
+     * 保存运行状态。同一聊天只保留最新一份（租约保证同聊天无并发循环）。
+     * @param chatIdentity 聊天身份
+     * @param state 运行状态；内部做深拷贝，调用方后续修改不影响缓存
+     */
+    function saveAgentRunState_ACU(chatIdentity, state) {
+        if (!chatIdentity)
+            return;
+        statesByChat_ACU.set(chatIdentity, {
+            taskId: state.taskId,
+            cursorKey: state.cursorKey,
+            nextIteration: state.nextIteration,
+            ledger: {
+                delegationsUsed: state.ledger.delegationsUsed,
+                perAgent: { ...state.ledger.perAgent },
+                outcomes: state.ledger.outcomes.map(outcome => ({ ...outcome })),
+            },
+        });
+    }
+    /**
+     * 读取可恢复的运行状态。任务或游标不匹配即作废并返回 null——
+     * 旧轮次的证据对新轮次而言是污染而不是资产。
+     * @param chatIdentity 聊天身份
+     * @param taskId 当前任务
+     * @param cursorKey 当前大纲游标指纹
+     * @returns 匹配的运行状态深拷贝；无缓存或不匹配时为 null
+     */
+    function readAgentRunState_ACU(chatIdentity, taskId, cursorKey) {
+        const cached = statesByChat_ACU.get(chatIdentity);
+        if (!cached)
+            return null;
+        if (cached.taskId !== taskId || cached.cursorKey !== cursorKey) {
+            statesByChat_ACU.delete(chatIdentity);
+            return null;
+        }
+        return {
+            taskId: cached.taskId,
+            cursorKey: cached.cursorKey,
+            nextIteration: cached.nextIteration,
+            ledger: {
+                delegationsUsed: cached.ledger.delegationsUsed,
+                perAgent: { ...cached.ledger.perAgent },
+                outcomes: cached.ledger.outcomes.map(outcome => ({ ...outcome })),
+            },
+        };
+    }
+    /**
+     * 清除运行状态。finalize 成功交付与主 Agent 主动 block 时调用：
+     * 前者本轮已完成，后者是明确的终局判断，重跑应给全新预算而不是复播旧证据。
+     * @param chatIdentity 聊天身份
+     */
+    function clearAgentRunState_ACU(chatIdentity) {
+        statesByChat_ACU.delete(chatIdentity);
+    }
+    function resetAgentRunCacheForTests_ACU() {
+        statesByChat_ACU.clear();
     }
 
     /**
@@ -106689,15 +106815,39 @@ $CONTENT
                 recentTurnCount: request.settings.contextTurnCount,
             };
             context.originInstruction = context.execution.task.originInstruction;
-            const ledger = { delegationsUsed: 0, perAgent: new Map(), outcomes: [] };
+            const identitySeed = request.createInternalRequestIdentity(0);
+            const cursorKeyOf = () => {
+                const execution = request.readContext();
+                return `${execution.stage?.stageId ?? 'pre-outline'}#${execution.revision?.revision ?? 0}#${execution.turn?.id ?? ''}`;
+            };
+            // 中断恢复：上次运行在同任务同游标下失败时，带着已获得的证据从中断迭代继续，
+            // 而不是丢掉全部派工结论从头重跑。游标或任务变了的旧状态由缓存层作废。
+            const resumedState = readAgentRunState_ACU(identitySeed.chatIdentity, identitySeed.taskId, cursorKeyOf());
+            const ledger = resumedState
+                ? { delegationsUsed: resumedState.ledger.delegationsUsed, perAgent: new Map(Object.entries(resumedState.ledger.perAgent)), outcomes: resumedState.ledger.outcomes }
+                : { delegationsUsed: 0, perAgent: new Map(), outcomes: [] };
+            // 上次迭代耗尽后恢复时收敛到最后一次迭代：派工被禁用，主 Agent 必须基于已有证据交付或阻断。
+            const iterationStart = resumedState ? Math.min(Math.max(1, resumedState.nextIteration), budget.maxIterations) : 1;
+            const persistRunState = (nextIteration) => saveAgentRunState_ACU(identitySeed.chatIdentity, {
+                taskId: identitySeed.taskId,
+                cursorKey: cursorKeyOf(),
+                nextIteration,
+                ledger: { delegationsUsed: ledger.delegationsUsed, perAgent: Object.fromEntries(ledger.perAgent), outcomes: ledger.outcomes },
+            });
             const history = buildAgentRealHistory_ACU(chat);
             let totalAttempts = 0;
             let terminalLogged = false;
-            beginAgentSessionRun_ACU(describeRunLabel_ACU(context), context.execution.turn?.goal ?? '本轮目标待大纲确定');
+            let lastConstraintRejection = '';
+            let currentIteration = iterationStart;
+            beginAgentSessionRun_ACU(describeRunLabel_ACU(context), resumedState
+                ? `从中断点恢复：继续第 ${iterationStart} 次迭代，已保留 ${ledger.outcomes.length} 条已完成结果`
+                : context.execution.turn?.goal ?? '本轮目标待大纲确定', resumedState !== null);
             try {
-                for (let iteration = 1; iteration <= budget.maxIterations; iteration += 1) {
+                for (let iteration = iterationStart; iteration <= budget.maxIterations; iteration += 1) {
                     // 大纲操作会改变游标，每次迭代都从权威状态重读执行上下文。
                     context.execution = request.readContext();
+                    currentIteration = iteration;
+                    persistRunState(iteration);
                     const allowDelegate = iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations;
                     const round = await this.callMainAgent(request, preset, history, context, ledger, budget, iteration, allowDelegate);
                     totalAttempts += round.attempts;
@@ -106705,35 +106855,57 @@ $CONTENT
                     const actionLabel = action.kind === 'delegate' ? `派工 ${action.delegations.length} 项`
                         : action.kind === 'edit_outline' ? `工具编辑大纲 ${action.edits.length} 处`
                             : action.kind === 'finalize' ? '交付写作指导' : '阻断本轮';
-                    logAgentSession_ACU({ kind: 'main_action', title: `迭代 ${iteration} · ${actionLabel}`, detail: action.thought });
+                    logAgentSession_ACU({ kind: 'thought', title: `迭代 ${iteration} · ${actionLabel}`, detail: action.thought });
                     if (action.kind === 'edit_outline') {
                         await this.runOutlineEdits(action.edits, request, context, ledger);
                         continue;
                     }
                     if (action.kind === 'finalize') {
                         if (action.constraints) {
-                            snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.current, action.constraints.retired, chat.length - 1);
+                            // 约束登记校验失败不终止本轮：把拒绝原因回灌，让主 Agent 在剩余迭代内修正登记，
+                            // 与大纲工具编辑、子代理写集失败的处理同构。只有非校验类异常才上抛。
+                            try {
+                                snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.current, action.constraints.retired, chat.length - 1);
+                            }
+                            catch (error) {
+                                if (!(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_WRITE_REJECTED')
+                                    throw error;
+                                lastConstraintRejection = error.error.message;
+                                ledger.outcomes.push({ agentName: 'finalize(约束登记)', ok: false, summary: '', detail: '', rejectedReason: `${error.error.message}。finalize 未被采纳，请修正 constraints 后重新交付` });
+                                logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 约束登记被拒绝`, detail: error.error.message, ok: false });
+                                continue;
+                            }
                             context.moduleSnapshot = snapshot;
                             await this.persistSnapshot_ACU(chat, snapshot);
                         }
                         logAgentSession_ACU({ kind: 'finalize', title: '最终写作指导', detail: action.instruction });
                         logAgentSession_ACU({ kind: 'run_completed', title: '本轮规划完成', detail: action.summary });
                         terminalLogged = true;
+                        clearAgentRunState_ACU(identitySeed.chatIdentity);
                         return { instruction: action.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
                     }
                     if (action.kind === 'block') {
                         logAgentSession_ACU({ kind: 'block', title: '主 Agent 阻断本轮', detail: [action.reason, ...action.unresolved].filter(Boolean).join('\n'), ok: false });
                         terminalLogged = true;
+                        // block 是明确的终局判断：重跑应给全新预算重新收集证据，而不是复播旧账本再次阻断。
+                        clearAgentRunState_ACU(identitySeed.chatIdentity);
                         failLoop_ACU('CONTINUATION_AGENT_BLOCKED', `主 Agent 阻断本轮：${action.reason}`, { unresolved: action.unresolved });
                     }
                     snapshot = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies);
                 }
-                failLoop_ACU('CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', `主 Agent 在 ${budget.maxIterations} 次迭代内没有交付最终指导`, { delegationsUsed: ledger.delegationsUsed });
+                failLoop_ACU('CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', lastConstraintRejection
+                    ? `主 Agent 在 ${budget.maxIterations} 次迭代内没有交付最终指导；最后一次约束登记被拒绝：${lastConstraintRejection}`
+                    : `主 Agent 在 ${budget.maxIterations} 次迭代内没有交付最终指导`, { delegationsUsed: ledger.delegationsUsed });
             }
             catch (error) {
+                // 中断即存档（block 除外，其缓存已清）：迭代中途的失败保留已完成的派工结论，
+                // 「继续当前轮次」据此从当前迭代恢复而不是从头重跑。
+                if (!(error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_BLOCKED')) {
+                    persistRunState(Math.min(currentIteration, budget.maxIterations));
+                }
                 if (!terminalLogged) {
                     const message = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
-                    logAgentSession_ACU({ kind: 'run_failed', title: '本轮已终止', detail: message, ok: false });
+                    logAgentSession_ACU({ kind: 'run_failed', title: '本轮已终止', detail: `${message}\n（进度已保留，点击「继续当前轮次」将从中断处恢复）`, ok: false });
                 }
                 throw error;
             }
@@ -106835,28 +107007,51 @@ $CONTENT
         }
         async runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies) {
             const waveLimit = resolveWaveLimit_ACU(request.settings, budget);
-            const outcomesBefore = ledger.outcomes.length;
             const outlineDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU);
             const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU);
+            // 未通过预算/波次校验的派工立即记失败条目：这些拒绝是即时判定，没有 running 阶段。
+            const rejectImmediately = (agentName, reason) => {
+                ledger.outcomes.push({ agentName, ok: false, summary: '', detail: '', rejectedReason: reason });
+                logAgentSession_ACU({
+                    kind: agentName === AGENT_OUTLINE_AGENT_NAME_ACU ? 'outline_op' : 'delegation',
+                    agentName,
+                    title: `${agentName} 未执行`,
+                    detail: reason,
+                    ok: false,
+                });
+            };
             // 大纲操作先于同波次其他派工串行执行：它改变游标，后续派工与下一次迭代都要看到新大纲。
             for (const delegation of outlineDelegations) {
                 const used = ledger.perAgent.get(delegation.agentName) ?? 0;
                 if (ledger.delegationsUsed >= budget.maxDelegations) {
-                    ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `派工总数已达上限 ${budget.maxDelegations} 次` });
+                    rejectImmediately(delegation.agentName, `派工总数已达上限 ${budget.maxDelegations} 次`);
                     continue;
                 }
                 if (used >= budget.maxSameAgent) {
-                    ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `同一代理最多派工 ${budget.maxSameAgent} 次` });
+                    rejectImmediately(delegation.agentName, `同一代理最多派工 ${budget.maxSameAgent} 次`);
                     continue;
                 }
                 if (!request.applyOutline) {
-                    ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: '正文重试轮次不允许改写大纲，请基于现有大纲交付或阻断' });
+                    rejectImmediately(delegation.agentName, '正文重试轮次不允许改写大纲，请基于现有大纲交付或阻断');
                     continue;
                 }
                 ledger.delegationsUsed += 1;
                 ledger.perAgent.set(delegation.agentName, used + 1);
-                const result = await request.applyOutline(delegation.prompt);
-                logAgentSession_ACU({ kind: 'outline_op', agentName: delegation.agentName, title: result.op === 'create' ? '创建阶段大纲' : result.op === 'continue' ? '继续下一阶段大纲' : '改写当前阶段大纲', detail: result.summary, ok: result.stopped === null });
+                const entryId = logAgentSession_ACU({ kind: 'outline_op', agentName: delegation.agentName, title: '大纲操作执行中', detail: delegation.prompt, status: 'running' });
+                let result;
+                try {
+                    result = await request.applyOutline(delegation.prompt);
+                }
+                catch (error) {
+                    const message = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
+                    updateAgentSession_ACU(entryId, { title: '大纲操作失败', detail: message, ok: false });
+                    throw error;
+                }
+                updateAgentSession_ACU(entryId, {
+                    title: result.op === 'create' ? '创建阶段大纲' : result.op === 'continue' ? '继续下一阶段大纲' : '改写当前阶段大纲',
+                    detail: result.summary,
+                    ok: result.stopped === null,
+                });
                 if (result.stopped) {
                     failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', result.summary, { stopped: result.stopped });
                 }
@@ -106870,11 +107065,11 @@ $CONTENT
             for (const delegation of normalDelegations) {
                 const used = ledger.perAgent.get(delegation.agentName) ?? 0;
                 if (ledger.delegationsUsed + accepted.length >= budget.maxDelegations) {
-                    ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `派工总数已达上限 ${budget.maxDelegations} 次` });
+                    rejectImmediately(delegation.agentName, `派工总数已达上限 ${budget.maxDelegations} 次`);
                     continue;
                 }
                 if (used + accepted.filter(item => item.agentName === delegation.agentName).length >= budget.maxSameAgent) {
-                    ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `同一代理最多派工 ${budget.maxSameAgent} 次` });
+                    rejectImmediately(delegation.agentName, `同一代理最多派工 ${budget.maxSameAgent} 次`);
                     continue;
                 }
                 if (accepted.length >= waveLimit) {
@@ -106882,11 +107077,27 @@ $CONTENT
                     const why = waveLimit === 1 && hasCurrentChannel
                         ? '当前跟随活动 API，同一波次只能派工 1 个子代理'
                         : `同一波次并发上限为 ${waveLimit} 个`;
-                    ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `${why}，本次未执行，可在下一次迭代重派` });
+                    rejectImmediately(delegation.agentName, `${why}，本次未执行，可在下一次迭代重派`);
                     continue;
                 }
                 accepted.push(delegation);
             }
+            // 派工发出即记 running 条目，结果回来后原地更新——用户能实时看到哪些子代理在跑。
+            const runningEntries = new Map();
+            for (const delegation of accepted) {
+                runningEntries.set(delegation, logAgentSession_ACU({ kind: 'delegation', agentName: delegation.agentName, title: `${delegation.agentName} 执行中`, detail: delegation.prompt, status: 'running' }));
+            }
+            const settleOutcome = (delegation, outcome) => {
+                ledger.outcomes.push(outcome);
+                const entryId = runningEntries.get(delegation);
+                if (entryId === undefined)
+                    return;
+                updateAgentSession_ACU(entryId, {
+                    title: outcome.ok ? `${outcome.agentName} 完成` : `${outcome.agentName} 未采用`,
+                    detail: outcome.ok ? [outcome.summary, outcome.detail].filter(Boolean).join('\n') : outcome.rejectedReason,
+                    ok: outcome.ok,
+                });
+            };
             const settled = await Promise.all(accepted.map(async (delegation) => {
                 try {
                     // 每个子代理按自己的渠道角色解析；渠道解析失败会成为该派工的拒绝结果回喂给主 Agent。
@@ -106915,7 +107126,7 @@ $CONTENT
                 ledger.delegationsUsed += 1;
                 ledger.perAgent.set(item.delegation.agentName, (ledger.perAgent.get(item.delegation.agentName) ?? 0) + 1);
                 if (!item.result) {
-                    ledger.outcomes.push({ agentName: item.delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: compactAgentProtocolError_ACU(item.error) });
+                    settleOutcome(item.delegation, { agentName: item.delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: compactAgentProtocolError_ACU(item.error) });
                     continue;
                 }
                 const result = item.result;
@@ -106929,7 +107140,7 @@ $CONTENT
                             snapshotChanged = true;
                         }
                         const proposals = result.maintainer.delta.constraintProposals;
-                        ledger.outcomes.push({
+                        settleOutcome(item.delegation, {
                             agentName: result.agentName,
                             ok: true,
                             summary: result.maintainer.summary,
@@ -106942,12 +107153,12 @@ $CONTENT
                         });
                     }
                     catch (error) {
-                        ledger.outcomes.push({ agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
+                        settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
                     }
                     continue;
                 }
                 if (result.planner) {
-                    ledger.outcomes.push({
+                    settleOutcome(item.delegation, {
                         agentName: result.agentName,
                         ok: true,
                         summary: result.planner.summary,
@@ -106957,7 +107168,7 @@ $CONTENT
                     continue;
                 }
                 if (result.reviewer) {
-                    ledger.outcomes.push({
+                    settleOutcome(item.delegation, {
                         agentName: result.agentName,
                         ok: true,
                         summary: `判词 ${result.reviewer.verdict}`,
@@ -106966,24 +107177,12 @@ $CONTENT
                     });
                     continue;
                 }
-                ledger.outcomes.push({ agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' });
+                settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' });
             }
             if (snapshotChanged) {
                 context.moduleSnapshot = nextSnapshot;
                 context.settledThroughIndex = nextSnapshot.settledThroughIndex;
                 await this.persistSnapshot_ACU(chat, nextSnapshot);
-            }
-            for (const outcome of ledger.outcomes.slice(outcomesBefore)) {
-                // 大纲操作成功的条目已作为 outline_op 记录，这里不重复。
-                if (outcome.agentName === AGENT_OUTLINE_AGENT_NAME_ACU && outcome.ok)
-                    continue;
-                logAgentSession_ACU({
-                    kind: 'delegation',
-                    agentName: outcome.agentName,
-                    ok: outcome.ok,
-                    title: outcome.ok ? `${outcome.agentName} 完成` : `${outcome.agentName} 未采用`,
-                    detail: outcome.ok ? [outcome.summary, outcome.detail].filter(Boolean).join('\n') : outcome.rejectedReason,
-                });
             }
             return nextSnapshot;
         }
@@ -107404,8 +107603,11 @@ $CONTENT
                 if (result.preparedTurn)
                     await this.send(result.preparedTurn);
             }
-            catch {
-                // 状态已由 orchestrator 记录（paused+lastError 或拒绝原因），自动链到此为止。
+            catch (error) {
+                // 状态已由 orchestrator 记录（paused+lastError 或拒绝原因），自动链到此为止；
+                // 但必须在会话流留痕——静默吞掉会让用户以为自动续写根本没触发。
+                const message = error instanceof Error ? error.message : String(error);
+                logAgentSession_ACU({ kind: 'run_failed', title: '自动续写已暂停', detail: `${message}\n可点击「继续当前轮次」从中断处恢复。`, ok: false });
             }
         }
         async resolveMessageIndex_ACU(eventMessageId, capture, chatIdentity) {
@@ -134285,7 +134487,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 2,
 	class: "fa-solid fa-check acu-preset-dd__check"
     };
-    const _hoisted_9$h = {
+    const _hoisted_9$i = {
 	key: 0,
 	class: "acu-preset-dd__empty"
     };
@@ -134356,7 +134558,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			/* KEYED_FRAGMENT */
 		)), !$props.items.length ? (openBlock(), createElementBlock(
 			"li",
-			_hoisted_9$h,
+			_hoisted_9$i,
 			toDisplayString($props.emptyText),
 			1
 			/* TEXT */
@@ -134648,7 +134850,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-api-config-panel__editor-section"
     };
-    const _hoisted_9$g = { class: "acu-api-config-panel__actions" };
+    const _hoisted_9$h = { class: "acu-api-config-panel__actions" };
     function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.apiCopy.panels.preset.title,
@@ -134879,7 +135081,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_9$g, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_9$h, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.activeDraftDirty,
 						onClick: $setup.syncActiveDraft
 					}, {
@@ -138350,10 +138552,10 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_6$n = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_7$k = { class: "acu-v2-plot-task-editor__toggles" };
     const _hoisted_8$j = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_9$f = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
-    const _hoisted_10$e = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_11$d = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_12$a = {
+    const _hoisted_9$g = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
+    const _hoisted_10$f = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_11$e = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_12$b = {
 	key: 1,
 	class: "acu-v2-plot-task-editor__empty"
     };
@@ -138541,7 +138743,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value"])]),
 				_: 1
 			})]),
-			createBaseVNode("div", _hoisted_9$f, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_9$g, [createVNode($setup["AcuFormRow"], {
 				label: "依赖任务 ID",
 				hint: "逗号分隔。Agent 排序时应先执行这些任务；非法或循环依赖会在运行时校验。"
 			}, {
@@ -138565,7 +138767,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				_: 1
 			})])
 		]),
-		createBaseVNode("fieldset", _hoisted_10$e, [_cache[26] || (_cache[26] = createBaseVNode(
+		createBaseVNode("fieldset", _hoisted_10$f, [_cache[26] || (_cache[26] = createBaseVNode(
 			"legend",
 			null,
 			"当前任务使用的 API",
@@ -138583,7 +138785,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, null, 8, ["options", "model-value"])]),
 			_: 1
 		})]),
-		createBaseVNode("fieldset", _hoisted_11$d, [_cache[27] || (_cache[27] = createBaseVNode(
+		createBaseVNode("fieldset", _hoisted_11$e, [_cache[27] || (_cache[27] = createBaseVNode(
 			"legend",
 			null,
 			"提示词段（promptGroup）",
@@ -138596,7 +138798,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			onMove: _cache[21] || (_cache[21] = (index, delta) => _ctx.$emit("segment-move", index, delta)),
 			onUpdate: _cache[22] || (_cache[22] = (index, patch) => _ctx.$emit("segment-update", index, patch))
 		}, null, 8, ["segments"])])
-	])) : (openBlock(), createElementBlock("div", _hoisted_12$a, " 请在上方选择一个任务进行编辑。 "));
+	])) : (openBlock(), createElementBlock("div", _hoisted_12$b, " 请在上方选择一个任务进行编辑。 "));
     }
     var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-0d30f745"]]);
 
@@ -138640,7 +138842,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-plot-tasks__disabled-label"
     };
-    const _hoisted_9$e = {
+    const _hoisted_9$f = {
 	key: 0,
 	class: "acu-v2-plot-tasks__empty"
     };
@@ -138720,7 +138922,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		}),
 		128
 		/* KEYED_FRAGMENT */
-	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$e, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
+	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$f, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
     }
     var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-ee3c6f4c"]]);
 
@@ -142186,9 +142388,9 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_7$h = { class: "acu-dashboard-storage-mode__body" };
     const _hoisted_8$g = { class: "acu-dashboard-storage-mode__card-head" };
-    const _hoisted_9$d = { class: "acu-dashboard-storage-mode__name" };
-    const _hoisted_10$d = { class: "acu-dashboard-storage-mode__badge" };
-    const _hoisted_11$c = { class: "acu-dashboard-storage-mode__desc" };
+    const _hoisted_9$e = { class: "acu-dashboard-storage-mode__name" };
+    const _hoisted_10$e = { class: "acu-dashboard-storage-mode__badge" };
+    const _hoisted_11$d = { class: "acu-dashboard-storage-mode__desc" };
     function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", {
 		class: "acu-dashboard-storage-mode",
@@ -142237,19 +142439,19 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* CLASS */
 					)]), createBaseVNode("span", _hoisted_7$h, [createBaseVNode("span", _hoisted_8$g, [createBaseVNode(
 						"span",
-						_hoisted_9$d,
+						_hoisted_9$e,
 						toDisplayString(option.label),
 						1
 						/* TEXT */
 					), createBaseVNode(
 						"span",
-						_hoisted_10$d,
+						_hoisted_10$e,
 						toDisplayString(option.badge),
 						1
 						/* TEXT */
 					)]), createBaseVNode(
 						"span",
-						_hoisted_11$c,
+						_hoisted_11$d,
 						toDisplayString(option.description),
 						1
 						/* TEXT */
@@ -144504,9 +144706,9 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_6$h = { class: "acu-v2-form-fill-page__status-table" };
     const _hoisted_7$f = { key: 0 };
     const _hoisted_8$f = { key: 1 };
-    const _hoisted_9$c = { class: "acu-v2-form-fill-page__manual-number-grid" };
-    const _hoisted_10$c = { class: "acu-v2-form-fill-page__manual-extra" };
-    const _hoisted_11$b = { class: "acu-v2-form-fill-page__actions" };
+    const _hoisted_9$d = { class: "acu-v2-form-fill-page__manual-number-grid" };
+    const _hoisted_10$d = { class: "acu-v2-form-fill-page__manual-extra" };
+    const _hoisted_11$c = { class: "acu-v2-form-fill-page__actions" };
     function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$z, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
 		default: withCtx(() => [
@@ -144681,7 +144883,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				description: $setup.formFillCopy.panels.manual.description
 			}, {
 				default: withCtx(() => [
-					createBaseVNode("div", _hoisted_9$c, [createVNode($setup["AcuFormRow"], {
+					createBaseVNode("div", _hoisted_9$d, [createVNode($setup["AcuFormRow"], {
 						label: "手动处理最近 N 层",
 						hint: "从可用 AI 回复中取最近 N 层执行手动填表。"
 					}, {
@@ -144731,7 +144933,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"onSelectAll",
 						"onSelectNone"
 					]),
-					createBaseVNode("div", _hoisted_10$c, [createVNode($setup["AcuFormRow"], {
+					createBaseVNode("div", _hoisted_10$d, [createVNode($setup["AcuFormRow"], {
 						label: "本次填表附加要求",
 						hint: "留空时不会给本次手动填表追加额外要求。"
 					}, {
@@ -144762,7 +144964,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					}),
-					createBaseVNode("div", _hoisted_11$b, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_11$c, [createVNode($setup["AcuButton"], {
 						variant: "secondary",
 						disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.catchUpBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
 						onClick: $setup.manualUpdate.runManualCatchUp
@@ -145295,15 +145497,15 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
-    const _hoisted_9$b = {
+    const _hoisted_9$c = {
 	key: 2,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
-    const _hoisted_10$b = {
+    const _hoisted_10$c = {
 	key: 3,
 	class: "acu-v2-wb-entry-skill"
     };
-    const _hoisted_11$a = { class: "acu-v2-wb-entry-skill__actions" };
+    const _hoisted_11$b = { class: "acu-v2-wb-entry-skill__actions" };
     function _sfc_render$v(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$v, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$q, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
 		"div",
@@ -145371,7 +145573,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$e, "常量")) : createCommentVNode("v-if", true),
 									$props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_9$b,
+										_hoisted_9$c,
 										toDisplayString($setup.formatAgentTakeoverState(entry)),
 										1
 										/* TEXT */
@@ -145400,7 +145602,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										_: 2
 									}, 1032, ["onClick"])) : createCommentVNode("v-if", true)
 								])) : createCommentVNode("v-if", true),
-								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_10$b, [
+								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_10$c, [
 									createVNode($setup["AcuTextarea"], {
 										"model-value": $setup.getSkillDraft(entry).description,
 										label: "Skill 描述",
@@ -145419,7 +145621,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										"auto-resize": "",
 										"onUpdate:modelValue": ($event) => $setup.patchSkillDraft(entry, { triggerWhen: String($event) })
 									}, null, 8, ["model-value", "onUpdate:modelValue"]),
-									createBaseVNode("div", _hoisted_11$a, [createVNode($setup["AcuButton"], {
+									createBaseVNode("div", _hoisted_11$b, [createVNode($setup["AcuButton"], {
 										size: "sm",
 										variant: "primary",
 										onClick: ($event) => $setup.saveSkill(entry)
@@ -146212,8 +146414,8 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_6$f = { class: "acu-v2-table-page__toggle-row" };
     const _hoisted_7$d = { class: "acu-v2-table-page__toggle-head" };
     const _hoisted_8$d = { class: "acu-v2-table-page__toggle-row" };
-    const _hoisted_9$a = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_10$a = { class: "acu-v2-table-page__hint" };
+    const _hoisted_9$b = { class: "acu-v2-table-page__toggle-head" };
+    const _hoisted_10$b = { class: "acu-v2-table-page__hint" };
     function _sfc_render$s(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$s, [
 		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }),
@@ -146313,7 +146515,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						-1
 						/* CACHED */
 					))]),
-					createBaseVNode("div", _hoisted_8$d, [createBaseVNode("div", _hoisted_9$a, [_cache[20] || (_cache[20] = createBaseVNode(
+					createBaseVNode("div", _hoisted_8$d, [createBaseVNode("div", _hoisted_9$b, [_cache[20] || (_cache[20] = createBaseVNode(
 						"span",
 						{ class: "acu-v2-table-page__toggle-label" },
 						" 仅识别最后一对 <tableEdit> 标签 ",
@@ -146370,7 +146572,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"char-primary",
 					"status",
 					"error"
-				]), createBaseVNode("p", _hoisted_10$a, [_cache[22] || (_cache[22] = createTextVNode(
+				]), createBaseVNode("p", _hoisted_10$b, [_cache[22] || (_cache[22] = createTextVNode(
 					" 目前已选: ",
 					-1
 					/* CACHED */
@@ -147017,15 +147219,15 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_6$e = { class: "acu-agent-advanced__grid" };
     const _hoisted_7$c = { class: "acu-agent-advanced__section" };
     const _hoisted_8$c = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_9$9 = { class: "acu-agent-advanced__grid" };
-    const _hoisted_10$9 = { class: "acu-agent-advanced__section" };
-    const _hoisted_11$9 = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_12$9 = { class: "acu-agent-advanced__grid" };
-    const _hoisted_13$7 = { class: "acu-agent-advanced__section" };
-    const _hoisted_14$7 = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_15$7 = { class: "acu-agent-advanced__prompt-scope" };
-    const _hoisted_16$7 = { class: "acu-agent-advanced__prompt-actions" };
-    const _hoisted_17$6 = { class: "acu-agent-advanced__prompt-head" };
+    const _hoisted_9$a = { class: "acu-agent-advanced__grid" };
+    const _hoisted_10$a = { class: "acu-agent-advanced__section" };
+    const _hoisted_11$a = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_12$a = { class: "acu-agent-advanced__grid" };
+    const _hoisted_13$8 = { class: "acu-agent-advanced__section" };
+    const _hoisted_14$8 = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_15$8 = { class: "acu-agent-advanced__prompt-scope" };
+    const _hoisted_16$8 = { class: "acu-agent-advanced__prompt-actions" };
+    const _hoisted_17$7 = { class: "acu-agent-advanced__prompt-head" };
     const _hoisted_18$6 = { class: "acu-agent-advanced__prompt-head" };
     function _sfc_render$p(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
@@ -147129,7 +147331,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				toDisplayString($setup.plotCopy.agentControl.decisionSettings.description),
 				1
 				/* TEXT */
-			)])]), createBaseVNode("div", _hoisted_9$9, [createVNode($setup["AcuFormRow"], {
+			)])]), createBaseVNode("div", _hoisted_9$a, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.decisionSettings.concurrency.label,
 				hint: $setup.plotCopy.agentControl.decisionSettings.concurrency.hint
 			}, {
@@ -147144,7 +147346,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value", "disabled"])]),
 				_: 1
 			}, 8, ["label", "hint"])])]),
-			createBaseVNode("section", _hoisted_10$9, [createBaseVNode("header", _hoisted_11$9, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_10$a, [createBaseVNode("header", _hoisted_11$a, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.skillifySettings.title),
@@ -147156,7 +147358,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				toDisplayString($setup.plotCopy.agentControl.skillifySettings.description),
 				1
 				/* TEXT */
-			)])]), createBaseVNode("div", _hoisted_12$9, [createVNode($setup["AcuFormRow"], {
+			)])]), createBaseVNode("div", _hoisted_12$a, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.skillifySettings.maxConcurrency.label,
 				hint: $setup.plotCopy.agentControl.skillifySettings.maxConcurrency.hint
 			}, {
@@ -147171,8 +147373,8 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value", "disabled"])]),
 				_: 1
 			}, 8, ["label", "hint"])])]),
-			createBaseVNode("section", _hoisted_13$7, [
-				createBaseVNode("header", _hoisted_14$7, [createBaseVNode("div", null, [
+			createBaseVNode("section", _hoisted_13$8, [
+				createBaseVNode("header", _hoisted_14$8, [createBaseVNode("div", null, [
 					createBaseVNode(
 						"h4",
 						null,
@@ -147189,12 +147391,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					),
 					createBaseVNode(
 						"p",
-						_hoisted_15$7,
+						_hoisted_15$8,
 						toDisplayString($setup.plotCopy.agentControl.prompts.scopeHint),
 						1
 						/* TEXT */
 					)
-				]), createBaseVNode("div", _hoisted_16$7, [createVNode($setup["AcuButton"], {
+				]), createBaseVNode("div", _hoisted_16$8, [createVNode($setup["AcuButton"], {
 					size: "sm",
 					disabled: !$setup.canSavePrompts,
 					onClick: $setup.savePromptsToCurrentWorldbook
@@ -147267,7 +147469,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					Fragment,
 					{ key: 1 },
 					[
-						createBaseVNode("div", _hoisted_17$6, [createBaseVNode(
+						createBaseVNode("div", _hoisted_17$7, [createBaseVNode(
 							"h5",
 							null,
 							toDisplayString($setup.plotCopy.agentControl.prompts.decisionTitle),
@@ -148425,8 +148627,12 @@ Expected function or array of functions, received type ${typeof value}.`
             __expose();
             const props = __props;
             const feedElement = ref(null);
+            /** 用户手动展开/收起的覆盖表；未覆盖时按条目类型取默认展开态。 */
+            const expandedOverrides = ref({});
             const KIND_LABELS = {
                 run_started: '开始',
+                run_resumed: '恢复',
+                thought: '思考',
                 main_action: '主 Agent',
                 protocol_retry: '重试',
                 delegation: '子代理',
@@ -148439,7 +148645,23 @@ Expected function or array of functions, received type ${typeof value}.`
             function kindLabel(entry) {
                 if (entry.kind === 'delegation' && entry.agentName)
                     return entry.agentName;
+                if (entry.kind === 'outline_op' && entry.agentName)
+                    return entry.agentName;
                 return KIND_LABELS[entry.kind];
+            }
+            /** 失败与终态条目默认展开（用户需要立刻看到原因/结果），过程性条目默认折叠。 */
+            function defaultExpanded(entry) {
+                if (entry.status === 'failed')
+                    return true;
+                return entry.kind === 'finalize' || entry.kind === 'run_completed' || entry.kind === 'run_failed' || entry.kind === 'block';
+            }
+            function isExpanded(entry) {
+                return expandedOverrides.value[entry.id] ?? defaultExpanded(entry);
+            }
+            function toggle(entry) {
+                if (!entry.detail)
+                    return;
+                expandedOverrides.value = { ...expandedOverrides.value, [entry.id]: !isExpanded(entry) };
             }
             function formatTime(at) {
                 return new Date(at).toLocaleTimeString();
@@ -148450,14 +148672,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (element)
                     element.scrollTop = element.scrollHeight;
             });
-            const __returned__ = { props, feedElement, KIND_LABELS, kindLabel, formatTime };
+            const __returned__ = { props, feedElement, expandedOverrides, KIND_LABELS, kindLabel, defaultExpanded, isExpanded, toggle, formatTime };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-session-feed[data-v-63de2dc9] { display: grid; gap: 8px; max-height: 420px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed__empty[data-v-63de2dc9] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__entry[data-v-63de2dc9] { padding: 8px 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); background: var(--acu-bg-2); animation: acu-v2-session-feed-in-63de2dc9 0.18s ease-out;\n}\n.acu-v2-session-feed__entry--run_started[data-v-63de2dc9] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 70%, transparent);\n}\n.acu-v2-session-feed__entry--main_action[data-v-63de2dc9] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-session-feed__entry--delegation[data-v-63de2dc9] { margin-left: 18px; border-left: 3px solid color-mix(in srgb, var(--acu-text-3) 40%, transparent);\n}\n.acu-v2-session-feed__entry--outline_op[data-v-63de2dc9] { margin-left: 18px; border-left: 3px solid color-mix(in srgb, #b98add 65%, transparent);\n}\n.acu-v2-session-feed__entry--protocol_retry[data-v-63de2dc9] { margin-left: 18px;\n}\n.acu-v2-session-feed__entry--finalize[data-v-63de2dc9] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 8%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__entry--run_completed[data-v-63de2dc9] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent);\n}\n.acu-v2-session-feed__entry--failed[data-v-63de2dc9] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__head[data-v-63de2dc9] { display: flex; align-items: baseline; gap: 8px;\n}\n.acu-v2-session-feed__badge[data-v-63de2dc9] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-63de2dc9] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-session-feed__time[data-v-63de2dc9] { margin-left: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__detail[data-v-63de2dc9] { margin: 6px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-63de2dc9] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-63de2dc9] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-63de2dc9 1.1s ease-in-out infinite;\n}\n@keyframes acu-v2-session-feed-in-63de2dc9 {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-63de2dc9 {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\r\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-63de2dc9");
-    var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_63de2dc9_lang = null;
+    injectSfcStyle("\n.acu-v2-session-feed[data-v-bd8acd2d] { display: grid; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed__empty[data-v-bd8acd2d] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-bd8acd2d] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-bd8acd2d]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-bd8acd2d] { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-bd8acd2d] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-bd8acd2d] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-bd8acd2d] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-bd8acd2d] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\r\n\r\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-bd8acd2d] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-bd8acd2d 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-bd8acd2d], .acu-v2-session-feed__card--outline_op[data-v-bd8acd2d], .acu-v2-session-feed__card--protocol_retry[data-v-bd8acd2d] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-bd8acd2d], .acu-v2-session-feed__card--run_completed[data-v-bd8acd2d] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-bd8acd2d] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-bd8acd2d] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-session-feed__card-head[data-v-bd8acd2d] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-bd8acd2d] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-bd8acd2d] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-bd8acd2d] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-bd8acd2d] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-bd8acd2d] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-bd8acd2d 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-bd8acd2d] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-bd8acd2d] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-bd8acd2d] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-bd8acd2d] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-bd8acd2d] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-bd8acd2d] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-bd8acd2d] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-bd8acd2d] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-bd8acd2d] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-bd8acd2d 1.1s ease-in-out infinite;\n}\n@keyframes acu-v2-session-feed-in-bd8acd2d {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-bd8acd2d {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-bd8acd2d {\nto { transform: rotate(360deg);\n}\n}\r\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-bd8acd2d");
+    var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_bd8acd2d_lang = null;
 
     const _hoisted_1$m = {
 	ref: "feedElement",
@@ -148467,15 +148689,33 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-session-feed__empty"
     };
-    const _hoisted_3$h = { class: "acu-v2-session-feed__head" };
-    const _hoisted_4$e = { class: "acu-v2-session-feed__badge" };
-    const _hoisted_5$d = { class: "acu-v2-session-feed__title" };
-    const _hoisted_6$c = { class: "acu-v2-session-feed__time" };
-    const _hoisted_7$a = {
+    const _hoisted_3$h = {
 	key: 0,
+	class: "acu-v2-session-feed__run-divider"
+    };
+    const _hoisted_4$e = { class: "acu-v2-session-feed__run-divider-badge" };
+    const _hoisted_5$d = { class: "acu-v2-session-feed__run-divider-title" };
+    const _hoisted_6$c = { class: "acu-v2-session-feed__time" };
+    const _hoisted_7$a = { class: "acu-v2-session-feed__thought" };
+    const _hoisted_8$a = { class: "acu-v2-session-feed__thought-label" };
+    const _hoisted_9$9 = {
+	key: 0,
+	class: "acu-v2-session-feed__thought-text"
+    };
+    const _hoisted_10$9 = ["onClick"];
+    const _hoisted_11$9 = {
+	key: 0,
+	class: "acu-v2-session-feed__spinner"
+    };
+    const _hoisted_12$9 = { class: "acu-v2-session-feed__badge" };
+    const _hoisted_13$7 = { class: "acu-v2-session-feed__title" };
+    const _hoisted_14$7 = { class: "acu-v2-session-feed__time" };
+    const _hoisted_15$7 = ["onClick"];
+    const _hoisted_16$7 = {
+	key: 1,
 	class: "acu-v2-session-feed__detail"
     };
-    const _hoisted_8$a = {
+    const _hoisted_17$6 = {
 	key: 1,
 	class: "acu-v2-session-feed__running"
     };
@@ -148490,16 +148730,13 @@ Expected function or array of functions, received type ${typeof value}.`
 				null,
 				renderList($props.entries, (entry) => {
 					return openBlock(), createElementBlock(
-						"div",
-						{
-							key: entry.id,
-							class: normalizeClass(["acu-v2-session-feed__entry", [`acu-v2-session-feed__entry--${entry.kind}`, { "acu-v2-session-feed__entry--failed": !entry.ok }]])
-						},
-						[createBaseVNode("div", _hoisted_3$h, [
+						Fragment,
+						{ key: entry.id },
+						[createCommentVNode(" 运行分隔条：一次运行（或恢复）的起点 "), entry.kind === "run_started" || entry.kind === "run_resumed" ? (openBlock(), createElementBlock("div", _hoisted_3$h, [
 							createBaseVNode(
 								"span",
 								_hoisted_4$e,
-								toDisplayString($setup.kindLabel(entry)),
+								toDisplayString(entry.kind === "run_resumed" ? "恢复运行" : "开始运行"),
 								1
 								/* TEXT */
 							),
@@ -148517,21 +148754,114 @@ Expected function or array of functions, received type ${typeof value}.`
 								1
 								/* TEXT */
 							)
-						]), entry.detail ? (openBlock(), createElementBlock(
-							"p",
-							_hoisted_7$a,
-							toDisplayString(entry.detail),
-							1
-							/* TEXT */
-						)) : createCommentVNode("v-if", true)],
-						2
-						/* CLASS */
+						])) : entry.kind === "thought" ? (openBlock(), createElementBlock(
+							Fragment,
+							{ key: 1 },
+							[createCommentVNode(" 思考条目：弱化渲染，像 coding agent 的推理气泡 "), createBaseVNode("div", _hoisted_7$a, [createBaseVNode(
+								"span",
+								_hoisted_8$a,
+								toDisplayString(entry.title),
+								1
+								/* TEXT */
+							), entry.detail ? (openBlock(), createElementBlock(
+								"p",
+								_hoisted_9$9,
+								toDisplayString(entry.detail),
+								1
+								/* TEXT */
+							)) : createCommentVNode("v-if", true)])],
+							2112
+							/* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */
+						)) : (openBlock(), createElementBlock(
+							Fragment,
+							{ key: 2 },
+							[createCommentVNode(" 工具调用卡片：派工 / 大纲 / 重试 / 交付 / 终态 "), createBaseVNode(
+								"div",
+								{ class: normalizeClass(["acu-v2-session-feed__card", [`acu-v2-session-feed__card--${entry.kind}`, `acu-v2-session-feed__card--${entry.status}`]]) },
+								[
+									createBaseVNode("button", {
+										type: "button",
+										class: "acu-v2-session-feed__card-head",
+										onClick: ($event) => $setup.toggle(entry)
+									}, [
+										createBaseVNode(
+											"span",
+											{ class: normalizeClass(["acu-v2-session-feed__status", `acu-v2-session-feed__status--${entry.status}`]) },
+											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_11$9)) : entry.status === "failed" ? (openBlock(), createElementBlock(
+												Fragment,
+												{ key: 1 },
+												[createTextVNode("✕")],
+												64
+												/* STABLE_FRAGMENT */
+											)) : (openBlock(), createElementBlock(
+												Fragment,
+												{ key: 2 },
+												[createTextVNode("✓")],
+												64
+												/* STABLE_FRAGMENT */
+											))],
+											2
+											/* CLASS */
+										),
+										createBaseVNode(
+											"span",
+											_hoisted_12$9,
+											toDisplayString($setup.kindLabel(entry)),
+											1
+											/* TEXT */
+										),
+										createBaseVNode(
+											"span",
+											_hoisted_13$7,
+											toDisplayString(entry.title),
+											1
+											/* TEXT */
+										),
+										createBaseVNode(
+											"span",
+											_hoisted_14$7,
+											toDisplayString($setup.formatTime(entry.at)),
+											1
+											/* TEXT */
+										),
+										entry.detail ? (openBlock(), createElementBlock(
+											"span",
+											{
+												key: 0,
+												class: normalizeClass(["acu-v2-session-feed__chevron", { "acu-v2-session-feed__chevron--open": $setup.isExpanded(entry) }])
+											},
+											"▾",
+											2
+											/* CLASS */
+										)) : createCommentVNode("v-if", true)
+									], 8, _hoisted_10$9),
+									entry.detail && !$setup.isExpanded(entry) ? (openBlock(), createElementBlock("p", {
+										key: 0,
+										class: "acu-v2-session-feed__preview",
+										onClick: ($event) => $setup.toggle(entry)
+									}, toDisplayString(entry.detail), 9, _hoisted_15$7)) : createCommentVNode("v-if", true),
+									entry.detail && $setup.isExpanded(entry) ? (openBlock(), createElementBlock(
+										"p",
+										_hoisted_16$7,
+										toDisplayString(entry.detail),
+										1
+										/* TEXT */
+									)) : createCommentVNode("v-if", true)
+								],
+								2
+								/* CLASS */
+							)],
+							2112
+							/* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */
+						))],
+						64
+						/* STABLE_FRAGMENT */
 					);
 				}),
 				128
 				/* KEYED_FRAGMENT */
 			)),
-			$props.running ? (openBlock(), createElementBlock("div", _hoisted_8$a, [..._cache[0] || (_cache[0] = [createBaseVNode(
+			$props.running ? (openBlock(), createElementBlock("div", _hoisted_17$6, [..._cache[0] || (_cache[0] = [createBaseVNode(
 				"span",
 				{ class: "acu-v2-session-feed__pulse" },
 				null,
@@ -148547,7 +148877,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-63de2dc9"]]);
+    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-bd8acd2d"]]);
 
     function errorMessage_ACU(error) {
         if (error instanceof ContinuationValidationError_ACU)
