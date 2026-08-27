@@ -5,7 +5,7 @@ import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../ru
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { validateMigrationProvenanceV1_ACU } from '../../shared/canonical-checkpoint-validator';
 import { resolveHistoricalSheetKeyMigrations_ACU } from '../../shared/sql-read-resolver';
-import { logDebug_ACU } from '../../shared/utils';
+import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { hasV2TableHistoryEvidence_ACU, isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 import type { TableCheckpointScheduleSummaryV2_ACU, TableMigrationAuditBackupV1_ACU, TableMigrationProvenanceV1_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { commitMixedStorageDecision_ACU } from './mixed-storage-commit';
@@ -41,6 +41,38 @@ function deepClone_ACU<T>(value: T): T {
 function sheetKeysOfData_ACU(data: Record<string, any> | null | undefined): string[] {
   if (!data || typeof data !== 'object') return [];
   return Object.keys(data).filter(key => key.startsWith('sheet_') && Boolean((data as any)[key]));
+}
+
+function countRealDataRows_ACU(data: Record<string, any> | null | undefined): number {
+  let rows = 0;
+  for (const sheetKey of sheetKeysOfData_ACU(data)) {
+    const content = (data as any)?.[sheetKey]?.content;
+    if (Array.isArray(content) && content.length > 1) rows += content.length - 1;
+  }
+  return rows;
+}
+
+/**
+ * 迁移破坏保险闸的旧源扫描：检查聊天中将被 cleanupLegacyFieldsAfterV2Write_ACU
+ * 删除的旧存储源（隔离槽 V1 数据 + 顶层旧字段）里是否存在任何真实数据行。
+ * 扫描范围与 cleanup 的删除范围使用同一隔离匹配语义，保护的正是将被删除的内容。
+ */
+function legacySourcesContainRealRows_ACU(chat: any[], isolationKey: string, isolationConfig: IsolationConfig_ACU): boolean {
+  for (const message of chat) {
+    if (!message || message.is_user) continue;
+    const tagData = readIsolatedTagData_ACU(message, isolationKey);
+    if (tagData && !isV2TagData_ACU(tagData)) {
+      if (countRealDataRows_ACU(tagData.independentData) > 0) return true;
+      const incrementalData = (tagData as any).incrementalData;
+      if (incrementalData && typeof incrementalData === 'object' && Object.keys(incrementalData).length > 0) return true;
+    }
+    if (isLegacyMatchForIsolation_ACU(message, isolationConfig)) {
+      if (countRealDataRows_ACU(readLegacyIndependentData_ACU(message)) > 0) return true;
+      if (countRealDataRows_ACU(readLegacyStandardData_ACU(message) as any) > 0) return true;
+      if (countRealDataRows_ACU(readLegacySummaryData_ACU(message) as any) > 0) return true;
+    }
+  }
+  return false;
 }
 
 function countAiFloor_ACU(chat: any[], messageIndex: number): number {
@@ -468,6 +500,18 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
   const sheetKeys = sheetKeysOfData_ACU(options.data);
   if (sheetKeys.length === 0) {
     return { migrated: false, error: 'legacy migration requires non-empty merged table data' };
+  }
+
+  // ── 破坏性迁移保险闸 ──
+  // 迁移成功后会删除各楼层旧存储字段原件（cleanupLegacyFieldsAfterV2Write_ACU），而
+  // migrationAuditBackup 只备份合并结果。若合并结果一行数据都没有、但旧存储源中存在
+  // 真实行，说明合并读取存在丢行（如模板/指导表不匹配），此时执行迁移会造成不可逆
+  // 数据丢失——拒绝迁移，读路径自动走直读降级，数据保持原样可用。
+  if (countRealDataRows_ACU(options.data) === 0
+    && legacySourcesContainRealRows_ACU(chat, options.isolationKey, options.isolationConfig)) {
+    const error = '合并结果不含任何数据行，但聊天旧存储中存在真实行数据；为防止破坏性迁移丢失原始数据，已拒绝迁移。';
+    logWarn_ACU(`[V2 Migration] ${error}`);
+    return { migrated: false, error };
   }
 
   const strategy = resolveTableStorageStrategy_ACU(chat, options.isolationKey, options.isolationConfig);
