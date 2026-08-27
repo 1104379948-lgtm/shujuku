@@ -25,3 +25,10 @@ SillyTavern-1.13.1/
 *.log
 .acu-*.txt
 tsc.log
+.tmp/
+.tmp-*
+*.tsbuildinfo
+tsc-out*.txt
+vitest-*.txt
+temp_*.txt
+backups/pr8-review/
