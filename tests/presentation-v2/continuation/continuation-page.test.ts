@@ -256,7 +256,7 @@ describe('ContinuationPage', () => {
       expect(el.textContent).toContain('续写设置');
       expect(el.textContent).toContain('伪 Role 提示词');
       expect(el.textContent).toContain('正文窗口楼数');
-      expect(el.textContent).toContain('Agent 会话 token 预算');
+      expect(el.textContent).toContain('会话自动总结阈值');
       expect(el.textContent).toContain('$STORY_TEXT');
       // 保存按钮已移除：修改任意设置项后由防抖自动保存。
       expect(buttonByText(el, '保存续写设置')).toBeUndefined();

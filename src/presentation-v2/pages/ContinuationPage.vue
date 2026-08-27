@@ -84,7 +84,7 @@
           <AcuFormRow label="正文窗口楼数（已结算部分，0 为只给未结算）">
             <AcuInput v-model="settingsDraft.storyWindowFloors" type="number" :min="0" />
           </AcuFormRow>
-            <AcuFormRow label="Agent 会话 token 预算（0 为不限制，超限在下一轮开始前浓缩）">
+          <AcuFormRow label="会话自动总结阈值（token）：超过后在下一轮开始前把最早轮次浓缩成交接报告，0 为不总结">
             <AcuInput v-model="settingsDraft.agentHistoryTokenBudget" type="number" :min="0" />
           </AcuFormRow>
           <AcuFormRow label="循环标签">
@@ -346,7 +346,7 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     totalDurationMinutes: requiredInteger(source.totalDurationMinutes, '总时长'),
     contextTurnCount: requiredInteger(source.contextTurnCount, '最近剧情轮数'),
     storyWindowFloors: requiredInteger(source.storyWindowFloors, '正文窗口楼数'),
-    agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, 'Agent 会话 token 预算'),
+    agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, '会话自动总结阈值'),
   };
   if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.contextTurnCount < 0 || normalized.storyWindowFloors < 0 || normalized.agentHistoryTokenBudget < 0) {
     throw new Error('续写设置中的数值不能低于允许范围');
@@ -493,5 +493,9 @@ watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevisio
 .acu-v2-continuation-page__settings-grid select { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1); }
 .acu-v2-continuation-page__toggles { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0; }
 @media (max-width: 860px) { .acu-v2-continuation-page { padding: 14px; } }
-@media (max-width: 640px) { .acu-v2-continuation-page__settings-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .acu-v2-continuation-page { padding: 10px; gap: 12px; }
+  .acu-v2-continuation-page__settings-grid { grid-template-columns: 1fr; }
+  .acu-v2-continuation-page__actions > * { flex: 1 1 auto; }
+}
 </style>

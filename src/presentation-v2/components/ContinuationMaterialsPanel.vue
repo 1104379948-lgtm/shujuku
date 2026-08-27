@@ -203,4 +203,10 @@ defineExpose({ reload });
 /* 带 max-height 的滚动列表不用 grid：行会被压缩到最小贡献导致条目压扁（同会话流的修复）。 */
 .acu-v2-continuation-materials__timeline { max-height: 320px; overflow-y: auto; }
 .acu-v2-continuation-materials__timeline > li { flex: 0 0 auto; }
+
+/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */
+@media (max-width: 640px) {
+  .acu-v2-continuation-materials__tab-actions { margin-left: 0; width: 100%; justify-content: flex-end; }
+  .acu-v2-continuation-materials__confirm-actions { display: flex; margin: 8px 0 0; }
+}
 </style>

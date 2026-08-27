@@ -159,6 +159,17 @@ watch(() => props.entries.length, async () => {
 
 .acu-v2-session-feed__running { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
 .acu-v2-session-feed__pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse 1.1s ease-in-out infinite; }
+/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，
+   横向空间留给正文；用户气泡放宽到近整行。 */
+@media (max-width: 640px) {
+  .acu-v2-session-feed { max-height: 62vh; padding: 8px; }
+  .acu-v2-session-feed__card--delegation, .acu-v2-session-feed__card--outline_op, .acu-v2-session-feed__card--protocol_retry { margin-left: 8px; }
+  .acu-v2-session-feed__card-head { padding: 7px 8px; gap: 6px; }
+  .acu-v2-session-feed__preview { padding: 0 8px 7px 12px; }
+  .acu-v2-session-feed__detail { padding: 0 8px 8px 12px; }
+  .acu-v2-session-feed__user-bubble { max-width: 94%; }
+}
+
 @keyframes acu-v2-session-feed-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @keyframes acu-v2-session-feed-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 @keyframes acu-v2-session-feed-spin { to { transform: rotate(360deg); } }

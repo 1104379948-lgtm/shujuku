@@ -119,4 +119,13 @@ function onKeydown(event: KeyboardEvent): void {
 .acu-v2-continuation-chat__input:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent); }
 .acu-v2-continuation-chat__composer-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .acu-v2-continuation-chat__hint { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
+
+/* 手机窄屏：快捷键提示没有意义直接隐藏；按钮均分整行方便点按；
+   输入框字号提到 16px，避免 iOS Safari 聚焦时自动放大页面。 */
+@media (max-width: 640px) {
+  .acu-v2-continuation-chat__hint { display: none; }
+  .acu-v2-continuation-chat__composer-actions > * { flex: 1 1 auto; }
+  .acu-v2-continuation-chat__input { font-size: 16px; min-height: 56px; }
+  .acu-v2-continuation-chat__composer { padding: 8px; }
+}
 </style>
