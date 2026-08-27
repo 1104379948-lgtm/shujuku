@@ -4,6 +4,7 @@ import { buildDefaultContinuationSettings_ACU } from '../../service/continuation
 import { ContinuationValidationError_ACU, type ContinuationEnvelope_ACU, type ContinuationSettings_ACU, type ContinuationTask_ACU, type StageOutline_ACU } from '../../service/continuation/model';
 import type { ContinuationOrchestratorResult_ACU } from '../../service/continuation/continuation-orchestrator';
 import type { ContinuationPreparedTurnInstruction_ACU } from '../../service/continuation/stage-execution-engine';
+import { restoreContinuationPromptDefault_ACU, type ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template';
 import { useToastStore } from '../stores/toast-store';
 
 type ContinuationActionResult_ACU = ContinuationOrchestratorResult_ACU & { preparedTurn?: ContinuationPreparedTurnInstruction_ACU };
@@ -98,6 +99,24 @@ export function useContinuationRuntime() {
     if (created && canContinue.value) await continueTask();
   }
 
+  /**
+   * 在 Agent 会话里以用户身份发言。没有任务时等价于创建任务，运行中会先打断当前循环。
+   * @param text 用户输入
+   * @returns 是否成功发出
+   */
+  async function sendAgentMessage(text: string): Promise<boolean> {
+    if (!text.trim()) return false;
+    let shouldContinue = false;
+    const sent = await run_ACU(async () => {
+      const result = await runtime.orchestrator.sendAgentMessage({ text });
+      shouldContinue = result.shouldContinue;
+      return result;
+    });
+    // 打断后的续跑必须是独立一次租约操作：run_ACU 内嵌套会撞上「操作正在执行」。
+    if (sent && shouldContinue) await continueTask();
+    return sent;
+  }
+
   async function continueTask(): Promise<void> {
     await run_ACU(() => runtime.orchestrator.continueTask());
   }
@@ -132,7 +151,55 @@ export function useContinuationRuntime() {
     return run_ACU(() => runtime.orchestrator.replaceSettings({ settings }));
   }
 
+  /**
+   * 保存用户手动编辑的当前阶段大纲。
+   * @param outline 编辑后的完整大纲
+   * @returns 是否保存成功
+   */
+  /**
+   * 把某一类提示词恢复成内置默认值。
+   *
+   * 默认值属于领域知识，页面只负责把结果放回草稿：恢复动作本身不落盘，
+   * 由设置面板既有的保存链路决定何时写入，避免绕过设置校验。
+   * @param settings 当前设置草稿
+   * @param kind 提示词种类
+   * @returns 恢复默认值后的设置草稿
+   */
+  function restorePromptDefault(settings: ContinuationSettings_ACU, kind: ContinuationPromptKind_ACU): ContinuationSettings_ACU {
+    return restoreContinuationPromptDefault_ACU(settings, kind);
+  }
+
+  async function saveActiveOutline(outline: StageOutline_ACU): Promise<boolean> {
+    return run_ACU(() => runtime.orchestrator.replaceActiveOutline({ outline }));
+  }
+
+  /**
+   * 一键清空：丢弃任务、Agent 会话记录与本地资料快照，正文楼层不动。
+   * @returns 是否清空成功
+   */
+  async function clearData(): Promise<boolean> {
+    if (busy.value) return false;
+    busy.value = true;
+    try {
+      const result = await runtime.orchestrator.clearContinuationData();
+      envelope.value = result.envelope;
+      refresh();
+      toast.success('已清空续写任务、会话记录与本地资料，正文未改动。');
+      return true;
+    } catch (error) {
+      toast.error(errorMessage_ACU(error), { muteable: false });
+      refresh();
+      return false;
+    } finally {
+      busy.value = false;
+    }
+  }
+
   return {
+    clearData,
+    restorePromptDefault,
+    saveActiveOutline,
+    sendAgentMessage,
     activeStage,
     activeNode,
     activeRevision,

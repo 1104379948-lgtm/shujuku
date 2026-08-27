@@ -11,6 +11,14 @@
         <span class="acu-v2-session-feed__time">{{ formatTime(entry.at) }}</span>
       </div>
 
+      <!-- 用户消息：右对齐气泡，和 coding agent 的对话界面一致 -->
+      <div v-else-if="entry.kind === 'user_message'" class="acu-v2-session-feed__user">
+        <div class="acu-v2-session-feed__user-bubble">
+          <p class="acu-v2-session-feed__user-text">{{ entry.detail || entry.title }}</p>
+          <span class="acu-v2-session-feed__time">{{ formatTime(entry.at) }}</span>
+        </div>
+      </div>
+
       <!-- 思考条目：弱化渲染，像 coding agent 的推理气泡 -->
       <div v-else-if="entry.kind === 'thought'" class="acu-v2-session-feed__thought">
         <span class="acu-v2-session-feed__thought-label">{{ entry.title }}</span>
@@ -46,7 +54,7 @@
 
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue';
-import type { AgentSessionEntry_ACU } from '../../service/continuation/agent/agent-session-log';
+import type { AgentSessionEntry_ACU } from '../../service/continuation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 
 const props = defineProps<{
   entries: AgentSessionEntry_ACU[];
@@ -60,6 +68,7 @@ const expandedOverrides = ref<Record<number, boolean>>({});
 const KIND_LABELS: Record<AgentSessionEntry_ACU['kind'], string> = {
   run_started: '开始',
   run_resumed: '恢复',
+  user_message: '你',
   thought: '思考',
   main_action: '主 Agent',
   protocol_retry: '重试',
@@ -112,6 +121,12 @@ watch(() => props.entries.length, async () => {
 .acu-v2-session-feed__run-divider::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent); }
 .acu-v2-session-feed__run-divider-badge { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px); }
 .acu-v2-session-feed__run-divider-title { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
+
+/* 用户消息气泡 */
+.acu-v2-session-feed__user { display: flex; justify-content: flex-end; padding: 4px 2px; }
+.acu-v2-session-feed__user-bubble { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent); }
+.acu-v2-session-feed__user-text { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word; }
+.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time { display: block; margin: 3px 0 0; text-align: right; }
 
 /* 思考条目 */
 .acu-v2-session-feed__thought { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); }

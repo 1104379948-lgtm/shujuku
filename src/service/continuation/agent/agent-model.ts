@@ -13,6 +13,68 @@ export const AGENT_MODULE_FIELD_ACU = '_qrf_continuation_agent';
 
 export const AGENT_MODULE_SCHEMA_VERSION_ACU = 1 as const;
 
+/** 主 Agent 自身会话记录挂在消息对象上的字段名。与资料快照同楼不同字段，互不干扰。 */
+export const AGENT_CONVERSATION_FIELD_ACU = '_qrf_continuation_agent_chat';
+
+export const AGENT_CONVERSATION_SCHEMA_VERSION_ACU = 1 as const;
+
+/**
+ * 会话消息种类。API 角色由种类推导，UI 展示样式也由种类决定：
+ * - user：人类在 Agent 会话里的输入（初始要求、中途插话、重规划说明）
+ * - agent：主 Agent 某次迭代的原始输出（含 thought 与动作 JSON）
+ * - tool：运行时回灌给主 Agent 的结果或拒绝原因
+ * - turn：新轮次开始通告（相当于人类下发新任务）
+ * - handoff：token 预算压缩时生成的交接报告
+ */
+export const AGENT_CONVERSATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'turn', 'handoff'] as const;
+export type AgentConversationMessageKind_ACU = typeof AGENT_CONVERSATION_MESSAGE_KINDS_ACU[number];
+
+/** 单条会话消息。digest 是短标签，供 UI 标题与交接报告使用，避免二次解析 text。 */
+export interface AgentConversationMessage_ACU {
+  id: number;
+  kind: AgentConversationMessageKind_ACU;
+  text: string;
+  digest: string;
+  /** 产生该消息时的大纲游标指纹（stageId#revision#turnId），用于按轮分组与压缩。 */
+  turnKey: string;
+  at: number;
+}
+
+/** 楼层锚定的会话快照。与资料快照同构：删楼/Swipe 即自动回退到更早的会话。 */
+export interface AgentConversationSnapshot_ACU {
+  schemaVersion: typeof AGENT_CONVERSATION_SCHEMA_VERSION_ACU;
+  nextId: number;
+  updatedAt: number;
+  messages: AgentConversationMessage_ACU[];
+}
+
+/** 追加一条会话消息的输入。id 与 at 由存储层分配。 */
+export interface AgentConversationAppend_ACU {
+  kind: AgentConversationMessageKind_ACU;
+  text: string;
+  digest?: string;
+  turnKey?: string;
+}
+
+/** 摘取小说正文时默认保留的已结算 AI 楼层数。未结算楼层始终全给，不受此值限制。 */
+export const AGENT_STORY_WINDOW_DEFAULT_ACU = 20;
+
+/**
+ * 主 Agent 会话历史的默认 token 预算。取 24000 是因为一轮规划的提示词骨架（子代理目录、
+ * 模块目录、表格目录、大纲窗口、正文窗口）已占用相当篇幅，会话历史再占这个量级时，
+ * 128k 级上下文仍有充足余量；超出后按整轮压缩为交接报告。
+ */
+export const AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU = 24000;
+
+/**
+ * 轮次进行中允许超出预算的倍数。
+ *
+ * 压缩只在轮次边界发生，因此一轮内到达阈值只登记不执行。但若同一轮反复失败重跑（游标不变、
+ * 每次重跑又追加迭代记录），历史会一直长下去；到这个倍数时改为立即压缩——此时的替代方案是
+ * 请求因超长而必然失败，用户除了一键清空别无出路，那比一次轮内压缩更糟。
+ */
+export const AGENT_HISTORY_EMERGENCY_FACTOR_ACU = 2;
+
 /** 热上下文里最多展示的活跃伏笔条数，超出部分如实标注不静默丢弃。 */
 export const AGENT_HOT_HOOK_LIMIT_ACU = 8;
 

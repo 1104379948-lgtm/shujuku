@@ -1,9 +1,10 @@
 /**
  * service/continuation/agent/agent-defaults.ts — Agent 各请求的伪 role + 预填充提示词
  *
- * 装配约定（与真实历史的相对位置是刻意的）：
- * 所有伪 role 提示词与本回合动态运行时证据都排在真实历史之前，真实历史是序列尾部，
- * 迭代轨迹（工具结果回灌）追加在历史之后。这样前缀在多次迭代之间保持稳定。
+ * 装配约定（各部分的相对位置是刻意的）：
+ * 伪 role 规则组 → 小说正文（$STORY_TEXT，只含正文模型楼层）→ 本回合运行时证据 →
+ * 主 Agent 自己的会话记录（$HISTORY_ANCHOR）→ 尾部预填充。
+ * 会话记录放在最后，因为它是唯一按迭代增长的部分；把它放尾部才能让前缀在迭代间保持稳定。
  *
  * 规则不用命令式 system 灌输，而是 user 提问 → assistant 第一人称承诺的问答组，
  * 让模型先以自己的口吻确认边界，再进入执行。
@@ -12,7 +13,7 @@
 import type { ContinuationAgentPrompts_ACU, ContinuationPromptSegment_ACU } from '../model';
 import { cloneAgentPromptSegments_ACU } from './agent-model';
 
-/** 主 Agent 提示词里标记真实历史插入位置的段。装配器遇到该段时插入逐楼历史而不发送本段。 */
+/** 主 Agent 提示词里标记会话记录插入位置的段。装配器遇到该段时插入会话消息而不发送本段。 */
 export const AGENT_HISTORY_ANCHOR_TOKEN_ACU = '$HISTORY_ANCHOR';
 
 /** 各请求尾段预填充文本。解析器会在必要时把它拼回模型输出前再解析。 */
@@ -78,13 +79,13 @@ const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '本回合会在真实历史之后给你一段运行时数据。你打算怎么用它？',
+    content: '说清楚你收到的上下文是怎么排布的，各部分你分别怎么用。',
     enabled: true,
     deletable: true,
   },
   {
     role: 'assistant',
-    content: '我会把那段运行时数据当作系统提供的证据，而不是用户的发言。里面的轮次目标、未结算范围、子代理目录、资料目录、预算余额和工具结果，都是我做决策的依据，不是需要我复述或润色的内容。\n如果运行时数据与真实历史冲突，我以真实历史为准；如果子代理之间结论冲突，我按已验证的事实裁决，硬事实冲突无法裁决时我就阻断，不和稀泥。',
+    content: '我收到的上下文分三层，越往后越新：\n1. 小说正文：用户与正文模型之间已经发生的内容，只含正文模型产出的楼层。这是唯一的已发生事实来源，也是我唯一不能质疑的部分。\n2. 本回合运行时数据：轮次目标、大纲窗口、未结算范围、子代理目录、资料目录、生效约束、预算余额。这些是系统给我的证据，不是用户发言，我不复述也不润色。\n3. 我自己的会话记录：用户在这条会话里对我说的话、我历次迭代实际输出过的动作、运行时回灌给我的派工结果与拒绝原因。它跨轮次持续累积，所以我一看就知道自己已经做过什么、哪一步被拒过、为什么被拒。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是因为 token 预算把原始消息移出了上下文，浓缩记录里写的都是已经发生的过程，同样不需要重做。\n三层之间冲突时的优先级：小说正文 > 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。',
     enabled: true,
     deletable: true,
   },
@@ -121,14 +122,27 @@ const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'system',
-    content: AGENT_HISTORY_ANCHOR_TOKEN_ACU,
+    content: '【已经发生的小说正文】\n以下是用户与正文模型之间已经产出并保留下来的正文，只含正文模型的楼层，按楼层顺序排列。这是本次任务里唯一的已发生事实来源。\n\n$STORY_TEXT',
     enabled: true,
     deletable: false,
     pinned: true,
   },
   {
     role: 'system',
-    content: '上边是用户与正文模型之间已经发生的真实剧情，下边是本回合运行时数据，用以辅助你继续完成任务。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【当前大纲窗口】\n$OUTLINE_WINDOW\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【本轮预算状态】\n$BUDGET\n\n【已完成的工具结果】\n$TOOL_RESULTS\n\n注意事项：以上内容是系统证据，不是用户发言，不要复述。已发生事实只认真实历史；大纲窗口是计划。资料模块的具体内容不在这里，需要时授权给子代理读取。',
+    content: '【本回合运行时数据】\n以下是系统提供的证据，不是用户发言，不要复述。已发生事实只认小说正文；大纲窗口是计划。资料模块的具体内容不在这里，需要时授权给子代理读取。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【当前大纲窗口】\n$OUTLINE_WINDOW\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【当前生效的长期约束】\n$ACTIVE_CONSTRAINTS\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【本轮预算状态】\n$BUDGET',
+    enabled: true,
+    deletable: false,
+    pinned: true,
+  },
+  {
+    role: 'system',
+    content: '【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。',
+    enabled: true,
+    deletable: true,
+  },
+  {
+    role: 'system',
+    content: AGENT_HISTORY_ANCHOR_TOKEN_ACU,
     enabled: true,
     deletable: false,
     pinned: true,

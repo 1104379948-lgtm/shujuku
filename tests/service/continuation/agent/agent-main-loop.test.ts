@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ContinuationAgentTurnPlanner_ACU, buildAgentRealHistory_ACU, renderAgentBudget_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
+import { ContinuationAgentTurnPlanner_ACU, renderAgentBudget_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
 import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
 import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
+import { appendAgentConversation_ACU, buildEmptyAgentConversation_ACU } from '../../../../src/service/continuation/agent/agent-conversation-store';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import { ContinuationValidationError_ACU, type ContinuationInternalAiRequestIdentity_ACU } from '../../../../src/service/continuation/model';
 import { readAgentSessionLog_ACU, resetAgentSessionLogForTests_ACU } from '../../../../src/service/continuation/agent/agent-session-log';
 import { readAgentRunState_ACU, resetAgentRunCacheForTests_ACU } from '../../../../src/service/continuation/agent/agent-run-cache';
-import type { AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
+import type { AgentConversationSnapshot_ACU, AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
 
 const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test' };
 
@@ -34,13 +35,30 @@ const preOutlineContext_ACU = () => ({
 const execution_ACU = () => ({
   envelope: {} as any,
   task: { taskId: 'task-1', originInstruction: '推进主角进入禁区' } as any,
-  stage: { stageNumber: 2, status: 'running' } as any,
+  stage: { stageId: 'stage-1', stageNumber: 2, status: 'running' } as any,
   revision: { outline: { title: '禁区试探', goal: '进入禁区', totalTurns: 6 } } as any,
   node: { id: 'node-1', title: '试探守门人', goal: '试探而不揭穿', turns: [{ id: 'turn-1', goal: '推门' }, { id: 'turn-2', goal: '试探' }] } as any,
   turn: { id: 'turn-2', goal: '试探' } as any,
   turnNumber: 2,
   nodeTurnNumber: 2,
 });
+
+/** 游标已经推进到下一轮：用来构造「上一轮已结束」的轮次边界。 */
+const nextTurnContext_ACU = () => {
+  const base = execution_ACU();
+  base.node.turns = [...base.node.turns, { id: 'turn-3', goal: '收网' }];
+  return { ...base, turn: { id: 'turn-3', goal: '收网' } as any, turnNumber: 3, nodeTurnNumber: 3 };
+};
+
+/**
+ * 构造一份超出预算的两轮会话：turn-1 是可丢弃的旧轮次，turn-2 是最后通告的轮次。
+ * 最近一轮永远完整保留，所以必须有两个轮次分组才谈得上压缩。
+ */
+const overBudgetConversation_ACU = (filler: string): AgentConversationSnapshot_ACU => appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+  { kind: 'turn', text: '开始新的一轮规划：第 1 阶段 · 第 1/6 轮', digest: '第 1 阶段 · 第 1/6 轮', turnKey: 'stage-1#0#turn-1' },
+  { kind: 'agent', text: filler, digest: '交付写作指导', turnKey: 'stage-1#0#turn-1' },
+  { kind: 'turn', text: '开始新的一轮规划：第 2 阶段 · 第 2/6 轮', digest: '第 2 阶段 · 第 2/6 轮', turnKey: 'stage-1#0#turn-2' },
+]);
 
 interface Harness_ACU {
   planner: ContinuationAgentTurnPlanner_ACU;
@@ -51,6 +69,9 @@ interface Harness_ACU {
   outlineCalls: string[];
   presetRoles: string[];
   setContext: (factory: () => any) => void;
+  /** 当前内存态的持久会话，用来断言迭代输出与工具结果是否被真的记进会话。 */
+  conversation: () => AgentConversationSnapshot_ACU;
+  conversationWrites: AgentConversationSnapshot_ACU[];
 }
 
 function harness_ACU(options: {
@@ -63,6 +84,8 @@ function harness_ACU(options: {
   applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU> | AgentOutlineOpResult_ACU;
   applyOutlineEdits?: (edits: any[]) => Promise<{ summary: string }> | { summary: string };
   withoutApplyOutline?: boolean;
+  conversation?: AgentConversationSnapshot_ACU;
+  historyTokenBudget?: number;
   apiPresetMode?: 'current' | 'fixed';
   agentApiPresets?: Partial<Record<'main' | 'outline' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer', { mode: 'inherit' | 'current' | 'fixed'; presetName: string }>>;
 }): Harness_ACU {
@@ -75,6 +98,8 @@ function harness_ACU(options: {
   const presetRoles: string[] = [];
   const chat = chat_ACU();
   let snapshot = options.snapshot ?? buildEmptyAgentModuleSnapshot_ACU();
+  let conversation = options.conversation ?? buildEmptyAgentConversation_ACU();
+  const conversationWrites: AgentConversationSnapshot_ACU[] = [];
   let contextFactory = options.context ?? execution_ACU;
 
   const subagentRuntime = new AgentSubagentRuntime_ACU({
@@ -89,6 +114,8 @@ function harness_ACU(options: {
     readChat: () => chat,
     readModuleSnapshot: () => snapshot,
     writeModuleSnapshot: async (_chat, index, next) => { written.push({ index, snapshot: next }); snapshot = next; },
+    readConversation: () => conversation,
+    writeConversation: async (_chat, _index, next) => { conversationWrites.push(next); conversation = next; },
     budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxExtraReads: 1, ...options.budget },
   });
 
@@ -96,6 +123,7 @@ function harness_ACU(options: {
   settings.internalAiRetryLimit = 1;
   settings.apiPresetMode = options.apiPresetMode ?? 'fixed';
   settings.fixedApiPresetName = 'p1';
+  if (options.historyTokenBudget !== undefined) settings.agentHistoryTokenBudget = options.historyTokenBudget;
   if (options.agentApiPresets) settings.agentApiPresets = { ...settings.agentApiPresets, ...options.agentApiPresets };
 
   const request: ContinuationAgentTurnPlanRequest_ACU = {
@@ -118,7 +146,18 @@ function harness_ACU(options: {
         },
   };
 
-  return { planner, request, mainCalls, subCalls, written, outlineCalls, presetRoles, setContext: factory => { contextFactory = factory; } };
+  return {
+    planner,
+    request,
+    mainCalls,
+    subCalls,
+    written,
+    outlineCalls,
+    presetRoles,
+    setContext: factory => { contextFactory = factory; },
+    conversation: () => conversation,
+    conversationWrites,
+  };
 }
 
 function lastMessage_ACU(messages: Array<{ role: string; content: string }>): { role: string; content: string } {
@@ -129,13 +168,136 @@ function findIndex_ACU(messages: Array<{ role: string; content: string }>, needl
   return messages.findIndex(message => message.content.includes(needle));
 }
 
-describe('真实历史投影', () => {
-  it('逐楼带上楼层号，用户楼与 AI 楼角色不同，空楼被跳过', () => {
-    const history = buildAgentRealHistory_ACU([{ mes: '你好', is_user: true }, { mes: '   ' }, { mes: '回应' }, null]);
-    expect(history).toEqual([
-      { role: 'user', content: '【楼层 0】\n你好' },
-      { role: 'assistant', content: '【楼层 2】\n回应' },
+describe('小说正文摘取', () => {
+  it('$STORY_TEXT 只摘取 AI 楼层，用户楼层不进上下文', async () => {
+    const h = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"本轮指导"}'] });
+    await h.planner.plan(h.request);
+
+    const joined = h.mainCalls[0].map(message => message.content).join('\n');
+    expect(joined).toContain('主角推开铁门。');
+    expect(joined).toContain('守门人挡在门后，右手藏着黑色晶屑。');
+    // 用户在酒馆里输入的楼层不是小说正文，不该被当成上下文喂回去。
+    expect(joined).not.toContain('我要进禁区');
+    expect(joined).not.toContain('【楼层 2】');
+  });
+});
+
+describe('主 Agent 会话记录', () => {
+  it('换轮通告、迭代原始输出与工具结果按真实 role 累积落库，下一次迭代读得到', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"delegate","thought":"先要主线","delegations":[{"agentName":"mainline-planner","prompt":"主线","reads":["$OUTLINE_WINDOW"]}]}',
+        '{"action":"finalize","instruction":"按主线要点写"}',
+      ],
+      subReplies: ['{"summary":"主线要点","recommendation":"先试探"}'],
+    });
+    await h.planner.plan(h.request);
+
+    const kinds = h.conversation().messages.map(message => message.kind);
+    expect(kinds).toEqual(['turn', 'agent', 'tool', 'agent']);
+    const [announcement, firstAction, toolResult] = h.conversation().messages;
+    expect(announcement.text).toContain('开始新的一轮规划：第 2 阶段 · 第 2/6 轮');
+    expect(firstAction.digest).toBe('派工 1 项');
+    expect(firstAction.text).toContain('mainline-planner');
+    expect(toolResult.text).toContain('主线要点');
+    // 每条消息都带上本轮游标，压缩时才能按轮次成组丢弃。
+    expect(new Set(h.conversation().messages.map(message => message.turnKey))).toEqual(new Set([h.conversation().messages[0].turnKey]));
+    expect(h.conversation().messages[0].turnKey).toBe('stage-1#0#turn-2');
+    expect(h.conversationWrites.length).toBeGreaterThan(0);
+
+    // 第二次迭代看到的是自己上一次的原始输出（assistant）与回灌的工具结果（user）。
+    const second = h.mainCalls[1];
+    const actionIndex = findIndex_ACU(second, '"agentName":"mainline-planner"');
+    expect(second[actionIndex].role).toBe('assistant');
+    const toolIndex = findIndex_ACU(second, '【工具结果】');
+    expect(second[toolIndex].role).toBe('user');
+    expect(toolIndex).toBeGreaterThan(actionIndex);
+  });
+
+  it('已有会话在同一轮内恢复时不重复通告，用户消息排在换轮通告之前', async () => {
+    const conversation = appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+      { kind: 'user', text: '这一轮别急着揭穿守门人', digest: '你的消息', turnKey: '' },
+      { kind: 'turn', text: '开始新的一轮规划：第 2 阶段 · 第 2/6 轮', digest: '第 2 阶段 · 第 2/6 轮', turnKey: 'stage-1#0#turn-2' },
     ]);
+    const h = harness_ACU({ conversation, mainReplies: ['{"action":"finalize","instruction":"依旧含糊其辞"}'] });
+    await h.planner.plan(h.request);
+
+    expect(h.conversation().messages.filter(message => message.kind === 'turn')).toHaveLength(1);
+    const first = h.mainCalls[0];
+    const userIndex = findIndex_ACU(first, '这一轮别急着揭穿守门人');
+    expect(first[userIndex].role).toBe('user');
+    expect(first[userIndex].content.startsWith('【用户】')).toBe(true);
+    // 会话记录整体在运行时证据之后（锚点在尾部），用户消息在其内部按发生顺序排在换轮通告之前。
+    expect(userIndex).toBeGreaterThan(findIndex_ACU(first, '本轮预算状态'));
+    expect(userIndex).toBeLessThan(findIndex_ACU(first, '开始新的一轮规划'));
+  });
+
+  it('新一轮开始时把超出预算的早期轮次浓缩成交接报告', async () => {
+    const filler = '守门人'.repeat(400);
+    // 会话最后通告的是 turn-2，本次运行的游标是 turn-3：上一轮已结束，正处在轮次边界。
+    const h = harness_ACU({
+      conversation: overBudgetConversation_ACU(filler),
+      historyTokenBudget: 200,
+      mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
+      context: nextTurnContext_ACU,
+    });
+    await h.planner.plan(h.request);
+
+    const messages = h.conversation().messages;
+    expect(messages[0].kind).toBe('handoff');
+    expect(messages[0].text).toContain('第 1 阶段 · 第 1/6 轮');
+    expect(messages[0].text).toContain('交付写作指导');
+    expect(messages.some(message => message.text === filler)).toBe(false);
+    // 刚结束的那一轮完整保留，主 Agent 不会忘记自己从哪儿接上。
+    expect(messages.some(message => message.kind === 'turn' && message.turnKey === 'stage-1#0#turn-2')).toBe(true);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(true);
+  });
+
+  it('同一轮内到达阈值只登记不压缩，留到下一轮开始时再做', async () => {
+    const filler = '守门人'.repeat(400);
+    // 最后通告的就是本次运行的游标 turn-2：这一轮还没走完（中断恢复或同游标重跑）。
+    // 预算取 600：历史约 830 tokens，超出预算但没到两倍，因此走登记而非越界压缩。
+    const h = harness_ACU({
+      conversation: overBudgetConversation_ACU(filler),
+      historyTokenBudget: 600,
+      mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
+    });
+    await h.planner.plan(h.request);
+
+    const messages = h.conversation().messages;
+    // 历史没有被重塑：既没有交接报告，早期消息也仍在原处。
+    expect(messages.some(message => message.kind === 'handoff')).toBe(false);
+    expect(messages.some(message => message.text === filler)).toBe(true);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
+    // 阈值到了要如实告诉用户，只是执行时机推迟。
+    const deferred = readAgentSessionLog_ACU().find(entry => entry.title.includes('已到 token 阈值'));
+    expect(deferred?.detail).toContain('下一轮开始前');
+
+    // 同一份会话在游标推进到 turn-3 后再跑，这时才真正压缩。
+    const next = harness_ACU({
+      conversation: h.conversation(),
+      historyTokenBudget: 600,
+      mainReplies: ['{"action":"finalize","instruction":"下一轮"}'],
+      context: nextTurnContext_ACU,
+    });
+    await next.planner.plan(next.request);
+    expect(next.conversation().messages[0].kind).toBe('handoff');
+    expect(next.conversation().messages.some(message => message.text === filler)).toBe(false);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(true);
+  });
+
+  it('同一轮内历史涨到预算两倍时提前压缩，避免请求因超长必然失败', async () => {
+    const h = harness_ACU({
+      conversation: overBudgetConversation_ACU('守门人'.repeat(4000)),
+      historyTokenBudget: 200,
+      mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
+    });
+    await h.planner.plan(h.request);
+
+    expect(h.conversation().messages[0].kind).toBe('handoff');
+    const compacted = readAgentSessionLog_ACU().find(entry => entry.title.includes('会话历史已压缩'));
+    // 越界压缩必须自报原因，不能让用户以为轮次边界规则失效了。
+    expect(compacted?.detail).toContain('本轮尚未结束');
   });
 });
 
@@ -148,17 +310,19 @@ describe('预算渲染', () => {
 });
 
 describe('主 Agent 提示词装配', () => {
-  it('真实历史插在锚点段位置：伪 role 在前，运行时证据与预填充在后', async () => {
+  it('小说正文在前、运行时证据居中、自己的会话记录在锚点位置，预填充收尾', async () => {
     const h = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"本轮指导"}'] });
     await h.planner.plan(h.request);
 
     const messages = h.mainCalls[0];
-    const historyStart = findIndex_ACU(messages, '【楼层 0】');
+    const storyIndex = findIndex_ACU(messages, '尚未结算的最新正文');
     const runtimeIndex = findIndex_ACU(messages, '本轮预算状态');
-    expect(historyStart).toBeGreaterThan(0);
+    const historyIndex = findIndex_ACU(messages, '开始新的一轮规划');
     expect(messages[0].role).toBe('system');
-    expect(runtimeIndex).toBeGreaterThan(historyStart);
-    expect(findIndex_ACU(messages, '【楼层 3】')).toBeLessThan(runtimeIndex);
+    expect(storyIndex).toBeGreaterThan(0);
+    expect(runtimeIndex).toBeGreaterThan(storyIndex);
+    // 会话记录是唯一按迭代增长的部分，放在最后才能让前面的前缀在迭代间保持稳定。
+    expect(historyIndex).toBeGreaterThan(runtimeIndex);
     expect(lastMessage_ACU(messages).role).toBe('assistant');
     expect(lastMessage_ACU(messages).content.endsWith('"thought": "')).toBe(true);
     expect(messages.some(message => message.content.includes('$HISTORY_ANCHOR'))).toBe(false);
@@ -172,7 +336,8 @@ describe('主 Agent 提示词装配', () => {
     expect(runtime).toContain('未结算楼层区间：0 到 3');
     expect(runtime).toContain('hook-cognition-maintainer');
     expect(runtime).toContain('$HOOKS_LEDGER');
-    expect(runtime).toContain('本轮尚未派工');
+    // 区间只报范围不带正文：正文已由 $STORY_TEXT 独立摘取，重复注入等于白烧 token。
+    expect(runtime).not.toContain('守门人挡在门后，右手藏着黑色晶屑。');
   });
 });
 
@@ -231,24 +396,29 @@ describe('主 Agent 循环收敛', () => {
     first.request.createInternalRequestIdentity = identity;
     await expect(first.planner.plan(first.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID' } });
 
-    const second = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"恢复后交付"}'] });
+    // 会话是楼层锚定持久化的，第二次运行读到的是同一份；这里显式传入以模拟同一个聊天。
+    const second = harness_ACU({ conversation: first.conversation(), mainReplies: ['{"action":"finalize","instruction":"恢复后交付"}'] });
     second.request.createInternalRequestIdentity = identity;
     const result = await second.planner.plan(second.request);
     expect(result.instruction).toBe('恢复后交付');
-    // 派工结论从缓存恢复进证据，不再重跑子代理。
+    // 派工结论从缓存恢复进账本，不再重跑子代理；结论本身在持久会话里，仍看得见。
     expect(second.subCalls).toHaveLength(0);
     expect(second.mainCalls[0].map(message => message.content).join('\n')).toContain('主线要点');
+    // 同一轮内恢复不重复通告换轮。
+    expect(second.conversation().messages.filter(message => message.kind === 'turn')).toHaveLength(1);
     // 会话续写而非清空：能看到恢复分隔条目。
     expect(readAgentSessionLog_ACU().some(entry => entry.kind === 'run_resumed')).toBe(true);
     // 成功交付后缓存清除，下一轮全新开始。
-    expect(readAgentRunState_ACU('chat-resume', 'task-1', 'pre-outline#0#turn-2')).toBeNull();
+    expect(readAgentRunState_ACU('chat-resume', 'task-1', 'stage-1#0#turn-2')).toBeNull();
   });
 
   it('协议非法时按重试上限重试，重试仍失败则以不可重试错误终止', async () => {
     const h = harness_ACU({ mainReplies: ['我不想输出 JSON', '{"action":"write_story"}'] });
     await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID', retryable: false } });
     expect(h.mainCalls).toHaveLength(2);
-    expect(h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '上一次输出被拒绝')].content).toContain('不包含可解析的 JSON');
+    // 拒绝原因与被拒的原文都进了会话：模型必须看到自己上一次到底写了什么。
+    expect(h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '没有被采纳')].content).toContain('不包含可解析的 JSON');
+    expect(h.mainCalls[1].some(message => message.role === 'assistant' && message.content.includes('我不想输出 JSON'))).toBe(true);
   });
 
   it('预算走到尽头仍不肯交付时终止，不做任何兜底', async () => {
@@ -273,7 +443,7 @@ describe('主 Agent 循环收敛', () => {
     const result = await h.planner.plan(h.request);
     expect(result.instruction).toBe('就这样写');
     expect(h.mainCalls[0][findIndex_ACU(h.mainCalls[0], '本轮预算状态')].content).toContain('FINAL_ITERATION');
-    expect(h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '上一次输出被拒绝')].content).toContain('预算最后一轮');
+    expect(h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '没有被采纳')].content).toContain('预算最后一轮');
   });
 
   it('block 以专用错误码终止，并带上未解决项', async () => {
@@ -459,7 +629,10 @@ describe('派工与写集落盘', () => {
 
     const reviewerMaterials = h.subCalls[1].map(message => message.content).join('\n');
     expect(reviewerMaterials).toContain('黑色晶屑');
-    expect(h.mainCalls[2][findIndex_ACU(h.mainCalls[2], '结果 2')].content).toContain('判词：pass');
+    // 每一批派工结果是一条独立的工具消息，编号在批内从 1 起算。
+    const secondBatch = h.mainCalls[2][findIndex_ACU(h.mainCalls[2], 'continuity-reviewer｜成功')].content;
+    expect(secondBatch).toContain('判词：pass');
+    expect(secondBatch).not.toContain('hook-cognition-maintainer');
   });
 
   it('同波次两次写同一模块时，后者按读取时刻的修订号被判过期并如实回灌', async () => {

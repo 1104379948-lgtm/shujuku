@@ -47,6 +47,51 @@ afterEach(() => {
   vi.resetModules();
 });
 
+function stage_ACU(stageNumber: number, turnCount: number): any {
+  return {
+    stageId: `stage-${stageNumber}`, stageNumber, status: 'completed', activeRevision: 2,
+    completedTurns: turnCount, activeNodeIndex: 0, activeTurnIndex: 0,
+    chronicleRange: { first: `AM${stageNumber}`, last: `AM${stageNumber}` },
+    revisions: [
+      // 作废的旧 revision 不该出现在阶段历史里。
+      { revision: 1, reason: 'initial', frozen: true, replanInstruction: '', outline: { schemaVersion: 1, title: `第 ${stageNumber} 阶段旧计划`, goal: '作废目标', totalTurns: turnCount, nodes: [] } },
+      {
+        revision: 2, reason: 'manual_replan', frozen: true, replanInstruction: '',
+        outline: {
+          schemaVersion: 1, title: `第 ${stageNumber} 阶段`, goal: `阶段 ${stageNumber} 目标`, totalTurns: turnCount,
+          nodes: [{ id: `node-${stageNumber}`, title: `节点 ${stageNumber}`, goal: `节点 ${stageNumber} 目标`, suggestedTurns: turnCount, turns: Array.from({ length: turnCount }, (_, index) => ({ id: `t${stageNumber}-${index + 1}`, goal: `阶段 ${stageNumber} 第 ${index + 1} 轮目标` })) }],
+        },
+      },
+    ],
+  };
+}
+
+describe('阶段历史渲染', () => {
+  it('没有阶段时如实说明这是第一个阶段', async () => {
+    const h = await createHarness();
+    expect(h.runtime.serializeStageHistory_ACU({ stages: [] } as any)).toContain('第一个阶段');
+  });
+
+  it('只给活动 revision，最近两个阶段保留逐轮目标，更早的压到节点级', async () => {
+    const h = await createHarness();
+    const text = h.runtime.serializeStageHistory_ACU({ stages: [stage_ACU(1, 2), stage_ACU(2, 2), stage_ACU(3, 2)] } as any);
+
+    // 被替换掉的旧 revision 是作废的计划，不进上下文。
+    expect(text).not.toContain('旧计划');
+    expect(text).not.toContain('作废目标');
+    // 第 1 阶段较早：只到节点级。
+    expect(text).toContain('- 节点「节点 1」：节点 1 目标');
+    expect(text).not.toContain('阶段 1 第 1 轮目标');
+    expect(text).toContain('（该阶段较早，已省略逐轮目标；其事实已进入纪要。）');
+    // 最近两个阶段：逐轮目标全给。
+    expect(text).toContain('阶段 2 第 1 轮目标');
+    expect(text).toContain('阶段 3 第 2 轮目标');
+    // 输出是可读文本而不是 JSON，避免诱导大纲模型用 JSON 回话。
+    expect(text).not.toContain('"totalTurns"');
+    expect(text).toContain('已完成 2/2 轮，纪要范围 AM3 → AM3');
+  });
+});
+
 describe('ContinuationRuntime_ACU migration', () => {
   it('先写入首楼权威状态，再成功清理废弃的 v2 循环字段', async () => {
     const h = await createHarness();

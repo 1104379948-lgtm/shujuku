@@ -161,6 +161,10 @@ export interface ContinuationSettings_ACU {
   generationRetryLimit: number;
   internalAiRetryLimit: number;
   contextTurnCount: number;
+  /** 主 Agent 摘取小说正文时保留的已结算 AI 楼层数；0 表示只给未结算部分。 */
+  storyWindowFloors: number;
+  /** 主 Agent 自身会话历史的 token 预算；超出后压缩最早的轮次为交接报告。0 表示不限制。 */
+  agentHistoryTokenBudget: number;
   contextExtractRules: ContinuationRulePair_ACU[];
   contextExcludeRules: ContinuationRulePair_ACU[];
   apiPresetMode: 'current' | 'fixed';

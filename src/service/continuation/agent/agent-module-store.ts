@@ -174,6 +174,73 @@ export async function writeAgentModuleSnapshot_ACU(chat: any[], targetIndex: num
   }
 }
 
+function rejectSnapshotEdit_ACU(message: string, details?: Record<string, unknown>): never {
+  throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', message, false, details));
+}
+
+/**
+ * 用户手动改写资料快照。
+ *
+ * 与子代理写入的关键区别是「不容忍静默丢条目」：校验器为了容错会丢掉结构非法的单条记录，
+ * 那对模型输出是合理的降级，但对用户编辑是数据丢失——用户会以为自己保存成功了。因此这里
+ * 逐类比对条目数，只要有条目被丢弃就整份拒绝并指出是哪一类。
+ * @param raw 用户编辑后的快照对象（可只带 hooks / infoGap / constraints）
+ * @param chat 聊天数组，缺省取当前聊天
+ * @returns 落盘后的快照
+ */
+export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: any[]): Promise<AgentModuleSnapshot_ACU> {
+  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  const targetIndex = messages.length - 1;
+  if (targetIndex < 0) rejectSnapshotEdit_ACU('当前聊天没有可承载资料快照的楼层');
+  if (!isRecord_ACU(raw)) rejectSnapshotEdit_ACU('资料快照必须是 JSON 对象');
+  const current = readAgentModuleSnapshot_ACU(messages);
+  const merged = {
+    ...current,
+    ...raw,
+    schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
+    settledThroughIndex: targetIndex,
+    // 手动编辑同样推进修订号：否则携带旧修订号的子代理写集会通过并覆盖用户刚保存的内容。
+    revisions: {
+      hooks: current.revisions.hooks + 1,
+      infoGap: current.revisions.infoGap + 1,
+      constraints: current.revisions.constraints + 1,
+    },
+  };
+  const validated = validateAgentModuleSnapshot_ACU(merged);
+  if (!validated) rejectSnapshotEdit_ACU('资料快照结构非法：hooks / infoGap / constraints 必须是数组');
+  const checks: Array<[string, unknown, readonly unknown[]]> = [
+    ['伏笔账本 hooks', merged.hooks, validated.hooks],
+    ['信息差 infoGap', merged.infoGap, validated.infoGap],
+    ['长期约束 constraints', merged.constraints, validated.constraints],
+  ];
+  for (const [label, input, accepted] of checks) {
+    const inputLength = Array.isArray(input) ? input.length : 0;
+    if (inputLength !== accepted.length) {
+      rejectSnapshotEdit_ACU(`${label} 中有 ${inputLength - accepted.length} 条记录不符合结构要求（id 与关键文本字段不能为空），整份编辑未保存`, { label, inputLength, acceptedLength: accepted.length });
+    }
+  }
+  await writeAgentModuleSnapshot_ACU(messages, targetIndex, validated);
+  return validated;
+}
+
+/**
+ * 从全部楼层清除资料快照字段。用于「一键清空」，只删扩展字段，绝不触碰正文。
+ * @param chat 聊天数组，缺省取当前聊天
+ * @returns 是否有楼层被改动
+ */
+export async function clearAgentModuleField_ACU(chat?: any[]): Promise<boolean> {
+  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  let changed = false;
+  for (const message of messages) {
+    if (!message || typeof message !== 'object') continue;
+    if (!Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU)) continue;
+    delete (message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU];
+    changed = true;
+  }
+  if (changed) await saveChatToHostStrict_ACU();
+  return changed;
+}
+
 function truncateAgentBlock_ACU(text: string): string {
   if (text.length <= AGENT_BLOCK_CHAR_LIMIT_ACU) return text;
   return `${text.slice(0, AGENT_BLOCK_CHAR_LIMIT_ACU)}\n（本资料块超出 ${AGENT_BLOCK_CHAR_LIMIT_ACU} 字上限，已截断；未展示部分不代表不存在）`;

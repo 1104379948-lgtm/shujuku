@@ -1,5 +1,5 @@
 /**
- * ContinuationPage — 仅验证 v2 任务 UI 到 runtime composable 的派发。
+ * ContinuationPage — 仅验证 v2 会话 UI 到 runtime composable 的派发。
  * 宿主发送归属由 useContinuationRuntime 的独立测试覆盖。
  * @vitest-environment jsdom
  */
@@ -21,22 +21,22 @@ const originInstruction = ref('');
 const statusText = ref('尚未创建任务');
 const initialize = vi.fn(async () => undefined);
 const refresh = vi.fn();
-const createTask = vi.fn(async () => undefined);
 const continueTask = vi.fn(async () => undefined);
 const retryCurrentTurn = vi.fn(async () => undefined);
 const stopTask = vi.fn(async () => undefined);
-const replanRemaining = vi.fn(async () => undefined);
-const replanRemainingWithInstruction = vi.fn(async () => undefined);
+const sendAgentMessage = vi.fn(async () => true);
+const saveActiveOutline = vi.fn(async () => true);
+const clearData = vi.fn(async () => true);
 const acceptOutline = vi.fn(async () => true);
-const abandonAndCreate = vi.fn(async () => true);
 const saveSettings = vi.fn(async () => true);
+const restorePromptDefault = vi.fn((draft: any) => draft);
 
 vi.mock('../../../src/presentation-v2/composables/useContinuationRuntime', () => ({
- useContinuationRuntime: () => ({
-    activeStage, activeRevision, activeNode, activeTurn, busy, canContinue, createTask, continueTask, initialize,
+  useContinuationRuntime: () => ({
+    activeStage, activeRevision, activeNode, activeTurn, busy, canContinue, continueTask, initialize,
     isAwaitingHostResult: awaitingHostResult, originInstruction, refresh,
-    replanRemaining, replanRemainingWithInstruction, retryCurrentTurn, acceptOutline,
-    abandonAndCreate, saveSettings, settings, statusText, stopTask, task,
+    retryCurrentTurn, acceptOutline, sendAgentMessage, saveActiveOutline, clearData, restorePromptDefault,
+    saveSettings, settings, statusText, stopTask, task,
   }),
 }));
 vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({
@@ -78,6 +78,16 @@ function buttonByText(el: Element, text: string): HTMLButtonElement | undefined 
   return Array.from(el.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.includes(text));
 }
 
+function typeInto(textarea: HTMLTextAreaElement, value: string): void {
+  textarea.value = value;
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/** 会话输入框：页面里还有大纲/资料编辑框，按会话自己的类名定位。 */
+function chatInput(el: Element): HTMLTextAreaElement {
+  return el.querySelector<HTMLTextAreaElement>('.acu-v2-continuation-chat__input')!;
+}
+
 beforeEach(() => {
   document.body.innerHTML = '';
   task.value = null;
@@ -102,7 +112,8 @@ function setSettings(): void {
     outlinePreview: false, autoNextStage: true, maxAutomaticStages: 6,
     loopTags: '', loopDelaySeconds: 5, totalDurationMinutes: 0,
     retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3,
-    contextTurnCount: 3, contextExtractRules: [], contextExcludeRules: [],
+    contextTurnCount: 3, storyWindowFloors: 20, agentHistoryTokenBudget: 24000,
+    contextExtractRules: [], contextExcludeRules: [],
     apiPresetMode: 'current', fixedApiPresetName: '',
     agentApiPresets: {
       main: { mode: 'inherit', presetName: '' },
@@ -126,60 +137,127 @@ function setSettings(): void {
 afterEach(() => { document.body.innerHTML = ''; });
 
 describe('ContinuationPage', () => {
-  it('显示任务创建入口，并将初始要求交给 runtime', async () => {
+  it('空态下没有独立的创建入口，第一条消息即交给 runtime 创建任务', async () => {
     const { app, el } = await mountPage();
     expect(el.textContent).toContain('Agent 会话');
     expect(initialize).toHaveBeenCalledOnce();
-    expect(el.textContent).toContain('创建续写任务');
+    // 创建任务不再是一个单独按钮：发送第一句话就是创建。
+    expect(buttonByText(el, '创建续写任务')).toBeUndefined();
     expect(el.textContent).not.toContain('循环提示词');
-    const textarea = el.querySelector('textarea')!;
-    textarea.value = '让主角找到出口';
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+    typeInto(chatInput(el), '让主角找到出口');
     await nextTick();
-    buttonByText(el, '创建续写任务')!.click();
+    buttonByText(el, '发送')!.click();
     await nextTick();
-    expect(originInstruction.value).toBe('让主角找到出口');
-    expect(createTask).toHaveBeenCalledOnce();
+    expect(sendAgentMessage).toHaveBeenCalledWith('让主角找到出口');
+    // 发送后输入框清空，避免重复发送同一句。
+    expect(chatInput(el).value).toBe('');
     app.unmount();
   });
 
-  it('任务存在时渲染 Agent 会话流与空态提示', async () => {
+  it('Ctrl + Enter 直接发送，空白内容不派发', async () => {
+    setTask();
+    const { app, el } = await mountPage();
+    const input = chatInput(el);
+
+    typeInto(input, '   ');
+    await nextTick();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+    await nextTick();
+    expect(sendAgentMessage).not.toHaveBeenCalled();
+
+    typeInto(input, '这一轮先别揭穿守门人');
+    await nextTick();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+    await nextTick();
+    expect(sendAgentMessage).toHaveBeenCalledWith('这一轮先别揭穿守门人');
+    app.unmount();
+  });
+
+  it('任务存在时渲染状态条、会话流空态与继续/停止派发', async () => {
     setTask();
     const { app, el } = await mountPage();
     expect(el.querySelector('.acu-v2-session-feed')).not.toBeNull();
     expect(el.textContent).toContain('还没有运行记录');
-    app.unmount();
-  });
-
-  it('展示持久化任务状态并派发继续、重规划和停止操作', async () => {
-    setSettings();
-    setTask();
-    const { app, el } = await mountPage();
     expect(el.textContent).toContain('第 1 阶段');
-    expect(el.textContent).toContain('完成轮次');
-    expect(el.textContent).toContain('让主角找到出口');
+    expect(el.textContent).toContain('已完成 3 / 6 轮');
+    expect(el.textContent).toContain('大纲 revision 2');
+
     buttonByText(el, '继续当前轮次')!.click();
-    buttonByText(el, '重新规划剩余阶段')!.click();
-    buttonByText(el, '停止智能续写')!.click();
     await nextTick();
     expect(continueTask).toHaveBeenCalledOnce();
-    expect(replanRemainingWithInstruction).toHaveBeenCalledOnce();
-    expect(stopTask).toHaveBeenCalledOnce();
+    // paused 状态下不给停止：没有正在跑的循环可停。
+    expect(buttonByText(el, '停止生成')).toBeUndefined();
     app.unmount();
   });
 
-  it('渲染大纲、执行回执、设置与伪 Role 提示词，设置修改后自动经 runtime 保存', async () => {
+  it('运行中提供停止生成，等待宿主正文时隐藏所有竞争操作并在聊天切换后刷新', async () => {
+    setTask('running');
+    const running = await mountPage();
+    buttonByText(running.el, '停止生成')!.click();
+    await nextTick();
+    expect(stopTask).toHaveBeenCalledOnce();
+    running.app.unmount();
+
+    setTask('running', true);
+    const { app, el } = await mountPage();
+    expect(el.textContent).toContain('当前轮次正在等待酒馆的正文生成结束');
+    expect(buttonByText(el, '停止生成')).toBeUndefined();
+    expect(buttonByText(el, '继续当前轮次')).toBeUndefined();
+    chatTick.value += 1;
+    await nextTick();
+    expect(refresh).toHaveBeenCalledOnce();
+    app.unmount();
+  });
+
+  it('资料面板可编辑保存当前大纲，一键清空需二次确认', async () => {
+    setTask();
+    const { app, el } = await mountPage();
+    expect(el.textContent).toContain('已有资料');
+    expect(el.textContent).toContain('逃离计划');
+
+    const outlineTextarea = el.querySelector<HTMLTextAreaElement>('.acu-v2-continuation-materials__editor textarea')!;
+    expect(JSON.parse(outlineTextarea.value).title).toBe('逃离计划');
+    // 未改动时保存按钮禁用，避免无意义写盘推进 revision。
+    expect(buttonByText(el, '保存大纲')!.disabled).toBe(true);
+
+    typeInto(outlineTextarea, JSON.stringify({ ...JSON.parse(outlineTextarea.value), title: '逃离计划 v2' }));
+    await nextTick();
+    buttonByText(el, '保存大纲')!.click();
+    await nextTick();
+    expect(saveActiveOutline).toHaveBeenCalledOnce();
+    expect(saveActiveOutline.mock.calls[0][0]).toMatchObject({ title: '逃离计划 v2' });
+
+    // JSON 写坏时就地报错，不派发给领域层。
+    typeInto(outlineTextarea, '{不是 JSON');
+    await nextTick();
+    buttonByText(el, '保存大纲')!.click();
+    await nextTick();
+    expect(saveActiveOutline).toHaveBeenCalledOnce();
+    expect(el.textContent).toContain('大纲 JSON 无法解析');
+
+    buttonByText(el, '一键清空')!.click();
+    await nextTick();
+    expect(clearData).not.toHaveBeenCalled();
+    expect(el.textContent).toContain('小说正文楼层不受影响');
+    buttonByText(el, '确认清空')!.click();
+    await nextTick();
+    expect(clearData).toHaveBeenCalledOnce();
+    app.unmount();
+  });
+
+  it('渲染设置与伪 Role 提示词，设置修改后自动经 runtime 保存', async () => {
     vi.useFakeTimers();
     try {
       setSettings();
       setTask();
       const { app, el } = await mountPage();
 
-      expect(el.textContent).toContain('阶段大纲与执行回执');
-      expect(el.textContent).toContain('逃离计划');
       expect(el.textContent).toContain('续写设置');
       expect(el.textContent).toContain('伪 Role 提示词');
-      expect(el.textContent).toContain('总倒计时');
+      expect(el.textContent).toContain('正文窗口楼数');
+      expect(el.textContent).toContain('Agent 会话 token 预算');
+      expect(el.textContent).toContain('$STORY_TEXT');
       // 保存按钮已移除：修改任意设置项后由防抖自动保存。
       expect(buttonByText(el, '保存续写设置')).toBeUndefined();
 
@@ -190,24 +268,10 @@ describe('ContinuationPage', () => {
       expect(saveSettings).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(900);
       expect(saveSettings).toHaveBeenCalledOnce();
-      expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short' });
+      expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 24000 });
       app.unmount();
     } finally {
       vi.useRealTimers();
     }
-  });
-
-
-  it('等待宿主结果时隐藏会产生竞争的操作，并在聊天切换后刷新', async () => {
-    setTask('running', true);
-    const { app, el } = await mountPage();
-    expect(el.textContent).toContain('当前轮次正在等待宿主生成结束事件');
-    expect(buttonByText(el, '继续当前轮次')).toBeUndefined();
-    expect(buttonByText(el, '重新规划剩余阶段')).toBeUndefined();
-    expect(buttonByText(el, '停止智能续写')).toBeUndefined();
-    chatTick.value += 1;
-    await nextTick();
-    expect(refresh).toHaveBeenCalledOnce();
-    app.unmount();
   });
 });

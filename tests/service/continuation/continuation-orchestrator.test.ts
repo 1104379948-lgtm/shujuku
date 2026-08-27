@@ -12,7 +12,7 @@ const outline = { schemaVersion: 1 as const, title: '阶段', goal: '目标', to
  * 执行引擎桩：模拟主 Agent 的大纲行为——没有可执行大纲（无阶段或阶段已完成）时
  * 先通过注入的回调派工大纲子代理，review/stopped 时按真实循环的行为抛错中止。
  */
-function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<typeof vi.fn>; hasLiveHostClaim?: () => boolean } = {}) {
+function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<typeof vi.fn>; hasLiveHostClaim?: () => boolean; conversation?: ReturnType<typeof vi.fn> } = {}) {
   const planner = options.planner ?? vi.fn().mockResolvedValue({ outline, attempts: 1, requiresReview: !!options.preview, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
   let sequence = 0;
   const store = new FirstFloorContinuationStore_ACU();
@@ -32,14 +32,20 @@ function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<t
       return { identity: {}, instruction: { instruction: '发送文本', attempts: 1 } };
     }),
   };
+  // 会话记录默认走桩：楼层锚定存储属于 agent-conversation-store 的测试范围，
+  // 这里只关心「编排器有没有在正确的时机记下用户消息」。
+  const appendAgentConversation = options.conversation ?? vi.fn(async () => true);
+  const clearAgentModules = vi.fn(async () => true);
+  const clearAgentConversation = vi.fn(async () => true);
   const orchestrator = new ContinuationOrchestrator_ACU({
     store, planner: { plan: planner } as any, executionEngine: executionEngine as any,
     getChatIdentity: () => 'chat-a', now: () => 1_000, allocateId: prefix => `${prefix}-${++sequence}`,
     readChronicleSnapshot: vi.fn().mockResolvedValue({ count: 3, range: { first: 'AM1', last: 'AM3' } }),
     createOutlineResolvers: () => ({}),
+    appendAgentConversation, clearAgentModules, clearAgentConversation,
     ...(options.hasLiveHostClaim ? { hasLiveHostClaim: options.hasLiveHostClaim } : {}),
   });
-  return { orchestrator, planner, store, executionEngine };
+  return { orchestrator, planner, store, executionEngine, appendAgentConversation, clearAgentModules, clearAgentConversation };
 }
 
 async function recordPendingHostTurn(orchestrator: ContinuationOrchestrator_ACU, identity: any): Promise<void> {
@@ -259,7 +265,8 @@ describe('ContinuationOrchestrator_ACU', () => {
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     const replan = orchestrator.replanRemaining({ instruction: '改为收束冲突' });
     const guarded = replan.catch(error => error);
-    await Promise.resolve();
+    // 重规划说明会先作为用户消息落进 Agent 会话再进入租约，因此要等到大纲调用真正发出。
+    await vi.waitFor(() => { expect(resolvePlan).toBeDefined(); });
     await orchestrator.stopTask();
     resolvePlan!({ outline, attempts: 1, requiresReview: false, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
     const error = await guarded;
@@ -420,5 +427,102 @@ describe('ContinuationOrchestrator_ACU', () => {
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await expectCode(() => orchestrator.abandonAndCreate({ originInstruction: '新任务' }), 'CONTINUATION_TASK_STATE_INVALID');
     expect(store.readPersisted()!.activeTask?.originInstruction).toBe('推进剧情');
+  });
+
+  it('sendAgentMessage 在没有任务时创建任务，并把这句话记成用户消息', async () => {
+    const { orchestrator, store, appendAgentConversation, planner } = createOrchestrator();
+    const result = await orchestrator.sendAgentMessage({ text: '  推进主角进入禁区  ' });
+
+    expect(result).toMatchObject({ created: true, interrupted: false, shouldContinue: true });
+    expect(store.readPersisted()!.activeTask).toMatchObject({ originInstruction: '推进主角进入禁区', status: 'paused' });
+    // 创建本身不发起大纲规划：规划由紧随其后的 continueTask 触发。
+    expect(planner).not.toHaveBeenCalled();
+    expect(appendAgentConversation).toHaveBeenCalledOnce();
+    expect(appendAgentConversation.mock.calls[0][0]).toMatchObject([{ kind: 'user', text: '推进主角进入禁区', digest: '创建续写任务' }]);
+  });
+
+  it('sendAgentMessage 打断运行中的循环并落回可继续的 paused，在途结果随后被判失效', async () => {
+    let resolvePlan: ((value: any) => void) | undefined;
+    const planner = vi.fn().mockImplementationOnce(() => new Promise(resolve => { resolvePlan = resolve; }));
+    const { orchestrator, store, appendAgentConversation } = createOrchestrator({ planner });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    const guarded = orchestrator.continueTask().catch(error => error);
+    await vi.waitFor(() => { expect(resolvePlan).toBeDefined(); });
+    expect(store.readPersisted()!.activeTask!.status).toBe('running');
+
+    const result = await orchestrator.sendAgentMessage({ text: '这一轮别揭穿守门人' });
+    expect(result).toMatchObject({ created: false, interrupted: true, shouldContinue: true });
+    expect(appendAgentConversation.mock.calls[0][0]).toMatchObject([{ kind: 'user', text: '这一轮别揭穿守门人', digest: '打断并插话' }]);
+    // 打断不是停止：不设 stopReason，等着带上新消息继续。
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: null, lastError: null });
+
+    resolvePlan!({ outline, attempts: 1, requiresReview: false, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
+    expect((await guarded as ContinuationValidationError_ACU).error.code).toBe('CONTINUATION_INTERNAL_REQUEST_STALE');
+  });
+
+  it('sendAgentMessage 在等待宿主正文时只记消息，不打断酒馆生成也不请求继续', async () => {
+    const { orchestrator, store, appendAgentConversation } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    await recordPendingHostTurn(orchestrator, {
+      chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1,
+      nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-await',
+    });
+
+    const result = await orchestrator.sendAgentMessage({ text: '下一轮收一点' });
+    expect(result).toMatchObject({ interrupted: false, shouldContinue: false });
+    expect(appendAgentConversation.mock.calls[0][0]).toMatchObject([{ kind: 'user', digest: '会话输入' }]);
+    expect(store.readPersisted()!.activeTask!.pendingHostTurn).toMatchObject({ status: 'awaiting_generation' });
+  });
+
+  it('replaceActiveOutline 走与工具编辑相同的校验：改未完成的目标句可以，动当前执行轮不行', async () => {
+    const { orchestrator, store, planner } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    // 运行中不许手动改：先确认一轮让任务落回 paused。
+    await expectCode(() => orchestrator.replaceActiveOutline({ outline: outline as any }), 'CONTINUATION_OPERATION_BUSY');
+    await confirmTurns(orchestrator, store, 1);
+
+    const current = store.readPersisted()!.activeTask!.stages[0].revisions[0].outline;
+    const edited = {
+      ...current,
+      nodes: [{ ...current.nodes[0], turns: current.nodes[0].turns.map((turn, index) => index === 2 ? { ...turn, goal: '用户改写的第三轮目标' } : turn) }],
+    };
+    await orchestrator.replaceActiveOutline({ outline: edited as any });
+    // 手动编辑不发大纲 AI 调用，直接生成下一个已冻结 revision。
+    expect(planner).toHaveBeenCalledTimes(1);
+    const stage = store.readPersisted()!.activeTask!.stages[0];
+    expect(stage.activeRevision).toBe(2);
+    const saved = stage.revisions.find(item => item.revision === 2)!;
+    expect(saved).toMatchObject({ frozen: true, reason: 'manual_replan', replanInstruction: '用户手动编辑' });
+    expect(saved.outline.nodes[0].turns[2].goal).toBe('用户改写的第三轮目标');
+
+    // 删掉当前正在执行的轮次（已完成 1 轮，游标在第 2 轮）：拒绝，revision 不变。
+    const withoutCursor = { ...saved.outline, nodes: [{ ...saved.outline.nodes[0], turns: saved.outline.nodes[0].turns.filter(turn => turn.id !== 'turn-2') }] };
+    await expectCode(() => orchestrator.replaceActiveOutline({ outline: withoutCursor as any }), 'CONTINUATION_AGENT_WRITE_REJECTED');
+    expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(2);
+  });
+
+  it('clearContinuationData 丢任务、资料与会话记录，但不碰正文楼层', async () => {
+    const { orchestrator, store, clearAgentModules, clearAgentConversation } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    expect(store.readPersisted()!.activeTask).not.toBeNull();
+
+    const result = await orchestrator.clearContinuationData();
+    expect(result).toMatchObject({ clearedModules: true, clearedConversation: true });
+    expect(result.envelope.activeTask).toBeNull();
+    expect(store.readPersisted()!.activeTask).toBeNull();
+    expect(clearAgentModules).toHaveBeenCalledOnce();
+    expect(clearAgentConversation).toHaveBeenCalledOnce();
+    // 设置不受影响：清空只针对任务与运行期资料。
+    expect(store.readPersisted()!.settings).toBeTruthy();
+
+    // 清空后可以直接从当前剧情重新开始规划。
+    await orchestrator.sendAgentMessage({ text: '从这里重新规划' });
+    expect(store.readPersisted()!.activeTask).toMatchObject({ originInstruction: '从这里重新规划' });
   });
 });

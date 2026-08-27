@@ -30,6 +30,7 @@ const m = vi.hoisted(() => ({
     return context;
   }),
   consumeGeneration: vi.fn(() => m.gate.activeGenerations.pop() || null),
+  isQuiet: vi.fn(() => false),
 }));
 
 vi.mock('../../../src/shared/host-api', () => ({ SillyTavern_API_ACU: m.api }));
@@ -39,7 +40,7 @@ vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({ ensureInitialSeedCheckpoint_ACU: vi.fn(), handleChatCompletionReady_ACU: vi.fn(), loadPresetAndCleanCharacterData_ACU: m.loadPreset }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   chatMutationDebounceTimer_ACU: null, _set_chatMutationDebounceTimer_ACU: m.setChatMutationTimer, generationGate_ACU: m.gate,
-  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), isProcessing_Plot_ACU: false, isQuietLikeGeneration_ACU: vi.fn(), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: { plotSettings: {} }, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessAutoTableUpdateForGenerationEnded_ACU: (...args: any[]) => m.autoUpdate(...args), shouldProcessPlotForGeneration_ACU: vi.fn(), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
+  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), isProcessing_Plot_ACU: false, isQuietLikeGeneration_ACU: (...args: any[]) => m.isQuiet(...args), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: { plotSettings: {} }, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessAutoTableUpdateForGenerationEnded_ACU: (...args: any[]) => m.autoUpdate(...args), shouldProcessPlotForGeneration_ACU: vi.fn(), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
   _set_allChatMessages_ACU: m.setMessages, _set_currentChatFileIdentifier_ACU: (value: string) => { m.currentChatKey = value; m.setChat(value); }, _set_currentJsonTableData_ACU: m.setData, _set_independentTableStates_ACU: m.setTables, _set_isProcessing_Plot_ACU: vi.fn(), _set_lastTotalAiMessages_ACU: m.setTotal,
 }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: vi.fn(), loadSettings_ACU: vi.fn() }));
@@ -222,10 +223,15 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
 
-    expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq);
-    expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq);
-    expect(bridge.onGenerationEnded).toHaveBeenCalledWith(42, m.gate.generationSeq);
-    expect(m.autoUpdate).not.toHaveBeenCalled();
+    // 第二个参数是宽松认领开关：普通生成（非 quiet、非 dryRun、非自动触发）才允许，
+    // 因为宿主的 GENERATION_STARTED 常在发送返回后的微任务里才到，严格同步配对必然错过。
+    expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, true);
+    // 生成结束侧的宽松认领沿用自动填表门控的判定结果：会产生正文楼层的生成才允许。
+    expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, true);
+    expect(bridge.onGenerationEnded).toHaveBeenCalledWith(42, m.gate.generationSeq, true);
+    // 门控函数会被当作纯判定读一次（用来算宽松认领开关），但认领成功后自动填表链路不再往下走：
+    // 判断依据是后续的 handleNewMessage 没被调用。
+    expect(m.autoUpdate).toHaveBeenCalledTimes(1);
     expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 
@@ -238,11 +244,26 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
 
-    expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq);
-    expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq);
+    expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, true);
+    expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, true);
     expect(bridge.onGenerationEnded).not.toHaveBeenCalled();
     expect(m.autoUpdate).toHaveBeenCalledWith(expect.objectContaining({ seq: m.gate.generationSeq }));
     expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
+  });
+
+  it('quiet、dryRun 与自动触发的生成不开放宽松认领', () => {
+    const bridge = { onGenerationStarted: vi.fn(() => false), claimsGenerationEnded: vi.fn(() => false), onGenerationEnded: vi.fn() };
+    m.continuationBridge = bridge;
+    reinitialize_ACU!();
+
+    m.isQuiet.mockReturnValueOnce(true);
+    m.generationStarted!('quiet', {}, false);
+    m.generationStarted!('normal', {}, true);
+    m.generationStarted!('normal', { automatic_trigger: true }, false);
+
+    // 这三类生成都不是用户点发送产生的，宽松认领会把别人的生成错认成续写轮。
+    for (const call of bridge.onGenerationStarted.mock.calls) expect(call[1]).toBe(false);
+    expect(bridge.onGenerationStarted).toHaveBeenCalledTimes(3);
   });
 });
 

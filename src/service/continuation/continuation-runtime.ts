@@ -41,16 +41,35 @@ function readRecentStory_ACU(limit: number): string {
     .join('\n\n');
 }
 
-function serializeStageHistory_ACU(task: ContinuationTask_ACU): string {
-  return JSON.stringify(task.stages.map(stage => ({
-    stageId: stage.stageId,
-    stageNumber: stage.stageNumber,
-    status: stage.status,
-    activeRevision: stage.activeRevision,
-    completedTurns: stage.completedTurns,
-    chronicleRange: stage.chronicleRange,
-    revisions: stage.revisions.map(revision => ({ revision: revision.revision, frozen: revision.frozen, outline: revision.outline })),
-  })));
+/** 阶段历史里保留逐轮目标的阶段数（从最新往前数）。更早的阶段只保留节点级摘要。 */
+const STAGE_HISTORY_DETAILED_STAGES_ACU = 2;
+
+/**
+ * 渲染阶段历史。
+ *
+ * 只给每个阶段的活动 revision：被替换掉的旧 revision 是作废的计划，对规划下一阶段没有信息价值，
+ * 全量塞进去只会让提示词随 revision 数线性膨胀。最近两个阶段给到逐轮目标，更早的压到节点级——
+ * 那些阶段的事实已经沉淀进纪要，这里只需要让模型知道故事大致走过哪些节点。
+ * 输出是可读文本而不是 JSON，避免诱导大纲模型用 JSON 回话。
+ * @param task 当前任务
+ * @returns 自然语言文本
+ */
+export function serializeStageHistory_ACU(task: ContinuationTask_ACU): string {
+  if (!task.stages.length) return '还没有任何阶段，本次是第一个阶段。';
+  const detailedFrom = Math.max(0, task.stages.length - STAGE_HISTORY_DETAILED_STAGES_ACU);
+  const sections = task.stages.map((stage, index) => {
+    const revision = stage.revisions.find(item => item.revision === stage.activeRevision) ?? null;
+    const head = `## 第 ${stage.stageNumber} 阶段（${stage.status}，已完成 ${stage.completedTurns}/${revision?.outline.totalTurns ?? 0} 轮${stage.chronicleRange ? `，纪要范围 ${stage.chronicleRange.first} → ${stage.chronicleRange.last}` : ''}）`;
+    if (!revision) return `${head}\n（该阶段没有可读的大纲。）`;
+    const lines = [head, `标题：${revision.outline.title}`, `目标：${revision.outline.goal}`];
+    for (const node of revision.outline.nodes) {
+      lines.push(`- 节点「${node.title}」：${node.goal}`);
+      if (index >= detailedFrom) for (const turn of node.turns) lines.push(`  · ${turn.goal}`);
+    }
+    if (index < detailedFrom) lines.push('（该阶段较早，已省略逐轮目标；其事实已进入纪要。）');
+    return lines.join('\n');
+  });
+  return sections.join('\n\n');
 }
 
 function previousStages_ACU(task: ContinuationTask_ACU, activeStage: ContinuationStage_ACU | null): ContinuationStage_ACU[] {

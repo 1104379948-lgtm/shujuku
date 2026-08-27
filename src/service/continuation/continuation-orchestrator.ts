@@ -4,10 +4,25 @@ import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createP
 import { resolveContinuationTurnRange_ACU, validateReplannedStageOutline_ACU } from './outline-schema';
 import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
-import type { AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU } from './agent/agent-model';
+import type { AgentConversationAppend_ACU, AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU } from './agent/agent-model';
+import { appendAgentConversationToChat_ACU, clearAgentConversationField_ACU } from './agent/agent-conversation-store';
+import { clearAgentModuleField_ACU } from './agent/agent-module-store';
+import { clearAgentRunState_ACU } from './agent/agent-run-cache';
+import { clearAgentSessionLog_ACU, logAgentSession_ACU } from './agent/agent-session-log';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
 
 export interface ContinuationChronicleSnapshot_ACU { count: number; range: { first: string; last: string } | null; }
+export interface SendAgentMessageInput_ACU { text: string; }
+export interface SendAgentMessageResult_ACU extends ContinuationOrchestratorResult_ACU {
+  /** 本次发送顺带创建了新任务。 */
+  created: boolean;
+  /** 本次发送打断了正在进行的 Agent 循环。 */
+  interrupted: boolean;
+  /** 调用方应紧接着调用 continueTask 让主 Agent 读到这条消息并继续工作。 */
+  shouldContinue: boolean;
+}
+export interface ReplaceActiveOutlineInput_ACU { outline: StageOutline_ACU; }
+export interface ClearContinuationDataResult_ACU { envelope: ContinuationEnvelope_ACU; clearedModules: boolean; clearedConversation: boolean; }
 export interface ContinuationPlanningContext_ACU { envelope: ContinuationEnvelope_ACU; task: ContinuationTask_ACU; stage: ContinuationStage_ACU | null; reason: ContinuationRevisionReason_ACU; replanInstruction: string; }
 export interface CreateContinuationTaskInput_ACU { originInstruction: string; }
 export interface ReplanContinuationInput_ACU { instruction?: string; }
@@ -29,11 +44,23 @@ export interface ContinuationOrchestratorDependencies_ACU {
   createOutlineResolvers: (context: ContinuationPlanningContext_ACU) => Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
   /** 桥内存中是否持有该聊天的活认领。缺省视为无认领（测试注入场景）。 */
   hasLiveHostClaim?: (chatIdentity: string) => boolean;
+  /** 把消息追加进主 Agent 的持久会话记录。缺省用楼层锚定存储。 */
+  appendAgentConversation?: (appends: readonly AgentConversationAppend_ACU[]) => Promise<boolean>;
+  /** 清除楼层上的资料快照字段。缺省用楼层锚定存储。 */
+  clearAgentModules?: () => Promise<boolean>;
+  /** 清除楼层上的会话记录字段。缺省用楼层锚定存储。 */
+  clearAgentConversation?: () => Promise<boolean>;
 }
 
 type Lease_ACU = { id: string; epoch: number };
 const leasesByChat_ACU = new Map<string, Lease_ACU>();
 const epochsByChat_ACU = new Map<string, number>();
+/**
+ * 每个聊天在跑的 Agent 循环对应的中断控制器。
+ * 租约作废只能让「下一次」身份校验失败，在途的 HTTP 请求还得等它自己返回；
+ * 用户点停止或中途插话时要立刻见效，就必须真的 abort 掉在飞的请求。
+ */
+const abortControllersByChat_ACU = new Map<string, AbortController>();
 
 function fail_ACU(code: 'CONTINUATION_OPERATION_BUSY' | 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY' | 'CONTINUATION_TASK_NOT_FOUND' | 'CONTINUATION_TASK_STATE_INVALID', message: string): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, 'persist', message, false));
@@ -270,6 +297,8 @@ export class ContinuationOrchestrator_ACU {
       }, { chatIdentity });
       const task = started!.activeTask!;
       if (task.status !== 'running') return taskResult_ACU(started!);
+      const controller = new AbortController();
+      abortControllersByChat_ACU.set(chatIdentity, controller);
       try {
         const retryAttempt = task.pendingHostTurn?.status === 'retry_ready' ? task.pendingHostTurn.identity : undefined;
         const preparedTurn = await this.dependencies.executionEngine.prepareCurrentTurnInstruction(
@@ -277,11 +306,14 @@ export class ContinuationOrchestrator_ACU {
           retryAttempt,
           async instruction => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult,
           async edits => this.applyOutlineEditsWithinLease_ACU(chatIdentity, lease, edits, 'running'),
+          controller.signal,
         );
         return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started!), preparedTurn };
       } catch (error) {
         await this.pauseWithError_ACU(chatIdentity, task.taskId, error, 'turn_call', '每轮指令生成失败');
         throw error;
+      } finally {
+        if (abortControllersByChat_ACU.get(chatIdentity) === controller) abortControllersByChat_ACU.delete(chatIdentity);
       }
     });
   }
@@ -497,10 +529,112 @@ export class ContinuationOrchestrator_ACU {
     });
   }
 
+  /**
+   * 在 Agent 会话里以用户身份说话。这是「像 coding agent 一样交互」的唯一入口。
+   *
+   * 三种情形：没有任务时等价于创建任务并把这句话作为初始要求；空闲时把消息记进会话记录；
+   * 循环正在跑时先中断在途请求再记消息——中断后主 Agent 下一次迭代会带着这条消息重新开始，
+   * 已完成的派工结论由 run cache 保留，不会白跑。
+   * @param input 用户输入的文本
+   * @returns 任务快照与「调用方是否应接着继续跑循环」的判定
+   */
+  async sendAgentMessage(input: SendAgentMessageInput_ACU): Promise<SendAgentMessageResult_ACU> {
+    const text = normalizeOriginInstruction_ACU(input.text);
+    const existing = this.dependencies.store.readPersisted()?.activeTask ?? null;
+    const hasLiveTask = !!existing && !['completed', 'abandoned', 'failed'].includes(existing.status);
+    if (!hasLiveTask) {
+      const created = await this.createTask({ originInstruction: text });
+      await this.recordUserMessage_ACU(text, '创建续写任务');
+      return { ...created, created: true, interrupted: false, shouldContinue: true };
+    }
+
+    const chatIdentity = this.requireChatIdentity_ACU();
+    // 等待宿主正文期间不能打断：那是酒馆自己的生成，中断它不属于本插件的职责范围。
+    // 消息仍然记入会话，主 Agent 在下一轮开始时就会读到。
+    const awaitingHost = existing!.pendingHostTurn?.status === 'awaiting_generation';
+    const wasRunning = existing!.status === 'running' && !awaitingHost;
+    if (wasRunning) this.invalidateLease_ACU(chatIdentity);
+    await this.recordUserMessage_ACU(text, wasRunning ? '打断并插话' : '会话输入');
+
+    let envelope: ContinuationEnvelope_ACU | null = null;
+    await this.withLease_ACU(async () => {
+      await this.dependencies.store.updatePersistedAtomically(current => {
+        const currentEnvelope = this.requireEnvelope_ACU(current);
+        const task = this.requireTask_ACU(currentEnvelope);
+        const now = this.dependencies.now();
+        // 被打断的运行落回 paused 且不设 stopReason：这不是「停止」，而是等着带上新消息重新继续。
+        envelope = wasRunning
+          ? { ...currentEnvelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: null, lastError: null } }
+          : currentEnvelope;
+        return envelope;
+      }, guardForTask_ACU(chatIdentity, existing));
+    });
+
+    const task = envelope!.activeTask!;
+    const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+    const shouldContinue = !awaitingHost
+      && task.status === 'paused'
+      && (task.stopReason === null || task.stopReason === 'manual')
+      && !task.pendingHostTurn
+      && (!stage || ['running', 'completed'].includes(stage.status));
+    return { ...taskResult_ACU(envelope!), created: false, interrupted: wasRunning, shouldContinue };
+  }
+
+  /**
+   * 用户在资料界面手动改写当前阶段大纲后保存。
+   *
+   * 走与 Agent 工具编辑完全相同的校验：已完成轮次不可改、当前执行轮不可删、总轮数必须留在
+   * 阶段规模范围内。这样「用户编辑」不会成为绕过大纲一致性约束的后门。
+   * @param input 用户编辑后的完整大纲
+   * @returns 任务快照
+   */
+  async replaceActiveOutline(input: ReplaceActiveOutlineInput_ACU): Promise<ContinuationOrchestratorResult_ACU> {
+    return this.withLease_ACU(async chatIdentity => {
+      const envelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
+      const task = this.requireTask_ACU(envelope);
+      if (task.status === 'running' || task.status === 'stopping_after_inflight') {
+        fail_ACU('CONTINUATION_OPERATION_BUSY', '循环正在运行，请先停止再手动编辑大纲');
+      }
+      const stage = getActiveStage_ACU(task);
+      const current = getActiveRevision_ACU(stage);
+      if (stage.status !== 'running' || !current.frozen) {
+        fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前没有可手动编辑的已冻结大纲');
+      }
+      await this.commitEditedOutline_ACU(chatIdentity, envelope, task, stage, current, cloneOutline_ACU(input.outline), '用户手动编辑', '已保存手动编辑的大纲（', 'paused');
+      return taskResult_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted()));
+    });
+  }
+
+  /**
+   * 一键清空：丢弃当前任务、Agent 会话记录与本地资料快照，回到「可以从当前剧情重新规划」的状态。
+   * 绝不触碰任何正文楼层——清掉的只有本插件写在楼层上的扩展字段与首楼信封里的任务。
+   * @returns 清空后的信封与各项是否真的有内容被清除
+   */
+  async clearContinuationData(): Promise<ClearContinuationDataResult_ACU> {
+    const chatIdentity = this.requireChatIdentity_ACU();
+    const existing = this.dependencies.store.readPersisted()?.activeTask ?? null;
+    this.invalidateLease_ACU(chatIdentity);
+    const envelope = await this.withLease_ACU(async () => {
+      let result: ContinuationEnvelope_ACU | null = null;
+      await this.dependencies.store.updatePersistedAtomically(current => {
+        const currentEnvelope = this.requireEnvelope_ACU(current);
+        result = { ...currentEnvelope, activeTask: null };
+        return result;
+      }, guardForTask_ACU(chatIdentity, existing));
+      return result!;
+    });
+    clearAgentRunState_ACU(chatIdentity);
+    const clearedModules = await (this.dependencies.clearAgentModules ?? clearAgentModuleField_ACU)();
+    const clearedConversation = await (this.dependencies.clearAgentConversation ?? clearAgentConversationField_ACU)();
+    clearAgentSessionLog_ACU();
+    return { envelope, clearedModules, clearedConversation };
+  }
+
   async replanRemaining(input: ReplanContinuationInput_ACU = {}): Promise<ContinuationOrchestratorResult_ACU> {
     const replanInstruction = typeof input.instruction === 'string' ? input.instruction.trim() : '';
     const chatIdentity = this.requireChatIdentity_ACU();
     this.invalidateLease_ACU(chatIdentity);
+    if (replanInstruction) await this.recordUserMessage_ACU(replanInstruction, '要求重新规划大纲');
     return this.withLease_ACU(async (_identity, lease) => {
       const taskId = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted())).taskId;
       try {
@@ -554,20 +688,50 @@ export class ContinuationOrchestrator_ACU {
       throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '当前大纲尚未冻结（可能等待确认），不可编辑', false));
     }
     const edited = applyOutlineEditOps_ACU(current.outline, edits, this.dependencies.allocateId);
+    return this.commitEditedOutline_ACU(chatIdentity, envelope, task, stage, current, edited, `Agent 工具编辑：${edits.length} 处`, `已按工具编辑改写大纲（${edits.length} 处`, endStatus);
+  }
+
+  /**
+   * 把一份直接改好的大纲提交为下一个已冻结 revision。
+   *
+   * 工具编辑与用户手动编辑共用这条路径：两者的差别只是「怎么得到候选大纲」，
+   * 之后的当前轮保护、前缀保护、轮数范围校验与落盘必须完全一致，否则手动编辑就成了绕过校验的后门。
+   * @param chatIdentity 当前聊天身份
+   * @param envelope 读到候选大纲时的信封
+   * @param task 当时的任务
+   * @param stage 当时的活动阶段
+   * @param current 被替换的 revision
+   * @param candidate 候选大纲
+   * @param reasonNote 写入 revision 的来源说明
+   * @param summaryHead 回执摘要前半段，函数负责补上 revision 与轮数
+   * @param endStatus 落盘后任务状态
+   * @returns 回执摘要
+   */
+  private async commitEditedOutline_ACU(
+    chatIdentity: string,
+    envelope: ContinuationEnvelope_ACU,
+    task: ContinuationTask_ACU,
+    stage: ContinuationStage_ACU,
+    current: StageRevision_ACU,
+    candidate: StageOutline_ACU,
+    reasonNote: string,
+    summaryHead: string,
+    endStatus: 'running' | 'paused',
+  ): Promise<{ summary: string }> {
     const oldCursorTurn = current.outline.nodes.flatMap(node => node.turns)[stage.completedTurns] ?? null;
-    const newFlattened = edited.nodes.flatMap(node => node.turns);
+    const newFlattened = candidate.nodes.flatMap(node => node.turns);
     const newCursorTurn = newFlattened[stage.completedTurns] ?? null;
     if (!oldCursorTurn || !newCursorTurn || newCursorTurn.id !== oldCursorTurn.id) {
       throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '编辑不能移除或替换当前正在执行的轮次（可以改它的目标句）', false, { cursorTurnId: oldCursorTurn?.id ?? null }));
     }
     const range = resolveContinuationTurnRange_ACU(envelope.settings.stageSize, envelope.settings.customTurnMin ?? undefined, envelope.settings.customTurnMax ?? undefined);
-    const validated = validateReplannedStageOutline_ACU(edited, range, {
+    const validated = validateReplannedStageOutline_ACU(candidate, range, {
       previousOutline: current.outline,
       completedTurns: stage.completedTurns,
       expectedRemainingTurns: newFlattened.length - stage.completedTurns,
     });
     const nextRevisionNumber = current.revision + 1;
-    const summary = `已按工具编辑改写大纲（${edits.length} 处，revision ${nextRevisionNumber}，共 ${validated.totalTurns} 轮）`;
+    const summary = `${summaryHead}，revision ${nextRevisionNumber}，共 ${validated.totalTurns} 轮）`;
     await this.dependencies.store.updatePersistedAtomically(currentEnvelope => {
       const env = this.requireEnvelope_ACU(currentEnvelope);
       const t = this.requireTask_ACU(env);
@@ -576,7 +740,7 @@ export class ContinuationOrchestrator_ACU {
         fail_ACU('CONTINUATION_TASK_STATE_INVALID', '大纲编辑结果已失效');
       }
       const at = this.dependencies.now();
-      const revision = freezePlannedStageRevision_ACU(createPlannedStageRevision_ACU(validated, nextRevisionNumber, 'manual_replan', `Agent 工具编辑：${edits.length} 处`, at));
+      const revision = freezePlannedStageRevision_ACU(createPlannedStageRevision_ACU(validated, nextRevisionNumber, 'manual_replan', reasonNote, at));
       const nextStage = { ...activeStage, activeRevision: nextRevisionNumber, revisions: [...activeStage.revisions, revision] };
       return { ...env, activeTask: { ...t, status: endStatus, updatedAt: at, lastError: null, stages: t.stages.map(item => item.stageId === nextStage.stageId ? nextStage : item), timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStage.stageId, revision: nextRevisionNumber })] } };
     }, guardForTask_ACU(chatIdentity, task));
@@ -733,6 +897,27 @@ export class ContinuationOrchestrator_ACU {
     } catch { /* Preserve the primary error; a later guarded operation exposes persistence failure. */ }
   }
 
+  /**
+   * 把用户消息同时写进持久会话记录与展示用会话流。
+   * 落盘失败不上抛：消息没能持久化时会话流仍要显示它，用户至少能看到自己说过什么。
+   * @param text 用户消息正文
+   * @param digest 短标签，用于压缩交接报告与 UI 标题
+   */
+  private async recordUserMessage_ACU(text: string, digest: string): Promise<void> {
+    logAgentSession_ACU({ kind: 'user_message', title: digest, detail: text });
+    const append = this.dependencies.appendAgentConversation ?? appendAgentConversationToChat_ACU;
+    try {
+      await append([{ kind: 'user', text, digest }]);
+    } catch (error) {
+      logAgentSession_ACU({
+        kind: 'run_failed',
+        title: '这条消息未能写入持久会话记录',
+        detail: `${error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error)}\n本条消息只存在于当前界面，页面重载后会消失。`,
+        ok: false,
+      });
+    }
+  }
+
   private planningSummary_ACU(result: ContinuationOutlinePlanningResult_ACU): ContinuationOrchestratorResult_ACU['planning'] {
     return { attempts: result.attempts, apiPreset: result.apiPreset, requiresReview: result.requiresReview };
   }
@@ -800,6 +985,12 @@ export class ContinuationOrchestrator_ACU {
   private invalidateLease_ACU(chatIdentity: string): void {
     epochsByChat_ACU.set(chatIdentity, (epochsByChat_ACU.get(chatIdentity) ?? 0) + 1);
     leasesByChat_ACU.delete(chatIdentity);
+    // 作废租约的同时中断在途请求：两者必须同时发生，否则「停止」在用户看来要等一整个 AI 调用。
+    const controller = abortControllersByChat_ACU.get(chatIdentity);
+    if (controller) {
+      abortControllersByChat_ACU.delete(chatIdentity);
+      try { controller.abort(); } catch { /* 中断失败不影响状态机推进。 */ }
+    }
   }
 
   private isLeaseCurrent_ACU(chatIdentity: string, lease: Lease_ACU): boolean {

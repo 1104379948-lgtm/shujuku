@@ -1,104 +1,28 @@
 <template>
   <section class="acu-v2-continuation-page">
-    <AcuPanel title="Agent 会话" description="主 Agent 按需派工子代理并管理大纲（创建 / 维护 / 继续）；运行过程实时显示在会话流中，最终正文仍由酒馆模型生成。">
-      <template v-if="!runtime.task.value">
-        <AcuTextarea
-          :model-value="runtime.originInstruction.value"
-          :rows="5"
-          :disabled="runtime.busy.value"
-          placeholder="输入本次智能续写的初始剧情要求..."
-          @update:model-value="runtime.originInstruction.value = $event"
-        />
-        <div class="acu-v2-continuation-page__actions">
-          <AcuButton
-            variant="primary"
-            :loading="runtime.busy.value"
-            :disabled="!runtime.originInstruction.value.trim()"
-            @click="runtime.createTask"
-          >创建续写任务</AcuButton>
-        </div>
-      </template>
-      <template v-else>
-        <dl class="acu-v2-continuation-page__status-grid">
-          <div><dt>任务状态</dt><dd>{{ runtime.statusText.value }}</dd></div>
-          <div><dt>当前阶段</dt><dd>{{ runtime.activeStage.value ? `第 ${runtime.activeStage.value.stageNumber} 阶段` : '大纲待创建' }}</dd></div>
-          <div><dt>完成轮次</dt><dd>{{ runtime.activeStage.value?.completedTurns ?? 0 }}</dd></div>
-          <div><dt>大纲 revision</dt><dd>{{ runtime.activeStage.value?.activeRevision ?? '-' }}</dd></div>
-          <div><dt>总倒计时</dt><dd>{{ deadlineText }}</dd></div>
-        </dl>
-        <p class="acu-v2-continuation-page__instruction">{{ runtime.task.value.originInstruction }}</p>
-        <ContinuationSessionFeed :entries="session.entries.value" :running="session.running.value" />
-        <div class="acu-v2-continuation-page__actions">
-          <AcuButton
-            v-if="runtime.canContinue.value"
-            variant="primary"
-            :loading="runtime.busy.value"
-            @click="runtime.continueTask"
-          >继续当前轮次</AcuButton>
-          <AcuButton
-            v-if="runtime.task.value?.pendingHostTurn?.status === 'retry_ready'"
-            variant="primary"
-            :loading="runtime.busy.value"
-            @click="runtime.retryCurrentTurn"
-          >重试当前轮次</AcuButton>
-          <AcuButton
-            v-if="runtime.task.value && !runtime.isAwaitingHostResult.value"
-            :loading="runtime.busy.value"
-            @click="replan"
-          >重新规划剩余阶段</AcuButton>
-          <AcuButton
-            v-if="runtime.task.value && !runtime.isAwaitingHostResult.value"
-            variant="danger"
-            :loading="runtime.busy.value"
-            @click="runtime.stopTask"
-          >停止智能续写</AcuButton>
-        </div>
-        <p v-if="runtime.isAwaitingHostResult.value" class="acu-v2-continuation-page__notice">
-          当前轮次正在等待宿主生成结束事件，不能重复发送或重规划。
-        </p>
-        <AcuTextarea
-          v-if="runtime.task.value && !runtime.isAwaitingHostResult.value"
-          :model-value="replanInstruction"
-          :rows="3"
-          placeholder="可选：说明本次重新规划要调整的方向..."
-          @update:model-value="replanInstruction = $event"
-        />
-      </template>
+    <AcuPanel title="Agent 会话" description="像和 coding agent 对话一样使用：随时输入、随时打断。主 Agent 按需派工子代理并管理大纲，最终正文仍由酒馆模型生成。">
+      <ContinuationChat
+        :task="runtime.task.value"
+        :entries="session.entries.value"
+        :running="session.running.value"
+        :busy="runtime.busy.value"
+        :status-text="runtime.statusText.value"
+        :stage-text="stageText"
+        :completed-turns="runtime.activeStage.value?.completedTurns ?? 0"
+        :total-turns="runtime.activeRevision.value?.outline.totalTurns ?? 0"
+        :revision-text="runtime.activeStage.value ? `revision ${runtime.activeStage.value.activeRevision}` : ''"
+        :deadline-text="deadlineText"
+        :awaiting-host="runtime.isAwaitingHostResult.value"
+        :can-continue="runtime.canContinue.value"
+        :can-retry="runtime.task.value?.pendingHostTurn?.status === 'retry_ready'"
+        @send="sendMessage"
+        @stop="runtime.stopTask"
+        @continue="runtime.continueTask"
+        @retry="runtime.retryCurrentTurn"
+      />
     </AcuPanel>
 
-    <AcuPanel v-if="runtime.task.value" title="阶段大纲与执行回执" description="阶段历史默认折叠；当前阶段与其当前 revision 展开。">
-      <details
-        v-for="stage in runtime.task.value.stages"
-        :key="stage.stageId"
-        class="acu-v2-continuation-page__stage"
-        :open="stage.stageId === runtime.task.value.activeStageId"
-      >
-        <summary>第 {{ stage.stageNumber }} 阶段 · {{ stage.status }} · {{ stage.completedTurns }} / {{ stage.revisions.find(item => item.revision === stage.activeRevision)?.outline.totalTurns ?? 0 }} 轮</summary>
-        <p v-if="stage.chronicleRange" class="acu-v2-continuation-page__meta">AM 范围：{{ stage.chronicleRange.first }} → {{ stage.chronicleRange.last }}</p>
-        <details
-          v-for="revision in stage.revisions"
-          :key="revision.revision"
-          class="acu-v2-continuation-page__revision"
-          :open="revision.revision === stage.activeRevision"
-        >
-          <summary>revision {{ revision.revision }} · {{ revision.reason }} · {{ revision.frozen ? '已冻结' : '待确认' }}</summary>
-          <p class="acu-v2-continuation-page__meta">{{ revision.outline.title }}：{{ revision.outline.goal }}</p>
-          <ol class="acu-v2-continuation-page__outline">
-            <li v-for="node in revision.outline.nodes" :key="node.id">
-              <strong>{{ node.title }}</strong>：{{ node.goal }}
-              <ol><li v-for="turn in node.turns" :key="turn.id">{{ turn.goal }}</li></ol>
-            </li>
-          </ol>
-        </details>
-      </details>
-      <ol class="acu-v2-continuation-page__timeline">
-        <li v-for="entry in runtime.task.value.timeline" :key="entry.id">
-          {{ new Date(entry.at).toLocaleString() }} · {{ entry.kind }}<span v-if="entry.errorCode"> · {{ entry.errorCode }}</span>
-        </li>
-      </ol>
-    </AcuPanel>
-
-    <AcuPanel v-if="runtime.task.value && runtime.task.value.status === 'awaiting_outline_review' && runtime.activeRevision.value" title="大纲预览" description="保存前会在领域层重新执行严格 Schema 与 revision 校验；页面不直接写入聊天数组。">
+    <AcuPanel v-if="runtime.task.value && runtime.task.value.status === 'awaiting_outline_review' && runtime.activeRevision.value" title="待确认的大纲" description="确认前会在领域层重新执行严格 Schema 与 revision 校验；页面不直接写入聊天数组。">
       <AcuTextarea :model-value="outlineDraft" :rows="16" @update:model-value="outlineDraft = $event" />
       <p v-if="outlineDraftError" class="acu-v2-continuation-page__error">{{ outlineDraftError }}</p>
       <div class="acu-v2-continuation-page__actions">
@@ -106,77 +30,90 @@
       </div>
     </AcuPanel>
 
-    <AcuPanel v-if="runtime.task.value && !runtime.isAwaitingHostResult.value" title="放弃并新建" description="未完成任务默认只能继续；放弃必须显式确认。">
-      <AcuTextarea :model-value="replacementInstruction" :rows="3" placeholder="输入新任务的初始剧情要求..." @update:model-value="replacementInstruction = $event" />
-      <AcuCheckbox v-model="confirmAbandon" label="我确认放弃当前未完成任务并创建新任务" />
-      <div class="acu-v2-continuation-page__actions">
-        <AcuButton variant="danger" :disabled="!confirmAbandon || !replacementInstruction.trim()" :loading="runtime.busy.value" @click="abandonAndCreate">放弃并创建新任务</AcuButton>
-      </div>
-    </AcuPanel>
+    <!-- 会话独占整宽，资料与设置并列在其下：会话是主操作面，资料与设置是查阅面。 -->
+    <AcuPanelGrid class="acu-v2-continuation-page__layout">
+      <AcuPanel title="已有资料" description="阶段大纲与本地资料都可以直接编辑保存；一键清空只丢任务、会话记录与本地资料，不动小说正文。">
+        <ContinuationMaterialsPanel
+          ref="materialsPanel"
+          :task="runtime.task.value"
+          :active-stage="runtime.activeStage.value"
+          :active-revision="runtime.activeRevision.value"
+          :busy="runtime.busy.value"
+          @save-outline="saveOutline"
+          @clear="clearData"
+        />
+      </AcuPanel>
 
-    <AcuPanel v-if="settingsDraft" title="续写设置" description="修改后自动保存并立即生效；宿主生成进行中暂不能保存，生成结束后再修改即可。">
-      <div class="acu-v2-continuation-page__settings-grid">
-        <AcuFormRow label="阶段规模">
-          <select v-model="settingsDraft.stageSize">
-            <option value="short">短（3–5）</option>
-            <option value="standard">标准（6–10）</option>
-            <option value="long">长（11–20）</option>
-            <option value="custom">自定义</option>
-          </select>
-        </AcuFormRow>
-        <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最少轮次">
-          <AcuInput v-model="settingsDraft.customTurnMin" type="number" :min="1" :max="50" />
-        </AcuFormRow>
-        <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最多轮次">
-          <AcuInput v-model="settingsDraft.customTurnMax" type="number" :min="1" :max="50" />
-        </AcuFormRow>
-        <AcuFormRow label="自动阶段上限">
-          <AcuInput v-model="settingsDraft.maxAutomaticStages" type="number" :min="1" />
-        </AcuFormRow>
-        <AcuFormRow label="正文重试次数">
-          <AcuInput v-model="settingsDraft.generationRetryLimit" type="number" :min="0" />
-        </AcuFormRow>
-        <AcuFormRow label="内部 AI 重试次数">
-          <AcuInput v-model="settingsDraft.internalAiRetryLimit" type="number" :min="0" />
-        </AcuFormRow>
-        <AcuFormRow label="轮次延迟（秒）">
-          <AcuInput v-model="settingsDraft.loopDelaySeconds" type="number" :min="0" />
-        </AcuFormRow>
-        <AcuFormRow label="重试延迟（秒）">
-          <AcuInput v-model="settingsDraft.retryDelaySeconds" type="number" :min="0" />
-        </AcuFormRow>
-        <AcuFormRow label="总时长（分钟，0 为不设总时长）">
-          <AcuInput v-model="settingsDraft.totalDurationMinutes" type="number" :min="0" />
-        </AcuFormRow>
-        <AcuFormRow label="最近剧情轮数">
-          <AcuInput v-model="settingsDraft.contextTurnCount" type="number" :min="0" />
-        </AcuFormRow>
-        <AcuFormRow label="循环标签">
-          <AcuInput v-model="settingsDraft.loopTags" type="text" />
-        </AcuFormRow>
-        <AcuFormRow label="API 预设（全局默认）">
-          <AcuSelect
-            :options="continuationApiPresetOptions"
-            :model-value="continuationApiPresetValue"
-            :placeholder="followActiveApiLabel"
-            @update:model-value="applyContinuationApiPreset"
-          />
-        </AcuFormRow>
-        <AcuFormRow v-for="channel in agentChannelRoles" :key="channel.role" :label="`渠道 · ${channel.label}`">
-          <AcuSelect
-            :options="agentChannelOptions"
-            :model-value="agentChannelValue(channel.role)"
-            @update:model-value="value => applyAgentChannel(channel.role, value)"
-          />
-        </AcuFormRow>
-      </div>
-      <div class="acu-v2-continuation-page__toggles">
-        <AcuCheckbox v-model="settingsDraft.outlinePreview" label="大纲产出后先预览再执行" />
-      </div>
-      <AcuRulePairList v-model="settingsDraft.contextExtractRules" label="上下文提取规则" />
-      <AcuRulePairList v-model="settingsDraft.contextExcludeRules" label="上下文排除规则" />
-      <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
-    </AcuPanel>
+      <AcuPanel v-if="settingsDraft" title="续写设置" description="修改后自动保存并立即生效；宿主生成进行中暂不能保存，生成结束后再修改即可。">
+        <div class="acu-v2-continuation-page__settings-grid">
+          <AcuFormRow label="阶段规模">
+            <select v-model="settingsDraft.stageSize">
+              <option value="short">短（3–5）</option>
+              <option value="standard">标准（6–10）</option>
+              <option value="long">长（11–20）</option>
+              <option value="custom">自定义</option>
+            </select>
+          </AcuFormRow>
+          <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最少轮次">
+            <AcuInput v-model="settingsDraft.customTurnMin" type="number" :min="1" :max="50" />
+          </AcuFormRow>
+          <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最多轮次">
+            <AcuInput v-model="settingsDraft.customTurnMax" type="number" :min="1" :max="50" />
+          </AcuFormRow>
+          <AcuFormRow label="自动阶段上限">
+            <AcuInput v-model="settingsDraft.maxAutomaticStages" type="number" :min="1" />
+          </AcuFormRow>
+          <AcuFormRow label="正文重试次数">
+            <AcuInput v-model="settingsDraft.generationRetryLimit" type="number" :min="0" />
+          </AcuFormRow>
+          <AcuFormRow label="内部 AI 重试次数">
+            <AcuInput v-model="settingsDraft.internalAiRetryLimit" type="number" :min="0" />
+          </AcuFormRow>
+          <AcuFormRow label="轮次延迟（秒）">
+            <AcuInput v-model="settingsDraft.loopDelaySeconds" type="number" :min="0" />
+          </AcuFormRow>
+          <AcuFormRow label="重试延迟（秒）">
+            <AcuInput v-model="settingsDraft.retryDelaySeconds" type="number" :min="0" />
+          </AcuFormRow>
+          <AcuFormRow label="总时长（分钟，0 为不设总时长）">
+            <AcuInput v-model="settingsDraft.totalDurationMinutes" type="number" :min="0" />
+          </AcuFormRow>
+          <AcuFormRow label="最近剧情轮数">
+            <AcuInput v-model="settingsDraft.contextTurnCount" type="number" :min="0" />
+          </AcuFormRow>
+          <AcuFormRow label="正文窗口楼数（已结算部分，0 为只给未结算）">
+            <AcuInput v-model="settingsDraft.storyWindowFloors" type="number" :min="0" />
+          </AcuFormRow>
+            <AcuFormRow label="Agent 会话 token 预算（0 为不限制，超限在下一轮开始前浓缩）">
+            <AcuInput v-model="settingsDraft.agentHistoryTokenBudget" type="number" :min="0" />
+          </AcuFormRow>
+          <AcuFormRow label="循环标签">
+            <AcuInput v-model="settingsDraft.loopTags" type="text" />
+          </AcuFormRow>
+          <AcuFormRow label="API 预设（全局默认）">
+            <AcuSelect
+              :options="continuationApiPresetOptions"
+              :model-value="continuationApiPresetValue"
+              :placeholder="followActiveApiLabel"
+              @update:model-value="applyContinuationApiPreset"
+            />
+          </AcuFormRow>
+          <AcuFormRow v-for="channel in agentChannelRoles" :key="channel.role" :label="`渠道 · ${channel.label}`">
+            <AcuSelect
+              :options="agentChannelOptions"
+              :model-value="agentChannelValue(channel.role)"
+              @update:model-value="value => applyAgentChannel(channel.role, value)"
+            />
+          </AcuFormRow>
+        </div>
+        <div class="acu-v2-continuation-page__toggles">
+          <AcuCheckbox v-model="settingsDraft.outlinePreview" label="大纲产出后先预览再执行" />
+        </div>
+        <AcuRulePairList v-model="settingsDraft.contextExtractRules" label="上下文提取规则" />
+        <AcuRulePairList v-model="settingsDraft.contextExcludeRules" label="上下文排除规则" />
+        <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
+      </AcuPanel>
+    </AcuPanelGrid>
 
     <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用段参与内部调用；占位符会按实际出现按需解析。">
       <h3>大纲子代理（outline-architect）提示词</h3>
@@ -187,7 +124,7 @@
       <h3>主 Agent 提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.agentPrompts.main" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('main')" @delete="index => deletePrompt('main', index)" @move="(index, delta) => movePrompt('main', index, delta)" @update="(index, patch) => updatePrompt('main', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_main')">恢复主 Agent 默认值</AcuButton></div>
-      <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记真实历史插入位置，该段本身不发送。删掉它会让真实历史退回到序列最前面。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$OUTLINE_WINDOW、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET、$TOOL_RESULTS。</p>
+      <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。小说正文由 $STORY_TEXT 单独摘取（只含 AI 楼层）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$OUTLINE_WINDOW、$UNSETTLED_RANGE、$ACTIVE_CONSTRAINTS、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET。</p>
 
       <h3>伏笔与认知维护子代理提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.agentPrompts.maintainer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('maintainer')" @delete="index => deletePrompt('maintainer', index)" @move="(index, delta) => movePrompt('maintainer', index, delta)" @update="(index, patch) => updatePrompt('maintainer', index, patch)" />
@@ -211,18 +148,20 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { restoreContinuationPromptDefault_ACU, type ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template';
-import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU, StageOutline_ACU } from '../../service/continuation/model';
+import type { ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
+import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU, StageOutline_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import AcuButton from '../components/_lib/AcuButton.vue';
 import AcuCheckbox from '../components/_lib/AcuCheckbox.vue';
 import AcuFormRow from '../components/_lib/AcuFormRow.vue';
 import AcuInput from '../components/_lib/AcuInput.vue';
 import AcuPanel from '../components/_lib/AcuPanel.vue';
+import AcuPanelGrid from '../components/_lib/AcuPanelGrid.vue';
 import AcuPromptSegments from '../components/_lib/AcuPromptSegments.vue';
 import AcuRulePairList from '../components/_lib/AcuRulePairList.vue';
 import AcuSelect from '../components/_lib/AcuSelect.vue';
 import AcuTextarea from '../components/_lib/AcuTextarea.vue';
-import ContinuationSessionFeed from '../components/ContinuationSessionFeed.vue';
+import ContinuationChat from '../components/ContinuationChat.vue';
+import ContinuationMaterialsPanel from '../components/ContinuationMaterialsPanel.vue';
 import { useApiPresetSelectOptions } from '../composables/useApiPresetSelectOptions';
 import { useChatChangedTick } from '../composables/useChatChangedListener';
 import { useContinuationRuntime } from '../composables/useContinuationRuntime';
@@ -235,11 +174,15 @@ const settingsDraft = ref<ContinuationSettings_ACU | null>(null);
 const outlineDraft = ref('');
 const outlineDraftError = ref('');
 const settingsError = ref('');
-const replacementInstruction = ref('');
-const confirmAbandon = ref(false);
-const replanInstruction = ref('');
+const materialsPanel = ref<InstanceType<typeof ContinuationMaterialsPanel> | null>(null);
 const clock = ref(Date.now());
 let countdownTimer: ReturnType<typeof setInterval> | undefined;
+
+const stageText = computed(() => {
+  const stage = runtime.activeStage.value;
+  if (!runtime.task.value) return '尚未创建任务';
+  return stage ? `第 ${stage.stageNumber} 阶段` : '大纲待创建';
+});
 
 const deadlineText = computed(() => {
   const deadlineAt = runtime.task.value?.deadlineAt;
@@ -361,17 +304,18 @@ async function acceptOutlineDraft(): Promise<void> {
   if (await runtime.acceptOutline(outline)) syncOutlineDraft();
 }
 
-async function replan(): Promise<void> {
-  const succeeded = await runtime.replanRemainingWithInstruction(replanInstruction.value);
-  if (succeeded) replanInstruction.value = '';
+/** 会话发送：没有任务时创建任务，运行中会打断当前迭代并带着这句话重新开始。 */
+async function sendMessage(text: string): Promise<void> {
+  await runtime.sendAgentMessage(text);
 }
 
-async function abandonAndCreate(): Promise<void> {
-  if (!confirmAbandon.value || !replacementInstruction.value.trim()) return;
-  if (await runtime.abandonAndCreate(replacementInstruction.value)) {
-    replacementInstruction.value = '';
-    confirmAbandon.value = false;
-  }
+/** 用户手动改写的大纲保存成功后刷新资料面板，让它读到新的 revision。 */
+async function saveOutline(outline: StageOutline_ACU): Promise<void> {
+  if (await runtime.saveActiveOutline(outline)) materialsPanel.value?.reload();
+}
+
+async function clearData(): Promise<void> {
+  if (await runtime.clearData()) materialsPanel.value?.reload();
 }
 
 function requiredInteger(value: unknown, label: string): number {
@@ -399,8 +343,10 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     retryDelaySeconds: requiredInteger(source.retryDelaySeconds, '重试延迟'),
     totalDurationMinutes: requiredInteger(source.totalDurationMinutes, '总时长'),
     contextTurnCount: requiredInteger(source.contextTurnCount, '最近剧情轮数'),
+    storyWindowFloors: requiredInteger(source.storyWindowFloors, '正文窗口楼数'),
+    agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, 'Agent 会话 token 预算'),
   };
-  if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.contextTurnCount < 0) {
+  if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.contextTurnCount < 0 || normalized.storyWindowFloors < 0 || normalized.agentHistoryTokenBudget < 0) {
     throw new Error('续写设置中的数值不能低于允许范围');
   }
   if (normalized.apiPresetMode === 'fixed') {
@@ -489,7 +435,7 @@ function updatePrompt(key: PromptKey, index: number, patch: Partial<Continuation
 
 function restorePrompt(kind: ContinuationPromptKind_ACU): void {
   if (!settingsDraft.value) return;
-  settingsDraft.value = restoreContinuationPromptDefault_ACU(settingsDraft.value, kind);
+  settingsDraft.value = runtime.restorePromptDefault(settingsDraft.value, kind);
 }
 
 /** 刷新页面依赖的全部数据源：API 预设列表必须在挂载与聊天切换时重新读取，否则预设下拉是空的。 */
@@ -522,22 +468,14 @@ watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevisio
 
 <style scoped>
 .acu-v2-continuation-page { min-height: 100%; padding: 20px; display: grid; gap: 18px; }
+.acu-v2-continuation-page__layout { align-items: start; }
 .acu-v2-continuation-page__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-.acu-v2-continuation-page__status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0; }
-.acu-v2-continuation-page__status-grid div { border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent); padding-left: 10px; }
-.acu-v2-continuation-page__status-grid dt { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
-.acu-v2-continuation-page__status-grid dd { margin: 3px 0 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); }
-.acu-v2-continuation-page__instruction, .acu-v2-continuation-page__notice { margin: 14px 0 0; color: var(--acu-text-2); white-space: pre-wrap; }
-.acu-v2-continuation-page__notice { color: var(--acu-text-3); }
 .acu-v2-continuation-page__error { color: var(--acu-danger, #d65b5b); white-space: pre-wrap; }
 .acu-v2-continuation-page__meta { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; }
-.acu-v2-continuation-page__stage, .acu-v2-continuation-page__revision { margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; }
-.acu-v2-continuation-page__stage > summary, .acu-v2-continuation-page__revision > summary { cursor: pointer; color: var(--acu-text-1); }
-.acu-v2-continuation-page__outline, .acu-v2-continuation-page__timeline { display: grid; gap: 8px; padding-left: 22px; color: var(--acu-text-2); }
 .acu-v2-continuation-page__settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .acu-v2-continuation-page__settings-grid label { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
 .acu-v2-continuation-page__settings-grid select { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1); }
 .acu-v2-continuation-page__toggles { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0; }
-@media (max-width: 860px) { .acu-v2-continuation-page { padding: 14px; } .acu-v2-continuation-page__status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 860px) { .acu-v2-continuation-page { padding: 14px; } }
 @media (max-width: 640px) { .acu-v2-continuation-page__settings-grid { grid-template-columns: 1fr; } }
 </style>

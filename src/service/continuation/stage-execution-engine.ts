@@ -94,6 +94,7 @@ export class StageExecutionEngine_ACU {
    * @param existingAttempt 正文重试轮的既有身份；提供时禁止大纲操作且游标必须原样
    * @param applyOutline 大纲操作回调，由编排器在租约内执行
    * @param applyOutlineEdits 大纲句级编辑回调，由编排器在租约内执行
+   * @param signal 中断信号；用户停止或插话时用于真正取消在途的内部 AI 请求
    * @returns 最终身份与写作指导
    */
   async prepareCurrentTurnInstruction(
@@ -101,6 +102,7 @@ export class StageExecutionEngine_ACU {
     existingAttempt?: TurnAttemptIdentity_ACU,
     applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU>,
     applyOutlineEdits?: (edits: AgentOutlineEditOp_ACU[]) => Promise<{ summary: string }>,
+    signal?: AbortSignal | null,
   ): Promise<ContinuationPreparedTurnInstruction_ACU> {
     const chatIdentity = this.dependencies.getChatIdentity();
     const initial = currentAgentContext_ACU(this.dependencies.readEnvelope());
@@ -136,6 +138,7 @@ export class StageExecutionEngine_ACU {
       isInternalRequestCurrent: isCurrent,
       applyOutline: existingAttempt ? undefined : applyOutline,
       applyOutlineEdits: existingAttempt ? undefined : applyOutlineEdits,
+      signal,
     });
 
     // 循环结束后按最终游标铸造身份：finalize 已由循环保证游标存在，这里的严格快照是最后防线。

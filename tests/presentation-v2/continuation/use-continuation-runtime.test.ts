@@ -13,9 +13,13 @@ const harness = vi.hoisted(() => ({
   acceptOutline: vi.fn(),
   abandonAndCreate: vi.fn(),
   replaceSettings: vi.fn(),
+  sendAgentMessage: vi.fn(),
+  replaceActiveOutline: vi.fn(),
+  clearContinuationData: vi.fn(),
   initialize: vi.fn(async () => null),
   read: vi.fn(() => null),
   toastError: vi.fn(),
+  toastSuccess: vi.fn(),
 }));
 
 vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
@@ -30,13 +34,16 @@ vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
       acceptOutline: harness.acceptOutline,
       abandonAndCreate: harness.abandonAndCreate,
       replaceSettings: harness.replaceSettings,
+      sendAgentMessage: harness.sendAgentMessage,
+      replaceActiveOutline: harness.replaceActiveOutline,
+      clearContinuationData: harness.clearContinuationData,
     },
     initialize: harness.initialize,
     read: harness.read,
   }),
 }));
 vi.mock('../../../src/presentation-v2/stores/toast-store', () => ({
-  useToastStore: () => ({ error: harness.toastError }),
+  useToastStore: () => ({ error: harness.toastError, success: harness.toastSuccess }),
 }));
 
 const envelope = { schemaVersion: 1, settings: {}, activeTask: null } as any;
@@ -59,6 +66,9 @@ beforeEach(() => {
   harness.acceptOutline.mockResolvedValue(result);
   harness.abandonAndCreate.mockResolvedValue(result);
   harness.replaceSettings.mockResolvedValue(envelope);
+  harness.sendAgentMessage.mockResolvedValue({ ...result, created: false, interrupted: false, shouldContinue: false });
+  harness.replaceActiveOutline.mockResolvedValue(result);
+  harness.clearContinuationData.mockResolvedValue({ envelope, clearedModules: true, clearedConversation: true });
 });
 
 describe('useContinuationRuntime', () => {
@@ -140,5 +150,50 @@ describe('useContinuationRuntime', () => {
     expect(harness.replaceSettings).toHaveBeenCalledWith({ settings });
     expect(harness.acceptOutline).toHaveBeenCalledWith({ outline });
     expect(harness.bridgeSend).not.toHaveBeenCalled();
+  });
+
+  it('会话发送：空白不派发，编排器要求继续时紧接着跑一轮', async () => {
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+
+    expect(await continuation.sendAgentMessage('   ')).toBe(false);
+    expect(harness.sendAgentMessage).not.toHaveBeenCalled();
+
+    expect(await continuation.sendAgentMessage('别揭穿守门人')).toBe(true);
+    expect(harness.sendAgentMessage).toHaveBeenCalledWith({ text: '别揭穿守门人' });
+    // shouldContinue 为假时只记消息，不擅自开跑。
+    expect(harness.continueTask).not.toHaveBeenCalled();
+
+    harness.sendAgentMessage.mockResolvedValue({ ...result, created: true, interrupted: false, shouldContinue: true });
+    expect(await continuation.sendAgentMessage('从这里重新规划')).toBe(true);
+    expect(harness.continueTask).toHaveBeenCalledOnce();
+  });
+
+  it('会话发送失败时不触发续跑', async () => {
+    harness.sendAgentMessage.mockRejectedValue(new Error('发送失败'));
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+
+    expect(await continuation.sendAgentMessage('打断一下')).toBe(false);
+    expect(harness.continueTask).not.toHaveBeenCalled();
+    expect(harness.toastError).toHaveBeenCalledOnce();
+  });
+
+  it('手动保存大纲与一键清空都经编排器，不直接发送宿主消息', async () => {
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+    const outline = { schemaVersion: 1, title: '阶段', goal: '目标', totalTurns: 6, nodes: [] } as any;
+
+    expect(await continuation.saveActiveOutline(outline)).toBe(true);
+    expect(harness.replaceActiveOutline).toHaveBeenCalledWith({ outline });
+
+    expect(await continuation.clearData()).toBe(true);
+    expect(harness.clearContinuationData).toHaveBeenCalledOnce();
+    expect(harness.toastSuccess).toHaveBeenCalledOnce();
+    expect(harness.bridgeSend).not.toHaveBeenCalled();
+
+    harness.clearContinuationData.mockRejectedValue(new Error('清空失败'));
+    expect(await continuation.clearData()).toBe(false);
+    expect(harness.toastError).toHaveBeenCalledOnce();
   });
 });

@@ -1,0 +1,122 @@
+<template>
+  <div class="acu-v2-continuation-chat">
+    <div class="acu-v2-continuation-chat__status">
+      <span class="acu-v2-continuation-chat__badge" :class="`acu-v2-continuation-chat__badge--${statusTone}`">{{ statusText }}</span>
+      <span class="acu-v2-continuation-chat__status-item">{{ stageText }}</span>
+      <span class="acu-v2-continuation-chat__status-item">已完成 {{ completedTurns }} / {{ totalTurns }} 轮</span>
+      <span v-if="revisionText" class="acu-v2-continuation-chat__status-item">大纲 {{ revisionText }}</span>
+      <span class="acu-v2-continuation-chat__status-item">倒计时 {{ deadlineText }}</span>
+    </div>
+
+    <ContinuationSessionFeed :entries="entries" :running="running" />
+
+    <p v-if="notice" class="acu-v2-continuation-chat__notice">{{ notice }}</p>
+
+    <div class="acu-v2-continuation-chat__composer">
+      <textarea
+        ref="inputElement"
+        class="acu-v2-continuation-chat__input"
+        :value="draft"
+        :rows="3"
+        :placeholder="placeholder"
+        @input="onInput"
+        @keydown="onKeydown"
+      />
+      <div class="acu-v2-continuation-chat__composer-actions">
+        <span class="acu-v2-continuation-chat__hint">Ctrl / ⌘ + Enter 发送</span>
+        <AcuButton v-if="canStop" variant="danger" :loading="busy && !running" @click="emit('stop')">停止生成</AcuButton>
+        <AcuButton v-if="canContinue" :loading="busy" @click="emit('continue')">继续当前轮次</AcuButton>
+        <AcuButton v-if="canRetry" :loading="busy" @click="emit('retry')">重试当前轮次</AcuButton>
+        <AcuButton variant="primary" :loading="busy" :disabled="!draft.trim()" @click="send">发送</AcuButton>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, ref } from 'vue';
+import AcuButton from './_lib/AcuButton.vue';
+import ContinuationSessionFeed from './ContinuationSessionFeed.vue';
+import type { AgentSessionEntry_ACU } from '../../service/continuation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import type { ContinuationTask_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+
+const props = defineProps<{
+  task: ContinuationTask_ACU | null;
+  entries: AgentSessionEntry_ACU[];
+  running: boolean;
+  busy: boolean;
+  statusText: string;
+  stageText: string;
+  completedTurns: number;
+  totalTurns: number;
+  revisionText: string;
+  deadlineText: string;
+  awaitingHost: boolean;
+  canContinue: boolean;
+  canRetry: boolean;
+}>();
+
+const emit = defineEmits<{
+  (event: 'send', text: string): void;
+  (event: 'stop' | 'continue' | 'retry'): void;
+}>();
+
+const draft = ref('');
+const inputElement = ref<HTMLTextAreaElement | null>(null);
+
+/** 只有「循环真在跑」才给停止：等待宿主正文时停的是酒馆的生成，不属于这里的职责。 */
+const canStop = computed(() => !!props.task && props.task.status === 'running' && !props.awaitingHost);
+
+const statusTone = computed(() => {
+  if (!props.task) return 'idle';
+  if (props.task.status === 'running') return 'running';
+  if (props.task.lastError) return 'failed';
+  return 'idle';
+});
+
+const placeholder = computed(() => {
+  if (!props.task) return '描述你想要的续写方向，发送后主 Agent 会创建任务并开始规划...';
+  if (props.awaitingHost) return '酒馆正在生成正文；现在发送的消息会在下一轮开始时被读到...';
+  if (props.task.status === 'running') return '主 Agent 正在工作；发送消息会打断当前迭代并带着你的话重新开始...';
+  return '继续和主 Agent 对话，或直接给出下一步要求...';
+});
+
+const notice = computed(() => {
+  if (props.awaitingHost) return '当前轮次正在等待酒馆的正文生成结束，这期间不能重规划或重复发送。';
+  if (props.task?.stopReason && props.task.stopReason !== 'manual') return `任务已停止：${props.task.stopReason}。这类停止不能直接继续，请清空后重新规划。`;
+  if (props.task?.lastError) return `上一次失败：${props.task.lastError.message}`;
+  return '';
+});
+
+function onInput(event: Event): void {
+  draft.value = (event.target as HTMLTextAreaElement).value;
+}
+
+function send(): void {
+  const text = draft.value.trim();
+  if (!text || props.busy) return;
+  draft.value = '';
+  emit('send', text);
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey)) return;
+  event.preventDefault();
+  send();
+}
+</script>
+
+<style scoped>
+.acu-v2-continuation-chat { display: grid; gap: 10px; }
+.acu-v2-continuation-chat__status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
+.acu-v2-continuation-chat__badge { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); }
+.acu-v2-continuation-chat__badge--running { background: color-mix(in srgb, var(--acu-primary, #5b8def) 20%, transparent); color: var(--acu-primary, #5b8def); }
+.acu-v2-continuation-chat__badge--failed { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b); }
+.acu-v2-continuation-chat__status-item { color: var(--acu-text-3); }
+.acu-v2-continuation-chat__notice { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; }
+.acu-v2-continuation-chat__composer { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2); }
+.acu-v2-continuation-chat__input { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px); }
+.acu-v2-continuation-chat__input:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent); }
+.acu-v2-continuation-chat__composer-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.acu-v2-continuation-chat__hint { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
+</style>

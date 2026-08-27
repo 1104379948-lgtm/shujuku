@@ -97,12 +97,14 @@ async function resolveRelevantBookNames_ACU(): Promise<string[]> {
   return (await getCurrentCharacterWorldbookBinding_ACU()).orderedNames;
 }
 
+// 依赖表里的函数一律延迟绑定：直接引用会在模块求值时就解析 pipeline 的导出，
+// 让「谁先被 import」决定本模块能否加载。改成调用时解析后，加载顺序不再影响可用性。
 const defaultDependencies_ACU: ContinuationWorldbookAdapterDependencies_ACU = {
   resolveRelevantBookNames: resolveRelevantBookNames_ACU,
-  resolveInjectionTarget: getInjectionTargetLorebook_ACU,
-  getIsolationPrefix: getIsolationPrefix_ACU,
-  buildRelevantWorldbookContent: buildCombinedWorldbookContentByStrategy_ACU,
-  readLorebookEntries: getLorebookEntriesByNames_ACU,
+  resolveInjectionTarget: () => getInjectionTargetLorebook_ACU(),
+  getIsolationPrefix: () => getIsolationPrefix_ACU(),
+  buildRelevantWorldbookContent: options => buildCombinedWorldbookContentByStrategy_ACU(options),
+  readLorebookEntries: bookNames => getLorebookEntriesByNames_ACU(bookNames),
   logReadFailure: phase => logWarn_ACU('[Continuation] 世界书只读失败。', { phase, error: { category: 'read_failed' } }),
 };
 

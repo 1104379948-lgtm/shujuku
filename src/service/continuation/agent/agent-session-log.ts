@@ -9,6 +9,7 @@
 export type AgentSessionEventKind_ACU =
   | 'run_started'
   | 'run_resumed'
+  | 'user_message'
   | 'thought'
   | 'main_action'
   | 'protocol_retry'
@@ -130,6 +131,53 @@ export function updateAgentSession_ACU(id: number, patch: AgentSessionEntryPatch
  */
 export function readAgentSessionLog_ACU(): AgentSessionEntry_ACU[] {
   return [...entries_ACU];
+}
+
+/**
+ * 当前会话流是否已有条目。UI 据此判断是否需要从持久会话回灌。
+ * @returns 有条目返回 true
+ */
+export function hasAgentSessionEntries_ACU(): boolean {
+  return entries_ACU.length > 0;
+}
+
+/**
+ * 从持久化的 Agent 会话回灌历史条目。
+ *
+ * 会话流本身是纯内存的，页面重载即空；而 Agent 的会话记录是楼层锚定持久化的。
+ * 回灌让「滚动会话界面」在重载后仍然显示既往对话，而不是白屏。
+ * 只在会话流为空时生效，避免同页内重复挂载导致条目翻倍；也不改变运行标记。
+ * @param items 待回灌的条目内容，按时间顺序
+ * @returns 实际写入的条目数；已有条目时返回 0
+ */
+export function hydrateAgentSessionLog_ACU(items: readonly AgentSessionEventInput_ACU[]): number {
+  if (entries_ACU.length || !items.length) return 0;
+  for (const item of items) {
+    const ok = item.ok !== false;
+    entries_ACU.push({
+      id: nextId_ACU++,
+      at: Date.now(),
+      kind: item.kind,
+      title: item.title,
+      detail: truncateDetail_ACU(String(item.detail ?? '')),
+      agentName: String(item.agentName ?? ''),
+      ok,
+      status: item.status ?? (ok ? 'done' : 'failed'),
+    });
+  }
+  if (entries_ACU.length > SESSION_ENTRY_LIMIT_ACU) entries_ACU = entries_ACU.slice(-SESSION_ENTRY_LIMIT_ACU);
+  notify_ACU();
+  return items.length;
+}
+
+/**
+ * 清空会话流。用于「一键清空」：订阅者保留，清空后立即收到通知刷新为空界面。
+ * 与 resetAgentSessionLogForTests_ACU 的区别是不解绑订阅者，因此可以在运行期调用。
+ */
+export function clearAgentSessionLog_ACU(): void {
+  entries_ACU = [];
+  running_ACU = false;
+  notify_ACU();
 }
 
 /**

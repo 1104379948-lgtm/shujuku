@@ -8,7 +8,7 @@
 
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
-import { isAgentWritableModule_ACU, type AgentModuleSnapshot_ACU, type AgentWritableModule_ACU } from './agent-model';
+import { AGENT_STORY_WINDOW_DEFAULT_ACU, isAgentWritableModule_ACU, type AgentModuleSnapshot_ACU, type AgentWritableModule_ACU } from './agent-model';
 import { renderAgentConstraints_ACU, renderAgentHooksLedger_ACU, renderAgentInfoGap_ACU } from './agent-module-store';
 import { renderAgentTableByAliases_ACU, renderAgentTableByName_ACU } from './agent-tables';
 
@@ -16,6 +16,7 @@ export const AGENT_TABLE_TOKEN_PREFIX_ACU = '$TABLE:';
 
 /** 每条虚拟/模块/表占位符对应的人类可读标题，进入材料块的分节标题。 */
 const READ_TOKEN_TITLES_ACU: Record<string, string> = {
+  $STORY_TEXT: '已经发生的小说正文（只含 AI 楼层）',
   $HISTORY_UNSETTLED: '尚未结算的真实历史',
   $HISTORY_RECENT: '最近已被采用的真实剧情',
   $OUTLINE_WINDOW: '当前大纲窗口',
@@ -36,6 +37,8 @@ export interface AgentResolveContext_ACU {
   execution: ContinuationAgentExecutionContext_ACU;
   originInstruction: string;
   recentTurnCount: number;
+  /** 已结算正文最多注入多少楼；缺省用 AGENT_STORY_WINDOW_DEFAULT_ACU。0 表示已结算段完全不注入。 */
+  storyWindowFloors?: number;
   tableData?: unknown;
 }
 
@@ -45,6 +48,45 @@ function messageRole_ACU(message: any): string {
 
 function messageText_ACU(message: any): string {
   return String(message?.mes ?? '').trim();
+}
+
+/**
+ * 渲染已经发生的小说正文。
+ *
+ * 只取 AI 楼层——用户楼是操作指令而不是小说内容，把它当正文注入会让模型把指令误读成剧情。
+ * 分「已结算」「尚未结算」两段：已结算段按窗口取最近若干楼（更早部分已经沉淀进资料模块与纪要），
+ * 未结算段全量注入（它还没被任何资料模块吸收，是本轮必须亲自读的部分）。
+ * @param context 解析上下文
+ * @returns 分段的逐楼正文；没有 AI 楼层时如实说明
+ */
+export function renderAgentStoryText_ACU(context: AgentResolveContext_ACU): string {
+  const chat = Array.isArray(context.chat) ? context.chat : [];
+  const highestIndex = chat.length - 1;
+  if (highestIndex < 0) return '当前聊天还没有任何楼层，也就没有已经发生的正文。';
+  // 删楼后残留的水位可能指向已不存在的楼层，必须钳制，否则未结算段起点会越过末楼输出空段。
+  const settledThrough = Math.min(context.settledThroughIndex, highestIndex);
+  const floors = chat
+    .map((message, index) => ({ index, text: messageText_ACU(message) }))
+    .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
+  if (!floors.length) return '当前聊天还没有 AI 产出的正文楼层。';
+
+  const window = Math.max(0, context.storyWindowFloors ?? AGENT_STORY_WINDOW_DEFAULT_ACU);
+  const settled = floors.filter(item => item.index <= settledThrough);
+  const unsettled = floors.filter(item => item.index > settledThrough);
+  const shownSettled = window > 0 ? settled.slice(-window) : [];
+  const hiddenSettled = settled.length - shownSettled.length;
+  const render = (items: Array<{ index: number; text: string }>) => items.map(item => `【楼层 ${item.index}】\n${item.text}`).join('\n\n');
+
+  const sections: string[] = [];
+  const settledHead = hiddenSettled > 0
+    ? `## 已结算正文（只列最近 ${shownSettled.length} 楼；更早的 ${hiddenSettled} 楼未注入，其事实已沉淀进资料模块与纪要，需要时派工读取）`
+    : '## 已结算正文';
+  if (shownSettled.length) sections.push(`${settledHead}\n${render(shownSettled)}`);
+  else if (settled.length) sections.push(`${settledHead}\n（本次未注入任何已结算正文。）`);
+  sections.push(unsettled.length
+    ? `## 尚未结算的最新正文（全量）\n${render(unsettled)}`
+    : '## 尚未结算的最新正文\n没有尚未结算的正文楼层；上一轮已结算到当前最后一楼。');
+  return sections.join('\n\n');
 }
 
 /**
@@ -122,6 +164,7 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
   }
   const title = READ_TOKEN_TITLES_ACU[normalized] ?? normalized;
   switch (normalized) {
+    case '$STORY_TEXT': return { title, text: renderAgentStoryText_ACU(context) };
     case '$HISTORY_UNSETTLED': return { title, text: renderAgentUnsettledHistory_ACU(context) };
     case '$HISTORY_RECENT': return { title, text: renderAgentRecentHistory_ACU(context) };
     case '$OUTLINE_WINDOW': return { title, text: renderAgentOutlineWindow_ACU(context) };
