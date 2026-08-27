@@ -8,6 +8,8 @@
 
 export type AgentSessionEventKind_ACU =
   | 'run_started'
+  | 'run_resumed'
+  | 'thought'
   | 'main_action'
   | 'protocol_retry'
   | 'delegation'
@@ -17,6 +19,9 @@ export type AgentSessionEventKind_ACU =
   | 'run_failed'
   | 'run_completed';
 
+/** 条目执行状态：running 表示动作已发出尚未有结果，UI 据此显示进行中动画。 */
+export type AgentSessionEntryStatus_ACU = 'running' | 'done' | 'failed';
+
 export interface AgentSessionEntry_ACU {
   id: number;
   at: number;
@@ -25,6 +30,7 @@ export interface AgentSessionEntry_ACU {
   detail: string;
   agentName: string;
   ok: boolean;
+  status: AgentSessionEntryStatus_ACU;
 }
 
 export interface AgentSessionEventInput_ACU {
@@ -33,6 +39,14 @@ export interface AgentSessionEventInput_ACU {
   detail?: string;
   agentName?: string;
   ok?: boolean;
+  status?: AgentSessionEntryStatus_ACU;
+}
+
+export interface AgentSessionEntryPatch_ACU {
+  title?: string;
+  detail?: string;
+  ok?: boolean;
+  status?: AgentSessionEntryStatus_ACU;
 }
 
 /** 会话条目上限。超出后丢最旧的，避免长循环把 UI 内存撑爆。 */
@@ -58,32 +72,55 @@ function truncateDetail_ACU(text: string): string {
 }
 
 /**
- * 开始一次新的运行。清空上一次会话并写入起始条目。
+ * 开始一次新的运行。
  * @param label 本次运行的标题，如「第 2 阶段 · 第 3 轮」
  * @param detail 起始说明
+ * @param resume 为 true 时保留既有会话记录并写入「恢复运行」条目——
+ *               从中断点恢复时用户必须能看到之前已完成的过程；缺省清空重来
  */
-export function beginAgentSessionRun_ACU(label: string, detail = ''): void {
-  entries_ACU = [];
+export function beginAgentSessionRun_ACU(label: string, detail = '', resume = false): void {
+  if (!resume) entries_ACU = [];
   running_ACU = true;
-  logAgentSession_ACU({ kind: 'run_started', title: label, detail });
+  logAgentSession_ACU({ kind: resume ? 'run_resumed' : 'run_started', title: label, detail });
 }
 
 /**
  * 记录一条会话事件。
- * @param input 事件内容；ok 缺省为 true
+ * @param input 事件内容；ok 缺省为 true，status 缺省按 ok 推导（false→failed，true→done）
+ * @returns 条目 id，可用于 updateAgentSession_ACU 原地更新（如 running→done）
  */
-export function logAgentSession_ACU(input: AgentSessionEventInput_ACU): void {
+export function logAgentSession_ACU(input: AgentSessionEventInput_ACU): number {
+  const id = nextId_ACU++;
+  const ok = input.ok !== false;
   entries_ACU.push({
-    id: nextId_ACU++,
+    id,
     at: Date.now(),
     kind: input.kind,
     title: input.title,
     detail: truncateDetail_ACU(String(input.detail ?? '')),
     agentName: String(input.agentName ?? ''),
-    ok: input.ok !== false,
+    ok,
+    status: input.status ?? (ok ? 'done' : 'failed'),
   });
   if (entries_ACU.length > SESSION_ENTRY_LIMIT_ACU) entries_ACU = entries_ACU.slice(-SESSION_ENTRY_LIMIT_ACU);
   if (input.kind === 'run_completed' || input.kind === 'run_failed' || input.kind === 'block') running_ACU = false;
+  notify_ACU();
+  return id;
+}
+
+/**
+ * 原地更新一条已有会话条目（典型用途：派工从 running 更新为成功/失败）。
+ * @param id logAgentSession_ACU 返回的条目 id
+ * @param patch 要更新的字段；条目已被上限截断淘汰时静默忽略
+ */
+export function updateAgentSession_ACU(id: number, patch: AgentSessionEntryPatch_ACU): void {
+  const entry = entries_ACU.find(item => item.id === id);
+  if (!entry) return;
+  if (patch.title !== undefined) entry.title = patch.title;
+  if (patch.detail !== undefined) entry.detail = truncateDetail_ACU(String(patch.detail));
+  if (patch.ok !== undefined) entry.ok = patch.ok;
+  if (patch.status !== undefined) entry.status = patch.status;
+  else if (patch.ok !== undefined) entry.status = patch.ok ? 'done' : 'failed';
   notify_ACU();
 }
 

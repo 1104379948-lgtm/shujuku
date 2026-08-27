@@ -20,7 +20,8 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
-import { beginAgentSessionRun_ACU, logAgentSession_ACU } from './agent-session-log';
+import { beginAgentSessionRun_ACU, logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log';
+import { clearAgentRunState_ACU, readAgentRunState_ACU, saveAgentRunState_ACU } from './agent-run-cache';
 import { findAgentSubagentDefinition_ACU, renderAgentModuleCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
 import { readAgentModuleSnapshot_ACU, writeAgentModuleSnapshot_ACU } from './agent-module-store';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
@@ -36,6 +37,7 @@ import {
   type AgentDelegationOutcome_ACU,
   type AgentModuleSnapshot_ACU,
   type AgentOutlineEditOp_ACU,
+  type AgentOutlineOpResult_ACU,
   type AgentRunBudget_ACU,
   type ContinuationAgentTurnPlanRequest_ACU,
   type ContinuationAgentTurnPlanResult_ACU,
@@ -200,16 +202,44 @@ export class ContinuationAgentTurnPlanner_ACU {
       recentTurnCount: request.settings.contextTurnCount,
     };
     context.originInstruction = context.execution.task.originInstruction;
-    const ledger: AgentRunLedger_ACU = { delegationsUsed: 0, perAgent: new Map(), outcomes: [] };
+    const identitySeed = request.createInternalRequestIdentity(0);
+    const cursorKeyOf = (): string => {
+      const execution = request.readContext();
+      return `${execution.stage?.stageId ?? 'pre-outline'}#${execution.revision?.revision ?? 0}#${execution.turn?.id ?? ''}`;
+    };
+    // 中断恢复：上次运行在同任务同游标下失败时，带着已获得的证据从中断迭代继续，
+    // 而不是丢掉全部派工结论从头重跑。游标或任务变了的旧状态由缓存层作废。
+    const resumedState = readAgentRunState_ACU(identitySeed.chatIdentity, identitySeed.taskId, cursorKeyOf());
+    const ledger: AgentRunLedger_ACU = resumedState
+      ? { delegationsUsed: resumedState.ledger.delegationsUsed, perAgent: new Map(Object.entries(resumedState.ledger.perAgent)), outcomes: resumedState.ledger.outcomes }
+      : { delegationsUsed: 0, perAgent: new Map(), outcomes: [] };
+    // 上次迭代耗尽后恢复时收敛到最后一次迭代：派工被禁用，主 Agent 必须基于已有证据交付或阻断。
+    const iterationStart = resumedState ? Math.min(Math.max(1, resumedState.nextIteration), budget.maxIterations) : 1;
+    const persistRunState = (nextIteration: number): void => saveAgentRunState_ACU(identitySeed.chatIdentity, {
+      taskId: identitySeed.taskId,
+      cursorKey: cursorKeyOf(),
+      nextIteration,
+      ledger: { delegationsUsed: ledger.delegationsUsed, perAgent: Object.fromEntries(ledger.perAgent), outcomes: ledger.outcomes },
+    });
     const history = buildAgentRealHistory_ACU(chat);
     let totalAttempts = 0;
     let terminalLogged = false;
-    beginAgentSessionRun_ACU(describeRunLabel_ACU(context), context.execution.turn?.goal ?? '本轮目标待大纲确定');
+    let lastConstraintRejection = '';
+    let currentIteration = iterationStart;
+    beginAgentSessionRun_ACU(
+      describeRunLabel_ACU(context),
+      resumedState
+        ? `从中断点恢复：继续第 ${iterationStart} 次迭代，已保留 ${ledger.outcomes.length} 条已完成结果`
+        : context.execution.turn?.goal ?? '本轮目标待大纲确定',
+      resumedState !== null,
+    );
 
     try {
-      for (let iteration = 1; iteration <= budget.maxIterations; iteration += 1) {
+      for (let iteration = iterationStart; iteration <= budget.maxIterations; iteration += 1) {
         // 大纲操作会改变游标，每次迭代都从权威状态重读执行上下文。
         context.execution = request.readContext();
+        currentIteration = iteration;
+        persistRunState(iteration);
         const allowDelegate = iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations;
         const round = await this.callMainAgent(request, preset, history, context, ledger, budget, iteration, allowDelegate);
         totalAttempts += round.attempts;
@@ -217,7 +247,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         const actionLabel = action.kind === 'delegate' ? `派工 ${action.delegations.length} 项`
           : action.kind === 'edit_outline' ? `工具编辑大纲 ${action.edits.length} 处`
           : action.kind === 'finalize' ? '交付写作指导' : '阻断本轮';
-        logAgentSession_ACU({ kind: 'main_action', title: `迭代 ${iteration} · ${actionLabel}`, detail: action.thought });
+        logAgentSession_ACU({ kind: 'thought', title: `迭代 ${iteration} · ${actionLabel}`, detail: action.thought });
 
         if (action.kind === 'edit_outline') {
           await this.runOutlineEdits(action.edits, request, context, ledger);
@@ -226,30 +256,54 @@ export class ContinuationAgentTurnPlanner_ACU {
 
         if (action.kind === 'finalize') {
           if (action.constraints) {
-            snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.current, action.constraints.retired, chat.length - 1);
+            // 约束登记校验失败不终止本轮：把拒绝原因回灌，让主 Agent 在剩余迭代内修正登记，
+            // 与大纲工具编辑、子代理写集失败的处理同构。只有非校验类异常才上抛。
+            try {
+              snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.current, action.constraints.retired, chat.length - 1);
+            } catch (error) {
+              if (!(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_WRITE_REJECTED') throw error;
+              lastConstraintRejection = error.error.message;
+              ledger.outcomes.push({ agentName: 'finalize(约束登记)', ok: false, summary: '', detail: '', rejectedReason: `${error.error.message}。finalize 未被采纳，请修正 constraints 后重新交付` });
+              logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 约束登记被拒绝`, detail: error.error.message, ok: false });
+              continue;
+            }
             context.moduleSnapshot = snapshot;
             await this.persistSnapshot_ACU(chat, snapshot);
           }
           logAgentSession_ACU({ kind: 'finalize', title: '最终写作指导', detail: action.instruction });
           logAgentSession_ACU({ kind: 'run_completed', title: '本轮规划完成', detail: action.summary });
           terminalLogged = true;
+          clearAgentRunState_ACU(identitySeed.chatIdentity);
           return { instruction: action.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
         }
 
         if (action.kind === 'block') {
           logAgentSession_ACU({ kind: 'block', title: '主 Agent 阻断本轮', detail: [action.reason, ...action.unresolved].filter(Boolean).join('\n'), ok: false });
           terminalLogged = true;
+          // block 是明确的终局判断：重跑应给全新预算重新收集证据，而不是复播旧账本再次阻断。
+          clearAgentRunState_ACU(identitySeed.chatIdentity);
           failLoop_ACU('CONTINUATION_AGENT_BLOCKED', `主 Agent 阻断本轮：${action.reason}`, { unresolved: action.unresolved });
         }
 
         snapshot = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies);
       }
 
-      failLoop_ACU('CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', `主 Agent 在 ${budget.maxIterations} 次迭代内没有交付最终指导`, { delegationsUsed: ledger.delegationsUsed });
+      failLoop_ACU(
+        'CONTINUATION_AGENT_ITERATIONS_EXHAUSTED',
+        lastConstraintRejection
+          ? `主 Agent 在 ${budget.maxIterations} 次迭代内没有交付最终指导；最后一次约束登记被拒绝：${lastConstraintRejection}`
+          : `主 Agent 在 ${budget.maxIterations} 次迭代内没有交付最终指导`,
+        { delegationsUsed: ledger.delegationsUsed },
+      );
     } catch (error) {
+      // 中断即存档（block 除外，其缓存已清）：迭代中途的失败保留已完成的派工结论，
+      // 「继续当前轮次」据此从当前迭代恢复而不是从头重跑。
+      if (!(error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_BLOCKED')) {
+        persistRunState(Math.min(currentIteration, budget.maxIterations));
+      }
       if (!terminalLogged) {
         const message = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
-        logAgentSession_ACU({ kind: 'run_failed', title: '本轮已终止', detail: message, ok: false });
+        logAgentSession_ACU({ kind: 'run_failed', title: '本轮已终止', detail: `${message}\n（进度已保留，点击「继续当前轮次」将从中断处恢复）`, ok: false });
       }
       throw error;
     }
@@ -379,29 +433,51 @@ export class ContinuationAgentTurnPlanner_ACU {
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<AgentModuleSnapshot_ACU> {
     const waveLimit = resolveWaveLimit_ACU(request.settings, budget);
-    const outcomesBefore = ledger.outcomes.length;
     const outlineDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU);
     const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU);
+    // 未通过预算/波次校验的派工立即记失败条目：这些拒绝是即时判定，没有 running 阶段。
+    const rejectImmediately = (agentName: string, reason: string): void => {
+      ledger.outcomes.push({ agentName, ok: false, summary: '', detail: '', rejectedReason: reason });
+      logAgentSession_ACU({
+        kind: agentName === AGENT_OUTLINE_AGENT_NAME_ACU ? 'outline_op' : 'delegation',
+        agentName,
+        title: `${agentName} 未执行`,
+        detail: reason,
+        ok: false,
+      });
+    };
 
     // 大纲操作先于同波次其他派工串行执行：它改变游标，后续派工与下一次迭代都要看到新大纲。
     for (const delegation of outlineDelegations) {
       const used = ledger.perAgent.get(delegation.agentName) ?? 0;
       if (ledger.delegationsUsed >= budget.maxDelegations) {
-        ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `派工总数已达上限 ${budget.maxDelegations} 次` });
+        rejectImmediately(delegation.agentName, `派工总数已达上限 ${budget.maxDelegations} 次`);
         continue;
       }
       if (used >= budget.maxSameAgent) {
-        ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `同一代理最多派工 ${budget.maxSameAgent} 次` });
+        rejectImmediately(delegation.agentName, `同一代理最多派工 ${budget.maxSameAgent} 次`);
         continue;
       }
       if (!request.applyOutline) {
-        ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: '正文重试轮次不允许改写大纲，请基于现有大纲交付或阻断' });
+        rejectImmediately(delegation.agentName, '正文重试轮次不允许改写大纲，请基于现有大纲交付或阻断');
         continue;
       }
       ledger.delegationsUsed += 1;
       ledger.perAgent.set(delegation.agentName, used + 1);
-      const result = await request.applyOutline(delegation.prompt);
-      logAgentSession_ACU({ kind: 'outline_op', agentName: delegation.agentName, title: result.op === 'create' ? '创建阶段大纲' : result.op === 'continue' ? '继续下一阶段大纲' : '改写当前阶段大纲', detail: result.summary, ok: result.stopped === null });
+      const entryId = logAgentSession_ACU({ kind: 'outline_op', agentName: delegation.agentName, title: '大纲操作执行中', detail: delegation.prompt, status: 'running' });
+      let result: AgentOutlineOpResult_ACU;
+      try {
+        result = await request.applyOutline(delegation.prompt);
+      } catch (error) {
+        const message = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
+        updateAgentSession_ACU(entryId, { title: '大纲操作失败', detail: message, ok: false });
+        throw error;
+      }
+      updateAgentSession_ACU(entryId, {
+        title: result.op === 'create' ? '创建阶段大纲' : result.op === 'continue' ? '继续下一阶段大纲' : '改写当前阶段大纲',
+        detail: result.summary,
+        ok: result.stopped === null,
+      });
       if (result.stopped) {
         failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', result.summary, { stopped: result.stopped });
       }
@@ -416,11 +492,11 @@ export class ContinuationAgentTurnPlanner_ACU {
     for (const delegation of normalDelegations) {
       const used = ledger.perAgent.get(delegation.agentName) ?? 0;
       if (ledger.delegationsUsed + accepted.length >= budget.maxDelegations) {
-        ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `派工总数已达上限 ${budget.maxDelegations} 次` });
+        rejectImmediately(delegation.agentName, `派工总数已达上限 ${budget.maxDelegations} 次`);
         continue;
       }
       if (used + accepted.filter(item => item.agentName === delegation.agentName).length >= budget.maxSameAgent) {
-        ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `同一代理最多派工 ${budget.maxSameAgent} 次` });
+        rejectImmediately(delegation.agentName, `同一代理最多派工 ${budget.maxSameAgent} 次`);
         continue;
       }
       if (accepted.length >= waveLimit) {
@@ -428,11 +504,27 @@ export class ContinuationAgentTurnPlanner_ACU {
         const why = waveLimit === 1 && hasCurrentChannel
           ? '当前跟随活动 API，同一波次只能派工 1 个子代理'
           : `同一波次并发上限为 ${waveLimit} 个`;
-        ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: `${why}，本次未执行，可在下一次迭代重派` });
+        rejectImmediately(delegation.agentName, `${why}，本次未执行，可在下一次迭代重派`);
         continue;
       }
       accepted.push(delegation);
     }
+
+    // 派工发出即记 running 条目，结果回来后原地更新——用户能实时看到哪些子代理在跑。
+    const runningEntries = new Map<AgentDelegation_ACU, number>();
+    for (const delegation of accepted) {
+      runningEntries.set(delegation, logAgentSession_ACU({ kind: 'delegation', agentName: delegation.agentName, title: `${delegation.agentName} 执行中`, detail: delegation.prompt, status: 'running' }));
+    }
+    const settleOutcome = (delegation: AgentDelegation_ACU, outcome: AgentDelegationOutcome_ACU): void => {
+      ledger.outcomes.push(outcome);
+      const entryId = runningEntries.get(delegation);
+      if (entryId === undefined) return;
+      updateAgentSession_ACU(entryId, {
+        title: outcome.ok ? `${outcome.agentName} 完成` : `${outcome.agentName} 未采用`,
+        detail: outcome.ok ? [outcome.summary, outcome.detail].filter(Boolean).join('\n') : outcome.rejectedReason,
+        ok: outcome.ok,
+      });
+    };
 
     const settled = await Promise.all(accepted.map(async (delegation): Promise<{ delegation: AgentDelegation_ACU; result: AgentSubagentRunResult_ACU | null; error: unknown }> => {
       try {
@@ -463,7 +555,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       ledger.delegationsUsed += 1;
       ledger.perAgent.set(item.delegation.agentName, (ledger.perAgent.get(item.delegation.agentName) ?? 0) + 1);
       if (!item.result) {
-        ledger.outcomes.push({ agentName: item.delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: compactAgentProtocolError_ACU(item.error) });
+        settleOutcome(item.delegation, { agentName: item.delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: compactAgentProtocolError_ACU(item.error) });
         continue;
       }
       const result = item.result;
@@ -474,7 +566,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           // 结算水位跟着快照一起走：全流程只有快照一个真值来源，避免上下文与落盘值各说一套。
           if (applied !== nextSnapshot) { nextSnapshot = { ...applied, settledThroughIndex: chat.length - 1 }; snapshotChanged = true; }
           const proposals = result.maintainer.delta.constraintProposals;
-          ledger.outcomes.push({
+          settleOutcome(item.delegation, {
             agentName: result.agentName,
             ok: true,
             summary: result.maintainer.summary,
@@ -486,12 +578,12 @@ export class ContinuationAgentTurnPlanner_ACU {
             rejectedReason: '',
           });
         } catch (error) {
-          ledger.outcomes.push({ agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
+          settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
         }
         continue;
       }
       if (result.planner) {
-        ledger.outcomes.push({
+        settleOutcome(item.delegation, {
           agentName: result.agentName,
           ok: true,
           summary: result.planner.summary,
@@ -501,7 +593,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         continue;
       }
       if (result.reviewer) {
-        ledger.outcomes.push({
+        settleOutcome(item.delegation, {
           agentName: result.agentName,
           ok: true,
           summary: `判词 ${result.reviewer.verdict}`,
@@ -510,24 +602,13 @@ export class ContinuationAgentTurnPlanner_ACU {
         });
         continue;
       }
-      ledger.outcomes.push({ agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' });
+      settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' });
     }
 
     if (snapshotChanged) {
       context.moduleSnapshot = nextSnapshot;
       context.settledThroughIndex = nextSnapshot.settledThroughIndex;
       await this.persistSnapshot_ACU(chat, nextSnapshot);
-    }
-    for (const outcome of ledger.outcomes.slice(outcomesBefore)) {
-      // 大纲操作成功的条目已作为 outline_op 记录，这里不重复。
-      if (outcome.agentName === AGENT_OUTLINE_AGENT_NAME_ACU && outcome.ok) continue;
-      logAgentSession_ACU({
-        kind: 'delegation',
-        agentName: outcome.agentName,
-        ok: outcome.ok,
-        title: outcome.ok ? `${outcome.agentName} 完成` : `${outcome.agentName} 未采用`,
-        detail: outcome.ok ? [outcome.summary, outcome.detail].filter(Boolean).join('\n') : outcome.rejectedReason,
-      });
     }
     return nextSnapshot;
   }

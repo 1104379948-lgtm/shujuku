@@ -1,5 +1,6 @@
 import { resolveGeneratedAiMessageIndex_ACU, type AutoFillIntent_ACU } from '../runtime/message-handler';
 import { validateLoopTags_ACU } from '../loop/loop-evaluator';
+import { logAgentSession_ACU } from './agent/agent-session-log';
 import type { ContinuationPreparedTurnInstruction_ACU } from './stage-execution-engine';
 import type { ContinuationHostGenerationCapture_ACU, TurnAttemptIdentity_ACU } from './model';
 import type { ContinuationHostTurnAdapter_ACU } from './host-turn-adapter';
@@ -214,8 +215,11 @@ export class ContinuationHostGenerationBridge_ACU {
     try {
       const result = await runtime.continueTask();
       if (result.preparedTurn) await this.send(result.preparedTurn);
-    } catch {
-      // 状态已由 orchestrator 记录（paused+lastError 或拒绝原因），自动链到此为止。
+    } catch (error) {
+      // 状态已由 orchestrator 记录（paused+lastError 或拒绝原因），自动链到此为止；
+      // 但必须在会话流留痕——静默吞掉会让用户以为自动续写根本没触发。
+      const message = error instanceof Error ? error.message : String(error);
+      logAgentSession_ACU({ kind: 'run_failed', title: '自动续写已暂停', detail: `${message}\n可点击「继续当前轮次」从中断处恢复。`, ok: false });
     }
   }
 

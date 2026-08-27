@@ -79,7 +79,34 @@ describe('ContinuationOutlinePlanner_ACU', () => {
   it('retries range violations with the validation error rather than accepting a short outline', async () => {
     const { planner, callInternalAi } = createPlanner_ACU([tagOutline_ACU(2), tagOutline_ACU(6)]);
     await expect(planner.plan(request_ACU(settings_ACU(1)))).resolves.toMatchObject({ attempts: 2, outline: { totalTurns: 6 } });
-    expect(callInternalAi.mock.calls[1][0][0].content).toContain('CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE@outline_validate');
+    const retryContent = callInternalAi.mock.calls[1][0][0].content as string;
+    expect(retryContent).toContain('CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE@outline_validate');
+    // 回灌必须带具体数字（min/max/actual），否则模型只能瞎猜再撞一次墙。
+    expect(retryContent).toContain('"min":6');
+    expect(retryContent).toContain('"max":10');
+    expect(retryContent).toContain('"actual":2');
+  });
+
+  it('injects the authoritative $TURN_RANGE text so the model knows the stage size up front', async () => {
+    const rangeSettings = { ...settings_ACU(), outlinePrompt: [{ role: 'user' as const, content: '阶段轮数范围：$TURN_RANGE' }] };
+    const { planner, callInternalAi } = createPlanner_ACU([tagOutline_ACU(6)]);
+    await planner.plan(request_ACU(rangeSettings));
+    const content = callInternalAi.mock.calls[0][0][0].content as string;
+    expect(content).toContain('必须在 6 到 10 之间');
+  });
+
+  it('tells the model the remaining-turn window on replan instead of only the stage total', async () => {
+    const rangeSettings = { ...settings_ACU(), outlinePrompt: [{ role: 'user' as const, content: '范围：$TURN_RANGE' }] };
+    const remainingOnly = '<node>\n<node_title>剩余</node_title>\n<node_goal>目标</node_goal>\n<turn>1</turn>\n<turn>2</turn>\n<turn>3</turn>\n<turn>4</turn>\n</node>';
+    const { planner, callInternalAi } = createPlanner_ACU([remainingOnly]);
+    await planner.plan(request_ACU(rangeSettings, {
+      reason: 'manual_replan',
+      replanConstraints: { previousOutline: buildOutline_ACU(6), completedTurns: 2, expectedRemainingTurns: 4 },
+    }));
+    const content = callInternalAi.mock.calls[0][0][0].content as string;
+    expect(content).toContain('必须在 6 到 10 之间');
+    expect(content).toContain('已完成 2 轮不可改动');
+    expect(content).toContain('剩余的 <turn> 数量必须在 4 到 8 之间');
   });
 
   it('counts the first call separately and stops after the configured retry limit', async () => {

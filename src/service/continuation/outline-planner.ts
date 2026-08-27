@@ -51,8 +51,34 @@ function toPlannerError_ACU(error: unknown): ContinuationError_ACU {
 }
 
 function compactValidationError_ACU(error: ContinuationError_ACU): string {
-  // 附上 message：标签口径下剩余的校验错误（轮数超范围、goal 为空）只有带原因模型才能自愈。
-  return `${error.code}@${error.phase}: ${error.message}`;
+  // 附上 message 与 details：轮数超范围这类错误只有带上具体数字（min/max/actual）模型才能自愈，
+  // 光说「超出范围」等于没说。
+  const base = `${error.code}@${error.phase}: ${error.message}`;
+  if (!error.details || !Object.keys(error.details).length) return base;
+  try {
+    return `${base}（${JSON.stringify(error.details)}）`;
+  } catch {
+    return base;
+  }
+}
+
+/**
+ * 渲染 $TURN_RANGE 的权威文案。planner 是唯一同时掌握阶段规模范围与重规划约束的模块，
+ * 因此该占位符在这里注入并覆盖外部同名解析器。
+ * @param range 阶段总轮数范围
+ * @param constraints 重规划约束；提供时模型只规划剩余轮次，需换算剩余轮数允许区间
+ * @returns 给大纲 AI 的范围说明；剩余额度不足时如实说明真实约束
+ */
+export function renderContinuationTurnRange_ACU(range: { min: number; max: number }, constraints?: ContinuationReplanConstraints_ACU): string {
+  const total = `本阶段总轮数（全部 <turn> 的数量）必须在 ${range.min} 到 ${range.max} 之间。`;
+  if (!constraints || constraints.completedTurns <= 0) return total;
+  const completed = constraints.completedTurns;
+  const remainingMin = Math.max(1, range.min - completed);
+  const remainingMax = range.max - completed;
+  if (remainingMax < remainingMin) {
+    return `${total}已完成 ${completed} 轮不可改动，剩余轮数额度不足（最多还能规划 ${Math.max(0, remainingMax)} 轮），当前阶段无法在范围内继续扩展。`;
+  }
+  return `${total}其中已完成 ${completed} 轮不可改动；你只规划剩余轮次，剩余的 <turn> 数量必须在 ${remainingMin} 到 ${remainingMax} 之间（拼接后总轮数才会落在范围内）。`;
 }
 
 function isRetryableOutlineError_ACU(error: ContinuationError_ACU): boolean {
@@ -80,6 +106,8 @@ export class ContinuationOutlinePlanner_ACU {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
         }
         const resolvers = { ...request.resolvers };
+        // $TURN_RANGE 由 planner 权威注入：只有这里同时知道范围与重规划约束。
+        resolvers.$TURN_RANGE = () => renderContinuationTurnRange_ACU(range, request.replanConstraints);
         if (attempt > 0 && lastError) resolvers.$VALIDATION_ERRORS = () => compactValidationError_ACU(lastError!);
         const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
         const raw = await this.dependencies.callInternalAi(rendered.messages, preset, identity);

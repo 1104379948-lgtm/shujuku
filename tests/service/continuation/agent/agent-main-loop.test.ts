@@ -5,12 +5,13 @@ import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/a
 import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import { ContinuationValidationError_ACU, type ContinuationInternalAiRequestIdentity_ACU } from '../../../../src/service/continuation/model';
-import { resetAgentSessionLogForTests_ACU } from '../../../../src/service/continuation/agent/agent-session-log';
+import { readAgentSessionLog_ACU, resetAgentSessionLogForTests_ACU } from '../../../../src/service/continuation/agent/agent-session-log';
+import { readAgentRunState_ACU, resetAgentRunCacheForTests_ACU } from '../../../../src/service/continuation/agent/agent-run-cache';
 import type { AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
 
 const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test' };
 
-beforeEach(() => { resetAgentSessionLogForTests_ACU(); });
+beforeEach(() => { resetAgentSessionLogForTests_ACU(); resetAgentRunCacheForTests_ACU(); });
 
 const chat_ACU = () => ([
   { mes: '我要进禁区', is_user: true },
@@ -194,6 +195,53 @@ describe('主 Agent 循环收敛', () => {
       { id: 'C01-1', text: '不得提前揭穿守门人', reason: '主 Agent 本轮裁决登记', createdIndex: 3 },
     ]);
     expect(h.written[0].snapshot.revisions.constraints).toBe(1);
+  });
+
+  it('finalize 约束登记漏写既有条目时拒绝回灌，主 Agent 修正后同循环内交付', async () => {
+    const withConstraint = buildEmptyAgentModuleSnapshot_ACU();
+    withConstraint.constraints = [{ id: 'C01-1', text: '既有约束', reason: '早前登记', createdIndex: 1 }];
+    withConstraint.revisions.constraints = 1;
+    const h = harness_ACU({
+      snapshot: withConstraint,
+      mainReplies: [
+        '{"action":"finalize","instruction":"指导","constraints":{"current":["新约束"],"retired":[]}}',
+        '{"action":"finalize","instruction":"修正后交付","constraints":{"current":["既有约束","新约束"],"retired":[]}}',
+      ],
+    });
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('修正后交付');
+    // 第一次 finalize 被拒绝：漏写既有活跃条目不落盘，拒绝原因回灌。
+    expect(h.written).toHaveLength(1);
+    expect(h.written[0].snapshot.constraints.map(item => item.text)).toEqual(['既有约束', '新约束']);
+    const feedback = h.mainCalls[1].map(message => message.content).join('\n');
+    expect(feedback).toContain('漏写');
+    expect(feedback).toContain('finalize 未被采纳');
+  });
+
+  it('循环失败后再次运行从中断点恢复，已完成的派工结论保留不重做', async () => {
+    const identity = (attempt: number) => ({ chatIdentity: 'chat-resume', taskId: 'task-1', stageId: 'stage-1', turnId: 'turn-2', attemptId: `a-${attempt}`, source: 'turn_instruction' }) as any;
+    const first = harness_ACU({
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"mainline-planner","prompt":"主线","reads":["$OUTLINE_WINDOW"]}]}',
+        '协议非法输出一',
+        '协议非法输出二',
+      ],
+      subReplies: ['{"summary":"主线要点","recommendation":"先试探"}'],
+    });
+    first.request.createInternalRequestIdentity = identity;
+    await expect(first.planner.plan(first.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID' } });
+
+    const second = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"恢复后交付"}'] });
+    second.request.createInternalRequestIdentity = identity;
+    const result = await second.planner.plan(second.request);
+    expect(result.instruction).toBe('恢复后交付');
+    // 派工结论从缓存恢复进证据，不再重跑子代理。
+    expect(second.subCalls).toHaveLength(0);
+    expect(second.mainCalls[0].map(message => message.content).join('\n')).toContain('主线要点');
+    // 会话续写而非清空：能看到恢复分隔条目。
+    expect(readAgentSessionLog_ACU().some(entry => entry.kind === 'run_resumed')).toBe(true);
+    // 成功交付后缓存清除，下一轮全新开始。
+    expect(readAgentRunState_ACU('chat-resume', 'task-1', 'pre-outline#0#turn-2')).toBeNull();
   });
 
   it('协议非法时按重试上限重试，重试仍失败则以不可重试错误终止', async () => {
