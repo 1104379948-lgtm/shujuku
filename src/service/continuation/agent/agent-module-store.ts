@@ -302,3 +302,79 @@ export function renderAgentConstraints_ACU(snapshot: AgentModuleSnapshot_ACU): s
   const lines = snapshot.constraints.map(item => `- [${item.id}] ${item.text}${item.reason ? `（理由：${item.reason}）` : ''}`);
   return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
 }
+
+function renderHookFull_ACU(hook: AgentHookEntry_ACU): string {
+  return [
+    `- [${hook.id}] 重要度=${hook.importance} 状态=${hook.status} 埋设楼层=${hook.plantedIndex} 最近变动楼层=${hook.updatedIndex}${hook.retired ? ' 已退休' : ''}`,
+    `  内容：${hook.summary}`,
+    hook.plannedPayoff ? `  计划回收：${hook.plannedPayoff}` : '',
+    hook.retired && hook.retiredReason ? `  退休原因：${hook.retiredReason}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function renderInfoGapFull_ACU(entry: AgentInfoGapEntry_ACU): string {
+  return [
+    `- [${entry.id}] ${entry.topic}（揭示状态=${entry.revealStatus}${entry.revealIndex === null ? '' : `，揭示楼层=${entry.revealIndex}`}${entry.retired ? '，已退休' : ''}）`,
+    `  客观事实：${entry.objectiveFact || '（未登记）'}`,
+    `  读者已知：${entry.readerKnown || '（未登记）'}`,
+    entry.characterKnowledge.length ? `  角色知晓：${entry.characterKnowledge.map(item => `${item.name}=${item.knows}`).join('；')}` : '',
+    entry.retired && entry.retiredReason ? `  退休原因：${entry.retiredReason}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function renderConstraintFull_ACU(item: AgentConstraintEntry_ACU): string {
+  return `- [${item.id}] ${item.text}${item.reason ? `（理由：${item.reason}）` : ''}（登记楼层=${item.createdIndex}）`;
+}
+
+interface AgentModuleReadSpec_ACU<Entry extends { id: string }> {
+  label: string;
+  revision: number;
+  entries: readonly Entry[];
+  render: (entry: Entry) => string;
+}
+
+interface RetirableEntry_ACU {
+  id: string;
+  retired?: boolean;
+}
+
+function renderModuleEntries_ACU<Entry extends RetirableEntry_ACU>(spec: AgentModuleReadSpec_ACU<Entry>, ids?: readonly string[]): string {
+  const head = `当前修订号=${spec.revision}`;
+  if (!ids || !ids.length) {
+    // 全量读默认只列活跃条目；退休条目可被搜索命中并按 ID 精读，避免全量视图被历史噪音撑大。
+    const active = spec.entries.filter(entry => entry.retired !== true);
+    const retiredCount = spec.entries.length - active.length;
+    if (!active.length) return `${head}\n${spec.label}当前没有活跃条目。${retiredCount ? `另有 ${retiredCount} 条已退休条目，可用 search 命中后按 ID 精读。` : ''}`;
+    const tail = retiredCount ? `\n另有 ${retiredCount} 条已退休条目未列出，可用 search 命中后按 ID 精读。` : '';
+    return `${head}\n${spec.label}活跃条目 ${active.length} 条：\n${active.map(spec.render).join('\n')}${tail}`;
+  }
+  const wanted = ids.map(id => id.trim()).filter(Boolean);
+  const found = spec.entries.filter(entry => wanted.includes(entry.id));
+  const missing = wanted.filter(id => !spec.entries.some(entry => entry.id === id));
+  const lines: string[] = [head];
+  if (found.length) lines.push(...found.map(spec.render));
+  if (missing.length) lines.push(`以下 ID 不存在于${spec.label}：${missing.join('、')}。可先读全量或 search 确认可用 ID。`);
+  if (!found.length && !missing.length) lines.push('未指定有效 ID。');
+  return lines.join('\n');
+}
+
+/**
+ * 按 ID 精读伏笔账本（含退休条目）；不传 ID 则输出全部活跃条目，支撑 `$HOOKS_LEDGER` / `$HOOKS_LEDGER:ID1,ID2`。
+ */
+export function renderAgentHooksByIds_ACU(snapshot: AgentModuleSnapshot_ACU, ids?: readonly string[]): string {
+  return renderModuleEntries_ACU({ label: '伏笔账本', revision: snapshot.revisions.hooks, entries: snapshot.hooks, render: renderHookFull_ACU }, ids);
+}
+
+/**
+ * 按 ID 精读信息差时间线（含退休条目）；不传 ID 则输出全部活跃条目，支撑 `$INFO_GAP` / `$INFO_GAP:ID1,ID2`。
+ */
+export function renderAgentInfoGapByIds_ACU(snapshot: AgentModuleSnapshot_ACU, ids?: readonly string[]): string {
+  return renderModuleEntries_ACU({ label: '信息差时间线', revision: snapshot.revisions.infoGap, entries: snapshot.infoGap, render: renderInfoGapFull_ACU }, ids);
+}
+
+/**
+ * 按 ID 精读长期约束；不传 ID 则输出全量，支撑 `$CONSTRAINTS` / `$CONSTRAINTS:ID1,ID2`。
+ */
+export function renderAgentConstraintsByIds_ACU(snapshot: AgentModuleSnapshot_ACU, ids?: readonly string[]): string {
+  return renderModuleEntries_ACU({ label: '长期约束清单', revision: snapshot.revisions.constraints, entries: snapshot.constraints, render: renderConstraintFull_ACU }, ids);
+}

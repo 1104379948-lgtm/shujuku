@@ -112,7 +112,8 @@ function setSettings(): void {
     outlinePreview: false, autoNextStage: true, maxAutomaticStages: 6,
     loopTags: '', loopDelaySeconds: 5, totalDurationMinutes: 0,
     retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3,
-    contextTurnCount: 3, storyWindowFloors: 20, agentHistoryTokenBudget: 24000,
+    contextTurnCount: 3, storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000,
+    agentReadTokenBudget: '30%', agentReadFallbackTokens: 6000,
     contextExtractRules: [], contextExcludeRules: [],
     apiPresetMode: 'current', fixedApiPresetName: '',
     agentApiPresets: {
@@ -255,9 +256,10 @@ describe('ContinuationPage', () => {
 
       expect(el.textContent).toContain('续写设置');
       expect(el.textContent).toContain('伪 Role 提示词');
-      expect(el.textContent).toContain('正文窗口楼数');
+      expect(el.textContent).toContain('正文可读窗口楼数');
       expect(el.textContent).toContain('会话自动总结阈值');
-      expect(el.textContent).toContain('$STORY_TEXT');
+      expect(el.textContent).toContain('读取预算');
+      expect(el.textContent).toContain('精读兜底额度');
       // 保存按钮已移除：修改任意设置项后由防抖自动保存。
       expect(buttonByText(el, '保存续写设置')).toBeUndefined();
 
@@ -268,7 +270,7 @@ describe('ContinuationPage', () => {
       expect(saveSettings).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(900);
       expect(saveSettings).toHaveBeenCalledOnce();
-      expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 24000 });
+      expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 120000 });
       app.unmount();
     } finally {
       vi.useRealTimers();

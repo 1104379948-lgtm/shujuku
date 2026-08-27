@@ -1,19 +1,19 @@
 /**
  * service/continuation/agent/agent-catalog.ts — 子代理能力目录与资料模块目录
  *
- * 主 Agent 只看到摘要：代理能做什么、何时该用、能读什么、能写什么、有什么上限。
+ * 主 Agent 只看到摘要：代理能做什么、何时该用、职责固定写什么。
+ * 读集不再有授权概念——所有资料域对主/子代理开放，读多少由 token 门禁管，
+ * 因此定义里没有 allowedReads/allowedWrites；写入范围由职责（kind）固定推得。
  * 子代理的完整系统提示词不暴露给主 Agent，避免主 Agent 被无关细节淹没。
  */
 
-import { AGENT_OUTLINE_AGENT_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU, type AgentWritableModule_ACU } from './agent-model';
+import { AGENT_OUTLINE_AGENT_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
 
 export interface AgentSubagentDefinition_ACU {
   name: AgentSubagentName_ACU;
   kind: AgentSubagentKind_ACU;
   description: string;
   triggers: string[];
-  allowedReads: string[];
-  allowedWrites: AgentWritableModule_ACU[];
   promptKey: 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer';
 }
 
@@ -30,9 +30,6 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     kind: 'maintain',
     description: '结算已经发生的正文：维护伏笔账本与认知信息差时间线，只登记真实历史里已实际发生的变化',
     triggers: ['存在尚未结算的真实历史', '新正文出现异常线索、秘密、反常细节', '已有伏笔被再次触碰', '某个角色的知晓状态发生变化'],
-    // 角色表是「谁此刻知道什么」的直接依据，信息差结算离不开它，因此纳入可读范围。
-    allowedReads: ['$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$TABLE_CHRONICLES', '$TABLE_CHARACTERS', '$OUTLINE_WINDOW'],
-    allowedWrites: ['hooks', 'infoGap'],
     promptKey: 'maintainer',
   },
   {
@@ -40,8 +37,6 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     kind: 'plan',
     description: '策划本轮主线推进：给出冲突阶梯、主角代理权与实质价值变动的自然语言建议，不写正文、不改资料',
     triggers: ['每轮都需要主线推进建议', '轮次目标涉及主线冲突升级或价值转移'],
-    allowedReads: ['$OUTLINE_WINDOW', '$CURRENT_TURN_GOAL', '$TABLE_GLOBAL', '$TABLE_CHARACTERS', '$HOOKS_LEDGER', '$HISTORY_RECENT'],
-    allowedWrites: [],
     promptKey: 'mainlinePlanner',
   },
   {
@@ -49,8 +44,6 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     kind: 'plan',
     description: '策划本轮伏笔操作与情绪节拍：给出埋设、强化、误导、回收的具体手法与情绪微弧建议，不写正文、不改资料',
     triggers: ['本轮计划操作伏笔', '本轮需要信息差的设用揭新循环', '情绪节拍需要承接上轮残留'],
-    allowedReads: ['$OUTLINE_WINDOW', '$HOOKS_LEDGER', '$INFO_GAP', '$TABLE_CHRONICLES', '$HISTORY_RECENT'],
-    allowedWrites: [],
     promptKey: 'beatPlanner',
   },
   {
@@ -58,8 +51,6 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     kind: 'review',
     description: '审查策划结果的连续性与约束合规：输出 pass / revise / block 判词，只读不写',
     triggers: ['策划结果之间存在冲突', '本轮触碰长期约束红线', '大阶段转折或伏笔密集轮次'],
-    allowedReads: ['$ACTIVE_CONSTRAINTS', '$TABLE_GLOBAL', '$TABLE_CHARACTERS', '$INFO_GAP', '$HOOKS_LEDGER', '$HISTORY_RECENT'],
-    allowedWrites: [],
     promptKey: 'reviewer',
   },
 ];
@@ -85,6 +76,13 @@ export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] 
   },
 ];
 
+/** 按职责固定的写入说明，进子代理目录的「写入」行。 */
+const KIND_WRITE_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
+  maintain: '$HOOKS_LEDGER、$INFO_GAP（职责固定；约束只能提议，由主 Agent 裁决登记）',
+  plan: '无（只返回建议）',
+  review: '无（只返回判词）',
+};
+
 /**
  * 大纲子代理的目录块。它不走通用子代理运行时：运行时会按任务状态自动推断
  * 创建 / 维护 / 继续三种操作，并用独立的大纲提示词与既有资料完成生成与校验，
@@ -94,9 +92,9 @@ const OUTLINE_AGENT_CATALOG_BLOCK_ACU = [
   `- name: ${AGENT_OUTLINE_AGENT_NAME_ACU}`,
   '  类型: 大纲',
   '  职责: 管理阶段大纲的完整生命周期——创建（当前没有任何大纲时）、维护（大纲与真实剧情脱节、需要改写剩余部分时）、继续（当前阶段已全部完成、需要下一阶段时）。具体做哪种操作由运行时按任务状态自动判断，你只需给出要求。',
-  '  适用时机: 大纲窗口显示「还没有阶段大纲」时必须先派它；真实剧情已经明显偏离大纲计划时派它改写；大纲窗口显示「阶段已全部完成」时派它继续。',
-  '  可读: 无需指定读集（运行时自动注入故事背景、最近剧情、阶段历史与纪要）',
-  '  可写: 阶段大纲（产出经严格 schema 校验后落盘；改写时已完成的轮次受保护，不会被改掉）',
+  '  适用时机: 大纲状态显示「还没有阶段大纲」时必须先派它；真实剧情已经明显偏离大纲计划时派它改写；大纲状态显示「阶段已全部完成」时派它继续。',
+  '  读取: 无需指定读集（运行时自动注入故事背景、最近剧情、阶段历史与纪要）',
+  '  写入: 阶段大纲（产出经严格 schema 校验后落盘；改写时已完成的轮次受保护，不会被改掉）',
   '  执行方式: 串行执行且先于同波次其他派工；计入派工预算；prompt 写清你对大纲的要求（走向、节奏、要保留或回收什么）。',
 ].join('\n');
 
@@ -110,8 +108,8 @@ export function renderAgentSubagentCatalog_ACU(): string {
     `  类型: ${definition.kind === 'maintain' ? '结算维护' : definition.kind === 'plan' ? '策划' : '审查'}`,
     `  职责: ${definition.description}`,
     `  适用时机: ${definition.triggers.join('；')}`,
-    `  可读: ${definition.allowedReads.join('、')}`,
-    `  可写: ${definition.allowedWrites.length ? definition.allowedWrites.join('、') : '无（只返回建议）'}`,
+    '  读取: 全部资料域开放；派工时用 reads 给出种子地址，它还能自己 read/search 补充调阅',
+    `  写入: ${KIND_WRITE_LABELS_ACU[definition.kind]}`,
   ].join('\n'));
   return [OUTLINE_AGENT_CATALOG_BLOCK_ACU, ...blocks].join('\n');
 }
@@ -128,6 +126,28 @@ export function renderAgentModuleCatalog_ACU(): string {
     `  可写代理: ${definition.writableBy.length ? definition.writableBy.join('、') : '仅主 Agent 裁决后登记'}`,
   ].join('\n'));
   return blocks.join('\n');
+}
+
+/**
+ * 渲染读集地址词汇表：read / search 工具能用的全部地址体系。
+ * 主 Agent 与子代理共用同一份（$AGENT_READ_CATALOG），保证派工 reads 里写的地址
+ * 子代理一定解析得了。各资料的具体可用地址以对应目录（正文/表格/世界书）为准。
+ * @returns 词汇表文本
+ */
+export function renderAgentReadCatalog_ACU(): string {
+  return [
+    'read 工具的地址体系（reads 数组里可混用多种地址，一次批量取数）：',
+    '- $STORY_RANGE:起始楼-结束楼：可读窗口内的 AI 正文楼层区间，逐楼全文。可用楼层与窗口范围见正文目录。',
+    '- $TABLE:表名 / $TABLE:表名:起始行-结束行：整表或行区间。可用表名与行数见表格目录。',
+    '- $HOOKS_LEDGER / $HOOKS_LEDGER:ID,ID：伏笔账本全部活跃条目，或按 ID 精读（含已退休条目）。',
+    '- $INFO_GAP / $INFO_GAP:ID,ID：认知与信息差时间线全部活跃条目，或按 ID 精读。',
+    '- $ACTIVE_CONSTRAINTS / $ACTIVE_CONSTRAINTS:ID,ID：长期约束全部条目，或按 ID 精读。',
+    '- $WORLDBOOK:书名:uid,uid：已启用世界书条目全文。地址从世界书目录复制。',
+    '- $CHRONICLES:AM起始码-AM结束码：往期剧情纪要区间（如 $CHRONICLES:AM12-AM18）。可用 AM 码见世界书目录的纪要概要段。',
+    '- $STORY_CATALOG / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：正文目录、完整大纲窗口、未结算正文全量。',
+    'search 工具：{"action":"search","query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}。',
+    '命中行会带上可直接复制进 read 的地址；先 search 定位、再用窄地址精读，比整读省预算。',
+  ].join('\n');
 }
 
 /**

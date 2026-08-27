@@ -13,6 +13,7 @@ export type AgentSessionEventKind_ACU =
   | 'thought'
   | 'main_action'
   | 'protocol_retry'
+  | 'tool_read'
   | 'delegation'
   | 'outline_op'
   | 'finalize'

@@ -13,6 +13,7 @@ import {
   AGENT_HOOK_STATUSES_ACU,
   AGENT_REVEAL_STATUSES_ACU,
   AGENT_REVIEW_VERDICTS_ACU,
+  AGENT_SEARCH_SCOPES_ACU,
   type AgentDelegation_ACU,
   type AgentHookDeltaItem_ACU,
   type AgentHookPatch_ACU,
@@ -24,6 +25,8 @@ import {
   type AgentModuleDelta_ACU,
   type AgentPlannerOutput_ACU,
   type AgentReviewerOutput_ACU,
+  type AgentSearchScope_ACU,
+  type AgentToolCall_ACU,
 } from './agent-model';
 
 function failProtocol_ACU(reason: string, details?: Record<string, unknown>): never {
@@ -146,8 +149,134 @@ function parseDelegations_ACU(value: unknown): AgentDelegation_ACU[] {
     const prompt = readText_ACU(raw.prompt);
     if (!agentName) failProtocol_ACU(`delegations[${index}].agentName 不能为空`);
     if (!prompt) failProtocol_ACU(`delegations[${index}].prompt 不能为空`);
-    return { agentName, prompt, reads: readTextList_ACU(raw.reads), writes: readTextList_ACU(raw.writes) };
+    // 旧协议的 writes 字段静默忽略：写入范围由子代理职责固定决定，不再由主 Agent 授权。
+    return { agentName, prompt, reads: readTextList_ACU(raw.reads) };
   });
+}
+
+/** 单次 read 调用最多允许的地址数，防止一口气抄全目录。 */
+const READ_ADDRESS_LIMIT_ACU = 8;
+
+/** search 单次调用默认与上限的返回条数。 */
+export const AGENT_SEARCH_DEFAULT_MAX_RESULTS_ACU = 30;
+export const AGENT_SEARCH_MAX_RESULTS_CAP_ACU = 100;
+
+function parseSearchScope_ACU(value: unknown): AgentSearchScope_ACU[] {
+  if (value === undefined || value === null) return [...AGENT_SEARCH_SCOPES_ACU];
+  const list = Array.isArray(value) ? value : [value];
+  const scopes: AgentSearchScope_ACU[] = [];
+  for (const raw of list) {
+    const scope = readText_ACU(raw);
+    if (!scope) continue;
+    if (!(AGENT_SEARCH_SCOPES_ACU as readonly string[]).includes(scope)) {
+      failProtocol_ACU(`search 的 scope 只能是 ${AGENT_SEARCH_SCOPES_ACU.join(' / ')}，实际收到：${scope}`);
+    }
+    if (!scopes.includes(scope as AgentSearchScope_ACU)) scopes.push(scope as AgentSearchScope_ACU);
+  }
+  return scopes.length ? scopes : [...AGENT_SEARCH_SCOPES_ACU];
+}
+
+/**
+ * 把一个 JSON 载荷解析成工具调用。
+ * @param payload 已解析且 action 为 read / search 的载荷
+ * @returns 工具调用对象；字段非法时抛可回灌的协议错误
+ */
+export function parseAgentToolCall_ACU(payload: Record<string, unknown>): AgentToolCall_ACU {
+  const action = readText_ACU(payload.action);
+  if (action === 'read') {
+    const reads = readTextList_ACU(payload.reads);
+    if (!reads.length) failProtocol_ACU('read 动作必须提供非空的 reads 数组（资料地址列表）');
+    if (reads.length > READ_ADDRESS_LIMIT_ACU) failProtocol_ACU(`一次 read 最多 ${READ_ADDRESS_LIMIT_ACU} 个地址；请拆成多次或先用 search 缩小范围`);
+    return { kind: 'read', reads: [...new Set(reads)] };
+  }
+  if (action === 'search') {
+    const query = readText_ACU(payload.query);
+    if (!query) failProtocol_ACU('search 动作必须提供非空 query');
+    let maxResults = AGENT_SEARCH_DEFAULT_MAX_RESULTS_ACU;
+    if (payload.maxResults !== undefined) {
+      if (typeof payload.maxResults !== 'number' || !Number.isInteger(payload.maxResults) || payload.maxResults < 1) {
+        failProtocol_ACU('search 的 maxResults 必须是正整数');
+      }
+      maxResults = Math.min(payload.maxResults, AGENT_SEARCH_MAX_RESULTS_CAP_ACU);
+    }
+    return { kind: 'search', query, scope: parseSearchScope_ACU(payload.scope), isRegex: payload.isRegex === true, maxResults };
+  }
+  failProtocol_ACU(`工具动作必须是 read / search，实际收到：${action || '(空)'}`);
+}
+
+/** 一次输出里最多接受的工具调用数（与 JSON 扫描上限一致）。 */
+export const AGENT_TOOL_BATCH_LIMIT_ACU = JSON_OBJECT_SCAN_LIMIT_ACU;
+
+interface ParsedActionObjects_ACU {
+  records: Record<string, unknown>[];
+}
+
+/** 按 parseAgentJsonPayload 的候选优先级提取全部带 action 键的顶层对象。 */
+function collectActionObjects_ACU(raw: string | null | undefined, prefill: string): ParsedActionObjects_ACU {
+  const text = typeof raw === 'string' ? raw : '';
+  if (!text.trim()) failProtocol_ACU('内部 AI 返回为空');
+  const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+  const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+  for (const candidate of candidates) {
+    const records: Record<string, unknown>[] = [];
+    for (const extracted of extractJsonObjects_ACU(candidate)) {
+      try {
+        const parsed = JSON.parse(extracted);
+        if (isRecord_ACU(parsed) && 'action' in parsed) records.push(parsed);
+      } catch { /* 无法解析的碎片直接跳过，由后续候选或报错兜底。 */ }
+    }
+    if (records.length) return { records };
+  }
+  failProtocol_ACU(`返回内容不包含带 action 字段的 JSON 对象。模型返回片段：${text.trim().slice(0, 300)}`);
+}
+
+/**
+ * 解析主 Agent 的一次完整输出。
+ *
+ * 输出里出现任意 read / search 对象时，本次视为工具并发批次：收集全部工具调用同时执行，
+ * 混入的决策动作被忽略（决策必须在拿到工具结果后单独输出）。否则按单动作解析。
+ * @param raw 模型返回的原始文本
+ * @param prefill 尾段预填充
+ * @param allowDelegate 本轮是否仍允许派工
+ * @returns 判别联合形式的动作对象（可能是 tools 批次）
+ */
+export function parseAgentMainOutput_ACU(raw: string | null | undefined, prefill: string, allowDelegate: boolean): AgentMainAction_ACU {
+  const { records } = collectActionObjects_ACU(raw, prefill);
+  const toolRecords = records.filter(record => { const action = readText_ACU(record.action); return action === 'read' || action === 'search'; });
+  if (toolRecords.length) {
+    const calls = toolRecords.slice(0, AGENT_TOOL_BATCH_LIMIT_ACU).map(parseAgentToolCall_ACU);
+    return { kind: 'tools', thought: readText_ACU(toolRecords[0].thought), calls };
+  }
+  return parseAgentMainAction_ACU(records[0], allowDelegate);
+}
+
+/**
+ * 从子代理输出里提取工具并发批次。
+ * @param raw 模型返回的原始文本
+ * @param prefill 尾段预填充
+ * @returns 工具调用列表；输出里没有任何 read / search 对象时返回 null（应按契约解析）
+ */
+export function parseAgentSubagentToolCalls_ACU(raw: string | null | undefined, prefill: string): AgentToolCall_ACU[] | null {
+  const text = typeof raw === 'string' ? raw : '';
+  if (!text.trim()) return null;
+  const looksComplete = stripMarkdownFences_ACU(text).startsWith('{');
+  const candidates = looksComplete || !prefill ? [text, `${prefill}${text}`] : [`${prefill}${text}`, text];
+  for (const candidate of candidates) {
+    const toolRecords: Record<string, unknown>[] = [];
+    let sawAnyRecord = false;
+    for (const extracted of extractJsonObjects_ACU(candidate)) {
+      try {
+        const parsed = JSON.parse(extracted);
+        if (!isRecord_ACU(parsed)) continue;
+        sawAnyRecord = true;
+        const action = readText_ACU(parsed.action);
+        if (action === 'read' || action === 'search') toolRecords.push(parsed);
+      } catch { /* 跳过碎片 */ }
+    }
+    if (toolRecords.length) return toolRecords.slice(0, AGENT_TOOL_BATCH_LIMIT_ACU).map(parseAgentToolCall_ACU);
+    if (sawAnyRecord) return null;
+  }
+  return null;
 }
 
 /** 单次 edit_outline 动作里最多允许的编辑操作数。 */
@@ -217,7 +346,10 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
     if (!reason) failProtocol_ACU('block 动作必须提供 reason');
     return { kind: 'block', thought, reason, unresolved: readTextList_ACU(payload.unresolved) };
   }
-  failProtocol_ACU(`action 必须是 delegate / edit_outline / finalize / block 之一，实际收到：${action || '(空)'}`);
+  if (action === 'read' || action === 'search') {
+    return { kind: 'tools', thought, calls: [parseAgentToolCall_ACU(payload)] };
+  }
+  failProtocol_ACU(`action 必须是 read / search / delegate / edit_outline / finalize / block 之一，实际收到：${action || '(空)'}`);
 }
 
 function parseCharacterKnowledge_ACU(value: unknown): AgentInfoGapDeltaItem_ACU['characterKnowledge'] {
@@ -352,45 +484,39 @@ export function parseAgentMaintainerOutput_ACU(payload: Record<string, unknown>)
       infoGapPatches: infoGap.patches,
       constraintProposals: readTextList_ACU(rawDelta.constraintProposals),
     },
-    needMore: readTextList_ACU(payload.needMore),
   };
 }
 
 /**
  * 解析策划类子代理的输出。外层字段结构化，创作内容保持自然语言。
  * @param payload 已解析的 JSON 载荷
- * @returns 摘要、建议正文、必须保留项、风险项与追加读取请求
+ * @returns 摘要、建议正文、必须保留项与风险项
  */
 export function parseAgentPlannerOutput_ACU(payload: Record<string, unknown>): AgentPlannerOutput_ACU {
-  const needMore = readTextList_ACU(payload.needMore);
   const recommendation = readText_ACU(payload.recommendation);
-  if (!recommendation && !needMore.length) failProtocol_ACU('策划子代理必须给出 recommendation，或用 needMore 申请补充资料');
+  if (!recommendation) failProtocol_ACU('策划子代理必须给出 recommendation；资料不足时应先输出 read / search 工具调用补齐资料');
   return {
     summary: readText_ACU(payload.summary),
     recommendation,
     mustPreserve: readTextList_ACU(payload.mustPreserve),
     risks: readTextList_ACU(payload.risks),
-    needMore,
   };
 }
 
 /**
  * 解析审查类子代理的输出。
  * @param payload 已解析的 JSON 载荷
- * @returns 判词、理由、修正建议与追加读取请求
+ * @returns 判词、理由与修正建议
  */
 export function parseAgentReviewerOutput_ACU(payload: Record<string, unknown>): AgentReviewerOutput_ACU {
   const verdict = readText_ACU(payload.verdict);
-  const needMore = readTextList_ACU(payload.needMore);
   if (!(AGENT_REVIEW_VERDICTS_ACU as readonly string[]).includes(verdict)) {
-    if (needMore.length) return { verdict: 'revise', reason: '资料不足，已申请补充读取', fixes: [], needMore };
-    failProtocol_ACU(`审查子代理的 verdict 必须是 pass / revise / block，实际收到：${verdict || '(空)'}`);
+    failProtocol_ACU(`审查子代理的 verdict 必须是 pass / revise / block，实际收到：${verdict || '(空)'}；资料不足时应先输出 read / search 工具调用`);
   }
   return {
     verdict: verdict as AgentReviewerOutput_ACU['verdict'],
     reason: readText_ACU(payload.reason),
     fixes: readTextList_ACU(payload.fixes),
-    needMore,
   };
 }
 

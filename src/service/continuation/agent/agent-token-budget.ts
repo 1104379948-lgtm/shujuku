@@ -13,8 +13,12 @@
  */
 
 import { SillyTavern_API_ACU } from '../../../shared/host-api';
-import { appendAgentConversation_ACU, buildEmptyAgentConversation_ACU } from './agent-conversation-store';
-import { AGENT_HISTORY_EMERGENCY_FACTOR_ACU, type AgentConversationMessage_ACU, type AgentConversationSnapshot_ACU } from './agent-model';
+import {
+  AGENT_HISTORY_EMERGENCY_FACTOR_ACU,
+  type AgentConversationCompactionMark_ACU,
+  type AgentConversationMessage_ACU,
+  type AgentConversationSnapshot_ACU,
+} from './agent-model';
 
 /** 宿主分词器不可用时的字符→token 估算系数。中文在常见分词器下约 1 token / 1~1.5 字。 */
 const FALLBACK_CHARS_PER_TOKEN_ACU = 1.5;
@@ -23,7 +27,13 @@ const FALLBACK_CHARS_PER_TOKEN_ACU = 1.5;
 const HANDOFF_QUOTE_LIMIT_ACU = 160;
 
 export interface AgentConversationCompaction_ACU {
+  /** 压缩后的会话视图（已应用标记投影），供本次运行继续使用。 */
   snapshot: AgentConversationSnapshot_ACU;
+  /**
+   * 非破坏压缩标记。调用方把它写进末楼（writeAgentConversationCompactionMark_ACU）；
+   * changed 为 false 时为 null。原始消息不删除，删掉承载楼层即自动撤销压缩。
+   */
+  mark: AgentConversationCompactionMark_ACU | null;
   /** 是否真的压缩了。false 表示未超预算或无可丢弃内容，调用方据此跳过落盘。 */
   changed: boolean;
   droppedMessages: number;
@@ -52,7 +62,7 @@ export async function countAgentTokens_ACU(text: string): Promise<number> {
   return Math.ceil(content.length / FALLBACK_CHARS_PER_TOKEN_ACU);
 }
 
-type TokenCounter_ACU = (text: string) => Promise<number>;
+export type TokenCounter_ACU = (text: string) => Promise<number>;
 
 /**
  * 包一层按文本记忆的计数器。
@@ -94,6 +104,22 @@ export async function measureAgentConversationTokens_ACU(
   return sizes.reduce((sum, size) => sum + size, 0);
 }
 
+/**
+ * 统计一组已渲染的提示词消息的 token 总数。用于测量主 Agent 除会话历史之外
+ * 实际读取的上下文开销（提示词骨架、正文摘取、资料目录等）。
+ * @param messages 已渲染的消息序列
+ * @param count token 统计函数，缺省用 countAgentTokens_ACU
+ * @returns 全部消息内容的 token 之和
+ */
+export async function measureAgentPromptTokens_ACU(
+  messages: ReadonlyArray<{ role: string; content: string }>,
+  count: TokenCounter_ACU = countAgentTokens_ACU,
+): Promise<number> {
+  let total = 0;
+  for (const message of messages) total += await count(message.content);
+  return total;
+}
+
 export interface AgentCompactionTiming_ACU {
   /** compact 立即压缩；defer 已超预算但要等轮次边界；skip 未超预算或不限预算。 */
   action: 'compact' | 'defer' | 'skip';
@@ -111,17 +137,20 @@ export interface AgentCompactionTiming_ACU {
  * @param budgetTokens 预算上限；<= 0 视为不限
  * @param continuingSameTurn 本次运行是否仍在会话里最后通告的那一轮内（中断恢复即为 true）
  * @param count token 统计函数，缺省用 countAgentTokens_ACU
- * @returns 时机判定结果
+ * @param overheadTokens 会话之外的上下文开销（提示词骨架、正文摘取等），与会话一起计入总量
+ * @returns 时机判定结果；totalTokens 为「会话 + 开销」的完整上下文总量
  */
 export async function resolveAgentCompactionTiming_ACU(
   snapshot: AgentConversationSnapshot_ACU,
   budgetTokens: number,
   continuingSameTurn: boolean,
   count: TokenCounter_ACU = countAgentTokens_ACU,
+  overheadTokens = 0,
 ): Promise<AgentCompactionTiming_ACU> {
   if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return { action: 'skip', totalTokens: 0, emergency: false };
-  if (!snapshot.messages.length) return { action: 'skip', totalTokens: 0, emergency: false };
-  const totalTokens = await measureAgentConversationTokens_ACU(snapshot, count);
+  // 会话为空时无可压缩：即使开销本身超阈值，压缩也改变不了任何东西。
+  if (!snapshot.messages.length) return { action: 'skip', totalTokens: overheadTokens, emergency: false };
+  const totalTokens = overheadTokens + await measureAgentConversationTokens_ACU(snapshot, count);
   if (totalTokens <= budgetTokens) return { action: 'skip', totalTokens, emergency: false };
   if (!continuingSameTurn) return { action: 'compact', totalTokens, emergency: false };
   const emergency = totalTokens > budgetTokens * AGENT_HISTORY_EMERGENCY_FACTOR_ACU;
@@ -169,29 +198,37 @@ export function buildAgentHandoffReport_ACU(messages: readonly AgentConversation
   }
   if (!sections.length && !inherited.length) return '';
   const head = '以下是更早会话的浓缩记录（原始消息已因 token 预算被移出上下文）。这些是已经发生的过程，不要重复执行：';
-  return [...inherited, `${head}\n${sections.join('\n')}`].join('\n\n');
+  // 曾调阅过的资料地址单独列出：内容已移出上下文，但地址可直接用 read 重新调阅。
+  const readKeys = [...new Set(messages.filter(message => message.kind === 'tool' && message.readKey).map(message => message.readKey!))];
+  const readsLine = readKeys.length ? `\n曾调阅过的资料地址（内容已移出上下文，需要时用 read 重新调阅）：${readKeys.join('、')}` : '';
+  return [...inherited, `${head}\n${sections.join('\n')}${readsLine}`].join('\n\n');
 }
 
 /**
  * 按 token 预算压缩会话。
- * @param snapshot 当前会话
+ *
+ * 压缩是非破坏的：不重建消息序列，只产出一个 compaction 标记（截止消息 id + 交接报告）。
+ * 调用方把标记写进末楼，拼接层负责投影；本函数同时返回投影后的会话视图供本次运行继续使用。
+ * @param snapshot 当前会话视图
  * @param budgetTokens 预算上限；<= 0 视为不限
  * @param count token 统计函数，缺省用 countAgentTokens_ACU
- * @returns 压缩结果；changed 为 false 时 snapshot 与入参同一引用
+ * @param overheadTokens 会话之外的上下文开销；压缩目标是让「会话 + 开销」整体回到预算内
+ * @returns 压缩结果；changed 为 false 时 snapshot 与入参同一引用、mark 为 null
  */
 export async function compactAgentConversation_ACU(
   snapshot: AgentConversationSnapshot_ACU,
   budgetTokens: number,
   count: TokenCounter_ACU = countAgentTokens_ACU,
+  overheadTokens = 0,
 ): Promise<AgentConversationCompaction_ACU> {
   const unchanged = (totalTokens: number, withinBudget: boolean): AgentConversationCompaction_ACU =>
-    ({ snapshot, changed: false, droppedMessages: 0, droppedTurns: 0, totalTokens, withinBudget });
+    ({ snapshot, mark: null, changed: false, droppedMessages: 0, droppedTurns: 0, totalTokens, withinBudget });
 
   if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return unchanged(0, true);
-  if (!snapshot.messages.length) return unchanged(0, true);
+  if (!snapshot.messages.length) return unchanged(overheadTokens, overheadTokens <= budgetTokens);
 
   const sizes = await measureMessages_ACU(snapshot.messages, count);
-  const total = sizes.reduce((sum, size) => sum + size, 0);
+  const total = overheadTokens + sizes.reduce((sum, size) => sum + size, 0);
   if (total <= budgetTokens) return unchanged(total, true);
 
   const groups = groupByTurn_ACU(snapshot.messages);
@@ -216,15 +253,25 @@ export async function compactAgentConversation_ACU(
   const dropped = groups.slice(0, firstKept).flat();
   const kept = groups.slice(firstKept).flat();
   const report = buildAgentHandoffReport_ACU(dropped);
-  const rebuilt = appendAgentConversation_ACU(
-    { ...buildEmptyAgentConversation_ACU(), nextId: snapshot.nextId },
-    report ? [{ kind: 'handoff', text: report, digest: `交接报告（浓缩 ${firstKept} 个轮次）`, turnKey: '' }] : [],
-  );
-  const next: AgentConversationSnapshot_ACU = { ...rebuilt, messages: [...rebuilt.messages, ...kept] };
-  const reportTokens = report ? await count(report) : 0;
+  // 截止 id 取被丢弃消息的最大 id。消息 id 按追加顺序单调递增（合成交接消息的 id 恒小于
+  // 其后消息），因此「丢弃视图前缀」等价于「丢弃 id ≤ 截止值」。
+  const compactedThroughId = dropped.reduce((max, message) => Math.max(max, message.id), 0);
+  if (!report || compactedThroughId <= 0) return unchanged(total, false);
+  const mark: AgentConversationCompactionMark_ACU = { compactedThroughId, report, at: Date.now() };
+  const handoffMessage: AgentConversationMessage_ACU = {
+    id: compactedThroughId,
+    kind: 'handoff',
+    text: report,
+    digest: `交接报告（浓缩 ${firstKept} 个轮次）`,
+    turnKey: '',
+    at: mark.at,
+  };
+  const next: AgentConversationSnapshot_ACU = { ...snapshot, messages: [handoffMessage, ...kept] };
+  const reportTokens = await count(report);
 
   return {
     snapshot: next,
+    mark,
     changed: true,
     droppedMessages: dropped.length,
     droppedTurns: firstKept,

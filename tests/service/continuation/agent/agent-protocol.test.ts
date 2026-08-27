@@ -5,9 +5,11 @@ import {
   extractFirstJsonObject_ACU,
   parseAgentJsonPayload_ACU,
   parseAgentMainAction_ACU,
+  parseAgentMainOutput_ACU,
   parseAgentMaintainerOutput_ACU,
   parseAgentPlannerOutput_ACU,
   parseAgentReviewerOutput_ACU,
+  parseAgentSubagentToolCalls_ACU,
 } from '../../../../src/service/continuation/agent/agent-protocol';
 import { AGENT_PREFILLS_ACU } from '../../../../src/service/continuation/agent/agent-defaults';
 
@@ -134,7 +136,38 @@ describe('主 Agent 动作解析', () => {
 
   it('未知动作直接拒绝，revise_outline 已退役不再是合法动作', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'write_story' }, true)).toThrowError(/action 必须是/);
-    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 delegate \/ edit_outline \/ finalize \/ block/);
+    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 read \/ search \/ delegate \/ edit_outline \/ finalize \/ block/);
+  });
+});
+
+describe('工具批次解析', () => {
+  it('输出里出现任意 read/search 对象即视为工具并发批次，混入的决策动作被忽略', () => {
+    const raw = '先查资料。\n{"action":"read","reads":["$STORY_RANGE:3-4","$HOOKS_LEDGER:H001"]}\n'
+      + '{"action":"search","query":"黑色晶屑","scope":["story","modules"],"maxResults":10}\n'
+      + '{"action":"finalize","instruction":"顺便交付"}';
+    const action = parseAgentMainOutput_ACU(raw, AGENT_PREFILLS_ACU.main, true);
+    expect(action.kind).toBe('tools');
+    const calls = (action as any).calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ kind: 'read', reads: ['$STORY_RANGE:3-4', '$HOOKS_LEDGER:H001'] });
+    expect(calls[1]).toMatchObject({ kind: 'search', query: '黑色晶屑', scope: ['story', 'modules'], isRegex: false, maxResults: 10 });
+  });
+
+  it('没有工具对象时按单动作解析', () => {
+    const action = parseAgentMainOutput_ACU('{"thought":"够了","action":"finalize","instruction":"写","summary":"要点"}', AGENT_PREFILLS_ACU.main, true);
+    expect(action.kind).toBe('finalize');
+  });
+
+  it('read 需要非空 reads，search 需要非空 query', () => {
+    expect(() => parseAgentMainOutput_ACU('{"action":"read","reads":[]}', AGENT_PREFILLS_ACU.main, true)).toThrowError(/reads/);
+    expect(() => parseAgentMainOutput_ACU('{"action":"search","query":""}', AGENT_PREFILLS_ACU.main, true)).toThrowError(/query/);
+  });
+
+  it('子代理输出里的工具批次被提取；纯契约输出返回 null', () => {
+    const calls = parseAgentSubagentToolCalls_ACU('{"action":"read","reads":["$INFO_GAP"]}', AGENT_PREFILLS_ACU.maintainer);
+    expect(calls).toHaveLength(1);
+    expect(calls![0]).toMatchObject({ kind: 'read', reads: ['$INFO_GAP'] });
+    expect(parseAgentSubagentToolCalls_ACU('{"summary":"结算完成","delta":{}}', AGENT_PREFILLS_ACU.maintainer)).toBeNull();
   });
 });
 
@@ -148,7 +181,6 @@ describe('子代理输出解析', () => {
         infoGap: [{ action: 'upsert', id: 'E1', topic: '主题', revealStatus: '瞎写', revealIndex: 4, characterKnowledge: [{ name: '林瑶', knows: '不知' }, { knows: '缺名字' }] }],
         constraintProposals: ['建议登记红线', ''],
       },
-      needMore: ['$TABLE_CHRONICLES'],
     });
 
     expect(output.delta.expectedRevisions).toEqual({ hooks: 2 });
@@ -156,7 +188,6 @@ describe('子代理输出解析', () => {
     expect(output.delta.infoGap[0].revealStatus).toBe('unrevealed');
     expect(output.delta.infoGap[0].characterKnowledge).toEqual([{ name: '林瑶', knows: '不知' }]);
     expect(output.delta.constraintProposals).toEqual(['建议登记红线']);
-    expect(output.needMore).toEqual(['$TABLE_CHRONICLES']);
   });
 
   it('维护类的非法 action 与非数组 delta 都被拒绝', () => {
@@ -164,17 +195,15 @@ describe('子代理输出解析', () => {
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { infoGap: '不是数组' } })).toThrowError(/必须是数组/);
   });
 
-  it('策划类要么给建议，要么申请补充资料', () => {
+  it('策划类必须给出 recommendation，资料不足应改走工具调用', () => {
     expect(parseAgentPlannerOutput_ACU({ summary: '要点', recommendation: '这样推进', mustPreserve: ['林瑶有伤'], risks: ['提前回收'] }))
       .toMatchObject({ recommendation: '这样推进', mustPreserve: ['林瑶有伤'] });
-    expect(parseAgentPlannerOutput_ACU({ needMore: ['$HOOKS_LEDGER'] })).toMatchObject({ recommendation: '', needMore: ['$HOOKS_LEDGER'] });
     expect(() => parseAgentPlannerOutput_ACU({ summary: '只有摘要' })).toThrowError(/必须给出 recommendation/);
   });
 
-  it('审查类判词非法时优先走补充资料而不是硬失败', () => {
+  it('审查类判词非法时直接拒绝，由重试机制纠正', () => {
     expect(parseAgentReviewerOutput_ACU({ verdict: 'revise', reason: '与 H1 冲突', fixes: ['改为部分回收'] }))
       .toMatchObject({ verdict: 'revise', fixes: ['改为部分回收'] });
-    expect(parseAgentReviewerOutput_ACU({ verdict: '说不清', needMore: ['$ACTIVE_CONSTRAINTS'] })).toMatchObject({ verdict: 'revise', needMore: ['$ACTIVE_CONSTRAINTS'] });
     expect(() => parseAgentReviewerOutput_ACU({ verdict: '说不清' })).toThrowError(/verdict 必须是/);
   });
 });

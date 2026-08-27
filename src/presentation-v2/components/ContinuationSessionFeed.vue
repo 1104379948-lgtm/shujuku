@@ -72,6 +72,7 @@ const KIND_LABELS: Record<AgentSessionEntry_ACU['kind'], string> = {
   thought: '思考',
   main_action: '主 Agent',
   protocol_retry: '重试',
+  tool_read: '调阅',
   delegation: '子代理',
   outline_op: '大纲',
   finalize: '交付',

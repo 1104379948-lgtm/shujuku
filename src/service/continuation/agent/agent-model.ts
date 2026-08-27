@@ -16,7 +16,11 @@ export const AGENT_MODULE_SCHEMA_VERSION_ACU = 1 as const;
 /** 主 Agent 自身会话记录挂在消息对象上的字段名。与资料快照同楼不同字段，互不干扰。 */
 export const AGENT_CONVERSATION_FIELD_ACU = '_qrf_continuation_agent_chat';
 
+/** v1：末楼全量快照（历史遗留，读取时兼容为基线段）。 */
 export const AGENT_CONVERSATION_SCHEMA_VERSION_ACU = 1 as const;
+
+/** v2：会话按楼层分段增量存储，读取时全楼拼接，删楼即自动回退该楼产生的消息。 */
+export const AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU = 2 as const;
 
 /**
  * 会话消息种类。API 角色由种类推导，UI 展示样式也由种类决定：
@@ -38,14 +42,37 @@ export interface AgentConversationMessage_ACU {
   /** 产生该消息时的大纲游标指纹（stageId#revision#turnId），用于按轮分组与压缩。 */
   turnKey: string;
   at: number;
+  /** 工具消息专用：本条承载的读取地址（如 $STORY_RANGE:12-15）。同地址重读时旧条目在渲染层投影为过期占位。 */
+  readKey?: string;
 }
 
-/** 楼层锚定的会话快照。与资料快照同构：删楼/Swipe 即自动回退到更早的会话。 */
+/**
+ * 由各楼层段拼接出的会话视图。nextId 取所有段内消息最大 id + 1；
+ * messages 已应用压缩标记投影（合成交接报告在最前，marker 之前的原始消息不出现）。
+ */
 export interface AgentConversationSnapshot_ACU {
   schemaVersion: typeof AGENT_CONVERSATION_SCHEMA_VERSION_ACU;
   nextId: number;
   updatedAt: number;
   messages: AgentConversationMessage_ACU[];
+}
+
+/**
+ * 非破坏压缩标记。存在楼层记录里而不进消息段：拼接时取 compactedThroughId 最大的标记，
+ * id ≤ 该值的消息被投影掉、report 合成为最前的交接消息。删掉承载楼层即自动撤销压缩。
+ */
+export interface AgentConversationCompactionMark_ACU {
+  compactedThroughId: number;
+  report: string;
+  at: number;
+}
+
+/** 单楼层的会话段记录。segment 是该楼层期间产生的消息增量；compaction 是可选的压缩标记。 */
+export interface AgentConversationFloorRecord_ACU {
+  schemaVersion: typeof AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU;
+  updatedAt: number;
+  segment: AgentConversationMessage_ACU[];
+  compaction?: AgentConversationCompactionMark_ACU;
 }
 
 /** 追加一条会话消息的输入。id 与 at 由存储层分配。 */
@@ -54,17 +81,28 @@ export interface AgentConversationAppend_ACU {
   text: string;
   digest?: string;
   turnKey?: string;
+  readKey?: string;
 }
 
-/** 摘取小说正文时默认保留的已结算 AI 楼层数。未结算楼层始终全给，不受此值限制。 */
+/** Agent 可读/可搜正文窗口的默认楼数。未结算楼层始终在窗口内，不受此值限制。 */
 export const AGENT_STORY_WINDOW_DEFAULT_ACU = 20;
 
+/** 骨架里固定注入全文的末尾 AI 楼层数默认值（承接锚点）。 */
+export const AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU = 2;
+
+/** read/search 累计 token 预算默认值：按 agentHistoryTokenBudget 的百分比折算。 */
+export const AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU = '30%';
+
+/** 临近历史预算阈值时仍放行的精读兜底额度默认值（token）。 */
+export const AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU = 6000;
+
 /**
- * 主 Agent 会话历史的默认 token 预算。取 24000 是因为一轮规划的提示词骨架（子代理目录、
- * 模块目录、表格目录、大纲窗口、正文窗口）已占用相当篇幅，会话历史再占这个量级时，
- * 128k 级上下文仍有充足余量；超出后按整轮压缩为交接报告。
+ * 主 Agent 上下文自动总结阈值的默认值。统计口径是主 Agent 每次请求实际读取的完整上下文：
+ * 提示词骨架（子代理目录、模块目录、表格目录、大纲窗口、正文摘取）加上跨轮会话历史
+ * （含用户输入、迭代输出、工具结果与子代理报告）。取 120000 使 128k 级模型在阈值内
+ * 仍留有输出余量；超出后在下一轮开始前把最早轮次压缩为交接报告。
  */
-export const AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU = 24000;
+export const AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU = 120000;
 
 /**
  * 轮次进行中允许超出预算的倍数。
@@ -172,12 +210,39 @@ export interface AgentOutlineOpResult_ACU {
   summary: string;
 }
 
-/** 主 Agent 一次派工的完整输入。读集/写集用占位符 token 表达，不暴露存储路径。 */
+/** 主 Agent 一次派工的完整输入。读集用占位符 token 表达，不暴露存储路径；写入范围由子代理职责固定决定。 */
 export interface AgentDelegation_ACU {
   agentName: string;
   prompt: string;
   reads: string[];
-  writes: string[];
+}
+
+/** search 工具可检索的资料域。 */
+export const AGENT_SEARCH_SCOPES_ACU = ['story', 'tables', 'modules', 'outline', 'worldbook'] as const;
+export type AgentSearchScope_ACU = typeof AGENT_SEARCH_SCOPES_ACU[number];
+
+/** 一次 read 工具调用：按地址 token 批量取数。 */
+export interface AgentReadCall_ACU {
+  kind: 'read';
+  reads: string[];
+}
+
+/** 一次 search 工具调用：grep 式跨域检索。 */
+export interface AgentSearchCall_ACU {
+  kind: 'search';
+  query: string;
+  scope: AgentSearchScope_ACU[];
+  isRegex: boolean;
+  maxResults: number;
+}
+
+export type AgentToolCall_ACU = AgentReadCall_ACU | AgentSearchCall_ACU;
+
+/** 主/子代理一次输出里的工具并发批次。多个 read/search JSON 对象组成一批同时执行。 */
+export interface AgentToolsAction_ACU {
+  kind: 'tools';
+  thought: string;
+  calls: AgentToolCall_ACU[];
 }
 
 export interface AgentFinalizeAction_ACU {
@@ -217,7 +282,7 @@ export interface AgentOutlineEditAction_ACU {
   edits: AgentOutlineEditOp_ACU[];
 }
 
-export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentOutlineEditAction_ACU | AgentBlockAction_ACU;
+export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentOutlineEditAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU;
 
 /** 运行时硬边界。预留最后一轮让主 Agent 有机会正常交付而不是被突然掐断。 */
 export interface AgentRunBudget_ACU {
@@ -225,15 +290,19 @@ export interface AgentRunBudget_ACU {
   maxDelegations: number;
   maxSameAgent: number;
   maxConcurrent: number;
+  /** 主 Agent 一次运行内 read/search 工具批次的次数上限。 */
+  maxReads: number;
+  /** 子代理小循环里工具轮次上限（首轮之外还允许几轮 read/search）。 */
   maxExtraReads: number;
 }
 
 export const DEFAULT_AGENT_RUN_BUDGET_ACU: AgentRunBudget_ACU = {
-  maxIterations: 5,
+  maxIterations: 8,
   maxDelegations: 6,
   maxSameAgent: 2,
   maxConcurrent: 3,
-  maxExtraReads: 2,
+  maxReads: 8,
+  maxExtraReads: 3,
 };
 
 /** 一次派工的执行结果。被运行时拒绝的委派也走这里回灌给主 Agent。 */
@@ -298,11 +367,10 @@ export interface AgentInfoGapDeltaItem_ACU {
   reason: string;
 }
 
-/** 子代理维护类的完整输出。 */
+/** 子代理维护类的完整输出。资料不足时不再用 needMore 申请重跑，而是在小循环里直接输出 read 工具调用。 */
 export interface AgentMaintainerOutput_ACU {
   summary: string;
   delta: AgentModuleDelta_ACU;
-  needMore: string[];
 }
 
 /** 子代理策划类的完整输出。外层结构化便于运行时识别，创作内容保持自然语言。 */
@@ -311,7 +379,6 @@ export interface AgentPlannerOutput_ACU {
   recommendation: string;
   mustPreserve: string[];
   risks: string[];
-  needMore: string[];
 }
 
 export const AGENT_REVIEW_VERDICTS_ACU = ['pass', 'revise', 'block'] as const;
@@ -322,7 +389,6 @@ export interface AgentReviewerOutput_ACU {
   verdict: AgentReviewVerdict_ACU;
   reason: string;
   fixes: string[];
-  needMore: string[];
 }
 
 /** 主 Agent 循环最终交付给宿主装配器的结果，字段形状与旧生成器保持一致。 */

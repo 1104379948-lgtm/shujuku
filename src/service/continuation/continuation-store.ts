@@ -1,8 +1,14 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU } from './defaults';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
-import { AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU, AGENT_STORY_WINDOW_DEFAULT_ACU } from './agent/agent-model';
+import {
+  AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
+  AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
+  AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU,
+  AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
+  AGENT_STORY_WINDOW_DEFAULT_ACU,
+} from './agent/agent-model';
 import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, CONTINUATION_AGENT_PROMPT_KEYS_ACU } from './model';
 import { resolveContinuationTurnRange_ACU, validateStageOutline_ACU } from './outline-schema';
 import { validateContinuationPromptSegments_ACU } from './prompt-template';
@@ -116,6 +122,24 @@ function validateAgentApiPresets_ACU(raw: unknown): ContinuationSettings_ACU['ag
   return result;
 }
 
+/**
+ * 校验 read/search 累计预算配置。接受正整数（固定 token 数）或 "1%"-"100%" 百分比串
+ * （按 agentHistoryTokenBudget 折算）；非法值直接拒绝而不是静默回退，与信封其余字段同构。
+ */
+function validateReadTokenBudget_ACU(raw: unknown): number | string {
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 1) return raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (/^\d+(\.\d+)?%$/.test(trimmed)) {
+      const percent = parseFloat(trimmed);
+      if (percent >= 1 && percent <= 100) return trimmed;
+    }
+    const numeric = Number(trimmed);
+    if (Number.isInteger(numeric) && numeric >= 1) return numeric;
+  }
+  fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.agentReadTokenBudget 必须是正整数或 1%-100% 百分比');
+}
+
 function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
   // V7 及更早的信封带 turnInstructionPrompt 且没有 agentPrompts。严格键校验会把它判成未知字段，
@@ -127,7 +151,14 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   // 主 Agent 会话改造之前的信封没有这两项；补默认即无感迁移，不必让用户重建配置。
   if (!Object.prototype.hasOwnProperty.call(raw, 'storyWindowFloors')) raw.storyWindowFloors = AGENT_STORY_WINDOW_DEFAULT_ACU;
   if (!Object.prototype.hasOwnProperty.call(raw, 'agentHistoryTokenBudget')) raw.agentHistoryTokenBudget = AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU;
-  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'storyWindowFloors', 'agentHistoryTokenBudget', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+  // 旧默认 24000 的统计口径只算会话历史；口径改为「实际读取的完整上下文」后，24000 连提示词
+  // 骨架都容不下，会导致每轮都触发压缩。该值从未是有效的主动选择，无条件迁到新默认。
+  if (raw.agentHistoryTokenBudget === 24000) raw.agentHistoryTokenBudget = AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU;
+  // Agent 工具化改造之前的信封没有这三项；补默认即无感迁移。
+  if (!Object.prototype.hasOwnProperty.call(raw, 'storyTailFloors')) raw.storyTailFloors = AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU;
+  if (!Object.prototype.hasOwnProperty.call(raw, 'agentReadTokenBudget')) raw.agentReadTokenBudget = AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU;
+  if (!Object.prototype.hasOwnProperty.call(raw, 'agentReadFallbackTokens')) raw.agentReadFallbackTokens = AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU;
+  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
   requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
   if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
   const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
@@ -139,10 +170,10 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   let outlinePrompt = raw.outlinePrompt;
   let agentPrompts = raw.agentPrompts;
   let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU) {
+  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU;
   }
   
   return {
@@ -152,6 +183,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     loopDelaySeconds: requireInteger_ACU(raw.loopDelaySeconds, 'settings.loopDelaySeconds', 0), totalDurationMinutes: requireInteger_ACU(raw.totalDurationMinutes, 'settings.totalDurationMinutes', 0), retryDelaySeconds: requireInteger_ACU(raw.retryDelaySeconds, 'settings.retryDelaySeconds', 0),
     generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0),
     storyWindowFloors: requireInteger_ACU(raw.storyWindowFloors, 'settings.storyWindowFloors', 0), agentHistoryTokenBudget: requireInteger_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', 0),
+    storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
     contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
     apiPresetMode: raw.apiPresetMode as ContinuationSettings_ACU['apiPresetMode'], fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
     agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),

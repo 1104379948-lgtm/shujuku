@@ -1,6 +1,12 @@
 import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationAgentApiPresets_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationStageSize_ACU, type ContinuationTurnRange_ACU } from './model';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
-import { AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU, AGENT_STORY_WINDOW_DEFAULT_ACU } from './agent/agent-model';
+import {
+  AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
+  AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
+  AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU,
+  AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
+  AGENT_STORY_WINDOW_DEFAULT_ACU,
+} from './agent/agent-model';
 
 export const CONTINUATION_TURN_RANGES_ACU: Readonly<Record<Exclude<ContinuationStageSize_ACU, 'custom'>, ContinuationTurnRange_ACU>> = {
   short: { min: 3, max: 5 },
@@ -52,6 +58,11 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V9_ACU = 'spv1.7-continua
  * $TOOL_RESULTS 退役。旧提示词描述的上下文排布与运行时不再一致，必须强制刷新。
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU = 'spv1.8-continuation-agent-conversation-v10';
+/**
+ * Agent 工具化版本：固定资料注入改为目录+状态骨架，主/子代理获得 read/search 工具与 token 门禁，
+ * needMore 与读写授权退役。旧提示词描述的协议与运行时不再一致，必须强制刷新。
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU = 'spv1.9-continuation-agent-tools-v11';
 
 function clonePromptSegments_ACU(segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
   return segments.map(segment => ({ ...segment }));
@@ -87,6 +98,9 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     contextTurnCount: 3,
     storyWindowFloors: AGENT_STORY_WINDOW_DEFAULT_ACU,
     agentHistoryTokenBudget: AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
+    storyTailFloors: AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
+    agentReadTokenBudget: AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU,
+    agentReadFallbackTokens: AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
     contextExtractRules: [],
     contextExcludeRules: [],
     apiPresetMode: 'current',
@@ -94,7 +108,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU,
   };
 }
 

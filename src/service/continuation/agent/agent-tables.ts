@@ -61,15 +61,36 @@ export function findAgentSheetsByAliases_ACU(aliases: readonly string[], tableDa
   return listSheetViews_ACU(tableData).filter(view => aliases.includes(view.name));
 }
 
+/** 行区间，1 基且含两端。 */
+export interface AgentTableRowRange_ACU {
+  start: number;
+  end: number;
+}
+
 /**
  * 把一张表渲染成紧凑文本。
  * @param view sheet 视图
+ * @param range 可选行区间（1 基含两端）；只渲染区间内的行，行号保持全表口径
  * @returns 形如「表名（共 N 行）\n列: a | b\n1. x | y」的文本
  */
-export function renderAgentSheet_ACU(view: AgentSheetView_ACU): string {
+export function renderAgentSheet_ACU(view: AgentSheetView_ACU, range?: AgentTableRowRange_ACU): string {
   const lines = [`表名：${view.name}（共 ${view.rows.length} 行）`, `列：${view.header.join(' | ')}`];
-  if (!view.rows.length) lines.push('（该表暂无数据行）');
-  else view.rows.forEach((row, index) => lines.push(`${index + 1}. ${row.join(' | ')}`));
+  if (!view.rows.length) {
+    lines.push('（该表暂无数据行）');
+    return lines.join('\n');
+  }
+  if (!range) {
+    view.rows.forEach((row, index) => lines.push(`${index + 1}. ${row.join(' | ')}`));
+    return lines.join('\n');
+  }
+  const start = Math.max(1, range.start);
+  const end = Math.min(view.rows.length, range.end);
+  if (start > end) {
+    lines.push(`请求的行区间 ${range.start}-${range.end} 超出范围：该表只有 1-${view.rows.length} 行。请修正区间后重读。`);
+    return lines.join('\n');
+  }
+  lines.push(`（只列第 ${start}-${end} 行）`);
+  for (let index = start; index <= end; index += 1) lines.push(`${index}. ${view.rows[index - 1].join(' | ')}`);
   return lines.join('\n');
 }
 
@@ -86,22 +107,23 @@ export function renderAgentTableByAliases_ACU(table: AgentGuaranteedTable_ACU, t
   }
   if (matched.length === 1) return renderAgentSheet_ACU(matched[0]);
   const header = `命中 ${matched.length} 张同名或同类表，全部列出，请自行判断使用哪一张：`;
-  return [header, ...matched.map(renderAgentSheet_ACU)].join('\n\n');
+  return [header, ...matched.map(view => renderAgentSheet_ACU(view))].join('\n\n');
 }
 
 /**
- * 按精确表名渲染一张表，支撑 `$TABLE:<表名>` 形式的读集。
+ * 按精确表名渲染一张表，支撑 `$TABLE:<表名>` 与 `$TABLE:<表名>:a-b` 形式的读集。
  * @param name 表名
  * @param tableData 表格数据对象，缺省取运行时快照
+ * @param range 可选行区间（1 基含两端）
  * @returns 自然语言文本；不存在时如实标注
  */
-export function renderAgentTableByName_ACU(name: string, tableData?: unknown): string {
+export function renderAgentTableByName_ACU(name: string, tableData?: unknown, range?: AgentTableRowRange_ACU): string {
   const target = String(name ?? '').trim();
   if (!target) return '读集里的表名为空，无法读取。';
   const matched = listSheetViews_ACU(tableData).filter(view => view.name === target);
-  if (!matched.length) return `当前聊天不存在名为「${target}」的表。`;
-  if (matched.length === 1) return renderAgentSheet_ACU(matched[0]);
-  return [`命中 ${matched.length} 张名为「${target}」的表，全部列出：`, ...matched.map(renderAgentSheet_ACU)].join('\n\n');
+  if (!matched.length) return `当前聊天不存在名为「${target}」的表。可用表名见表格目录。`;
+  if (matched.length === 1) return renderAgentSheet_ACU(matched[0], range);
+  return [`命中 ${matched.length} 张名为「${target}」的表，全部列出：`, ...matched.map(view => renderAgentSheet_ACU(view, range))].join('\n\n');
 }
 
 /**
@@ -112,6 +134,6 @@ export function renderAgentTableByName_ACU(name: string, tableData?: unknown): s
 export function renderAgentTableCatalog_ACU(tableData?: unknown): string {
   const views = listSheetViews_ACU(tableData);
   if (!views.length) return '当前聊天没有任何可读表格。';
-  const lines = views.map(view => `- ${view.name}（${view.rows.length} 行）列：${view.header.join(' | ')}｜读集写法：$TABLE:${view.name}`);
+  const lines = views.map(view => `- ${view.name}（${view.rows.length} 行）列：${view.header.join(' | ')}｜整表读取：$TABLE:${view.name}｜行区间读取：$TABLE:${view.name}:起始行-结束行`);
   return ['以下是当前聊天实际存在的全部表格；只有这里列出的表才能读取：', ...lines].join('\n');
 }

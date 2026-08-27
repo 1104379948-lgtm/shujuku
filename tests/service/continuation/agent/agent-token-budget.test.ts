@@ -7,6 +7,7 @@ import {
   countAgentTokens_ACU,
   createAgentTokenCounter_ACU,
   measureAgentConversationTokens_ACU,
+  measureAgentPromptTokens_ACU,
   resolveAgentCompactionTiming_ACU,
 } from '../../../../src/service/continuation/agent/agent-token-budget';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
@@ -153,6 +154,42 @@ describe('压缩时机', () => {
     // 恰好两倍仍然只登记，严格超过两倍才越界。
     expect(await resolveAgentCompactionTiming_ACU(threeTurns(), total / 2, true, countByChar)).toMatchObject({ action: 'defer' });
     expect(await resolveAgentCompactionTiming_ACU(threeTurns(), total / 2 - 1, true, countByChar)).toMatchObject({ action: 'compact', emergency: true });
+  });
+});
+
+describe('上下文开销计入', () => {
+  it('统计一组已渲染提示词消息的 token 总和', async () => {
+    const messages = [
+      { role: 'system', content: 'AAAA' },
+      { role: 'user', content: 'BBBBBB' },
+    ];
+    expect(await measureAgentPromptTokens_ACU(messages, countByChar)).toBe(10);
+    expect(await measureAgentPromptTokens_ACU([], countByChar)).toBe(0);
+  });
+
+  it('时机判定把会话之外的开销计入总量：会话本身未超但整体超了同样触发', async () => {
+    const snapshot = threeTurns();
+    const conversationTokens = await measureAgentConversationTokens_ACU(snapshot, countByChar);
+    const budget = conversationTokens + 50;
+    expect(await resolveAgentCompactionTiming_ACU(snapshot, budget, false, countByChar, 0)).toMatchObject({ action: 'skip' });
+    const triggered = await resolveAgentCompactionTiming_ACU(snapshot, budget, false, countByChar, 100);
+    expect(triggered).toMatchObject({ action: 'compact', emergency: false });
+    expect(triggered.totalTokens).toBe(conversationTokens + 100);
+    // 会话为空时无可压缩：开销再大也只能 skip，压缩改变不了任何东西。
+    expect(await resolveAgentCompactionTiming_ACU(buildEmptyAgentConversation_ACU(), 10, false, countByChar, 999)).toMatchObject({ action: 'skip' });
+  });
+
+  it('压缩以「会话 + 开销」整体回到预算内为目标', async () => {
+    const snapshot = threeTurns();
+    const conversationTokens = await measureAgentConversationTokens_ACU(snapshot, countByChar);
+    const budget = conversationTokens + 50;
+    // 不带开销时未超预算，原样返回；同一预算带上开销后必须真的开始丢轮次。
+    expect((await compactAgentConversation_ACU(snapshot, budget, countByChar)).changed).toBe(false);
+    const compaction = await compactAgentConversation_ACU(snapshot, budget, countByChar, 100);
+    expect(compaction.changed).toBe(true);
+    expect(compaction.snapshot.messages[0].kind).toBe('handoff');
+    // 报告的总量口径与判定一致：包含开销本身。
+    expect(compaction.totalTokens).toBeGreaterThanOrEqual(100);
   });
 });
 

@@ -4,11 +4,12 @@ import { ContinuationAgentTurnPlanner_ACU, renderAgentBudget_ACU } from '../../.
 import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
 import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
 import { appendAgentConversation_ACU, buildEmptyAgentConversation_ACU } from '../../../../src/service/continuation/agent/agent-conversation-store';
+import { buildEmptyAgentWorldbookSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import { ContinuationValidationError_ACU, type ContinuationInternalAiRequestIdentity_ACU } from '../../../../src/service/continuation/model';
 import { readAgentSessionLog_ACU, resetAgentSessionLogForTests_ACU } from '../../../../src/service/continuation/agent/agent-session-log';
 import { readAgentRunState_ACU, resetAgentRunCacheForTests_ACU } from '../../../../src/service/continuation/agent/agent-run-cache';
-import type { AgentConversationSnapshot_ACU, AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
+import type { AgentConversationMessage_ACU, AgentConversationSnapshot_ACU, AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
 
 const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test' };
 
@@ -51,6 +52,13 @@ const nextTurnContext_ACU = () => {
 };
 
 /**
+ * 只统计「守门人」出现次数的确定性计数器（每次出现记 2 tokens）。
+ * 阈值口径是完整上下文（提示词骨架也计入），预算用例若走真实估算会依赖默认提示词的长度，
+ * 提示词一改测试就碎；用它把开销钉在近似 0，只让填充词决定总量。
+ */
+const fillerTokens_ACU = async (text: string): Promise<number> => (text.match(/守门人/g)?.length ?? 0) * 2;
+
+/**
  * 构造一份超出预算的两轮会话：turn-1 是可丢弃的旧轮次，turn-2 是最后通告的轮次。
  * 最近一轮永远完整保留，所以必须有两个轮次分组才谈得上压缩。
  */
@@ -86,6 +94,7 @@ function harness_ACU(options: {
   withoutApplyOutline?: boolean;
   conversation?: AgentConversationSnapshot_ACU;
   historyTokenBudget?: number;
+  countTokens?: (text: string) => Promise<number>;
   apiPresetMode?: 'current' | 'fixed';
   agentApiPresets?: Partial<Record<'main' | 'outline' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer', { mode: 'inherit' | 'current' | 'fixed'; presetName: string }>>;
 }): Harness_ACU {
@@ -115,8 +124,26 @@ function harness_ACU(options: {
     readModuleSnapshot: () => snapshot,
     writeModuleSnapshot: async (_chat, index, next) => { written.push({ index, snapshot: next }); snapshot = next; },
     readConversation: () => conversation,
-    writeConversation: async (_chat, _index, next) => { conversationWrites.push(next); conversation = next; },
-    budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxExtraReads: 1, ...options.budget },
+    // 分段落盘的内存替身：把新消息接到会话尾部，与真实实现同样按 id 去重。
+    appendConversationMessages: async (_chat, prepared: readonly AgentConversationMessage_ACU[]) => {
+      const existing = new Set(conversation.messages.map(message => message.id));
+      const fresh = prepared.filter(message => !existing.has(message.id));
+      if (!fresh.length) return false;
+      const highest = fresh.reduce((max, message) => Math.max(max, message.id), conversation.nextId - 1);
+      conversation = { ...conversation, nextId: highest + 1, messages: [...conversation.messages, ...fresh] };
+      conversationWrites.push(conversation);
+      return true;
+    },
+    // 压缩标记的内存替身：应用与 readAgentConversation_ACU 相同的投影（交接消息置前 + 截断早期消息）。
+    writeCompactionMark: async (_chat, mark) => {
+      const handoff: AgentConversationMessage_ACU = { id: mark.compactedThroughId, kind: 'handoff', text: mark.report, digest: '早期会话交接报告', turnKey: '', at: mark.at };
+      conversation = { ...conversation, messages: [handoff, ...conversation.messages.filter(message => message.id > mark.compactedThroughId)] };
+      conversationWrites.push(conversation);
+      return true;
+    },
+    loadWorldbook: async () => buildEmptyAgentWorldbookSnapshot_ACU(true),
+    budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 1, ...options.budget },
+    countTokens: options.countTokens,
   });
 
   const settings = buildDefaultContinuationSettings_ACU();
@@ -168,12 +195,13 @@ function findIndex_ACU(messages: Array<{ role: string; content: string }>, needl
   return messages.findIndex(message => message.content.includes(needle));
 }
 
-describe('小说正文摘取', () => {
-  it('$STORY_TEXT 只摘取 AI 楼层，用户楼层不进上下文', async () => {
+describe('小说正文目录', () => {
+  it('$STORY_CATALOG 只收录 AI 楼层，用户楼层不进上下文；尾部楼层直接带全文', async () => {
     const h = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"本轮指导"}'] });
     await h.planner.plan(h.request);
 
     const joined = h.mainCalls[0].map(message => message.content).join('\n');
+    // 默认尾部全文楼数为 2，两个 AI 楼层都落在尾部全文里。
     expect(joined).toContain('主角推开铁门。');
     expect(joined).toContain('守门人挡在门后，右手藏着黑色晶屑。');
     // 用户在酒馆里输入的楼层不是小说正文，不该被当成上下文喂回去。
@@ -238,6 +266,7 @@ describe('主 Agent 会话记录', () => {
     const h = harness_ACU({
       conversation: overBudgetConversation_ACU(filler),
       historyTokenBudget: 200,
+      countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
       context: nextTurnContext_ACU,
     });
@@ -256,10 +285,12 @@ describe('主 Agent 会话记录', () => {
   it('同一轮内到达阈值只登记不压缩，留到下一轮开始时再做', async () => {
     const filler = '守门人'.repeat(400);
     // 最后通告的就是本次运行的游标 turn-2：这一轮还没走完（中断恢复或同游标重跑）。
-    // 预算取 600：历史约 830 tokens，超出预算但没到两倍，因此走登记而非越界压缩。
+    // 填充词计数下总量约 800 tokens（加上正文里的零星出现），预算取 600：超出但没到两倍，
+    // 因此走登记而非越界压缩。
     const h = harness_ACU({
       conversation: overBudgetConversation_ACU(filler),
       historyTokenBudget: 600,
+      countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
     });
     await h.planner.plan(h.request);
@@ -277,6 +308,7 @@ describe('主 Agent 会话记录', () => {
     const next = harness_ACU({
       conversation: h.conversation(),
       historyTokenBudget: 600,
+      countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"下一轮"}'],
       context: nextTurnContext_ACU,
     });
@@ -290,6 +322,7 @@ describe('主 Agent 会话记录', () => {
     const h = harness_ACU({
       conversation: overBudgetConversation_ACU('守门人'.repeat(4000)),
       historyTokenBudget: 200,
+      countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
     });
     await h.planner.plan(h.request);
@@ -299,13 +332,92 @@ describe('主 Agent 会话记录', () => {
     // 越界压缩必须自报原因，不能让用户以为轮次边界规则失效了。
     expect(compacted?.detail).toContain('本轮尚未结束');
   });
+
+  it('阈值统计的是实际读取的完整上下文：提示词骨架也计入，会话很小时同样触发压缩', async () => {
+    const snapshot = overBudgetConversation_ACU('这一轮只有寥寥数语');
+    const known = new Set(snapshot.messages.map(message => message.text));
+    // 会话消息每条记 1 token，其余文本（即渲染出的提示词骨架）按长度计——骨架远超阈值 50。
+    const h = harness_ACU({
+      conversation: snapshot,
+      historyTokenBudget: 50,
+      countTokens: async text => (known.has(text) ? 1 : Math.ceil(text.length / 10)),
+      mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
+      context: nextTurnContext_ACU,
+    });
+    await h.planner.plan(h.request);
+
+    // 会话本身只有 3 tokens，但完整上下文超阈值：轮次边界上照样压缩早期轮次。
+    expect(h.conversation().messages[0].kind).toBe('handoff');
+    const compacted = readAgentSessionLog_ACU().find(entry => entry.title.includes('会话历史已压缩'));
+    expect(compacted?.detail).toContain('提示词骨架');
+    // 骨架无法靠压缩会话消除，必须如实标注仍超阈值，而不是谎报已达标。
+    expect(compacted?.detail).toContain('压缩后仍超出阈值');
+  });
+});
+
+describe('主 Agent read/search 工具批次', () => {
+  it('调阅结果作为带 readKey 的工具消息回灌，重复调阅只回提示不重注内容', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"read","reads":["$HOOKS_LEDGER"]}',
+        '{"action":"read","reads":["$HOOKS_LEDGER"]}',
+        '{"action":"finalize","instruction":"查完了"}',
+      ],
+    });
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('查完了');
+
+    const toolMessages = h.conversation().messages.filter(message => message.kind === 'tool');
+    expect(toolMessages[0].readKey).toBe('$HOOKS_LEDGER');
+    expect(toolMessages[0].text).toContain('伏笔账本');
+    expect(toolMessages[1].text).toContain('不再重注');
+    // 第二次迭代读到第一次的调阅内容。
+    expect(h.mainCalls[1].some(message => message.content.includes('伏笔账本'))).toBe(true);
+  });
+
+  it('工具批次超过 maxReads 上限时回灌用尽提示，不再执行读取', async () => {
+    const h = harness_ACU({
+      budget: { maxReads: 1 },
+      mainReplies: [
+        '{"action":"read","reads":["$HOOKS_LEDGER"]}',
+        '{"action":"read","reads":["$INFO_GAP"]}',
+        '{"action":"finalize","instruction":"停止调阅"}',
+      ],
+    });
+    await h.planner.plan(h.request);
+    expect(h.mainCalls[2].map(message => message.content).join('\n')).toContain('工具批次已用尽');
+  });
+
+  it('读取批次被门禁打回时回灌结构化报告，循环不中断', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"read","reads":["$HISTORY_UNSETTLED"]}',
+        '{"action":"finalize","instruction":"不读了"}',
+      ],
+    });
+    (h.request.settings as any).agentReadTokenBudget = 1;
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('不读了');
+    const feedback = h.mainCalls[1].map(message => message.content).join('\n');
+    expect(feedback).toContain('读取被门禁打回');
+    expect(feedback).toContain('修正协议');
+  });
 });
 
 describe('预算渲染', () => {
+  const budget_ACU: AgentRunBudget_ACU = { maxIterations: 3, maxDelegations: 6, maxSameAgent: 2, maxConcurrent: 3, maxReads: 8, maxExtraReads: 1 };
+
   it('最后一轮明确宣告 FINAL_ITERATION 并禁用派工', () => {
     const ledger = { delegationsUsed: 2, perAgent: new Map(), outcomes: [] };
-    expect(renderAgentBudget_ACU({ maxIterations: 3, maxDelegations: 6, maxSameAgent: 2, maxConcurrent: 3, maxExtraReads: 1 }, 3, ledger as any, 3)).toContain('FINAL_ITERATION');
-    expect(renderAgentBudget_ACU({ maxIterations: 3, maxDelegations: 6, maxSameAgent: 2, maxConcurrent: 3, maxExtraReads: 1 }, 1, ledger as any, 3)).toContain('预算充足');
+    expect(renderAgentBudget_ACU(budget_ACU, 3, ledger as any, 3)).toContain('FINAL_ITERATION');
+    expect(renderAgentBudget_ACU(budget_ACU, 1, ledger as any, 3)).toContain('预算充足');
+  });
+
+  it('传入工具用量时同步报出批次与累计放行 token', () => {
+    const ledger = { delegationsUsed: 0, perAgent: new Map(), outcomes: [] };
+    const text = renderAgentBudget_ACU(budget_ACU, 1, ledger as any, 3, { batchesUsed: 2, grantedTokens: 1200, maxReadTokens: 36000 });
+    expect(text).toContain('已用 2 / 8 个工具批次');
+    expect(text).toContain('1200 / 36000 tokens');
   });
 });
 
@@ -315,7 +427,7 @@ describe('主 Agent 提示词装配', () => {
     await h.planner.plan(h.request);
 
     const messages = h.mainCalls[0];
-    const storyIndex = findIndex_ACU(messages, '尚未结算的最新正文');
+    const storyIndex = findIndex_ACU(messages, '已经发生的小说正文');
     const runtimeIndex = findIndex_ACU(messages, '本轮预算状态');
     const historyIndex = findIndex_ACU(messages, '开始新的一轮规划');
     expect(messages[0].role).toBe('system');
@@ -417,7 +529,7 @@ describe('主 Agent 循环收敛', () => {
     await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID', retryable: false } });
     expect(h.mainCalls).toHaveLength(2);
     // 拒绝原因与被拒的原文都进了会话：模型必须看到自己上一次到底写了什么。
-    expect(h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '没有被采纳')].content).toContain('不包含可解析的 JSON');
+    expect(h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '没有被采纳')].content).toContain('不包含带 action 字段的 JSON 对象');
     expect(h.mainCalls[1].some(message => message.role === 'assistant' && message.content.includes('我不想输出 JSON'))).toBe(true);
   });
 
@@ -671,19 +783,21 @@ describe('派工与写集落盘', () => {
     expect(h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '结果 1')].content).toContain('未采用');
   });
 
-  it('越权写集让该次派工失败，但不影响同波次其他子代理', async () => {
+  it('种子读集超预算的派工被拒绝，但不影响同波次其他子代理', async () => {
     const h = harness_ACU({
       mainReplies: [
-        '{"action":"delegate","delegations":[{"agentName":"mainline-planner","prompt":"越权写","reads":["$OUTLINE_WINDOW"],"writes":["$HOOKS_LEDGER"]},{"agentName":"beat-planner","prompt":"正常策划","reads":["$OUTLINE_WINDOW"]}]}',
+        '{"action":"delegate","delegations":[{"agentName":"mainline-planner","prompt":"读太多","reads":["$HISTORY_UNSETTLED","$OUTLINE_WINDOW"]},{"agentName":"beat-planner","prompt":"正常策划","reads":[]}]}',
         '{"action":"finalize","instruction":"指导"}',
       ],
       subReplies: ['{"summary":"节拍","recommendation":"三拍推进","mustPreserve":["林瑶有伤"]}'],
     });
+    // 读取预算钉在 1 token：任何非空种子材料都会超预算；空种子派工不受影响。
+    (h.request.settings as any).agentReadTokenBudget = 1;
     await h.planner.plan(h.request);
 
     const feedback = h.mainCalls[1].map(message => message.content).join('\n');
     expect(feedback).toContain('mainline-planner｜失败');
-    expect(feedback).toContain('无权写入 $HOOKS_LEDGER');
+    expect(feedback).toContain('种子读集超出读取预算');
     expect(feedback).toContain('beat-planner｜成功');
     expect(feedback).toContain('必须保留：林瑶有伤');
     expect(h.subCalls).toHaveLength(1);
@@ -769,7 +883,7 @@ describe('子代理运行时', () => {
   let replies: string[];
 
   const input_ACU = (overrides: Partial<Parameters<AgentSubagentRuntime_ACU['run']>[0]> = {}) => ({
-    delegation: { agentName: 'hook-cognition-maintainer', prompt: '结算未处理正文', reads: ['$HISTORY_UNSETTLED'], writes: ['$HOOKS_LEDGER'] },
+    delegation: { agentName: 'hook-cognition-maintainer', prompt: '结算未处理正文', reads: ['$HISTORY_UNSETTLED'] },
     settings: buildDefaultContinuationSettings_ACU(),
     resolveContext: {
       chat: chat_ACU(),
@@ -780,7 +894,7 @@ describe('子代理运行时', () => {
       recentTurnCount: 2,
       tableData: { s1: { name: '角色表', content: [['姓名', '状态'], ['林瑶', '右臂有伤']] } },
     },
-    budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxExtraReads: 1 },
+    budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 1 },
     preset: preset_ACU,
     createIdentity: (_name: string, attempt: number) => ({ taskId: 't', stageId: 's', turnId: 'u', attemptId: `a-${attempt}`, source: 'agent_subagent' }) as any,
     isCurrent: () => true,
@@ -796,7 +910,7 @@ describe('子代理运行时', () => {
     });
   });
 
-  it('只注入被授权读集解析后的材料与写集说明，不注入主 Agent 历史', async () => {
+  it('注入种子读集解析后的材料与固定写集说明，不注入主 Agent 历史', async () => {
     replies = [JSON.stringify({ summary: '结算完成', delta: { hooks: [{ action: 'upsert', id: 'H1', summary: '晶屑' }] } })];
     const result = await runtime.run(input_ACU());
 
@@ -805,38 +919,47 @@ describe('子代理运行时', () => {
     expect(text).toContain('$HOOKS_LEDGER 伏笔账本');
     expect(text).toContain('结算未处理正文');
     expect(text).not.toContain('【楼层 0】');
-    expect(result.writes).toEqual(['hooks']);
+    // 写入范围由职责固定：maintain 类固定写 hooks + infoGap，不再经派工写集协商。
+    expect(result.writes).toEqual(['hooks', 'infoGap']);
     expect(result.maintainer?.delta.hooks).toHaveLength(1);
   });
 
-  it('needMore 申请在预算内扩充一次读集并重跑', async () => {
+  it('子代理输出 read 工具批次时执行调阅并把结果回灌，随后继续小循环', async () => {
     replies = [
-      JSON.stringify({ summary: '资料不够', needMore: ['$TABLE_CHARACTERS'], delta: {} }),
+      '{"action":"read","reads":["$TABLE:角色表"]}',
       JSON.stringify({ summary: '补齐后结算', delta: { hooks: [{ action: 'upsert', id: 'H1', summary: '晶屑' }] } }),
     ];
     const result = await runtime.run(input_ACU());
     expect(calls).toHaveLength(2);
-    expect(calls[1].map(message => message.content).join('\n')).toContain('林瑶');
-    expect(result.expandedReads).toEqual(['$TABLE_CHARACTERS']);
+    // 第二次调用能看到自己上一次的工具请求（assistant）与回灌的工具结果（user）。
+    const second = calls[1];
+    expect(second.some(message => message.role === 'assistant' && message.content.includes('$TABLE:角色表'))).toBe(true);
+    expect(second.some(message => message.role === 'user' && message.content.includes('林瑶'))).toBe(true);
+    expect(result.expandedReads).toEqual(['$TABLE:角色表']);
     expect(result.iterations).toBe(2);
   });
 
-  it('无权读取的 needMore 申请被丢弃，不再重跑', async () => {
-    replies = [JSON.stringify({ summary: '想看约束', needMore: ['$ACTIVE_CONSTRAINTS'], delta: {} })];
-    const result = await runtime.run(input_ACU({ delegation: { agentName: 'beat-planner', prompt: '节拍', reads: ['$OUTLINE_WINDOW'], writes: [] } } as any));
-    expect(calls).toHaveLength(1);
+  it('工具轮次用尽后回灌最后通牒，子代理必须基于已有资料交付', async () => {
+    replies = [
+      '{"action":"read","reads":["$HOOKS_LEDGER"]}',
+      JSON.stringify({ summary: '就这样结算', delta: {} }),
+    ];
+    const result = await runtime.run(input_ACU({ budget: { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 0 } } as any));
+    expect(calls).toHaveLength(2);
+    expect(calls[1].map(message => message.content).join('\n')).toContain('轮次已用尽');
     expect(result.expandedReads).toEqual([]);
   });
 
-  it('读集越权直接拒绝整次派工，不发起 AI 调用', async () => {
-    await expect(runtime.run(input_ACU({ delegation: { agentName: 'continuity-reviewer', prompt: '审查', reads: ['$HISTORY_UNSETTLED'], writes: [] } } as any)))
-      .rejects.toBeInstanceOf(ContinuationValidationError_ACU);
+  it('种子读集超出读取预算时整次派工被拒，不发起 AI 调用', async () => {
+    const settings = buildDefaultContinuationSettings_ACU();
+    (settings as any).agentReadTokenBudget = 1;
+    await expect(runtime.run(input_ACU({ settings } as any))).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_WRITE_REJECTED' } });
     expect(calls).toHaveLength(0);
   });
 
-  it('表格读集对所有子代理开放，包括动态表名', async () => {
+  it('读集对所有子代理开放，包括动态表名', async () => {
     replies = ['{"verdict":"pass","reason":"无冲突"}'];
-    const result = await runtime.run(input_ACU({ delegation: { agentName: 'continuity-reviewer', prompt: '审查', reads: ['$TABLE:角色表'], writes: [] } } as any));
+    const result = await runtime.run(input_ACU({ delegation: { agentName: 'continuity-reviewer', prompt: '审查', reads: ['$TABLE:角色表'] } } as any));
     expect(calls[0].map(message => message.content).join('\n')).toContain('右臂有伤');
     expect(result.reviewer?.verdict).toBe('pass');
   });
@@ -847,7 +970,7 @@ describe('子代理运行时', () => {
     settings.internalAiRetryLimit = 1;
     await expect(runtime.run(input_ACU({ settings } as any))).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_SUBAGENT_FAILED' } });
     expect(calls).toHaveLength(2);
-    expect(calls[1].map(message => message.content).join('\n')).toContain('上一次返回被拒绝');
+    expect(calls[1].map(message => message.content).join('\n')).toContain('没有被采纳');
   });
 
   it('派工中途轮次失效时立刻停止', async () => {

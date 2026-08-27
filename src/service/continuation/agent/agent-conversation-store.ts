@@ -1,13 +1,20 @@
 /**
- * service/continuation/agent/agent-conversation-store.ts — 主 Agent 自身会话记录的楼层锚定存储
+ * service/continuation/agent/agent-conversation-store.ts — 主 Agent 自身会话记录的楼层分段存储
  *
- * 主 Agent 现在像标准 coding agent 一样看得到自己的对话：用户的输入、它历次迭代的原始输出、
- * 运行时回灌的工具结果，按真实 role 顺序累积成消息序列。小说正文不在这里，它由
- * `$STORY_TEXT` 占位符独立摘取（只取 AI 楼层）。
+ * 主 Agent 像标准 coding agent 一样看得到自己的对话：用户的输入、它历次迭代的原始输出、
+ * 运行时回灌的工具结果，按真实 role 顺序累积成消息序列。小说正文不在这里。
  *
- * 存储策略与资料快照 (`agent-module-store`) 完全同构：全量写入末楼的独立字段，读取时从尾
- * 向前找最近的合法快照。删楼、Swipe、编辑替换都会让该楼层连同会话一起消失，自动回退到上一个
- * 快照，因此这里同样不需要失效协调机制。
+ * 存储策略（v2）：会话按楼层分段增量存储——每条消息写进它产生时的末楼段（segment），
+ * 读取时按楼层顺序把各段拼接成完整会话。删楼、Swipe、编辑替换会让该楼层的段消失，
+ * 会话自动回退到更早的状态，与正文回退天然同步。
+ *
+ * 压缩是非破坏的：token 预算触发压缩时不删除任何消息，只在末楼记录一个
+ * compaction 标记（compactedThroughId + 交接报告）。拼接时取标记里最大的
+ * compactedThroughId，把 id 不大于它的消息投影掉、报告合成为最前的交接消息。
+ * 删掉承载标记的楼层即自动撤销压缩，原始消息原样回来。
+ *
+ * 兼容：v1 的末楼全量快照在读取时充当「基线段」——遇到 v1 快照就把之前收集的段
+ * 全部替换为它的消息，再继续拼接其后楼层的 v2 段。
  */
 
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../../data/gateways/chat-gateway';
@@ -16,7 +23,10 @@ import {
   AGENT_CONVERSATION_FIELD_ACU,
   AGENT_CONVERSATION_MESSAGE_KINDS_ACU,
   AGENT_CONVERSATION_SCHEMA_VERSION_ACU,
+  AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU,
   type AgentConversationAppend_ACU,
+  type AgentConversationCompactionMark_ACU,
+  type AgentConversationFloorRecord_ACU,
   type AgentConversationMessage_ACU,
   type AgentConversationMessageKind_ACU,
   type AgentConversationSnapshot_ACU,
@@ -58,7 +68,7 @@ function validateMessage_ACU(raw: unknown): AgentConversationMessage_ACU | null 
   if (!text.trim()) return null;
   const id = typeof raw.id === 'number' && Number.isInteger(raw.id) && raw.id > 0 ? raw.id : 0;
   if (!id) return null;
-  return {
+  const message: AgentConversationMessage_ACU = {
     id,
     kind: raw.kind,
     text,
@@ -66,11 +76,12 @@ function validateMessage_ACU(raw: unknown): AgentConversationMessage_ACU | null 
     turnKey: typeof raw.turnKey === 'string' ? raw.turnKey : '',
     at: typeof raw.at === 'number' && raw.at >= 0 ? raw.at : 0,
   };
+  if (typeof raw.readKey === 'string' && raw.readKey.trim()) message.readKey = raw.readKey.trim();
+  return message;
 }
 
 /**
- * 校验一份持久化会话。整体结构非法返回 null，让读取端继续向前寻找上一个合法快照；
- * 个别条目非法只丢该条（某一楼层的字段可能被外部工具局部污染）。
+ * 校验一份 v1 全量快照（历史遗留格式）。整体结构非法返回 null；个别条目非法只丢该条。
  * @param raw 楼层字段上的原始值
  * @returns 合法快照或 null
  */
@@ -90,31 +101,98 @@ export function validateAgentConversationSnapshot_ACU(raw: unknown): AgentConver
   };
 }
 
-/**
- * 读取当前生效的会话快照。
- * @param chat 聊天数组，缺省取当前聊天
- * @returns 最近的合法会话；全程无命中时返回空会话
- */
-export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapshot_ACU {
-  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!message || typeof message !== 'object') continue;
-    if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU)) continue;
-    const snapshot = validateAgentConversationSnapshot_ACU((message as Record<string, unknown>)[AGENT_CONVERSATION_FIELD_ACU]);
-    if (!snapshot) continue;
-    return snapshot;
-  }
-  return buildEmptyAgentConversation_ACU();
+function validateCompactionMark_ACU(raw: unknown): AgentConversationCompactionMark_ACU | undefined {
+  if (!isRecord_ACU(raw)) return undefined;
+  const compactedThroughId = typeof raw.compactedThroughId === 'number' && Number.isInteger(raw.compactedThroughId) && raw.compactedThroughId > 0 ? raw.compactedThroughId : 0;
+  const report = typeof raw.report === 'string' ? raw.report : '';
+  if (!compactedThroughId || !report.trim()) return undefined;
+  return { compactedThroughId, report, at: typeof raw.at === 'number' && raw.at >= 0 ? raw.at : 0 };
 }
 
 /**
- * 把会话快照写入指定楼层并真实提交到宿主。
- * @param chat 聊天数组
- * @param targetIndex 承载会话的楼层下标，通常是末楼
- * @param snapshot 待写入的全量会话
+ * 校验一份 v2 楼层段记录。整体结构非法返回 null；个别消息非法只丢该条。
+ * @param raw 楼层字段上的原始值
+ * @returns 合法段记录或 null
  */
-export async function writeAgentConversation_ACU(chat: any[], targetIndex: number, snapshot: AgentConversationSnapshot_ACU): Promise<void> {
+export function validateAgentConversationFloorRecord_ACU(raw: unknown): AgentConversationFloorRecord_ACU | null {
+  if (!isRecord_ACU(raw)) return null;
+  if (raw.schemaVersion !== AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU) return null;
+  if (!Array.isArray(raw.segment)) return null;
+  const segment = raw.segment.flatMap(item => { const message = validateMessage_ACU(item); return message ? [message] : []; });
+  const record: AgentConversationFloorRecord_ACU = {
+    schemaVersion: AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU,
+    updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
+    segment,
+  };
+  const compaction = validateCompactionMark_ACU(raw.compaction);
+  if (compaction) record.compaction = compaction;
+  return record;
+}
+
+/** 由压缩标记合成的交接消息。id 复用 compactedThroughId（该 id 的原始消息已被投影掉，不会撞号）。 */
+function buildHandoffMessage_ACU(mark: AgentConversationCompactionMark_ACU): AgentConversationMessage_ACU {
+  return { id: mark.compactedThroughId, kind: 'handoff', text: mark.report, digest: '早期会话交接报告', turnKey: '', at: mark.at };
+}
+
+/**
+ * 读取当前生效的会话视图：按楼层顺序拼接各段，应用最新的压缩标记投影。
+ * @param chat 聊天数组，缺省取当前聊天
+ * @returns 拼接后的会话；没有任何段时返回空会话
+ */
+export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapshot_ACU {
+  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  let collected: AgentConversationMessage_ACU[] = [];
+  let mark: AgentConversationCompactionMark_ACU | null = null;
+  let updatedAt = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (!message || typeof message !== 'object') continue;
+    if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU)) continue;
+    const raw = (message as Record<string, unknown>)[AGENT_CONVERSATION_FIELD_ACU];
+    const record = validateAgentConversationFloorRecord_ACU(raw);
+    if (record) {
+      collected = [...collected, ...record.segment];
+      if (record.compaction && (!mark || record.compaction.compactedThroughId > mark.compactedThroughId)) mark = record.compaction;
+      updatedAt = Math.max(updatedAt, record.updatedAt);
+      continue;
+    }
+    // v1 全量快照：它是当时的完整会话，充当基线段——之前收集的段全部被它覆盖。
+    const legacy = validateAgentConversationSnapshot_ACU(raw);
+    if (legacy) {
+      collected = [...legacy.messages];
+      updatedAt = Math.max(updatedAt, legacy.updatedAt);
+    }
+  }
+  if (!collected.length && !mark) return buildEmptyAgentConversation_ACU();
+  let projected = collected;
+  if (mark) {
+    const threshold = mark.compactedThroughId;
+    projected = [buildHandoffMessage_ACU(mark), ...collected.filter(item => item.id > threshold)];
+  }
+  const highestId = collected.reduce((max, item) => Math.max(max, item.id), mark?.compactedThroughId ?? 0);
+  return {
+    schemaVersion: AGENT_CONVERSATION_SCHEMA_VERSION_ACU,
+    nextId: highestId + 1,
+    updatedAt,
+    messages: projected,
+  };
+}
+
+function floorRecordOf_ACU(container: Record<string, unknown>): AgentConversationFloorRecord_ACU {
+  const raw = container[AGENT_CONVERSATION_FIELD_ACU];
+  const record = validateAgentConversationFloorRecord_ACU(raw);
+  if (record) return record;
+  // 该楼层挂着 v1 快照时就地升级为段记录：v1 的消息全部转为本楼的段。
+  // 回退语义不变——v1 本来也是删掉这一楼就整体消失。
+  const legacy = validateAgentConversationSnapshot_ACU(raw);
+  return {
+    schemaVersion: AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU,
+    updatedAt: legacy?.updatedAt ?? 0,
+    segment: legacy ? [...legacy.messages] : [],
+  };
+}
+
+async function writeFloorRecord_ACU(chat: any[], targetIndex: number, record: AgentConversationFloorRecord_ACU): Promise<void> {
   const message = Array.isArray(chat) ? chat[targetIndex] : null;
   if (!message || typeof message !== 'object') {
     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_persist', 'Agent 会话记录的目标楼层不可用', false, { targetIndex }));
@@ -123,7 +201,7 @@ export async function writeAgentConversation_ACU(chat: any[], targetIndex: numbe
   const hadPrevious = Object.prototype.hasOwnProperty.call(container, AGENT_CONVERSATION_FIELD_ACU);
   const previous = container[AGENT_CONVERSATION_FIELD_ACU];
   try {
-    container[AGENT_CONVERSATION_FIELD_ACU] = { ...snapshot, updatedAt: Date.now() };
+    container[AGENT_CONVERSATION_FIELD_ACU] = { ...record, updatedAt: Date.now() };
     await saveChatToHostStrict_ACU();
   } catch (error) {
     if (hadPrevious) container[AGENT_CONVERSATION_FIELD_ACU] = previous;
@@ -133,24 +211,65 @@ export async function writeAgentConversation_ACU(chat: any[], targetIndex: numbe
 }
 
 /**
- * 追加若干条会话消息。
- * @param snapshot 当前会话
+ * 把已分配 id 的消息追加进末楼的段并落盘。
+ * @param chat 聊天数组
+ * @param prepared 待落盘的消息（id 由调用方从拼接视图的 nextId 起分配）
+ * @returns 是否真的写入；没有楼层可承载或列表为空时为 false
+ */
+export async function appendPreparedAgentConversationMessages_ACU(chat: any[], prepared: readonly AgentConversationMessage_ACU[]): Promise<boolean> {
+  if (!prepared.length) return false;
+  const targetIndex = chat.length - 1;
+  if (targetIndex < 0) return false;
+  const container = chat[targetIndex];
+  if (!container || typeof container !== 'object') return false;
+  const record = floorRecordOf_ACU(container as Record<string, unknown>);
+  const existingIds = new Set(record.segment.map(item => item.id));
+  const fresh = prepared.filter(item => !existingIds.has(item.id));
+  if (!fresh.length) return false;
+  await writeFloorRecord_ACU(chat, targetIndex, { ...record, segment: [...record.segment, ...fresh] });
+  return true;
+}
+
+/**
+ * 在末楼记录一个非破坏压缩标记。已有更大的标记时保持不动。
+ * @param chat 聊天数组
+ * @param mark 压缩标记（截止消息 id + 交接报告）
+ * @returns 是否真的写入
+ */
+export async function writeAgentConversationCompactionMark_ACU(chat: any[], mark: AgentConversationCompactionMark_ACU): Promise<boolean> {
+  const targetIndex = chat.length - 1;
+  if (targetIndex < 0) return false;
+  const container = chat[targetIndex];
+  if (!container || typeof container !== 'object') return false;
+  const record = floorRecordOf_ACU(container as Record<string, unknown>);
+  if (record.compaction && record.compaction.compactedThroughId >= mark.compactedThroughId) return false;
+  await writeFloorRecord_ACU(chat, targetIndex, { ...record, compaction: { ...mark, at: mark.at || Date.now() } });
+  return true;
+}
+
+/**
+ * 在内存会话视图上追加若干条消息（纯函数，不落盘）。
+ * @param snapshot 当前会话视图
  * @param appends 待追加的消息；text 为空的条目被忽略
- * @returns 新的会话快照；没有有效条目时原样返回，调用方据此跳过落盘
+ * @returns 新的会话视图；没有有效条目时原样返回，调用方据此跳过落盘
  */
 export function appendAgentConversation_ACU(snapshot: AgentConversationSnapshot_ACU, appends: readonly AgentConversationAppend_ACU[]): AgentConversationSnapshot_ACU {
   const usable = appends.filter(item => String(item.text ?? '').trim());
   if (!usable.length) return snapshot;
   let nextId = snapshot.nextId;
   const at = Date.now();
-  const added = usable.map(item => ({
-    id: nextId++,
-    kind: item.kind,
-    text: truncateText_ACU(String(item.text)),
-    digest: String(item.digest ?? ''),
-    turnKey: String(item.turnKey ?? ''),
-    at,
-  }));
+  const added = usable.map(item => {
+    const message: AgentConversationMessage_ACU = {
+      id: nextId++,
+      kind: item.kind,
+      text: truncateText_ACU(String(item.text)),
+      digest: String(item.digest ?? ''),
+      turnKey: String(item.turnKey ?? ''),
+      at,
+    };
+    if (item.readKey) message.readKey = item.readKey;
+    return message;
+  });
   return { ...snapshot, nextId, messages: [...snapshot.messages, ...added] };
 }
 
@@ -167,28 +286,42 @@ export async function appendAgentConversationToChat_ACU(appends: readonly AgentC
   const snapshot = readAgentConversation_ACU(messages);
   const next = appendAgentConversation_ACU(snapshot, appends);
   if (next === snapshot) return false;
-  await writeAgentConversation_ACU(messages, targetIndex, next);
-  return true;
+  return appendPreparedAgentConversationMessages_ACU(messages, next.messages.slice(snapshot.messages.length));
+}
+
+/** 同一读取地址被重读后，旧工具结果在发送给模型时投影成的占位说明。 */
+function staleReadPlaceholder_ACU(readKey: string): string {
+  return `（此前读取的 ${readKey} 内容已过期并被移出上下文，最新内容见后文的工具结果。）`;
 }
 
 /**
  * 渲染会话消息为发送给模型的消息序列。
- * @param snapshot 当前会话
+ *
+ * 携带相同 readKey 的工具消息只保留最后一条的完整内容，更早的投影成一行过期占位——
+ * 资料被重读说明旧版本已失效，继续占用上下文只会误导模型。持久化内容不受影响，
+ * 楼层回退后投影自动按剩余消息重算。
+ * @param snapshot 当前会话视图
  * @returns `{ role, content }` 数组；主 Agent 自己的输出是 assistant，其余一律 user
  */
 export function renderAgentConversationMessages_ACU(snapshot: AgentConversationSnapshot_ACU): Array<{ role: string; content: string }> {
-  return snapshot.messages.map(message => {
+  const latestByReadKey = new Map<string, number>();
+  snapshot.messages.forEach((message, index) => {
+    if (message.kind === 'tool' && message.readKey) latestByReadKey.set(message.readKey, index);
+  });
+  return snapshot.messages.map((message, index) => {
     const prefix = KIND_PREFIXES_ACU[message.kind];
+    const stale = message.kind === 'tool' && message.readKey && latestByReadKey.get(message.readKey) !== index;
+    const text = stale ? staleReadPlaceholder_ACU(message.readKey!) : message.text;
     return {
       role: message.kind === 'agent' ? 'assistant' : 'user',
-      content: prefix ? `${prefix}\n${message.text}` : message.text,
+      content: prefix ? `${prefix}\n${text}` : text,
     };
   });
 }
 
 /**
  * 找出会话里最后一次轮次通告的游标指纹。
- * @param snapshot 当前会话
+ * @param snapshot 当前会话视图
  * @returns 最后一条 turn 消息的 turnKey；没有通告过则为空串
  */
 export function lastAnnouncedTurnKey_ACU(snapshot: AgentConversationSnapshot_ACU): string {

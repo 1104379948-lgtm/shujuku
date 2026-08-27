@@ -31,12 +31,14 @@ export interface ContinuationWorldbookAdapterDependencies_ACU {
 
 const AM_CODE_PATTERN_ACU = /^AM\d+$/i;
 
-function normalizeAmCode_ACU(value: unknown): string | null {
+/** 归一化 AM 码（纪要地址码）；非法返回 null。同时供 Agent 世界书读取工具使用。 */
+export function normalizeAmCode_ACU(value: unknown): string | null {
   const code = String(value ?? '').trim().toUpperCase();
   return AM_CODE_PATTERN_ACU.test(code) ? code : null;
 }
 
-function extractAmCodes_ACU(entry: Record<string, unknown>): string[] {
+/** 从世界书条目的 keys 中提取全部 AM 码。 */
+export function extractAmCodes_ACU(entry: Record<string, unknown>): string[] {
   const keyValues = Array.isArray(entry.keys)
     ? entry.keys
     : typeof entry.keys === 'string'
@@ -47,12 +49,14 @@ function extractAmCodes_ACU(entry: Record<string, unknown>): string[] {
     .filter((code): code is string => code !== null))];
 }
 
-function normalizeGeneratedComment_ACU(entry: Record<string, unknown>, isolationPrefix: string): string {
+/** 去掉隔离前缀后的条目显示名。 */
+export function normalizeGeneratedComment_ACU(entry: Record<string, unknown>, isolationPrefix: string): string {
   const raw = String(entry.comment ?? entry.name ?? '').trim();
   return isolationPrefix && raw.startsWith(isolationPrefix) ? raw.slice(isolationPrefix.length) : raw;
 }
 
-function isSummaryEntryComment_ACU(comment: string): boolean {
+/** 是否为纪要（总结）条目的显示名。 */
+export function isSummaryEntryComment_ACU(comment: string): boolean {
   return /^(?:总结条目|小总结条目)\d+$/.test(comment);
 }
 
@@ -63,7 +67,8 @@ function isGeneratedEntryComment_ACU(comment: string): boolean {
     || comment.startsWith('重要人物条目');
 }
 
-function compareAmCodes_ACU(left: string, right: string): number {
+/** 按数值语义比较两个 AM 码。 */
+export function compareAmCodes_ACU(left: string, right: string): number {
   const leftDigits = left.slice(2).replace(/^0+/, '') || '0';
   const rightDigits = right.slice(2).replace(/^0+/, '') || '0';
   return leftDigits.length - rightDigits.length || leftDigits.localeCompare(rightDigits);
@@ -84,7 +89,8 @@ function sortSummaryRows_ACU(rows: ContinuationSummaryRow_ACU[]): ContinuationSu
   return [...rows].sort((left, right) => compareAmCodes_ACU(left.codes[0], right.codes[0]) || left.order - right.order);
 }
 
-async function resolveRelevantBookNames_ACU(): Promise<string[]> {
+/** 解析当前生效的世界书名单（手动选择或角色绑定）。同时供 Agent 世界书读取工具使用。 */
+export async function resolveRelevantBookNames_ACU(): Promise<string[]> {
   const config = getCurrentWorldbookConfig_ACU();
   if (config?.source === 'manual') {
     const manualSelection: unknown[] = Array.isArray(config.manualSelection)

@@ -1,10 +1,14 @@
 /**
  * service/continuation/agent/agent-subagent-runtime.ts — 子代理运行时
  *
- * 子代理不是一次性问答，而是一个受限的小循环：它可以在返回 needMore 时申请补充读集，
- * 运行时在读集权限与预算允许的范围内扩充材料并重跑一次。
+ * 子代理不是一次性问答，而是一个受限的小循环：主 Agent 派工时给出种子读集，
+ * 子代理拿到材料后还可以自己输出 read / search 工具批次补充调阅，运行时执行工具、
+ * 把结果作为 user 消息追加进本次派工的对话，再让它继续，直到交出契约 JSON。
  *
- * 这里只负责「调用 + 解析 + 权限校验」，不落盘。写集事务由主循环串行应用，
+ * 免授权：读集不再做白名单校验——所有资料域对所有子代理开放，读多少由 token 门禁管。
+ * 种子读集在注入前记入本次派工自己的门禁账本；种子本身就超预算时整次派工拒回主 Agent。
+ *
+ * 这里只负责「调用 + 解析 + 门禁」，不落盘。写集事务由主循环串行应用，
  * 避免同一波次里多个子代理并发改同一份快照造成互相覆盖。
  */
 
@@ -19,20 +23,30 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU } from './agent-defaults';
-import { findAgentSubagentDefinition_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
+import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import {
   compactAgentProtocolError_ACU,
   parseAgentJsonPayload_ACU,
   parseAgentMaintainerOutput_ACU,
   parseAgentPlannerOutput_ACU,
   parseAgentReviewerOutput_ACU,
+  parseAgentSubagentToolCalls_ACU,
 } from './agent-protocol';
 import {
-  AGENT_TABLE_TOKEN_PREFIX_ACU,
-  renderAgentReadMaterials_ACU,
-  resolveAgentWriteTokens_ACU,
+  renderAgentStoryCatalog_ACU,
+  resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
+import { buildEmptyAgentWorldbookSnapshot_ACU, renderAgentWorldbookCatalog_ACU } from './agent-worldbook-read';
+import { renderAgentTableCatalog_ACU } from './agent-tables';
+import { runAgentSearch_ACU } from './agent-search';
+import {
+  createAgentReadGateState_ACU,
+  gateAgentReadBatch_ACU,
+  type AgentGateItem_ACU,
+  type AgentReadGateConfig_ACU,
+  type AgentReadGateState_ACU,
+} from './agent-read-gate';
 import type {
   AgentDelegation_ACU,
   AgentMaintainerOutput_ACU,
@@ -41,6 +55,7 @@ import type {
   AgentReviewerOutput_ACU,
   AgentRunBudget_ACU,
   AgentSubagentKind_ACU,
+  AgentToolCall_ACU,
   AgentWritableModule_ACU,
 } from './agent-model';
 
@@ -48,12 +63,15 @@ import type {
 export interface AgentSubagentRunResult_ACU {
   agentName: string;
   kind: AgentSubagentKind_ACU;
+  /** 该子代理职责固定对应的可写模块（maintain → hooks+infoGap，其余为空）。 */
   writes: AgentWritableModule_ACU[];
   maintainer: AgentMaintainerOutput_ACU | null;
   planner: AgentPlannerOutput_ACU | null;
   reviewer: AgentReviewerOutput_ACU | null;
+  /** 有效轮次数：1（首轮）+ 实际用掉的工具轮次。 */
   iterations: number;
   attempts: number;
+  /** 小循环里通过 read/search 补充调阅的地址（读 token 与搜索指纹），进主 Agent 的结果摘要。 */
   expandedReads: string[];
   /** 渲染读集材料那一刻的模块修订号。主循环用它做写入并发校验，不依赖子代理自报。 */
   readRevisions: AgentModuleRevisions_ACU;
@@ -94,9 +112,16 @@ const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], 
 
 /** 各类子代理契约对象的判别键：解析器据此从模型全文中挑出正确的 JSON 对象。 */
 const KIND_PAYLOAD_KEYS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = {
-  maintain: ['delta', 'summary', 'needMore'],
-  plan: ['recommendation', 'summary', 'needMore'],
-  review: ['verdict', 'needMore'],
+  maintain: ['delta', 'summary'],
+  plan: ['recommendation', 'summary'],
+  review: ['verdict'],
+};
+
+/** 维护类子代理固定作用的模块。写入范围由职责决定，不再经派工写集协商。 */
+const KIND_FIXED_WRITES_ACU: Record<AgentSubagentKind_ACU, readonly AgentWritableModule_ACU[]> = {
+  maintain: ['hooks', 'infoGap'],
+  plan: [],
+  review: [],
 };
 
 function rejectDelegation_ACU(message: string, details?: Record<string, unknown>): never {
@@ -107,63 +132,33 @@ function subagentFailed_ACU(message: string, retryable: boolean, details?: Recor
   return new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SUBAGENT_FAILED', 'agent_delegate', message, retryable, details));
 }
 
-/**
- * 校验读集权限。表格读取对所有子代理开放（表格是公共只读投影），
- * 其余 token 必须落在该代理的 allowedReads 内。
- * @param tokens 主 Agent 请求的读集
- * @param definition 子代理定义
- * @returns 通过校验的读集；越权 token 会直接拒绝整次派工
- */
-export function authorizeAgentReads_ACU(tokens: readonly string[], definition: AgentSubagentDefinition_ACU): string[] {
-  const authorized: string[] = [];
-  for (const raw of tokens) {
-    const token = String(raw ?? '').trim();
-    if (!token) continue;
-    if (token.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU)) {
-      if (!authorized.includes(token)) authorized.push(token);
-      continue;
-    }
-    if (!definition.allowedReads.includes(token)) {
-      rejectDelegation_ACU(`${definition.name} 无权读取 ${token}`, { token, allowedReads: [...definition.allowedReads] });
-    }
-    if (!authorized.includes(token)) authorized.push(token);
-  }
-  return authorized;
-}
-
-/**
- * 过滤子代理申请的补充读集，只保留它有权读取且本次尚未注入的 token。
- * @param needMore 子代理申请的 token 列表
- * @param current 本次已注入的读集
- * @param definition 子代理定义
- * @returns 可以追加的 token 列表；越权申请被丢弃而不是拒绝整次派工
- */
-export function filterAgentExtraReads_ACU(needMore: readonly string[], current: readonly string[], definition: AgentSubagentDefinition_ACU): string[] {
-  const extra: string[] = [];
-  for (const raw of needMore) {
-    const token = String(raw ?? '').trim();
-    if (!token || current.includes(token) || extra.includes(token)) continue;
-    const allowed = token.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU) || definition.allowedReads.includes(token);
-    if (allowed) extra.push(token);
-  }
-  return extra;
-}
-
 function selectPromptSegments_ACU(settings: ContinuationSettings_ACU, definition: AgentSubagentDefinition_ACU): unknown {
   return settings.agentPrompts[definition.promptKey];
 }
 
 function describeWriteScope_ACU(writes: readonly AgentWritableModule_ACU[]): string {
-  if (!writes.length) return '本次没有授予你任何写入权限。你只需返回建议或判词，不要输出 delta。';
+  if (!writes.length) return '你的职责不含写入。你只需返回建议或判词，不要输出 delta。';
   const labels: Record<AgentWritableModule_ACU, string> = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束' };
-  return `你被授权写入：${writes.map(item => labels[item]).join('、')}。授权之外的模块一律不许出现在 delta 里。`;
+  return `你的职责固定写入：${writes.map(item => labels[item]).join('、')}。职责之外的模块一律不许出现在 delta 里。`;
 }
 
-function readNeedMore_ACU(result: AgentSubagentRunResult_ACU): string[] {
-  if (result.maintainer) return result.maintainer.needMore;
-  if (result.planner) return result.planner.needMore;
-  if (result.reviewer) return result.reviewer.needMore;
-  return [];
+interface SubagentGate_ACU {
+  state: AgentReadGateState_ACU;
+  config: AgentReadGateConfig_ACU;
+  /** 本次派工已放行的读取地址（含种子）。重复调阅返回一行提示、不重注、不计账。 */
+  granted: Set<string>;
+}
+
+interface SubagentMaterial_ACU {
+  key: string;
+  label: string;
+  text: string;
+}
+
+/** 把一个读地址解析成材料条目。text 已带分节标题，可直接拼接注入。 */
+function resolveMaterial_ACU(token: string, context: AgentResolveContext_ACU): SubagentMaterial_ACU {
+  const resolved = resolveAgentReadToken_ACU(token, context);
+  return { key: token, label: token, text: `### ${resolved.title}（${token}）\n${resolved.text}` };
 }
 
 /** 子代理运行时。一个实例可服务多次派工，自身不持有任何本轮状态。 */
@@ -173,84 +168,172 @@ export class AgentSubagentRuntime_ACU {
   /**
    * 执行一次派工。
    * @param input 派工内容、设置、解析上下文、预算与身份工厂
-   * @returns 解析后的子代理输出；权限越权或重试耗尽时抛错
+   * @returns 解析后的子代理输出；种子超预算或重试耗尽时抛错
    */
   async run(input: AgentSubagentRunInput_ACU): Promise<AgentSubagentRunResult_ACU> {
     const definition = findAgentSubagentDefinition_ACU(input.delegation.agentName);
     if (!definition) {
       rejectDelegation_ACU(`目录里没有名为 ${input.delegation.agentName} 的子代理`, { agentName: input.delegation.agentName });
     }
-    const writes = resolveAgentWriteTokens_ACU(input.delegation.writes, definition.allowedWrites);
-    let reads = authorizeAgentReads_ACU(input.delegation.reads, definition);
-    const expandedReads: string[] = [];
-    const maxIterations = 1 + Math.max(0, input.budget.maxExtraReads);
-    let totalAttempts = 0;
-    let result: AgentSubagentRunResult_ACU | null = null;
+    const writes = [...KIND_FIXED_WRITES_ACU[definition.kind]];
+    const gate: SubagentGate_ACU = {
+      state: createAgentReadGateState_ACU(),
+      config: {
+        historyTokenBudget: input.settings.agentHistoryTokenBudget,
+        readTokenBudget: input.settings.agentReadTokenBudget,
+        fallbackTokens: input.settings.agentReadFallbackTokens,
+      },
+      granted: new Set(),
+    };
 
-    for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-      const round = await this.callOnce(input, definition, reads, writes);
-      totalAttempts += round.attempts;
-      result = { ...round, iterations: iteration, attempts: totalAttempts, expandedReads: [...expandedReads] };
-      const extra = filterAgentExtraReads_ACU(readNeedMore_ACU(round), reads, definition);
-      if (!extra.length || iteration === maxIterations) break;
-      reads = [...reads, ...extra];
-      expandedReads.push(...extra);
+    // 种子读集：免授权，直接解析；注入前整批记入本次派工自己的门禁账本。
+    const seedTokens = [...new Set(input.delegation.reads.map(raw => String(raw ?? '').trim()).filter(Boolean))];
+    const seeds = seedTokens.map(token => resolveMaterial_ACU(token, input.resolveContext));
+    const seedDecision = await gateAgentReadBatch_ACU(seeds.map(seed => ({ label: seed.label, text: seed.text })), gate.state, gate.config, 0);
+    if (!seedDecision.allowed) {
+      rejectDelegation_ACU(
+        `派工种子读集超出读取预算，整次派工未执行。请缩小 reads——正文用更窄的 $STORY_RANGE 区间、表格用 $TABLE:表名:行区间、模块按 ID 精读。\n${seedDecision.report}`,
+        { agentName: definition.name, seedTokens, batchTokens: seedDecision.batchTokens },
+      );
     }
+    gate.state.grantedTokens += seedDecision.batchTokens;
+    for (const seed of seeds) gate.granted.add(seed.key);
+    const materials = seeds.length
+      ? seeds.map(seed => seed.text).join('\n\n')
+      : '本次没有为你注入任何种子资料。需要的信息用 read / search 工具按各目录的地址调阅。';
 
-    if (!result) throw subagentFailed_ACU(`${definition.name} 没有产生任何结果`, false, { agentName: definition.name });
-    return result;
-  }
-
-  private async callOnce(
-    input: AgentSubagentRunInput_ACU,
-    definition: AgentSubagentDefinition_ACU,
-    reads: readonly string[],
-    writes: readonly AgentWritableModule_ACU[],
-  ): Promise<AgentSubagentRunResult_ACU> {
-    const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
-    const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
     // 捕获与渲染必须同一时刻取自同一份快照，否则并发校验的基准就不是子代理真正读到的版本。
     const readRevisions: AgentModuleRevisions_ACU = { ...input.resolveContext.moduleSnapshot.revisions };
-    const materials = renderAgentReadMaterials_ACU(reads, input.resolveContext);
-    const writeScope = describeWriteScope_ACU(writes);
-    let lastReason = '';
+    const rendered = await renderContinuationPrompt_ACU(selectPromptSegments_ACU(input.settings, definition), {
+      $AGENT_READ_MATERIALS: () => materials,
+      $AGENT_TASK: () => input.delegation.prompt,
+      $AGENT_WRITE_SCOPE: () => describeWriteScope_ACU(writes),
+      // 资料目录：默认提示词引用它们给子代理提供可复制的读取地址；未引用时不产生开销。
+      $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
+      $STORY_CATALOG: () => renderAgentStoryCatalog_ACU(input.resolveContext),
+      $TABLE_CATALOG: () => renderAgentTableCatalog_ACU(input.resolveContext.tableData),
+      $WORLDBOOK_CATALOG: () => renderAgentWorldbookCatalog_ACU(input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false)),
+    }, 'agent_delegate');
 
-    for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
+    const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
+    const maxToolRounds = Math.max(0, input.budget.maxExtraReads);
+    // 小循环的追加消息：子代理自己的输出（assistant）与工具结果/纠正提示（user）。
+    const transcript: Array<{ role: string; content: string }> = [];
+    const expandedReads: string[] = [];
+    let toolRoundsUsed = 0;
+    let protocolRejections = 0;
+    let attempt = 0;
+    let lastReason = '';
+    // 调用总数上界 = 首轮 + 工具轮 + 协议重试 + 工具轮用尽后的最后通牒轮。到界仍未交付即失败。
+    const maxCalls = 1 + maxToolRounds + retries + 1;
+
+    for (let call = 0; call < maxCalls; call += 1) {
       const identity = input.createIdentity(definition.name, attempt);
+      attempt += 1;
       if (!input.isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理请求已失效', false));
       }
-      const task = lastReason
-        ? `${input.delegation.prompt}\n\n【上一次返回被拒绝】原因：${lastReason}\n请修正后重新输出符合契约的 JSON。`
-        : input.delegation.prompt;
-      const rendered = await renderContinuationPrompt_ACU(selectPromptSegments_ACU(input.settings, definition), {
-        $AGENT_READ_MATERIALS: () => materials,
-        $AGENT_TASK: () => task,
-        $AGENT_WRITE_SCOPE: () => writeScope,
-      }, 'agent_delegate');
-      const raw = await this.dependencies.callInternalAi(rendered.messages, input.preset, identity, input.signal);
+      const raw = await this.dependencies.callInternalAi([...rendered.messages, ...transcript], input.preset, identity, input.signal);
       if (!input.isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理结果已失效', false));
       }
+      const rawText = String(raw ?? '').trim();
+
+      // 工具批次优先于契约解析：输出里出现任意 read/search 对象即视为继续调阅。
+      const toolCalls = parseAgentSubagentToolCalls_ACU(raw, prefill);
+      if (toolCalls) {
+        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+        if (toolRoundsUsed >= maxToolRounds) {
+          transcript.push({ role: 'user', content: `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。` });
+          continue;
+        }
+        toolRoundsUsed += 1;
+        transcript.push({ role: 'user', content: await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads) });
+        continue;
+      }
+
       try {
         const payload = parseAgentJsonPayload_ACU(raw, prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
         return {
           agentName: definition.name,
           kind: definition.kind,
-          writes: [...writes],
+          writes,
           maintainer: definition.kind === 'maintain' ? parseAgentMaintainerOutput_ACU(payload) : null,
           planner: definition.kind === 'plan' ? parseAgentPlannerOutput_ACU(payload) : null,
           reviewer: definition.kind === 'review' ? parseAgentReviewerOutput_ACU(payload) : null,
-          iterations: 1,
-          attempts: attempt + 1,
-          expandedReads: [],
+          iterations: 1 + toolRoundsUsed,
+          attempts: attempt,
+          expandedReads: [...expandedReads],
           readRevisions,
         };
       } catch (error) {
         lastReason = compactAgentProtocolError_ACU(error);
+        protocolRejections += 1;
+        if (protocolRejections > retries) {
+          throw subagentFailed_ACU(`${definition.name} 连续 ${retries + 1} 次返回不符合契约`, false, { agentName: definition.name, lastReason });
+        }
+        // 被拒原文也要留在小循环对话里：模型必须看到自己上一次写了什么才能真正修正。
+        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
+        transcript.push({ role: 'user', content: `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出符合契约的 JSON 对象。` });
       }
     }
 
-    throw subagentFailed_ACU(`${definition.name} 连续 ${retries + 1} 次返回不符合协议`, false, { agentName: definition.name, lastReason });
+    throw subagentFailed_ACU(`${definition.name} 在 ${maxCalls} 次调用内没有交付契约输出`, false, { agentName: definition.name, lastReason, toolRoundsUsed });
+  }
+
+  /**
+   * 执行子代理的一个工具批次并渲染结果文本。
+   * 与主循环同一门禁语义：批内去重与已放行地址拆分、整批过门禁、打回报告直接作为结果回灌。
+   */
+  private async executeToolCalls_ACU(
+    calls: readonly AgentToolCall_ACU[],
+    context: AgentResolveContext_ACU,
+    gate: SubagentGate_ACU,
+    expandedReads: string[],
+  ): Promise<string> {
+    const fresh: SubagentMaterial_ACU[] = [];
+    const duplicated: string[] = [];
+    const seenInBatch = new Set<string>();
+    for (const call of calls) {
+      if (call.kind === 'read') {
+        for (const raw of call.reads) {
+          const key = String(raw ?? '').trim();
+          if (!key || seenInBatch.has(key)) continue;
+          seenInBatch.add(key);
+          if (gate.granted.has(key)) { duplicated.push(key); continue; }
+          fresh.push(resolveMaterial_ACU(key, context));
+        }
+        continue;
+      }
+      const key = `search|${call.isRegex ? 're' : 'kw'}|${[...call.scope].sort().join('+')}|${call.maxResults}|${call.query}`;
+      if (seenInBatch.has(key)) continue;
+      seenInBatch.add(key);
+      const label = `search "${call.query}"（域：${call.scope.join('、')}）`;
+      if (gate.granted.has(key)) { duplicated.push(label); continue; }
+      fresh.push({ key, label, text: `### 搜索「${call.query}」\n${runAgentSearch_ACU(call, context)}` });
+    }
+
+    const sections: string[] = [];
+    if (duplicated.length) {
+      sections.push(`以下调阅本次派工已放行，完整内容见上文，不再重注：${duplicated.join('、')}。`);
+    }
+    if (fresh.length) {
+      const items: AgentGateItem_ACU[] = fresh.map(material => ({ label: material.label, text: material.text }));
+      const decision = await gateAgentReadBatch_ACU(items, gate.state, gate.config, 0);
+      if (decision.allowed) {
+        gate.state.grantedTokens += decision.batchTokens;
+        for (const material of fresh) {
+          gate.granted.add(material.key);
+          expandedReads.push(material.label);
+        }
+        sections.push(...fresh.map(material => material.text));
+      } else {
+        sections.push(decision.report);
+      }
+    } else if (!duplicated.length) {
+      sections.push('本次工具批次没有任何有效的读取地址或搜索请求。请检查 read 的 reads 数组与 search 的 query。');
+    }
+    return `【工具结果】\n${sections.join('\n\n')}`;
   }
 }

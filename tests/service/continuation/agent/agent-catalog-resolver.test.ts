@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { renderAgentModuleCatalog_ACU, renderAgentSubagentCatalog_ACU, findAgentSubagentDefinition_ACU } from '../../../../src/service/continuation/agent/agent-catalog';
+import { renderAgentModuleCatalog_ACU, renderAgentReadCatalog_ACU, renderAgentSubagentCatalog_ACU, findAgentSubagentDefinition_ACU } from '../../../../src/service/continuation/agent/agent-catalog';
 import { renderAgentTableByAliases_ACU, renderAgentTableByName_ACU, renderAgentTableCatalog_ACU } from '../../../../src/service/continuation/agent/agent-tables';
 import {
   renderAgentReadMaterials_ACU,
+  renderAgentStoryCatalog_ACU,
   renderAgentUnsettledHistory_ACU,
   resolveAgentReadToken_ACU,
-  resolveAgentWriteTokens_ACU,
   type AgentResolveContext_ACU,
 } from '../../../../src/service/continuation/agent/agent-placeholder-resolver';
 import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
@@ -147,9 +147,58 @@ describe('Agent 读写集解析', () => {
     expect(renderAgentReadMaterials_ACU([], context_ACU())).toContain('信息不足');
   });
 
-  it('写集 token 映射到模块名，越权与非法 token 都拒绝', () => {
-    expect(resolveAgentWriteTokens_ACU(['$HOOKS_LEDGER', '$INFO_GAP', '$HOOKS_LEDGER'], ['hooks', 'infoGap'])).toEqual(['hooks', 'infoGap']);
-    expect(() => resolveAgentWriteTokens_ACU(['$ACTIVE_CONSTRAINTS'], ['hooks'])).toThrowError(/无权写入/);
-    expect(() => resolveAgentWriteTokens_ACU(['$RANDOM'], ['hooks'])).toThrowError(/不是可写资料模块/);
+  it('读集词汇表覆盖全部地址体系，主/子代理共用同一份', () => {
+    const catalog = renderAgentReadCatalog_ACU();
+    expect(catalog).toContain('$STORY_RANGE:');
+    expect(catalog).toContain('$TABLE:表名:起始行-结束行');
+    expect(catalog).toContain('$WORLDBOOK:书名:uid');
+    expect(catalog).toContain('$CHRONICLES:AM');
+    expect(catalog).toContain('search');
+  });
+});
+
+describe('正文窗口与区间读取', () => {
+  function storyContext_ACU(windowFloors: number, tailFloors: number): AgentResolveContext_ACU {
+    return {
+      ...context_ACU(),
+      chat: [
+        { mes: '用户开场', is_user: true },
+        { mes: '第一楼正文内容' },
+        { mes: '用户插话', is_user: true },
+        { mes: '第三楼正文内容' },
+        { mes: '第四楼正文内容' },
+      ],
+      storyWindowFloors: windowFloors,
+      storyTailFloors: tailFloors,
+    };
+  }
+
+  it('目录只列窗口内楼层，尾部楼层给全文，更早的指引纪要', () => {
+    const catalog = renderAgentStoryCatalog_ACU(storyContext_ACU(2, 1));
+    expect(catalog).toContain('更早的 1 个 AI 楼层不在可读窗口内');
+    expect(catalog).toContain('$STORY_RANGE:3-3');
+    expect(catalog).toContain('第四楼正文内容');
+    expect(catalog).not.toContain('第一楼正文内容');
+  });
+
+  it('$STORY_RANGE 只放行窗口内楼层，窗口外指引 $CHRONICLES', () => {
+    const context = storyContext_ACU(2, 1);
+    expect(resolveAgentReadToken_ACU('$STORY_RANGE:3-4', context).text).toContain('第三楼正文内容');
+    expect(resolveAgentReadToken_ACU('$STORY_RANGE:1-1', context).text).toContain('$CHRONICLES');
+    expect(resolveAgentReadToken_ACU('$STORY_RANGE:xx', context).text).toContain('不合法');
+  });
+
+  it('表格行区间读取只回区间内数据行', () => {
+    const context = context_ACU();
+    const ranged = resolveAgentReadToken_ACU('$TABLE:角色表:1-1', context);
+    expect(ranged.text).toContain('林瑶');
+    const outside = resolveAgentReadToken_ACU('$TABLE:角色表:5-9', context);
+    expect(outside.text).not.toContain('林瑶');
+  });
+
+  it('模块按 ID 精读时未知 ID 如实标注', () => {
+    const text = resolveAgentReadToken_ACU('$HOOKS_LEDGER:H999', context_ACU()).text;
+    expect(text).toContain('H999');
+    expect(text).toContain('不存在');
   });
 });
