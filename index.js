@@ -104819,14 +104819,15 @@ $CONTENT
     }
     /**
      * 开始一次新的运行。
+     *
+     * 会话流是滚动累积的：新运行只追加一条分隔条目，绝不清空既有记录——
+     * 自动续写每轮都开新运行，若在这里清空，用户看到的界面每轮都会塌缩重来。
+     * 清空只发生在「一键清空」与切换聊天时（clearAgentSessionLog_ACU）。
      * @param label 本次运行的标题，如「第 2 阶段 · 第 3 轮」
      * @param detail 起始说明
-     * @param resume 为 true 时保留既有会话记录并写入「恢复运行」条目——
-     *               从中断点恢复时用户必须能看到之前已完成的过程；缺省清空重来
+     * @param resume 为 true 时写「恢复运行」分隔（中断点恢复），否则写「开始运行」分隔
      */
     function beginAgentSessionRun_ACU(label, detail = '', resume = false) {
-        if (!resume)
-            entries_ACU = [];
         running_ACU = true;
         logAgentSession_ACU({ kind: resume ? 'run_resumed' : 'run_started', title: label, detail });
     }
@@ -105142,14 +105143,17 @@ $CONTENT
                 return taskResult_ACU(result);
             });
         }
+        /**
+         * 替换续写设置。任务运行中也允许保存：设置在每轮规划开始时才被重新读取，
+         * 落盘发生在轮与轮之间不会影响在途生成；Agent 正在规划时租约互斥会以
+         * CONTINUATION_OPERATION_BUSY 拒绝，调用方稍后重试即可。与现有任务冲突的
+         * 修改（如阶段规模与已冻结大纲不符）由信封候选校验 fail-closed 拒绝。
+         */
         async replaceSettings(input) {
             return this.withLease_ACU(async (chatIdentity) => {
                 let result = null;
                 await this.dependencies.store.updatePersistedAtomically(current => {
                     const envelope = this.requireEnvelope_ACU(current);
-                    if (envelope.activeTask?.status === 'running' || envelope.activeTask?.status === 'stopping_after_inflight') {
-                        fail_ACU$1('CONTINUATION_OPERATION_BUSY', '宿主生成进行中，不能修改智能续写设置');
-                    }
                     result = { ...envelope, settings: input.settings };
                     return result;
                 }, { chatIdentity });
@@ -107641,8 +107645,8 @@ $CONTENT
             beginAgentSessionRun_ACU(describeRunLabel_ACU(context), resumedState
                 ? `从中断点恢复：继续第 ${iterationStart} 次迭代，已保留 ${ledger.outcomes.length} 条已完成结果`
                 : context.execution.turn?.goal ?? '本轮目标待大纲确定', resumedState !== null);
-            // 会话必须在 beginAgentSessionRun_ACU 之后打开：新运行会清空会话流，
-            // 压缩通知若先于它记录就会被清掉，用户再也看不到「历史被压缩过」这件事。
+            // 会话在 beginAgentSessionRun_ACU 之后打开：压缩/阈值通知按时间顺序
+            // 落在本次运行的分隔条之后，用户能看出它属于哪一次运行。
             const session = await this.openConversation_ACU(chat, request, cursorKeyOf());
             // 换轮通告只在游标真的变了时追加：同一轮内的中断恢复不重复通告，否则模型会以为又开了一轮。
             if (session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) !== session.turnKey) {
@@ -148150,7 +148154,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_10$c = { class: "acu-agent-advanced__section" };
     const _hoisted_11$b = { class: "acu-agent-advanced__section-head" };
     const _hoisted_12$b = { class: "acu-agent-advanced__grid" };
-    const _hoisted_13$8 = { class: "acu-agent-advanced__section" };
+    const _hoisted_13$9 = { class: "acu-agent-advanced__section" };
     const _hoisted_14$8 = { class: "acu-agent-advanced__section-head" };
     const _hoisted_15$8 = { class: "acu-agent-advanced__prompt-scope" };
     const _hoisted_16$8 = { class: "acu-agent-advanced__prompt-actions" };
@@ -148300,7 +148304,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value", "disabled"])]),
 				_: 1
 			}, 8, ["label", "hint"])])]),
-			createBaseVNode("section", _hoisted_13$8, [
+			createBaseVNode("section", _hoisted_13$9, [
 				createBaseVNode("header", _hoisted_14$8, [createBaseVNode("div", null, [
 					createBaseVNode(
 						"h4",
@@ -149630,7 +149634,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_10$b = { class: "acu-v2-session-feed__time" };
     const _hoisted_11$a = { class: "acu-v2-session-feed__thought" };
     const _hoisted_12$a = { class: "acu-v2-session-feed__thought-label" };
-    const _hoisted_13$7 = {
+    const _hoisted_13$8 = {
 	key: 0,
 	class: "acu-v2-session-feed__thought-text"
     };
@@ -149715,7 +149719,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								/* TEXT */
 							), entry.detail ? (openBlock(), createElementBlock(
 								"p",
-								_hoisted_13$7,
+								_hoisted_13$8,
 								toDisplayString(entry.detail),
 								1
 								/* TEXT */
@@ -150222,7 +150226,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_13$6 = {
+    const _hoisted_13$7 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
@@ -150373,7 +150377,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							),
 							stage.chronicleRange ? (openBlock(), createElementBlock(
 								"p",
-								_hoisted_13$6,
+								_hoisted_13$7,
 								"纪要范围：" + toDisplayString(stage.chronicleRange.first) + " → " + toDisplayString(stage.chronicleRange.last),
 								1
 								/* TEXT */
@@ -150664,8 +150668,33 @@ Expected function or array of functions, received type ${typeof value}.`
                 originInstruction.value = '';
             return succeeded;
         }
+        /**
+         * 保存续写设置。
+         *
+         * Agent 正在规划时编排器以 CONTINUATION_OPERATION_BUSY 拒绝写入——这不是错误而是时机问题，
+         * 返回 'busy' 让页面静默排队重试，而不是弹错误吐司把用户的改动丢掉。
+         * @param settings 规范化后的完整设置
+         * @returns 'saved' 已落盘；'busy' 暂时写不进（稍后重试）；'failed' 校验或持久化失败（已吐司）
+         */
         async function saveSettings(settings) {
-            return run_ACU(() => runtime.orchestrator.replaceSettings({ settings }));
+            if (busy.value)
+                return 'busy';
+            busy.value = true;
+            try {
+                envelope.value = await runtime.orchestrator.replaceSettings({ settings });
+                refresh();
+                return 'saved';
+            }
+            catch (error) {
+                if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_OPERATION_BUSY')
+                    return 'busy';
+                toast.error(errorMessage_ACU(error), { muteable: false });
+                refresh();
+                return 'failed';
+            }
+            finally {
+                busy.value = false;
+            }
         }
         /**
          * 保存用户手动编辑的当前阶段大纲。
@@ -150789,6 +150818,14 @@ Expected function or array of functions, received type ${typeof value}.`
             catch { /* 持久会话不可读时保持空会话流，实时事件仍会显示。 */ }
             sync();
         }
+        /**
+         * 切换聊天后调用：会话流是全局内存，不清空就会把上一个聊天的记录带进当前聊天。
+         * 先清空再从当前聊天的持久会话重新回灌。
+         */
+        function rehydrate() {
+            clearAgentSessionLog_ACU();
+            hydrate();
+        }
         onMounted(() => {
             unsubscribe = subscribeAgentSessionLog_ACU(sync);
             hydrate();
@@ -150798,7 +150835,7 @@ Expected function or array of functions, received type ${typeof value}.`
             unsubscribe?.();
             unsubscribe = null;
         });
-        return { entries, running, hydrate };
+        return { entries, running, hydrate, rehydrate };
     }
 
     const INHERIT_CHANNEL_VALUE = '__inherit__';
@@ -150814,6 +150851,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const outlineDraft = ref('');
             const outlineDraftError = ref('');
             const settingsError = ref('');
+            const settingsNotice = ref('');
             const materialsPanel = ref(null);
             const clock = ref(Date.now());
             let countdownTimer;
@@ -151029,15 +151067,24 @@ Expected function or array of functions, received type ${typeof value}.`
                     scheduleSettingsSave();
                     return;
                 }
+                let candidate;
                 try {
                     apiStore.refreshFromSettings();
-                    const candidate = normalizeSettingsDraft();
-                    if (await runtime.saveSettings(candidate)) {
-                        settingsError.value = '';
-                    }
+                    candidate = normalizeSettingsDraft();
                 }
                 catch (error) {
                     settingsError.value = error instanceof Error ? error.message : '续写设置无效';
+                    return;
+                }
+                const outcome = await runtime.saveSettings(candidate);
+                if (outcome === 'saved') {
+                    settingsError.value = '';
+                    settingsNotice.value = '';
+                }
+                else if (outcome === 'busy') {
+                    // Agent 正在规划，改动不能丢：告知用户并排队等空档（如等待宿主正文时）落盘。
+                    settingsNotice.value = '设置已修改：Agent 正在运行，将在本轮空档自动保存并于下一轮生效。';
+                    scheduleSettingsSave();
                 }
             }
             function promptList(key) {
@@ -151078,6 +151125,8 @@ Expected function or array of functions, received type ${typeof value}.`
             function refreshAll() {
                 apiStore.refreshFromSettings();
                 runtime.refresh();
+                // 会话流是全局内存：切聊天必须清空并从新聊天的持久会话回灌，否则显示的是上一个聊天的记录。
+                session.rehydrate();
             }
             onMounted(() => {
                 apiStore.refreshFromSettings();
@@ -151092,8 +151141,13 @@ Expected function or array of functions, received type ${typeof value}.`
             });
             watch(useChatChangedTick(), refreshAll);
             watch(runtime.settings, settings => {
+                // 每次刷新信封都会产生新的 settings 引用；只有持久化内容真的变了（保存成功、切换聊天）
+                // 才重建草稿。否则运行期间的每次状态刷新都会把用户尚未保存的改动悄悄冲掉。
+                const persistedJson = settings ? JSON.stringify(cloneSettings(settings)) : '';
+                if (persistedJson === lastPersistedSettingsJson && settingsDraft.value)
+                    return;
                 settingsDraft.value = settings ? cloneSettings(settings) : null;
-                lastPersistedSettingsJson = settingsDraft.value ? JSON.stringify(settingsDraft.value) : '';
+                lastPersistedSettingsJson = persistedJson;
             }, { immediate: true });
             watch(settingsDraft, () => {
                 if (!settingsDraft.value)
@@ -151103,14 +151157,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, sendMessage, saveOutline, clearData, requiredInteger, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
+            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, sendMessage, saveOutline, clearData, requiredInteger, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-d8338f61] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-d8338f61] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-d8338f61] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__error[data-v-d8338f61] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-d8338f61] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-d8338f61] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-d8338f61] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-d8338f61] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-d8338f61] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-d8338f61] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-d8338f61] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-d8338f61");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_d8338f61_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-667dadd0] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-667dadd0] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-667dadd0] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__error[data-v-667dadd0] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-667dadd0] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-667dadd0] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-667dadd0] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-667dadd0] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-667dadd0] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-667dadd0] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page__settings-grid[data-v-667dadd0] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-667dadd0");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_667dadd0_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-continuation-page" };
     const _hoisted_2$j = {
@@ -151124,12 +151178,16 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_7$9 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_7$9 = {
+	key: 1,
+	class: "acu-v2-continuation-page__meta"
+    };
     const _hoisted_8$9 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_9$8 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_10$8 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_11$8 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_12$8 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_13$6 = { class: "acu-v2-continuation-page__actions" };
     function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$l, [
 		createVNode($setup["AcuPanel"], {
@@ -151231,7 +151289,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			}), $setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
 				key: 0,
 				title: "续写设置",
-				description: "修改后自动保存并立即生效；宿主生成进行中暂不能保存，生成结束后再修改即可。"
+				description: "修改后自动保存；任务运行中也可以改，改动会在本轮空档落盘、下一轮开始时生效。"
 			}, {
 				default: withCtx(() => [
 					createBaseVNode("div", _hoisted_4$d, [
@@ -151447,6 +151505,13 @@ Expected function or array of functions, received type ${typeof value}.`
 						toDisplayString($setup.settingsError),
 						1
 						/* TEXT */
+					)) : createCommentVNode("v-if", true),
+					$setup.settingsNotice ? (openBlock(), createElementBlock(
+						"p",
+						_hoisted_7$9,
+						toDisplayString($setup.settingsNotice),
+						1
+						/* TEXT */
 					)) : createCommentVNode("v-if", true)
 				]),
 				_: 1
@@ -151477,7 +151542,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[19] || (_cache[19] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
 					onUpdate: _cache[20] || (_cache[20] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_7$9, [createVNode($setup["AcuButton"], { onClick: _cache[21] || (_cache[21] = ($event) => $setup.restorePrompt("outline")) }, {
+				createBaseVNode("div", _hoisted_8$9, [createVNode($setup["AcuButton"], { onClick: _cache[21] || (_cache[21] = ($event) => $setup.restorePrompt("outline")) }, {
 					default: withCtx(() => [..._cache[49] || (_cache[49] = [createTextVNode(
 						"恢复大纲提示词默认值",
 						-1
@@ -151510,7 +151575,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[24] || (_cache[24] = (index, delta) => $setup.movePrompt("main", index, delta)),
 					onUpdate: _cache[25] || (_cache[25] = (index, patch) => $setup.updatePrompt("main", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_8$9, [createVNode($setup["AcuButton"], { onClick: _cache[26] || (_cache[26] = ($event) => $setup.restorePrompt("agent_main")) }, {
+				createBaseVNode("div", _hoisted_9$8, [createVNode($setup["AcuButton"], { onClick: _cache[26] || (_cache[26] = ($event) => $setup.restorePrompt("agent_main")) }, {
 					default: withCtx(() => [..._cache[50] || (_cache[50] = [createTextVNode(
 						"恢复主 Agent 默认值",
 						-1
@@ -151543,7 +151608,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[29] || (_cache[29] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
 					onUpdate: _cache[30] || (_cache[30] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_9$8, [createVNode($setup["AcuButton"], { onClick: _cache[31] || (_cache[31] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
+				createBaseVNode("div", _hoisted_10$8, [createVNode($setup["AcuButton"], { onClick: _cache[31] || (_cache[31] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
 					default: withCtx(() => [..._cache[51] || (_cache[51] = [createTextVNode(
 						"恢复维护子代理默认值",
 						-1
@@ -151569,7 +151634,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[34] || (_cache[34] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
 					onUpdate: _cache[35] || (_cache[35] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_10$8, [createVNode($setup["AcuButton"], { onClick: _cache[36] || (_cache[36] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
+				createBaseVNode("div", _hoisted_11$8, [createVNode($setup["AcuButton"], { onClick: _cache[36] || (_cache[36] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
 					default: withCtx(() => [..._cache[52] || (_cache[52] = [createTextVNode(
 						"恢复主线策划默认值",
 						-1
@@ -151595,7 +151660,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[39] || (_cache[39] = (index, delta) => $setup.movePrompt("beatPlanner", index, delta)),
 					onUpdate: _cache[40] || (_cache[40] = (index, patch) => $setup.updatePrompt("beatPlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_11$8, [createVNode($setup["AcuButton"], { onClick: _cache[41] || (_cache[41] = ($event) => $setup.restorePrompt("agent_beat")) }, {
+				createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuButton"], { onClick: _cache[41] || (_cache[41] = ($event) => $setup.restorePrompt("agent_beat")) }, {
 					default: withCtx(() => [..._cache[53] || (_cache[53] = [createTextVNode(
 						"恢复节拍策划默认值",
 						-1
@@ -151621,7 +151686,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[44] || (_cache[44] = (index, delta) => $setup.movePrompt("reviewer", index, delta)),
 					onUpdate: _cache[45] || (_cache[45] = (index, patch) => $setup.updatePrompt("reviewer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuButton"], { onClick: _cache[46] || (_cache[46] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
+				createBaseVNode("div", _hoisted_13$6, [createVNode($setup["AcuButton"], { onClick: _cache[46] || (_cache[46] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
 					default: withCtx(() => [..._cache[54] || (_cache[54] = [createTextVNode(
 						"恢复审查子代理默认值",
 						-1
@@ -151641,7 +151706,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-d8338f61"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-667dadd0"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
