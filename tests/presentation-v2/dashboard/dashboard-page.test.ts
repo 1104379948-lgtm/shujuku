@@ -762,6 +762,7 @@ describe("DashboardPage", () => {
       "plotEnabled",
       "continuationPageEnabled",
       "externalImportPageEnabled",
+      "contentReplaceEnabled",
       "summaryVectorIndexModeEnabled",
       "developerOptionsEnabled",
     ]);
@@ -934,7 +935,7 @@ describe("DashboardPage", () => {
     expect(text).toContain("智能续写");
     expect(text).toContain("外部导入");
     expect(text).toContain("交火模式");
-    expect(text).not.toContain("启用正文替换");
+    expect(text).toContain("正文替换");
 
     expect(
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
@@ -991,9 +992,8 @@ describe("DashboardPage", () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it("maxRetries=49 时在外部导入下方显示正文替换开关，开启后才显示页面并启用功能", async () => {
+  it("正文替换开关常驻显示在外部导入下方，开启后才显示页面并启用功能", async () => {
     const settings = createSettings();
-    settings.plotSettings.loopSettings = { maxRetries: 49 };
     settings.contentOptimizationSettings.enabled = false;
     const { mount } = await mountDashboardPage(settings);
 

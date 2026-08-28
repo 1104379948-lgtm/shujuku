@@ -144,25 +144,15 @@ describe('router-store · 高手模式可见性', () => {
   it('正文替换 featureGate 打开后出现在可见列表', async () => {
     persistAdvancedMode();
     const m = await freshImport();
-    const state = await import('../../../src/service/runtime/state-manager');
-    state._set_settings_ACU({
-      ...state.settings_ACU,
-      plotSettings: {
-        ...(state.settings_ACU.plotSettings || {}),
-        loopSettings: {
-          ...(state.settings_ACU.plotSettings?.loopSettings || {}),
-          maxRetries: m.registry.CONTENT_REPLACE_UNLOCK_MAX_RETRIES,
-        },
-      },
-    });
     m.pinia.setActivePinia(m.pinia.createPinia());
+    const state = await import('../../../src/service/runtime/state-manager');
     const r = m.router.useRouterStore();
     r.setFeatureGate(m.registry.FEATURE_GATE_CONTENT_REPLACE, true);
     expect(r.visiblePages.map(p => p.id)).toContain('content-replace');
     expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(true);
   });
 
-  it('初始化时 maxRetries=49 但开关未开，仍隐藏正文替换页', async () => {
+  it('初始化时正文替换开关未开则隐藏正文替换页', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     const state = await import('../../../src/service/runtime/state-manager');
@@ -171,13 +161,6 @@ describe('router-store · 高手模式可见性', () => {
       contentOptimizationSettings: {
         ...(state.settings_ACU.contentOptimizationSettings || {}),
         enabled: false,
-      },
-      plotSettings: {
-        ...(state.settings_ACU.plotSettings || {}),
-        loopSettings: {
-          ...(state.settings_ACU.plotSettings?.loopSettings || {}),
-          maxRetries: m.registry.CONTENT_REPLACE_UNLOCK_MAX_RETRIES,
-        },
       },
     });
     m.pinia.setActivePinia(m.pinia.createPinia());
@@ -188,7 +171,7 @@ describe('router-store · 高手模式可见性', () => {
     expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(false);
   });
 
-  it('初始化时 maxRetries=49 且正文替换开关用户偏好为开，显示正文替换页', async () => {
+  it('初始化时正文替换用户偏好为开，显示正文替换页', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     const state = await import('../../../src/service/runtime/state-manager');
@@ -200,13 +183,6 @@ describe('router-store · 高手模式可见性', () => {
         enabledSwitchTouched: true,
         enabledPreference: true,
       },
-      plotSettings: {
-        ...(state.settings_ACU.plotSettings || {}),
-        loopSettings: {
-          ...(state.settings_ACU.plotSettings?.loopSettings || {}),
-          maxRetries: m.registry.CONTENT_REPLACE_UNLOCK_MAX_RETRIES,
-        },
-      },
     });
     m.pinia.setActivePinia(m.pinia.createPinia());
 
@@ -216,7 +192,7 @@ describe('router-store · 高手模式可见性', () => {
     expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(true);
   });
 
-  it('初始化时非 49 会隐藏正文替换页并自动禁用旧 enabled 状态', async () => {
+  it('初始化时旧 enabled=true 但未登记偏好，按 legacy 值保持启用并显示页面', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     const state = await import('../../../src/service/runtime/state-manager');
@@ -226,20 +202,13 @@ describe('router-store · 高手模式可见性', () => {
         ...(state.settings_ACU.contentOptimizationSettings || {}),
         enabled: true,
       },
-      plotSettings: {
-        ...(state.settings_ACU.plotSettings || {}),
-        loopSettings: {
-          ...(state.settings_ACU.plotSettings?.loopSettings || {}),
-          maxRetries: 3,
-        },
-      },
     });
     m.pinia.setActivePinia(m.pinia.createPinia());
 
     const r = m.router.useRouterStore();
 
-    expect(r.visiblePages.map(p => p.id)).not.toContain('content-replace');
-    expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(false);
+    expect(r.visiblePages.map(p => p.id)).toContain('content-replace');
+    expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(true);
   });
 
   it('visiblePagesByGroup 在高手模式默认状态下：overview=1 / config=5 / feature=2 / tool=2 / developer=0', async () => {

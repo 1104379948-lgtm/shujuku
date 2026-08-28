@@ -1,9 +1,4 @@
 import { settings_ACU } from '../../service/runtime/state-manager';
-import { CONTENT_REPLACE_UNLOCK_MAX_RETRIES } from '../router/page-registry';
-
-export function isContentReplaceUnlockedBySettings(): boolean {
-  return Number(settings_ACU?.plotSettings?.loopSettings?.maxRetries) === CONTENT_REPLACE_UNLOCK_MAX_RETRIES;
-}
 
 function ensureContentReplaceSettings(): Record<string, any> {
   if (!settings_ACU.contentOptimizationSettings || typeof settings_ACU.contentOptimizationSettings !== 'object') {
@@ -12,30 +7,30 @@ function ensureContentReplaceSettings(): Record<string, any> {
   return settings_ACU.contentOptimizationSettings as Record<string, any>;
 }
 
+/**
+ * 读取用户的启用偏好。未通过 v2 开关登记过偏好时回退到 legacy enabled 值：
+ * 旧 UI 的启用复选框（以及隐藏彩蛋时代的解锁启用）只写 enabled 不写偏好字段，
+ * 功能转正后这些用户的已启用状态必须被尊重，不能被同步逻辑静默复位。
+ */
 function readUserEnabledPreference(cfg: Record<string, any>): boolean {
-  if (cfg.enabledSwitchTouched !== true) return false;
+  if (cfg.enabledSwitchTouched !== true) return cfg.enabled === true;
   return cfg.enabledPreference === true;
 }
 
 export function isContentReplaceEnabledBySettings(): boolean {
-  return isContentReplaceUnlockedBySettings() && settings_ACU?.contentOptimizationSettings?.enabled === true;
+  return settings_ACU?.contentOptimizationSettings?.enabled === true;
 }
 
 export function setContentReplaceEnabledBySettings(enabled: boolean): boolean {
   const cfg = ensureContentReplaceSettings();
   cfg.enabledSwitchTouched = true;
   cfg.enabledPreference = enabled === true;
-  cfg.enabled = isContentReplaceUnlockedBySettings() && cfg.enabledPreference === true;
+  cfg.enabled = cfg.enabledPreference === true;
   return cfg.enabled === true;
 }
 
 export function syncContentReplaceAvailability(): boolean {
-  const unlocked = isContentReplaceUnlockedBySettings();
   const cfg = ensureContentReplaceSettings();
-  if (!unlocked) {
-    cfg.enabled = false;
-    return false;
-  }
   cfg.enabled = readUserEnabledPreference(cfg);
   return cfg.enabled;
 }

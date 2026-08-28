@@ -53,7 +53,6 @@ import {
 } from "../../shared/utils";
 import {
   isContentReplaceEnabledBySettings,
-  isContentReplaceUnlockedBySettings,
   setContentReplaceEnabledBySettings,
   syncContentReplaceAvailability,
 } from "../stores/content-replace-gate";
@@ -972,15 +971,13 @@ export function useDashboardPage(): DashboardPageState {
         description: dashboardCopy.toggles.externalImport.description,
         value: settings_ACU.externalImportPageEnabled !== false,
       },
-    ];
-    if (isContentReplaceUnlockedBySettings()) {
-      items.push({
+      {
         key: "contentReplaceEnabled",
         label: dashboardCopy.toggles.contentReplace.label,
         description: dashboardCopy.toggles.contentReplace.description,
         value: isContentReplaceEnabledBySettings(),
-      });
-    }
+      },
+    ];
     items.push(
       {
         key: "summaryVectorIndexModeEnabled",

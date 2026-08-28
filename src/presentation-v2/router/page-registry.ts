@@ -25,10 +25,8 @@ import DeveloperPage from '../pages/DeveloperPage.vue';
 import { dashboardCopy } from '../copy/dashboard-copy';
 import { useDevOptionsStore } from '../stores/dev-options-store';
 
-/** 正文替换页对应的 feature gate key；页面可见性由正文替换自身 enabled 控制。 */
+/** 正文替换页对应的 feature gate key；页面可见性由仪表盘常驻的正文替换启用开关控制。 */
 export const FEATURE_GATE_CONTENT_REPLACE = 'content-replace';
-/** 兼容旧 UI 隐藏开关：智能续写/剧情循环失败上限等于 49 时，仪表盘才显示正文替换启用开关。 */
-export const CONTENT_REPLACE_UNLOCK_MAX_RETRIES = 49;
 export const FEATURE_GATE_PLOT = 'plot';
 export const FEATURE_GATE_CONTINUATION = 'continuation';
 export const FEATURE_GATE_IMPORT = 'import';
