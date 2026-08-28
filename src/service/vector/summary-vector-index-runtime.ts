@@ -1,4 +1,6 @@
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
+import { createRerankScores_ACU } from '../../data/gateways/vector-rerank-gateway';
+import { currentChatFileIdentifier_ACU } from '../runtime/state-manager';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { commitVectorMetadataPatch_ACU } from './summary-vector-index-chat-commit';
 import { loadVectorIndexRegistry_ACU, readVectorIndexJsonFile_ACU } from '../../data/storage/vector-index-st-files-storage';
@@ -82,6 +84,12 @@ type SummaryIndexSelectedCandidate_ACU =
 let lastRuntimeSignature_ACU = '';
 let lastRuntimeAt_ACU = 0;
 const SUMMARY_VECTOR_INDEX_RUNTIME_DEDUPE_MS_ACU = 8000;
+
+/** 重置去重窗口状态（测试隔离用；生产路径依赖签名中的 chatKey 自然区分聊天）。 */
+export function resetSummaryVectorIndexRuntimeDedupeState_ACU(): void {
+    lastRuntimeSignature_ACU = '';
+    lastRuntimeAt_ACU = 0;
+}
 
 function normalizeText_ACU(value: any): string {
     return String(value ?? '').trim();
@@ -203,34 +211,24 @@ function cosineSimilarity_ACU(left: number[] | Float32Array, right: number[] | F
     return dot / (leftNorm * Math.sqrt(rightNorm));
 }
 
+// P4：统一走 vector-rerank-gateway 网关（超时可中断、宿主请求头、安全 JSON 解析），
+// 消除此前内联 fetch 与网关的双实现漂移。失败时保留既有语义：回退 embedding 排序。
 async function rerankCandidates_ACU(config: any, query: string, candidates: RankedSummaryCandidate_ACU[]): Promise<RankedSummaryCandidate_ACU[]> {
     const endpoint = normalizeText_ACU(config.rerankEndpoint);
     const model = normalizeText_ACU(config.rerankModel);
     if (!endpoint || !model || candidates.length === 0) return candidates;
     try {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        const apiKey = normalizeText_ACU(config.rerankApiKey);
-        if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-        const instruction = normalizeText_ACU(config.rerankInstruction);
-        const body: Record<string, any> = {
+        const results = await createRerankScores_ACU({
+            endpoint,
             model,
+            apiKey: normalizeText_ACU(config.rerankApiKey) || undefined,
             query,
             documents: candidates.map((candidate) => candidate.chunk.text),
-        };
-        if (instruction) body.instruction = instruction;
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(body),
+            instruction: normalizeText_ACU(config.rerankInstruction) || undefined,
         });
-        if (!response.ok) throw new Error(await response.text().catch(() => response.statusText));
-        const payload = await response.json();
-        const results = Array.isArray(payload?.results) ? payload.results : Array.isArray(payload?.data) ? payload.data : [];
         const byIndex = new Map<number, number>();
-        results.forEach((item: any, fallbackIndex: number) => {
-            const index = Number.isInteger(item?.index) ? Number(item.index) : Number.isInteger(item?.document_index) ? Number(item.document_index) : fallbackIndex;
-            const score = Number(item?.relevance_score ?? item?.score ?? item?.rerank_score);
-            if (Number.isFinite(index) && Number.isFinite(score)) byIndex.set(index, score);
+        results.forEach((item) => {
+            if (item.index >= 0 && item.index < candidates.length) byIndex.set(item.index, item.relevanceScore);
         });
         return candidates
             .map((candidate, index) => ({ ...candidate, rerankScore: byIndex.get(index) ?? candidate.score }))
@@ -612,8 +610,13 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     }
     const userInput = normalizeText_ACU(options.userInput);
     if (!userInput) return { success: false, skipped: true, reason: 'empty_user_input' };
-    const signature = `${options.source || 'unknown'}:${userInput}`;
+    // P3：去重签名不含 source——同一次发送会经由 TavernHelper 包装与
+    // GENERATION_AFTER_COMMANDS 两个钩子各触发一次，source 不同导致签名不同、
+    // 完整链路（关键词 AI + embedding + rerank + 世界书写回）跑两遍。
+    // 加入 chatKey 防止切换聊天后相同文本被跨聊天误去重。
+    const signature = `${String(currentChatFileIdentifier_ACU || '')}:${userInput}`;
     if (signature === lastRuntimeSignature_ACU && Date.now() - lastRuntimeAt_ACU <= SUMMARY_VECTOR_INDEX_RUNTIME_DEDUPE_MS_ACU) {
+        logDebug_ACU(`[交火模式纪要索引] 8s 窗口内重复触发已去重：source=${options.source || 'unknown'}`);
         return { success: true, skipped: true, reason: 'deduped' };
     }
     lastRuntimeSignature_ACU = signature;

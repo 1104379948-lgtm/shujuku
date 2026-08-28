@@ -4439,6 +4439,115 @@ $CONTENT
     }
 
     /**
+     * data/gateways/ai-gateway.ts — AI 调用网关
+     *
+     * 封装 TavernHelper_API_ACU.generateRaw、triggerSlash
+     * 以及 SillyTavern_API_ACU.ConnectionManagerRequestService.sendRequest 等 AI 调用方法。
+     * service 层通过本模块发起 AI 请求，不再直接调用宿主 API。
+     *
+     * 所有方法内置存在性检查，宿主 API 不可用时抛出明确错误。
+     */
+    // ═══ 可用性检查 ═══
+    /**
+     * 检查 generateRaw 是否可用
+     */
+    function isGenerateRawAvailable_ACU() {
+        return !!(TavernHelper_API_ACU && typeof TavernHelper_API_ACU.generateRaw === 'function');
+    }
+    /**
+     * 检查 ConnectionManagerRequestService 是否可用
+     */
+    function isConnectionManagerAvailable_ACU() {
+        return !!(SillyTavern_API_ACU?.ConnectionManagerRequestService &&
+            typeof SillyTavern_API_ACU.ConnectionManagerRequestService.sendRequest === 'function');
+    }
+    /**
+     * 检查 triggerSlash 是否可用
+     */
+    function isTriggerSlashAvailable_ACU() {
+        return !!(TavernHelper_API_ACU && typeof TavernHelper_API_ACU.triggerSlash === 'function');
+    }
+    // ═══ AI 生成 ═══
+    /**
+     * 通过酒馆主 API 生成文本
+     * @param options generateRaw 的参数（ordered_prompts、should_stream 等）
+     * @returns 生成的文本
+     * @throws 如果 generateRaw 不可用
+     */
+    async function generateRaw_ACU(options) {
+        if (!isGenerateRawAvailable_ACU()) {
+            throw new Error('主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或在设置中改用自定义API。');
+        }
+        const response = await TavernHelper_API_ACU.generateRaw(options);
+        return typeof response === 'string' ? response : String(response ?? '');
+    }
+    /**
+     * 通过 ConnectionManager 发送请求
+     * @param profileId 配置文件 ID
+     * @param messages 消息数组
+     * @param maxTokens 最大 token 数
+     * @returns API 响应结果
+     * @throws 如果 ConnectionManagerRequestService 不可用
+     */
+    async function sendConnectionManagerRequest_ACU(profileId, messages, maxTokens) {
+        if (!isConnectionManagerAvailable_ACU()) {
+            throw new Error('ConnectionManagerRequestService 不可用。请检查酒馆版本或连接管理器配置。');
+        }
+        return await SillyTavern_API_ACU.ConnectionManagerRequestService.sendRequest(profileId, messages, maxTokens);
+    }
+    /**
+     * 触发斜杠命令
+     * @param command 斜杠命令字符串
+     * @returns 命令执行结果
+     */
+    async function triggerSlash_ACU(command) {
+        if (!isTriggerSlashAvailable_ACU()) {
+            logWarn_ACU('[AIGateway] triggerSlash 不可用，返回空字符串');
+            return '';
+        }
+        return await TavernHelper_API_ACU.triggerSlash(command);
+    }
+    // ═══ 配置读取 ═══
+    /**
+     * 获取 ConnectionManager 的配置文件列表
+     * @returns 配置文件数组，不可用时返回 []
+     */
+    function getConnectionManagerProfiles_ACU() {
+        return SillyTavern_API_ACU?.extensionSettings?.connectionManager?.profiles || [];
+    }
+    // ═══ 请求认证 ═══
+    /**
+     * 获取宿主平台的 HTTP 请求头（包含 CSRF token 等认证信息）
+     * 封装 SillyTavern.getRequestHeaders()，不可用时返回空对象。
+     *
+     * 注意：主窗口的 window.SillyTavern 只有 {libs, getContext}，
+     * getRequestHeaders 在 getContext() 返回的对象里。
+     * 所以必须通过 SillyTavern_API_ACU（已被 Proxy 包装）或 getContext() 获取。
+     */
+    function getHostRequestHeaders_ACU() {
+        try {
+            // 优先通过 SillyTavern_API_ACU（插件模式下已被 Proxy 包装，每次读取走 getContext()）
+            if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.getRequestHeaders === 'function') {
+                const headers = SillyTavern_API_ACU.getRequestHeaders();
+                if (headers && typeof headers === 'object')
+                    return headers;
+            }
+            // fallback：直接调用 getContext()（覆盖 SillyTavern_API_ACU 尚未初始化的场景）
+            const ctx = globalThis.SillyTavern?.getContext?.();
+            if (ctx && typeof ctx.getRequestHeaders === 'function') {
+                const headers = ctx.getRequestHeaders();
+                if (headers && typeof headers === 'object')
+                    return headers;
+            }
+            return {};
+        }
+        catch {
+            logWarn_ACU('[AIGateway] getRequestHeaders 不可用，返回空对象');
+            return {};
+        }
+    }
+
+    /**
      * data/gateways/chat-gateway.ts — 聊天数组访问网关
      *
      * 封装 SillyTavern_API_ACU.chat、saveChat()、stopGeneration()、
@@ -4527,6 +4636,82 @@ $CONTENT
         }
         await SillyTavern_API_ACU.setChatMessages(messages, options);
         return true;
+    }
+    // ═══ 全量聊天枚举 ═══
+    /**
+     * 枚举宿主上全部存活聊天的归一化名称（角色聊天 + 群组聊天）。
+     *
+     * 用于向量存档孤儿判定：只有确认某个 chatKey 在全酒馆范围内不存在同名存活聊天
+     * （聊天文件名不含角色作用域，跨角色可重名），才允许删除其向量数据。
+     *
+     * fail-safe 契约：任一环节无法保证枚举完整性（characters 列表不可用、任一角色的
+     * 聊天列表请求失败、响应形状非预期）时返回 null，调用方必须视为"无法判定"并跳过
+     * 删除，绝不能把残缺枚举当成完整集合使用。
+     */
+    async function listAllHostChatNames_ACU() {
+        const characters = SillyTavern_API_ACU?.characters;
+        if (!Array.isArray(characters)) {
+            logWarn_ACU('[ChatGateway] characters 列表不可用，无法枚举全部聊天');
+            return null;
+        }
+        const names = new Set();
+        const headers = getHostRequestHeaders_ACU();
+        if (!headers['Content-Type'] && !headers['content-type']) {
+            headers['Content-Type'] = 'application/json';
+        }
+        for (const character of characters) {
+            const avatar = String(character?.avatar || '').trim();
+            if (!avatar)
+                continue;
+            try {
+                const response = await fetch('/api/characters/chats', {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ avatar_url: avatar, simple: true }),
+                });
+                if (!response.ok) {
+                    logWarn_ACU(`[ChatGateway] 枚举角色聊天失败（HTTP ${response.status}）：${avatar}`);
+                    return null;
+                }
+                const payload = await response.json();
+                // 无聊天时部分版本返回 {error: true}，视为空集而非失败。
+                if (payload && typeof payload === 'object' && !Array.isArray(payload) && payload.error) {
+                    continue;
+                }
+                const entries = Array.isArray(payload) ? payload : Object.values(payload || {});
+                for (const entry of entries) {
+                    const fileName = String(entry?.file_name || '').trim();
+                    if (!fileName)
+                        continue;
+                    const normalized = cleanChatName_ACU(fileName);
+                    if (normalized)
+                        names.add(normalized);
+                }
+            }
+            catch (error) {
+                logWarn_ACU(`[ChatGateway] 枚举角色聊天异常：${avatar}: ${error?.message || error}`);
+                return null;
+            }
+        }
+        try {
+            const groups = globalThis.SillyTavern?.getContext?.()?.groups
+                ?? SillyTavern_API_ACU?.groups;
+            if (Array.isArray(groups)) {
+                for (const group of groups) {
+                    const groupChats = Array.isArray(group?.chats) ? group.chats : [];
+                    for (const chatId of groupChats) {
+                        const normalized = cleanChatName_ACU(String(chatId || ''));
+                        if (normalized)
+                            names.add(normalized);
+                    }
+                }
+            }
+        }
+        catch (error) {
+            logWarn_ACU(`[ChatGateway] 枚举群组聊天异常：${error?.message || error}`);
+            return null;
+        }
+        return names;
     }
     /**
      * 触发消息更新事件通知宿主平台
@@ -64709,115 +64894,6 @@ $CONTENT
     }
 
     /**
-     * data/gateways/ai-gateway.ts — AI 调用网关
-     *
-     * 封装 TavernHelper_API_ACU.generateRaw、triggerSlash
-     * 以及 SillyTavern_API_ACU.ConnectionManagerRequestService.sendRequest 等 AI 调用方法。
-     * service 层通过本模块发起 AI 请求，不再直接调用宿主 API。
-     *
-     * 所有方法内置存在性检查，宿主 API 不可用时抛出明确错误。
-     */
-    // ═══ 可用性检查 ═══
-    /**
-     * 检查 generateRaw 是否可用
-     */
-    function isGenerateRawAvailable_ACU() {
-        return !!(TavernHelper_API_ACU && typeof TavernHelper_API_ACU.generateRaw === 'function');
-    }
-    /**
-     * 检查 ConnectionManagerRequestService 是否可用
-     */
-    function isConnectionManagerAvailable_ACU() {
-        return !!(SillyTavern_API_ACU?.ConnectionManagerRequestService &&
-            typeof SillyTavern_API_ACU.ConnectionManagerRequestService.sendRequest === 'function');
-    }
-    /**
-     * 检查 triggerSlash 是否可用
-     */
-    function isTriggerSlashAvailable_ACU() {
-        return !!(TavernHelper_API_ACU && typeof TavernHelper_API_ACU.triggerSlash === 'function');
-    }
-    // ═══ AI 生成 ═══
-    /**
-     * 通过酒馆主 API 生成文本
-     * @param options generateRaw 的参数（ordered_prompts、should_stream 等）
-     * @returns 生成的文本
-     * @throws 如果 generateRaw 不可用
-     */
-    async function generateRaw_ACU(options) {
-        if (!isGenerateRawAvailable_ACU()) {
-            throw new Error('主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或在设置中改用自定义API。');
-        }
-        const response = await TavernHelper_API_ACU.generateRaw(options);
-        return typeof response === 'string' ? response : String(response ?? '');
-    }
-    /**
-     * 通过 ConnectionManager 发送请求
-     * @param profileId 配置文件 ID
-     * @param messages 消息数组
-     * @param maxTokens 最大 token 数
-     * @returns API 响应结果
-     * @throws 如果 ConnectionManagerRequestService 不可用
-     */
-    async function sendConnectionManagerRequest_ACU(profileId, messages, maxTokens) {
-        if (!isConnectionManagerAvailable_ACU()) {
-            throw new Error('ConnectionManagerRequestService 不可用。请检查酒馆版本或连接管理器配置。');
-        }
-        return await SillyTavern_API_ACU.ConnectionManagerRequestService.sendRequest(profileId, messages, maxTokens);
-    }
-    /**
-     * 触发斜杠命令
-     * @param command 斜杠命令字符串
-     * @returns 命令执行结果
-     */
-    async function triggerSlash_ACU(command) {
-        if (!isTriggerSlashAvailable_ACU()) {
-            logWarn_ACU('[AIGateway] triggerSlash 不可用，返回空字符串');
-            return '';
-        }
-        return await TavernHelper_API_ACU.triggerSlash(command);
-    }
-    // ═══ 配置读取 ═══
-    /**
-     * 获取 ConnectionManager 的配置文件列表
-     * @returns 配置文件数组，不可用时返回 []
-     */
-    function getConnectionManagerProfiles_ACU() {
-        return SillyTavern_API_ACU?.extensionSettings?.connectionManager?.profiles || [];
-    }
-    // ═══ 请求认证 ═══
-    /**
-     * 获取宿主平台的 HTTP 请求头（包含 CSRF token 等认证信息）
-     * 封装 SillyTavern.getRequestHeaders()，不可用时返回空对象。
-     *
-     * 注意：主窗口的 window.SillyTavern 只有 {libs, getContext}，
-     * getRequestHeaders 在 getContext() 返回的对象里。
-     * 所以必须通过 SillyTavern_API_ACU（已被 Proxy 包装）或 getContext() 获取。
-     */
-    function getHostRequestHeaders_ACU() {
-        try {
-            // 优先通过 SillyTavern_API_ACU（插件模式下已被 Proxy 包装，每次读取走 getContext()）
-            if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.getRequestHeaders === 'function') {
-                const headers = SillyTavern_API_ACU.getRequestHeaders();
-                if (headers && typeof headers === 'object')
-                    return headers;
-            }
-            // fallback：直接调用 getContext()（覆盖 SillyTavern_API_ACU 尚未初始化的场景）
-            const ctx = globalThis.SillyTavern?.getContext?.();
-            if (ctx && typeof ctx.getRequestHeaders === 'function') {
-                const headers = ctx.getRequestHeaders();
-                if (headers && typeof headers === 'object')
-                    return headers;
-            }
-            return {};
-        }
-        catch {
-            logWarn_ACU('[AIGateway] getRequestHeaders 不可用，返回空对象');
-            return {};
-        }
-    }
-
-    /**
      * service/ai/prompt-builder/prompt-api-call.ts
      * AI API 调用 — prompt 组装 + API 调用 + 流式/非流式响应处理
      * 从 prompt-builder.ts 拆出（L195-L501 + L1519-L1604）
@@ -65312,14 +65388,14 @@ $CONTENT
         const normalized = String(name || '').trim();
         return presets.find(p => p.name === normalized) ?? null;
     }
-    function getCurrentChatKey_ACU() {
+    function getCurrentChatKey_ACU$1() {
         const raw = String(currentChatFileIdentifier_ACU || '').trim();
         return raw || 'unknown_chat';
     }
     /** 读取当前聊天绑定的预设名（悬挂引用返回空串） */
     function getBoundPresetNameForChat_ACU(chatKey) {
         ensureApiSettingsShape_ACU();
-        const key = chatKey || getCurrentChatKey_ACU();
+        const key = chatKey || getCurrentChatKey_ACU$1();
         const binding = settings_ACU.apiPresetBindingsByChat[key];
         if (!binding || typeof binding !== 'object')
             return '';
@@ -65499,7 +65575,7 @@ $CONTENT
             return { ok: false, code: 'not_found', changed: false, message: `预设 "${name}" 不存在。` };
         }
         const snapshot = snapshotApiFields_ACU();
-        const chatKey = getCurrentChatKey_ACU();
+        const chatKey = getCurrentChatKey_ACU$1();
         settings_ACU.apiPresetBindingsByChat[chatKey] = { presetName: preset.name, updatedAt: Date.now() };
         settings_ACU.apiMode = preset.apiMode;
         settings_ACU.apiConfig = clone$8(preset.apiConfig);
@@ -65541,7 +65617,7 @@ $CONTENT
             ? !boundName || boundName === preset.name
             : boundName === oldName || boundName === preset.name;
         if (shouldAutoSelect && findPresetByName_ACU(settings_ACU.apiPresets, preset.name)) {
-            settings_ACU.apiPresetBindingsByChat[getCurrentChatKey_ACU()] = {
+            settings_ACU.apiPresetBindingsByChat[getCurrentChatKey_ACU$1()] = {
                 presetName: preset.name,
                 updatedAt: Date.now(),
             };
@@ -65562,7 +65638,7 @@ $CONTENT
             return { ok: false, code: 'not_found', changed: false, message: `预设 "${name}" 不存在。` };
         }
         const snapshot = snapshotApiFields_ACU();
-        const chatKey = getCurrentChatKey_ACU();
+        const chatKey = getCurrentChatKey_ACU$1();
         // [关键] 在删除前捕获当前聊天绑定：删除后 findPresetByName 对已删预设返回 null，
         // getBoundPresetNameForChat_ACU 会把悬挂引用归一为空串，导致无法识别“删除的是活动预设”。
         const boundBeforeDelete = getBoundPresetNameForChat_ACU();
@@ -73699,9 +73775,53 @@ $CONTENT
         return String(path || '').startsWith(VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU);
     }
     /**
-     * 从 pack 路径提取 scope token。非 pack 路径返回 null。
-     * scopeToken 是 base64url 编码，只含 [A-Za-z0-9_-]，可用首个下划线之前的部分提取。
+     * 尝试把 base64url token 解码回 [chatKey, isolationKey, sourceTableKey] 三元组。
+     * 解码失败或形状不符（非长度 3 的字符串数组）返回 null。
      */
+    function tryDecodeVectorIndexScopeToken_ACU(token) {
+        if (!token || /[^A-Za-z0-9_-]/.test(token))
+            return null;
+        const base64 = token.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+        try {
+            const binary = atob(padded);
+            const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+            const json = new TextDecoder().decode(bytes);
+            const parsed = JSON.parse(json);
+            if (Array.isArray(parsed) && parsed.length === 3 && parsed.every((item) => typeof item === 'string')) {
+                return { chatKey: parsed[0], isolationKey: parsed[1], sourceTableKey: parsed[2] };
+            }
+        }
+        catch (_error) {
+            // 候选分割点不是完整 token 时解码/JSON 解析必然失败，继续尝试下一个。
+        }
+        return null;
+    }
+    /**
+     * 从 V2 快照 / v2pack 对象路径反解 canonical scope。
+     * 注意：scopeToken 的 base64url 字母表包含 `_`（来自 base64 的 `/` 替换），
+     * 不能用"首个下划线"切分；这里逐个 `_` 候选分割点（含全串）尝试解码，
+     * 只有 JSON 三元组解析成功才算命中。截断的 base64 无法解析出完整 JSON
+     * 数组，因此不存在提前误命中的可能。
+     */
+    function decodeVectorIndexScopeFromPath_ACU(path) {
+        const normalized = String(path || '');
+        const prefixes = [VECTOR_INDEX_CONTENT_PACK_PATH_V2_PREFIX_ACU, 'TavernDB_ACU_vector_v2_'];
+        for (const prefix of prefixes) {
+            if (!normalized.startsWith(prefix))
+                continue;
+            const remainder = normalized.slice(prefix.length);
+            for (let index = 0; index <= remainder.length; index += 1) {
+                if (index < remainder.length && remainder[index] !== '_')
+                    continue;
+                const decoded = tryDecodeVectorIndexScopeToken_ACU(remainder.slice(0, index));
+                if (decoded)
+                    return decoded;
+            }
+            return null;
+        }
+        return null;
+    }
     function extractVectorIndexContentPackScopeTokenFromPath_ACU(path) {
         const normalized = String(path || '');
         if (!isVectorIndexContentPackPathV2_ACU(normalized))
@@ -74073,6 +74193,13 @@ $CONTENT
     const DB_NAME_ACU$1 = 'TavernDB_ACU_VectorTempCache';
     const DB_VERSION_ACU$1 = 1;
     const STORE_NAME_ACU$1 = 'shards';
+    /**
+     * P7：临时缓存字节预算。超出预算时按 lastAccessAt 从最旧开始淘汰（LRU），
+     * 防止跨聊天累积导致 IndexedDB 无界增长。缓存 miss 只意味着回源外置权威文件。
+     */
+    const VECTOR_TEMP_CACHE_MAX_BYTES_ACU = 64 * 1024 * 1024;
+    const VECTOR_TEMP_CACHE_TRIM_THROTTLE_MS_ACU = 60000;
+    let lastTempCacheTrimAt_ACU = 0;
     function isIdbAvailable_ACU$1() {
         return typeof indexedDB !== 'undefined';
     }
@@ -74157,9 +74284,53 @@ $CONTENT
                 createdAt: now,
             };
             await runStore_ACU('readwrite', (store) => store.put(record));
+            if (Date.now() - lastTempCacheTrimAt_ACU >= VECTOR_TEMP_CACHE_TRIM_THROTTLE_MS_ACU) {
+                lastTempCacheTrimAt_ACU = Date.now();
+                void trimVectorIndexTempCacheToBudget_ACU().catch(() => undefined);
+            }
         }
         catch {
             // 临时缓存失败不应影响权威外置文件链路。
+        }
+    }
+    /**
+     * 按 lastAccessAt 从最旧开始淘汰，直到总字节数回到预算内。
+     * 实现为两趟 cursor：第一趟只读统计总量，第二趟按时间升序删除到位，
+     * 避免在单个 readwrite 事务里长时间持锁。
+     */
+    async function trimVectorIndexTempCacheToBudget_ACU(maxBytes = VECTOR_TEMP_CACHE_MAX_BYTES_ACU) {
+        try {
+            const { bytes } = await estimateVectorIndexTempCache_ACU();
+            if (bytes <= maxBytes)
+                return;
+            let bytesToFree = bytes - maxBytes;
+            const db = await openDb_ACU$1();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction(STORE_NAME_ACU$1, 'readwrite');
+                const store = tx.objectStore(STORE_NAME_ACU$1);
+                const request = store.index('lastAccessAt').openCursor();
+                request.onsuccess = () => {
+                    const cursor = request.result;
+                    if (cursor && bytesToFree > 0) {
+                        const record = cursor.value;
+                        bytesToFree -= Math.max(0, Number(record.byteSize) || 0);
+                        cursor.delete();
+                        cursor.continue();
+                    }
+                };
+                request.onerror = () => reject(request.error || new Error('向量临时缓存 LRU 淘汰失败'));
+                tx.oncomplete = () => {
+                    db.close();
+                    resolve();
+                };
+                tx.onerror = () => {
+                    db.close();
+                    reject(tx.error || new Error('向量临时缓存 LRU 淘汰事务失败'));
+                };
+            });
+        }
+        catch {
+            // 淘汰失败不影响读写链路，下次 put 会再次尝试。
         }
     }
     async function deleteVectorIndexCachedShard_ACU(indexId, shardId) {
@@ -74366,6 +74537,61 @@ $CONTENT
         const vector = getChunkVector_ACU(record.chunk);
         return !!vector && vector.length > 0 && (!ref.dimension || vector.length === ref.dimension);
     }
+    /**
+     * P7：热缓存字节预算 LRU。超预算时按 lastAccessAt 从最旧开始淘汰。
+     * 只作用于 chunk 数据 store，绝不触碰 flush 任务 store（任务是持久化意图，不是缓存）。
+     */
+    const VECTOR_HOT_CACHE_MAX_BYTES_ACU = 64 * 1024 * 1024;
+    const VECTOR_HOT_CACHE_TRIM_THROTTLE_MS_ACU = 60000;
+    let lastHotCacheTrimAt_ACU = 0;
+    async function trimSummaryVectorHotCacheToBudget_ACU(maxBytes = VECTOR_HOT_CACHE_MAX_BYTES_ACU) {
+        try {
+            const db = await openDb_ACU();
+            const totalBytes = await new Promise((resolve, reject) => {
+                let bytes = 0;
+                const tx = db.transaction(STORE_NAME_ACU, 'readonly');
+                const request = tx.objectStore(STORE_NAME_ACU).openCursor();
+                request.onsuccess = () => {
+                    const cursor = request.result;
+                    if (cursor) {
+                        bytes += Math.max(0, Number(cursor.value.byteSize) || 0);
+                        cursor.continue();
+                    }
+                };
+                request.onerror = () => reject(request.error || new Error('统计交火向量热缓存体积失败'));
+                tx.oncomplete = () => { db.close(); resolve(bytes); };
+                tx.onerror = () => { db.close(); reject(tx.error || new Error('统计交火向量热缓存体积事务失败')); };
+            });
+            if (totalBytes <= maxBytes)
+                return;
+            let bytesToFree = totalBytes - maxBytes;
+            const trimDb = await openDb_ACU();
+            await new Promise((resolve, reject) => {
+                const tx = trimDb.transaction(STORE_NAME_ACU, 'readwrite');
+                const request = tx.objectStore(STORE_NAME_ACU).index('lastAccessAt').openCursor();
+                request.onsuccess = () => {
+                    const cursor = request.result;
+                    if (cursor && bytesToFree > 0) {
+                        bytesToFree -= Math.max(0, Number(cursor.value.byteSize) || 0);
+                        cursor.delete();
+                        cursor.continue();
+                    }
+                };
+                request.onerror = () => reject(request.error || new Error('交火向量热缓存 LRU 淘汰失败'));
+                tx.oncomplete = () => { trimDb.close(); resolve(); };
+                tx.onerror = () => { trimDb.close(); reject(tx.error || new Error('交火向量热缓存 LRU 淘汰事务失败')); };
+            });
+        }
+        catch {
+            // 淘汰失败不影响读写链路，下次写入会再次尝试。
+        }
+    }
+    function maybeScheduleHotCacheTrim_ACU() {
+        if (Date.now() - lastHotCacheTrimAt_ACU < VECTOR_HOT_CACHE_TRIM_THROTTLE_MS_ACU)
+            return;
+        lastHotCacheTrimAt_ACU = Date.now();
+        void trimSummaryVectorHotCacheToBudget_ACU().catch(() => undefined);
+    }
     async function putSummaryVectorHotCacheChunks_ACU(options) {
         try {
             const manifest = options.manifest;
@@ -74419,6 +74645,7 @@ $CONTENT
                     tx.oncomplete = () => { db.close(); resolve(); };
                     tx.onerror = () => { db.close(); reject(tx.error || new Error('写入交火向量热缓存事务失败（单文件快照）')); };
                 });
+                maybeScheduleHotCacheTrim_ACU();
                 return;
             }
             // ── 旧版内容寻址模式：通过 chunkRefs 匹配写入 ──
@@ -74474,6 +74701,7 @@ $CONTENT
                     reject(tx.error || new Error('写入交火向量热缓存事务失败'));
                 };
             });
+            maybeScheduleHotCacheTrim_ACU();
         }
         catch {
             // 热缓存只是可丢失加速层，失败不能影响外置权威链路。
@@ -75881,8 +76109,10 @@ $CONTENT
                     blockedByReachability.push(path);
                     continue;
                 }
-                const scopeTokenFromPath = String(path.slice('TavernDB_ACU_vector_v2pack_'.length).split('_')[0] || '');
-                const candidatePackScopes = eligibleScopes.filter((scope) => scopeTokenFromPath === buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope));
+                // scopeToken 的 base64url 字母表含 `_`（base64 的 `/` 替换而来），
+                // split('_')[0] 会截断此类 token 导致永远失配（CJK 聊天名大概率命中）。
+                // 改为用候选 scope 构造完整 token 做前缀匹配。
+                const candidatePackScopes = eligibleScopes.filter((scope) => path.startsWith(`TavernDB_ACU_vector_v2pack_${buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope)}_`));
                 if (candidatePackScopes.length === 0) {
                     retainedPaths.push(path);
                     blockedByReachability.push(path);
@@ -75897,10 +76127,9 @@ $CONTENT
                 }
                 const packLoaded = await readVectorIndexJsonFile_ACU(path);
                 const packData = packLoaded.ok ? packLoaded.data : null;
-                const packKeyFromPath = scopeTokenFromPath
-                    ? path.slice(`TavernDB_ACU_vector_v2pack_${scopeTokenFromPath}_`.length)
-                    : '';
                 const scope = candidatePackScopes[0];
+                const matchedScopeToken = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(scope);
+                const packKeyFromPath = path.slice(`TavernDB_ACU_vector_v2pack_${matchedScopeToken}_`.length);
                 const packMatches = !!packData
                     && packData.schema === SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU
                     && Number(packData.version) === SUMMARY_VECTOR_INDEX_CONTENT_PACK_VERSION_ACU
@@ -92026,6 +92255,68 @@ $CONTENT
             model,
         });
     }
+    /** 请求超时：查询与归档批次共用。超时/网络中断归类为 retryable，交给上层有限重试。 */
+    const VECTOR_EMBEDDING_TIMEOUT_MS_ACU = 45000;
+    /** 网关内 retryable 类失败的最大请求次数（1 次原始 + 1 次快速重试）。 */
+    const VECTOR_EMBEDDING_MAX_ATTEMPTS_ACU = 2;
+    /** 重试前等待 Retry-After 的上界：查询路径在发送前同步阻塞，不允许长等待。 */
+    const VECTOR_EMBEDDING_RETRY_WAIT_MAX_MS_ACU = 5000;
+    async function fetchEmbeddingWithTimeout_ACU(endpoint, init, model) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), VECTOR_EMBEDDING_TIMEOUT_MS_ACU);
+        try {
+            return await fetch(endpoint, { ...init, signal: controller.signal });
+        }
+        catch (error) {
+            const isAbort = error?.name === 'AbortError';
+            throw new VectorEmbeddingError_ACU({
+                kind: 'retryable',
+                message: isAbort
+                    ? `Embedding 请求超时（${VECTOR_EMBEDDING_TIMEOUT_MS_ACU}ms），已中断。`
+                    : `Embedding 请求网络失败：${error?.message || String(error || '未知错误')}`,
+                endpoint,
+                model,
+            });
+        }
+        finally {
+            clearTimeout(timer);
+        }
+    }
+    async function requestEmbeddingsOnce_ACU(endpoint, model, input, headers) {
+        const response = await fetchEmbeddingWithTimeout_ACU(endpoint, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ model, input }),
+        }, model);
+        if (!response.ok) {
+            await throwEmbeddingHttpErrorAsync_ACU(response, endpoint, model);
+        }
+        const rawBody = await response.text().catch(() => '');
+        let payload;
+        try {
+            payload = JSON.parse(rawBody);
+        }
+        catch (_error) {
+            throw new VectorEmbeddingError_ACU({
+                kind: 'provider-contract',
+                message: `Embedding 响应不是合法 JSON（前 200 字符：${rawBody.slice(0, 200)}）。`,
+                httpStatus: response.status,
+                endpoint,
+                model,
+            });
+        }
+        const normalized = normalizeEmbeddingResponse_ACU(payload);
+        if (normalized.length === 0) {
+            throw new VectorEmbeddingError_ACU({
+                kind: 'provider-contract',
+                message: 'Embedding 响应中没有可用向量。',
+                httpStatus: response.status,
+                endpoint,
+                model,
+            });
+        }
+        return normalized;
+    }
     async function createEmbeddings_ACU(request) {
         const endpoint = String(request.endpoint || '').trim();
         const model = String(request.model || '').trim();
@@ -92044,26 +92335,26 @@ $CONTENT
         if (apiKey) {
             headers.Authorization = `Bearer ${apiKey}`;
         }
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({ model, input }),
-        });
-        if (!response.ok) {
-            await throwEmbeddingHttpErrorAsync_ACU(response, endpoint, model);
+        // 网关内只对 retryable / limited-retryable 做一次快速重试（尊重 Retry-After，
+        // 上限 5s）；credential / request / provider-contract 重试不可能成功，直接抛出。
+        // 任务级的多次退避重试由 flush 队列负责，这里不叠加长循环。
+        let lastError = null;
+        for (let attempt = 1; attempt <= VECTOR_EMBEDDING_MAX_ATTEMPTS_ACU; attempt += 1) {
+            try {
+                return await requestEmbeddingsOnce_ACU(endpoint, model, input, headers);
+            }
+            catch (error) {
+                lastError = error;
+                const retryable = isVectorEmbeddingError_ACU(error)
+                    && (error.kind === 'retryable' || error.kind === 'limited-retryable');
+                if (!retryable || attempt >= VECTOR_EMBEDDING_MAX_ATTEMPTS_ACU) {
+                    throw error;
+                }
+                const waitMs = Math.min(Math.max(0, Number(error.retryAfterMs ?? 1000) || 1000), VECTOR_EMBEDDING_RETRY_WAIT_MAX_MS_ACU);
+                await new Promise((resolve) => setTimeout(resolve, waitMs));
+            }
         }
-        const payload = await response.json();
-        const normalized = normalizeEmbeddingResponse_ACU(payload);
-        if (normalized.length === 0) {
-            throw new VectorEmbeddingError_ACU({
-                kind: 'provider-contract',
-                message: 'Embedding 响应中没有可用向量。',
-                httpStatus: response.status,
-                endpoint,
-                model,
-            });
-        }
-        return normalized;
+        throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Embedding 请求失败'));
     }
 
     const ANCHOR_FIELD_ACU = '_acu_remote_memory_snapshot_anchor';
@@ -92549,6 +92840,19 @@ $CONTENT
                 embeddingMap.set(item.index, item.embedding);
             }
         });
+        // P5：完整性校验——响应缺失任意一条向量即整批失败（retryable），禁止部分落盘。
+        // 静默跳过缺失 chunk 会把缺行索引标记为 success 写入快照，召回不全且无告警。
+        const missingIndexes = chunkSources
+            .map((_source, index) => index)
+            .filter((index) => !embeddingMap.has(index));
+        if (missingIndexes.length > 0) {
+            throw new VectorEmbeddingError_ACU({
+                kind: 'retryable',
+                message: `Embedding 响应缺失 ${missingIndexes.length}/${chunkSources.length} 条向量（首个缺失批内序号 ${missingIndexes[0]}），为避免索引缺行已中止本批归档。`,
+                endpoint: options.embeddingEndpoint,
+                model: options.embeddingModel,
+            });
+        }
         const chunks = [];
         const rowChunkIds = new Map();
         chunkSources.forEach((source, index) => {
@@ -93423,8 +93727,157 @@ $CONTENT
         return state ? { ...state } : null;
     }
 
+    /**
+     * service/vector/summary-vector-index-chat-deletion-gc.ts — 聊天删除向量清理与存储治理
+     *
+     * 解决向量外置存档"只增不减"的三个来源：
+     *   1. 聊天被删除后其向量文件/IDB 缓存/flush 任务成为永久孤儿 → 事件驱动即时清理；
+     *   2. 插件未加载期间发生的删除无事件可听 → 启动期节流孤儿清扫兜底；
+     *   3. 活跃聊天每次归档产生新一代快照、旧代无人回收 → flush 成功后按 scope 节流 Safe GC
+     *      （可达性来自当前聊天全部楼层 manifest，被任何楼层引用的历史快照天然受保护，
+     *      只回收无引用且过 grace 的旧代对象，不破坏回退旧楼层的恢复能力）。
+     *
+     * 删除安全边界（缺一不可）：
+     *   - 聊天文件名不含角色作用域，跨角色可重名；删除前必须枚举全酒馆聊天确认无同名存活，
+     *     枚举不完整（返回 null）时 fail-safe 跳过；
+     *   - 实际文件删除全部走 cleanupUnreachableSummaryVectorIndexFiles_ACU 的既有防护
+     *     （scope 前缀匹配 + blob canonical 身份回读校验 + grace 窗口 + prepared/pending 保护）。
+     */
+    const SUMMARY_VECTOR_ORPHAN_SWEEP_THROTTLE_KEY_ACU = 'TavernDB_ACU_vector_orphan_sweep_last_run';
+    const SUMMARY_VECTOR_ORPHAN_SWEEP_INTERVAL_MS_ACU = 24 * 60 * 60000;
+    const SUMMARY_VECTOR_RETENTION_GC_INTERVAL_MS_ACU = 30 * 60000;
+    /** flush 成功后 retention GC 的 per-scope 节流时钟（内存态即可，重载后重来无害）。 */
+    const retentionGcLastRunByScope_ACU = new Map();
+    function getCurrentChatKey_ACU() {
+        return String(currentChatFileIdentifier_ACU || '').trim();
+    }
+    /**
+     * 从 registry 反解出属于指定 chatKey 集合的全部唯一 scope。
+     * 只识别 V2 快照 / v2pack 路径（token 可逆）；legacy 路径没有可验证身份，
+     * 维持 Safe GC 的 quarantine 策略，不参与删除。
+     */
+    async function collectRegistryScopesByChatKeys_ACU(matchChatKey) {
+        const registry = await loadVectorIndexRegistry_ACU();
+        const byToken = new Map();
+        for (const file of registry.files) {
+            const path = String(file?.path || '').trim();
+            if (!path)
+                continue;
+            const decoded = decodeVectorIndexScopeFromPath_ACU(path);
+            if (!decoded || !matchChatKey(decoded.chatKey))
+                continue;
+            const scope = normalizeSummaryVectorIndexScope_ACU(decoded);
+            byToken.set(serializeSummaryVectorIndexScope_ACU(scope), scope);
+        }
+        return Array.from(byToken.values());
+    }
+    async function cleanupScopesEverywhere_ACU(scopes, chatKeys) {
+        // IDB 清理支持 partial scope：只传 chatKey 即可清空该聊天全部热缓存与 flush 任务，
+        // 覆盖 registry 里已无文件但 IDB 仍有残留的情况。
+        for (const chatKey of chatKeys) {
+            await deleteSummaryVectorHotCacheByScope_ACU({ chatKey, isolationKey: '', sourceTableKey: '' });
+            await clearSummaryVectorFlushTasksByScope_ACU({ chatKey, isolationKey: '', sourceTableKey: '' });
+        }
+        if (scopes.length === 0)
+            return 0;
+        const gcResult = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: scopes });
+        return Array.isArray(gcResult?.deletedPaths) ? gcResult.deletedPaths.length : 0;
+    }
+    /**
+     * CHAT_DELETED / GROUP_CHAT_DELETED 事件入口：清理被删聊天的向量数据。
+     */
+    async function cleanupSummaryVectorIndexForDeletedChat_ACU(deletedChatName) {
+        const chatKey = cleanChatName_ACU(String(deletedChatName || ''));
+        if (!chatKey) {
+            return { performed: false, reason: 'empty_chat_name', scopeCount: 0, deletedFileCount: 0 };
+        }
+        if (chatKey === getCurrentChatKey_ACU()) {
+            // 防御性守卫：删除事件不应指向当前打开的聊天；若指向则宁可留垃圾也不动。
+            logWarn_ACU(`[交火向量索引] 聊天删除清理跳过：目标即当前聊天 ${chatKey}`);
+            return { performed: false, reason: 'target_is_current_chat', scopeCount: 0, deletedFileCount: 0 };
+        }
+        const aliveChatNames = await listAllHostChatNames_ACU();
+        if (aliveChatNames === null) {
+            logWarn_ACU('[交火向量索引] 聊天删除清理跳过：无法完整枚举存活聊天（fail-safe）');
+            return { performed: false, reason: 'chat_enumeration_unavailable', scopeCount: 0, deletedFileCount: 0 };
+        }
+        if (aliveChatNames.has(chatKey)) {
+            // 跨角色同名聊天仍存活，其向量数据与被删聊天共用 scope，不能删。
+            logDebug_ACU(`[交火向量索引] 聊天删除清理跳过：仍存在同名存活聊天 ${chatKey}`);
+            return { performed: false, reason: 'same_name_chat_alive', scopeCount: 0, deletedFileCount: 0 };
+        }
+        const scopes = await collectRegistryScopesByChatKeys_ACU((candidate) => candidate === chatKey);
+        const deletedFileCount = await cleanupScopesEverywhere_ACU(scopes, [chatKey]);
+        logDebug_ACU(`[交火向量索引] 聊天删除清理完成：chatKey=${chatKey}, scopes=${scopes.length}, deletedFiles=${deletedFileCount}`);
+        return { performed: true, scopeCount: scopes.length, deletedFileCount };
+    }
+    /**
+     * 启动期孤儿清扫：兜住插件未加载期间被删除的聊天。localStorage 节流 24 小时。
+     */
+    async function sweepOrphanSummaryVectorIndexFiles_ACU() {
+        try {
+            const lastRun = Number(globalThis.localStorage?.getItem(SUMMARY_VECTOR_ORPHAN_SWEEP_THROTTLE_KEY_ACU) || 0);
+            if (Number.isFinite(lastRun) && Date.now() - lastRun < SUMMARY_VECTOR_ORPHAN_SWEEP_INTERVAL_MS_ACU) {
+                return { performed: false, reason: 'throttled', scopeCount: 0, deletedFileCount: 0 };
+            }
+        }
+        catch (_error) {
+            // localStorage 不可用时不节流，清扫本身幂等。
+        }
+        const aliveChatNames = await listAllHostChatNames_ACU();
+        if (aliveChatNames === null) {
+            logWarn_ACU('[交火向量索引] 孤儿清扫跳过：无法完整枚举存活聊天（fail-safe）');
+            return { performed: false, reason: 'chat_enumeration_unavailable', scopeCount: 0, deletedFileCount: 0 };
+        }
+        const currentChatKey = getCurrentChatKey_ACU();
+        const scopes = await collectRegistryScopesByChatKeys_ACU((candidate) => (!!candidate && candidate !== currentChatKey && !aliveChatNames.has(candidate)));
+        const orphanChatKeys = Array.from(new Set(scopes.map((scope) => scope.chatKey)));
+        const deletedFileCount = await cleanupScopesEverywhere_ACU(scopes, orphanChatKeys);
+        try {
+            globalThis.localStorage?.setItem(SUMMARY_VECTOR_ORPHAN_SWEEP_THROTTLE_KEY_ACU, String(Date.now()));
+        }
+        catch (_error) {
+            // 忽略：无法记录节流时间戳只意味着下次启动会再扫一遍。
+        }
+        if (scopes.length > 0) {
+            logDebug_ACU(`[交火向量索引] 孤儿清扫完成：orphanChats=${orphanChatKeys.length}, scopes=${scopes.length}, deletedFiles=${deletedFileCount}`);
+        }
+        return { performed: true, scopeCount: scopes.length, deletedFileCount };
+    }
+    /**
+     * flush 成功后的活跃聊天 retention GC：回收当前 scope 无楼层引用且过 grace 的旧代快照。
+     * per-scope 节流 30 分钟，避免每次归档都全量扫 registry。
+     */
+    async function runScopedRetentionGcAfterFlush_ACU(scope) {
+        const canonical = normalizeSummaryVectorIndexScope_ACU(scope);
+        const scopeKey = serializeSummaryVectorIndexScope_ACU(canonical);
+        const lastRun = retentionGcLastRunByScope_ACU.get(scopeKey) || 0;
+        if (Date.now() - lastRun < SUMMARY_VECTOR_RETENTION_GC_INTERVAL_MS_ACU)
+            return;
+        retentionGcLastRunByScope_ACU.set(scopeKey, Date.now());
+        const gcResult = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: [canonical] });
+        const deletedCount = Array.isArray(gcResult?.deletedPaths) ? gcResult.deletedPaths.length : 0;
+        if (deletedCount > 0) {
+            logDebug_ACU(`[交火向量索引] retention GC 回收旧代快照：scope=${scopeKey}, deletedFiles=${deletedCount}`);
+        }
+    }
+
     const SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU = 2500;
     const SUMMARY_VECTOR_INDEX_FLUSHING_STALE_MS_ACU = 60000;
+    /**
+     * P1：claim 后可重试失败的自动重排上限与退避上界。
+     * attemptCount 在 claim（status→flushing）时由 hot-cache 层自增，因此只有真正
+     * 走到归档执行的失败才会消耗尝试次数；claim 前失败（上下文不匹配等）不重排，
+     * 由 CHAT_CHANGED restore 兜底，避免 attemptCount 不增导致的无限重试循环。
+     */
+    const SUMMARY_VECTOR_INDEX_FLUSH_MAX_ATTEMPTS_ACU = 5;
+    const SUMMARY_VECTOR_INDEX_FLUSH_RETRY_BACKOFF_MAX_MS_ACU = 5 * 60000;
+    /** attemptCount=1 → 2.5s，2 → 5s，3 → 10s…上限 5 分钟。 */
+    function computeFlushRetryBackoffMs_ACU(attemptCount) {
+        const attempts = Math.max(1, Math.floor(Number(attemptCount) || 1));
+        const backoff = SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU * Math.pow(2, attempts - 1);
+        return Math.min(backoff, SUMMARY_VECTOR_INDEX_FLUSH_RETRY_BACKOFF_MAX_MS_ACU);
+    }
     /** T4：credential cooldown 默认时长（毫秒）。403/401 后同凭据在其他 scope 也停止重试。 */
     const SUMMARY_VECTOR_INDEX_CREDENTIAL_COOLDOWN_MS_ACU = 30 * 60000;
     const summaryVectorFlushTimers_ACU = new Map();
@@ -93481,8 +93934,21 @@ $CONTENT
             clearTimeout(timer);
         summaryVectorFlushTimers_ACU.delete(scopeKey);
     }
-    async function markFlushTaskFailure_ACU(task, error, terminal = false) {
-        await upsertSummaryVectorFlushTask_ACU({
+    async function markFlushTaskFailure_ACU(task, error, terminal = false, options = {}) {
+        // P1：claim 后失败（attemptCount 已自增）达到上限时升级为 terminal，
+        // 防止确定性失败（如坏文本导致 provider 持续缺向量）无限扣费。
+        const attemptCount = Math.max(0, Number(task.attemptCount) || 0);
+        const attemptsExhausted = !terminal
+            && options.scheduleRetry === true
+            && attemptCount >= SUMMARY_VECTOR_INDEX_FLUSH_MAX_ATTEMPTS_ACU;
+        const finalTerminal = terminal || attemptsExhausted;
+        const finalError = attemptsExhausted
+            ? `${error}（已连续失败 ${attemptCount} 次，达到自动重试上限，可通过“立即重建”手动恢复）`
+            : error;
+        const retryDelayMs = finalTerminal
+            ? SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU
+            : computeFlushRetryBackoffMs_ACU(attemptCount);
+        const updated = await upsertSummaryVectorFlushTask_ACU({
             scopeKey: task.scopeKey,
             chatKey: task.chatKey,
             isolationKey: task.isolationKey,
@@ -93490,15 +93956,25 @@ $CONTENT
             targetMessageIndex: task.targetMessageIndex,
             generation: task.generation,
             mode: task.mode,
-            status: terminal ? 'failed_terminal' : 'failed_retryable',
+            status: finalTerminal ? 'failed_terminal' : 'failed_retryable',
             requestedAt: task.requestedAt,
-            debounceUntil: Date.now() + SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU,
-            lastError: error,
+            debounceUntil: Date.now() + retryDelayMs,
+            lastError: finalError,
         });
-        logSummaryVectorIndexIdentityEvent_ACU(terminal ? 'warn' : 'debug', 'flush', terminal ? 'failed_terminal' : 'failed_retryable', {
+        logSummaryVectorIndexIdentityEvent_ACU(finalTerminal ? 'warn' : 'debug', 'flush', finalTerminal ? 'failed_terminal' : 'failed_retryable', {
             scopeFingerprint: task.scopeKey,
-            error,
+            error: finalError,
         });
+        // P1：只有 claim 后失败才自动重排定时器。upsert 可能因新代次入队而返回更高
+        // generation 的记录，此时不重排（新代次已有自己的定时器/接力）。
+        if (!finalTerminal
+            && options.scheduleRetry === true
+            && updated
+            && updated.generation === task.generation
+            && updated.status === 'failed_retryable') {
+            scheduleFlushTaskTimer_ACU(updated);
+            logDebug_ACU(`[交火向量索引] flush 失败已自动重排：scope=${task.scopeKey}, attempt=${attemptCount}, delayMs=${retryDelayMs}`);
+        }
     }
     function scheduleFlushTaskTimer_ACU(task) {
         clearFlushTimer_ACU(task.scopeKey);
@@ -93744,6 +94220,15 @@ $CONTENT
                 if (completed && shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(result)) {
                     clearSummaryVectorIndexDirtyForRealign_ACU(task.scopeKey);
                 }
+                // P7：归档成功后按 scope 节流回收无楼层引用且过 grace 的旧代快照，
+                // 防止活跃聊天的外置存档随归档次数无界增长。fire-and-forget，失败不影响 flush 结果。
+                void runScopedRetentionGcAfterFlush_ACU({
+                    chatKey: task.chatKey,
+                    isolationKey: task.isolationKey,
+                    sourceTableKey: task.sourceTableKey,
+                }).catch((error) => {
+                    logWarn_ACU('[交火向量索引] retention GC 执行失败（不影响归档结果）:', error?.message || error);
+                });
                 logDebug_ACU(`[交火向量索引] 防抖 flush 完成：scope=${task.scopeKey}, skipped=${result.skipped}, reason=${result.reason || ''}`);
                 return { success: true, skipped: result.skipped, reason: result.reason, result };
             }
@@ -93759,7 +94244,7 @@ $CONTENT
                 || result.reason === 'summary_vector_index_config_invalid'
                 || result.reason === 'target_message_invalid'
                 || result.reason === 'target_message_not_found';
-            await markFlushTaskFailure_ACU(task, error, isTerminalFailure);
+            await markFlushTaskFailure_ACU(task, error, isTerminalFailure, { scheduleRetry: true });
             logWarn_ACU('[交火向量索引] 防抖 flush 失败:', error);
             return { success: false, reason: result.reason, result, error };
         }
@@ -93767,7 +94252,7 @@ $CONTENT
             const message = normalizeErrorMessage_ACU$1(error);
             if (error instanceof SummaryVectorFlushGenerationInvalidatedError_ACU)
                 return { success: true, skipped: true, reason: 'flush_scope_invalidated' };
-            await markFlushTaskFailure_ACU(task, message, false);
+            await markFlushTaskFailure_ACU(task, message, false, { scheduleRetry: true });
             logWarn_ACU('[交火向量索引] 防抖 flush 异常:', message);
             return { success: false, reason: 'flush_exception', error: message };
         }
@@ -103237,7 +103722,23 @@ $CONTENT
                     sourceTableKey: summaryTable.summaryKey,
                 });
                 markSummaryVectorIndexDirtyForRealign_ACU(scopeKey, realignDirtyReason);
-                logDebug_ACU(`[交火向量索引] ${realignDirtyReason}: 已标记 scope=${scopeKey} 下一次归档后执行懒对齐。`);
+                // P2：dirty 标记必须有消费端。楼层删除/滑动后，当向量功能开启且该 scope 已建过
+                // 索引时，直接入队重新归档（flush 成功后由队列清除 dirty）。未建过索引的聊天
+                // 不入队，避免凭空发起首次建索引产生意外 embedding 费用。
+                const vectorModeEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
+                const hasExistingIndex = !!getLatestSummaryVectorIndexSnapshotState_ACU()?.summaryVectorIndexState;
+                if (vectorModeEnabled && hasExistingIndex) {
+                    void enqueueSummaryVectorIndexFlush_ACU({ reason: realignDirtyReason, mode: 'sync' })
+                        .then((queued) => {
+                        logDebug_ACU(`[交火向量索引] ${realignDirtyReason}: 已入队重新归档对齐，scope=${scopeKey}, queued=${queued.queued}, reason=${queued.reason || ''}`);
+                    })
+                        .catch((e) => {
+                        logWarn_ACU(`[交火向量索引] ${realignDirtyReason}: 重新归档入队失败（dirty 标记保留，等待下次归档）: ${e?.message || e}`);
+                    });
+                }
+                else {
+                    logDebug_ACU(`[交火向量索引] ${realignDirtyReason}: 已标记 scope=${scopeKey} dirty（向量功能未启用或尚无索引，不入队归档）。`);
+                }
             }
         }
         finally {
@@ -103659,6 +104160,107 @@ $CONTENT
             showToastr_ACU('success', `剧情规划成功，共完成 ${result.successCount} 个任务。`, '规划成功', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK });
         }
         return result.finalMessage;
+    }
+
+    /** Rerank 请求超时上界；超时抛错由调用方回退到 embedding 排序。 */
+    const VECTOR_RERANK_TIMEOUT_MS_ACU = 30000;
+    function normalizeEndpoint_ACU(endpoint) {
+        return String(endpoint || '').trim().replace(/\/+$/, '');
+    }
+    function buildRerankHeaders_ACU(apiKey) {
+        const headers = {
+            ...getHostRequestHeaders_ACU(),
+            'Content-Type': 'application/json',
+        };
+        if (apiKey) {
+            headers.Authorization = `Bearer ${apiKey}`;
+        }
+        return headers;
+    }
+    function normalizeRerankItem_ACU(item, fallbackIndex) {
+        if (!item || typeof item !== 'object') {
+            return null;
+        }
+        const rawIndex = item.index ?? item.document_index ?? item.documentIndex;
+        const rawScore = item.relevance_score ?? item.relevanceScore ?? item.score ?? item.rerank_score;
+        const index = Number.isFinite(Number(rawIndex)) ? Math.floor(Number(rawIndex)) : fallbackIndex;
+        const relevanceScore = Number(rawScore);
+        if (!Number.isFinite(index) || index < 0 || !Number.isFinite(relevanceScore)) {
+            return null;
+        }
+        return {
+            index,
+            relevanceScore,
+        };
+    }
+    function extractRerankResults_ACU(payload) {
+        const rawResults = Array.isArray(payload?.results)
+            ? payload.results
+            : Array.isArray(payload?.data?.results)
+                ? payload.data.results
+                : Array.isArray(payload?.data)
+                    ? payload.data
+                    : [];
+        return rawResults
+            .map((item, index) => normalizeRerankItem_ACU(item, index))
+            .filter((item) => !!item);
+    }
+    async function createRerankScores_ACU(request) {
+        const endpoint = normalizeEndpoint_ACU(request.endpoint);
+        const model = String(request.model || '').trim();
+        const query = String(request.query || '').trim();
+        const documents = Array.isArray(request.documents)
+            ? request.documents.map((item) => String(item ?? '').trim())
+            : [];
+        if (!endpoint) {
+            throw new Error('Rerank endpoint 为空。');
+        }
+        if (!model) {
+            throw new Error('Rerank model 为空。');
+        }
+        if (!query) {
+            return [];
+        }
+        if (documents.length === 0 || documents.every((item) => !item)) {
+            return [];
+        }
+        const instruction = String(request.instruction ?? '').trim();
+        const payload = { model, query, documents };
+        if (instruction)
+            payload.instruction = instruction;
+        // 超时可中断：rerank 在发送前同步链路上，挂起的上游不允许无限阻塞生成。
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), VECTOR_RERANK_TIMEOUT_MS_ACU);
+        let response;
+        try {
+            response = await fetch(endpoint, {
+                method: 'POST',
+                headers: buildRerankHeaders_ACU(request.apiKey),
+                body: JSON.stringify(payload),
+                signal: controller.signal,
+            });
+        }
+        catch (error) {
+            throw new Error(error?.name === 'AbortError'
+                ? `Rerank 请求超时（${VECTOR_RERANK_TIMEOUT_MS_ACU}ms），已中断。`
+                : `Rerank 请求网络失败：${error?.message || String(error || '未知错误')}`);
+        }
+        finally {
+            clearTimeout(timer);
+        }
+        if (!response.ok) {
+            const detail = await response.text().catch(() => response.statusText);
+            throw new Error(`Rerank 请求失败: ${response.status} ${detail}`);
+        }
+        const rawBody = await response.text().catch(() => '');
+        let responsePayload;
+        try {
+            responsePayload = JSON.parse(rawBody);
+        }
+        catch (_error) {
+            throw new Error(`Rerank 响应不是合法 JSON（前 200 字符：${rawBody.slice(0, 200)}）。`);
+        }
+        return extractRerankResults_ACU(responsePayload);
     }
 
     function getCurrentSummaryVectorIndexSourceTableKey_ACU() {
@@ -104207,6 +104809,11 @@ $CONTENT
     let lastRuntimeSignature_ACU = '';
     let lastRuntimeAt_ACU = 0;
     const SUMMARY_VECTOR_INDEX_RUNTIME_DEDUPE_MS_ACU = 8000;
+    /** 重置去重窗口状态（测试隔离用；生产路径依赖签名中的 chatKey 自然区分聊天）。 */
+    function resetSummaryVectorIndexRuntimeDedupeState_ACU() {
+        lastRuntimeSignature_ACU = '';
+        lastRuntimeAt_ACU = 0;
+    }
     function normalizeText_ACU(value) {
         return String(value ?? '').trim();
     }
@@ -104325,39 +104932,26 @@ $CONTENT
             return 0;
         return dot / (leftNorm * Math.sqrt(rightNorm));
     }
+    // P4：统一走 vector-rerank-gateway 网关（超时可中断、宿主请求头、安全 JSON 解析），
+    // 消除此前内联 fetch 与网关的双实现漂移。失败时保留既有语义：回退 embedding 排序。
     async function rerankCandidates_ACU(config, query, candidates) {
         const endpoint = normalizeText_ACU(config.rerankEndpoint);
         const model = normalizeText_ACU(config.rerankModel);
         if (!endpoint || !model || candidates.length === 0)
             return candidates;
         try {
-            const headers = { 'Content-Type': 'application/json' };
-            const apiKey = normalizeText_ACU(config.rerankApiKey);
-            if (apiKey)
-                headers.Authorization = `Bearer ${apiKey}`;
-            const instruction = normalizeText_ACU(config.rerankInstruction);
-            const body = {
+            const results = await createRerankScores_ACU({
+                endpoint,
                 model,
+                apiKey: normalizeText_ACU(config.rerankApiKey) || undefined,
                 query,
                 documents: candidates.map((candidate) => candidate.chunk.text),
-            };
-            if (instruction)
-                body.instruction = instruction;
-            const response = await fetch(endpoint, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify(body),
+                instruction: normalizeText_ACU(config.rerankInstruction) || undefined,
             });
-            if (!response.ok)
-                throw new Error(await response.text().catch(() => response.statusText));
-            const payload = await response.json();
-            const results = Array.isArray(payload?.results) ? payload.results : Array.isArray(payload?.data) ? payload.data : [];
             const byIndex = new Map();
-            results.forEach((item, fallbackIndex) => {
-                const index = Number.isInteger(item?.index) ? Number(item.index) : Number.isInteger(item?.document_index) ? Number(item.document_index) : fallbackIndex;
-                const score = Number(item?.relevance_score ?? item?.score ?? item?.rerank_score);
-                if (Number.isFinite(index) && Number.isFinite(score))
-                    byIndex.set(index, score);
+            results.forEach((item) => {
+                if (item.index >= 0 && item.index < candidates.length)
+                    byIndex.set(item.index, item.relevanceScore);
             });
             return candidates
                 .map((candidate, index) => ({ ...candidate, rerankScore: byIndex.get(index) ?? candidate.score }))
@@ -104725,8 +105319,13 @@ $CONTENT
         const userInput = normalizeText_ACU(options.userInput);
         if (!userInput)
             return { success: false, skipped: true, reason: 'empty_user_input' };
-        const signature = `${options.source || 'unknown'}:${userInput}`;
+        // P3：去重签名不含 source——同一次发送会经由 TavernHelper 包装与
+        // GENERATION_AFTER_COMMANDS 两个钩子各触发一次，source 不同导致签名不同、
+        // 完整链路（关键词 AI + embedding + rerank + 世界书写回）跑两遍。
+        // 加入 chatKey 防止切换聊天后相同文本被跨聊天误去重。
+        const signature = `${String(currentChatFileIdentifier_ACU || '')}:${userInput}`;
         if (signature === lastRuntimeSignature_ACU && Date.now() - lastRuntimeAt_ACU <= SUMMARY_VECTOR_INDEX_RUNTIME_DEDUPE_MS_ACU) {
+            logDebug_ACU(`[交火模式纪要索引] 8s 窗口内重复触发已去重：source=${options.source || 'unknown'}`);
             return { success: true, skipped: true, reason: 'deduped' };
         }
         lastRuntimeSignature_ACU = signature;
@@ -113800,6 +114399,35 @@ $CONTENT
                         logDebug_ACU('[提示词模板] 已注册 CHAT_COMPLETION_SETTINGS_READY 事件监听（on）');
                     }
                 }
+                // P7：聊天被删除时清理其向量外置存档 / IDB 缓存 / flush 任务。
+                // 延迟 5s 执行：等宿主完成删除后的状态收敛（characters[].chats、当前聊天切换）再枚举校验。
+                const handleChatDeletedForVectorCleanup_ACU = (deletedChatName) => {
+                    const name = String(deletedChatName || '').trim();
+                    if (!name)
+                        return;
+                    setTimeout(() => {
+                        void cleanupSummaryVectorIndexForDeletedChat_ACU(name).catch((error) => {
+                            logWarn_ACU('[交火向量索引] 聊天删除清理失败（将由孤儿清扫兜底）:', error?.message || error);
+                        });
+                    }, 5000);
+                };
+                if (SillyTavern_API_ACU.eventTypes.CHAT_DELETED) {
+                    SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_DELETED, handleChatDeletedForVectorCleanup_ACU);
+                    logDebug_ACU('[交火向量索引] 已注册 CHAT_DELETED 向量清理监听');
+                }
+                // GROUP_CHAT_DELETED 在本地 eventTypes 类型声明快照中缺失（运行时存在），用索引访问。
+                const groupChatDeletedEventType = SillyTavern_API_ACU.eventTypes['GROUP_CHAT_DELETED'];
+                if (groupChatDeletedEventType) {
+                    SillyTavern_API_ACU.eventSource.on(groupChatDeletedEventType, handleChatDeletedForVectorCleanup_ACU);
+                    logDebug_ACU('[交火向量索引] 已注册 GROUP_CHAT_DELETED 向量清理监听');
+                }
+                // P7：启动 60s 后执行孤儿清扫（内部 localStorage 节流 24h），
+                // 兜住插件未加载期间被删除的聊天遗留的向量存档。
+                setTimeout(() => {
+                    void sweepOrphanSummaryVectorIndexFiles_ACU().catch((error) => {
+                        logWarn_ACU('[交火向量索引] 孤儿清扫失败:', error?.message || error);
+                    });
+                }, 60000);
                 SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_CHANGED, async (chatFileName) => {
                     logDebug_ACU(`ACU CHAT_CHANGED event: ${chatFileName}`);
                     const hasValidChatFileName_ACU = isValidChatFileName_ACU(chatFileName);
@@ -139028,7 +139656,7 @@ Expected function or array of functions, received type ${typeof value}.`
             activePresetName: '',
             currentConfigReady: false,
             currentConfigLabel: '当前 API 配置不完整',
-            currentChatKey: getCurrentChatKey_ACU(),
+            currentChatKey: getCurrentChatKey_ACU$1(),
             streamingEnabled: false,
             tavernProfiles: [],
             modelOptions: [],
@@ -139053,7 +139681,7 @@ Expected function or array of functions, received type ${typeof value}.`
              */
             refreshFromSettings() {
                 ensureApiSettingsShape_ACU();
-                this.currentChatKey = getCurrentChatKey_ACU();
+                this.currentChatKey = getCurrentChatKey_ACU$1();
                 this.presets = clone$5(settings_ACU.apiPresets);
                 const defaultName = findPresetByName_ACU(this.presets, settings_ACU.defaultApiPresetName)
                     ? settings_ACU.defaultApiPresetName

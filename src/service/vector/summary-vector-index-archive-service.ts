@@ -13,7 +13,7 @@ import {
     assertSummaryVectorFlushGenerationCurrent_ACU,
     SummaryVectorFlushGenerationInvalidatedError_ACU,
 } from '../../data/storage/vector-index-hot-cache';
-import { createEmbeddings_ACU, isVectorEmbeddingError_ACU } from '../../data/gateways/vector-embedding-gateway';
+import { createEmbeddings_ACU, isVectorEmbeddingError_ACU, VectorEmbeddingError_ACU } from '../../data/gateways/vector-embedding-gateway';
 import type { VectorEmbeddingResult_ACU } from '../../data/gateways/vector-embedding-gateway';
 import { buildVectorIndexSingleSnapshotV2FilePath_ACU } from '../../data/storage/vector-index-st-files-storage';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
@@ -632,6 +632,20 @@ async function buildChunksWithEmbeddings_ACU(
             embeddingMap.set(item.index, item.embedding);
         }
     });
+
+    // P5：完整性校验——响应缺失任意一条向量即整批失败（retryable），禁止部分落盘。
+    // 静默跳过缺失 chunk 会把缺行索引标记为 success 写入快照，召回不全且无告警。
+    const missingIndexes = chunkSources
+        .map((_source, index) => index)
+        .filter((index) => !embeddingMap.has(index));
+    if (missingIndexes.length > 0) {
+        throw new VectorEmbeddingError_ACU({
+            kind: 'retryable',
+            message: `Embedding 响应缺失 ${missingIndexes.length}/${chunkSources.length} 条向量（首个缺失批内序号 ${missingIndexes[0]}），为避免索引缺行已中止本批归档。`,
+            endpoint: options.embeddingEndpoint,
+            model: options.embeddingModel,
+        });
+    }
 
     const chunks: ChatSummaryVectorIndexChunk_ACU[] = [];
     const rowChunkIds = new Map<string, string[]>();
