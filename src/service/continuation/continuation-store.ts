@@ -1,6 +1,6 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_DOWNTIME_TURN_RATIO_DEFAULT_ACU, CONTINUATION_DOWNTIME_TURN_RATIO_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU } from './defaults';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
@@ -69,10 +69,10 @@ function requireInteger_ACU(value: unknown, path: string, minimum?: number): num
   return value;
 }
 
-/** 校验 0 到 maximum 之间的有限小数。NaN 与 Infinity 会让后续的 ceil 换算产出垃圾，必须在这里拦掉。 */
-function requireRatio_ACU(value: unknown, path: string, maximum: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > maximum) {
-    fail_ACU('CONTINUATION_ENVELOPE_INVALID', `字段必须是 0 到 ${maximum} 之间的小数：${path}`, { path });
+/** 校验 0 到 maximum 之间的整数。上界存在的意义是：设得过大等于关闭兜底，应显式选 0 而不是靠大数糊弄。 */
+function requireBoundedInteger_ACU(value: unknown, path: string, maximum: number): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > maximum) {
+    fail_ACU('CONTINUATION_ENVELOPE_INVALID', `字段必须是 0 到 ${maximum} 之间的整数：${path}`, { path });
   }
   return value;
 }
@@ -182,9 +182,11 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (!Object.prototype.hasOwnProperty.call(raw, 'storyTailFloors')) raw.storyTailFloors = AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU;
   if (!Object.prototype.hasOwnProperty.call(raw, 'agentReadTokenBudget')) raw.agentReadTokenBudget = AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU;
   if (!Object.prototype.hasOwnProperty.call(raw, 'agentReadFallbackTokens')) raw.agentReadFallbackTokens = AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU;
-  // 节奏配比校验上线之前的信封没有这一项；补默认即无感迁移。
-  if (!Object.prototype.hasOwnProperty.call(raw, 'downtimeTurnRatio')) raw.downtimeTurnRatio = CONTINUATION_DOWNTIME_TURN_RATIO_DEFAULT_ACU;
-  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'downtimeTurnRatio', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+  // 节奏规则从「每阶段固定低压占比」改为「阶段形态 + 跨阶段连续高压上限」，旧键已无对应语义：
+  // 直接丢掉并补新键的默认值，保留旧值反而会把用户配过的比例误当成新语义使用。
+  if (Object.prototype.hasOwnProperty.call(raw, 'downtimeTurnRatio')) delete raw.downtimeTurnRatio;
+  if (!Object.prototype.hasOwnProperty.call(raw, 'maxConsecutivePressureTurns')) raw.maxConsecutivePressureTurns = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU;
+  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
   requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
   if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
   const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
@@ -196,10 +198,10 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   let outlinePrompt = raw.outlinePrompt;
   let agentPrompts = raw.agentPrompts;
   let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU) {
+  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU;
   }
   
   return {
@@ -207,7 +209,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     outlinePreview: requireBoolean_ACU(raw.outlinePreview, 'settings.outlinePreview'), autoNextStage: requireBoolean_ACU(raw.autoNextStage, 'settings.autoNextStage'),
     maxAutomaticStages: requireInteger_ACU(raw.maxAutomaticStages, 'settings.maxAutomaticStages', 1), loopTags: requireString_ACU(raw.loopTags, 'settings.loopTags'),
     loopDelaySeconds: requireInteger_ACU(raw.loopDelaySeconds, 'settings.loopDelaySeconds', 0), totalDurationMinutes: requireInteger_ACU(raw.totalDurationMinutes, 'settings.totalDurationMinutes', 0), retryDelaySeconds: requireInteger_ACU(raw.retryDelaySeconds, 'settings.retryDelaySeconds', 0),
-    generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0), downtimeTurnRatio: requireRatio_ACU(raw.downtimeTurnRatio, 'settings.downtimeTurnRatio', CONTINUATION_DOWNTIME_TURN_RATIO_MAX_ACU),
+    generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0), maxConsecutivePressureTurns: requireBoundedInteger_ACU(raw.maxConsecutivePressureTurns, 'settings.maxConsecutivePressureTurns', CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU),
     storyWindowFloors: requireInteger_ACU(raw.storyWindowFloors, 'settings.storyWindowFloors', 0), agentHistoryTokenBudget: requireInteger_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', 0),
     storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
     contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),

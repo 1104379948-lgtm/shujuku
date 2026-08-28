@@ -543,6 +543,9 @@ export class ContinuationAgentTurnPlanner_ACU {
             compaction.withinBudget ? '' : '压缩后仍超出阈值：提示词骨架与最近一轮的内容本身较大，最近一轮已完整保留。',
           ].filter(Boolean).join(''),
         });
+        // 交接报告正文单独作为一条会话条目插进会话流：用户在界面上直接看到
+        // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
+        logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: compaction.mark.report });
       }
     }
 

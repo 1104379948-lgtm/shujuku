@@ -291,6 +291,10 @@ describe('主 Agent 会话记录', () => {
     // 刚结束的那一轮完整保留，主 Agent 不会忘记自己从哪儿接上。
     expect(messages.some(message => message.kind === 'turn' && message.turnKey === 'stage-1#0#turn-2')).toBe(true);
     expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(true);
+    // 交接报告正文作为独立条目插进会话流，用户在界面上直接看到 AI 可见性边界。
+    const handoffEntry = readAgentSessionLog_ACU().find(entry => entry.kind === 'handoff');
+    expect(handoffEntry?.title).toContain('此前内容对当前 AI 不可见');
+    expect(handoffEntry?.detail).toBe(messages[0].text);
   });
 
   it('同一轮内到达阈值只登记不压缩，留到下一轮开始时再做', async () => {

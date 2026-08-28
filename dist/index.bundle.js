@@ -105249,6 +105249,16 @@ $CONTENT
     const STAGE_TURN_PACINGS_ACU = ['setup', 'pressure', 'turn', 'cooldown'];
     /** setup 与 cooldown 合称低压轮，是节奏配比校验里被计数的那一侧。 */
     const STAGE_TURN_DOWNTIME_PACINGS_ACU = ['setup', 'cooldown'];
+    /**
+     * 阶段级节奏形态。它存在的理由是：把张弛的周期从「阶段内每几轮」拉长到「阶段与阶段之间」。
+     * 若所有阶段共用同一套配比要求，读者感知到的就是固定节拍器；形态分档之后，铺垫阶段可以
+     * 大段日常、高潮阶段可以整段高压，起伏发生在卷的尺度上而不是轮的尺度上。
+     * - buildup：铺垫型，低压为主，攒关系与信息，为后面的爆发蓄力
+     * - mixed：起伏型，常规推进，松紧交替但不要求均匀
+     * - surge：高压型，决战/逃亡/密集事件，允许整阶段没有低压轮
+     * - aftermath：余波型，消化代价、重建关系，把前一段高压的重量落地
+     */
+    const STAGE_TEMPOS_ACU = ['buildup', 'mixed', 'surge', 'aftermath'];
     function createContinuationError_ACU(code, phase, message, retryable = false, details) {
         return details === undefined ? { code, phase, message, retryable } : { code, phase, message, retryable, details };
     }
@@ -105436,13 +105446,13 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我的行动规则：\n1. 调阅讲究并发与精准：能一次批量取的资料就在同一次输出里发多个 read/search 对象，省迭代轮次；先 search 定位再用窄地址精读，省读取额度。被门禁打回时我按报告缩小目标重试，绝不原样重发。\n2. 派工前先看目录，只派目录里存在的代理；派工时把它需要的资料地址写进 reads 作种子。派工讲究次序：存在未结算历史时先派结算维护，再谈策划与交付。\n3. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工；读取额度用尽时基于已有资料决策。\n4. 子代理的报告我要审核：结论与正文或已调阅资料冲突、明显缺漏时，带着具体意见重派，而不是照单全收。\n5. 任何环节失败，我如实报告失败，不用编造的结果补位。\n6. 我的每个动作都以完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。\n7. 我按本轮节奏标签给指导，不按惯性给指导。setup 与 cooldown 是低压轮：这两种轮次的指导里禁止制造新危机、禁止引入新的敌对方、禁止让局势升级，我写的是关系推进、生活质感、准备工作与情绪消化，读者的回报按「关系变化、信息沉淀、情绪落地」来算。pressure 轮只推进一个冲突，turn 轮的揭示必须落在已经埋过的伏笔上。一个阶段全是高压轮意味着大纲有问题，我用 edit_outline 插低压轮或派工 outline-architect 修，而不是照着高压往下写。',
+            content: '我的行动规则：\n1. 调阅讲究并发与精准：能一次批量取的资料就在同一次输出里发多个 read/search 对象，省迭代轮次；先 search 定位再用窄地址精读，省读取额度。被门禁打回时我按报告缩小目标重试，绝不原样重发。\n2. 派工前先看目录，只派目录里存在的代理；派工时把它需要的资料地址写进 reads 作种子。派工讲究次序：存在未结算历史时先派结算维护，再谈策划与交付。\n3. 在预算内行动。预算进入最后一轮时我立刻收敛交付，不再派工；读取额度用尽时基于已有资料决策。\n4. 子代理的报告我要审核：结论与正文或已调阅资料冲突、明显缺漏时，带着具体意见重派，而不是照单全收。\n5. 任何环节失败，我如实报告失败，不用编造的结果补位。\n6. 我的每个动作都以完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。\n7. 我按本轮节奏标签给指导，不按惯性给指导。setup 与 cooldown 是低压轮：这两种轮次的指导里禁止制造新危机、禁止引入新的敌对方、禁止让局势升级，我写的是关系推进、生活质感、准备工作与情绪消化，读者的回报按「关系变化、信息沉淀、情绪落地」来算。pressure 轮只推进一个冲突，turn 轮的揭示必须落在已经埋过的伏笔上。一个阶段全是高压轮只有在它的节奏形态是 surge 时才成立；形态不是 surge 却通篇高压，说明大纲有问题，我用 edit_outline 插低压轮或派工 outline-architect 修，而不是照着高压往下写。',
             enabled: true,
             deletable: true,
         },
         {
             role: 'system',
-            content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|delegate|edit_outline|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["种子资料地址"]}。互不依赖的派工放在同一次输出里即为并发。reads 是你替它准备的初始资料（地址体系同 read 工具）；它拿到后还能自己 read/search 补充，但种子给得准能帮它少跑几轮。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\naction = edit_outline：直接用工具微调当前大纲，不发 AI 调用、立即生效。附加字段 edits，数组，每项是下列之一：\n{"op":"set_turn_goal","turnId":"轮次ID","goal":"新目标句"}\n{"op":"set_node_goal","nodeId":"节点ID","goal":"新节点目标"}\n{"op":"insert_turn","nodeId":"节点ID","afterTurnId":"锚点轮次ID或null(插入节点开头)","goal":"新增轮目标","pacing":"setup|pressure|turn|cooldown(可省，默认 setup)"}\n{"op":"remove_turn","turnId":"轮次ID"}\n节点与轮次的 ID 见大纲状态行，完整列表用 read $OUTLINE_WINDOW 调阅。约束：只能动未完成的部分——已完成轮次不可改，当前正在执行的轮次可以改目标但不可删除；增删会改变总轮数，必须留在阶段规模范围内；一次最多 12 处。编辑后的剩余轮次还要过节奏配比校验（低压轮 setup/cooldown 占比下限、连续 pressure/turn 上限），删掉低压轮或连插高压轮会被拒绝并把实际配比回灌给你——剧情挤不下时正确做法是插 setup/cooldown 轮把它摊开，而不是把目标句越写越满。改几句目标、加减一两轮用它；整体走向要变才派 outline-architect。\n\naction = finalize：交付最终写作指导。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。交付前自检：存在未结算历史时已派工 hook-cognition-maintainer 结算完毕；instruction 里的伏笔与信息差操作有策划子代理的建议或伏笔账本条目作依据，不是你的即兴发挥。附加字段 instruction（发给正文模型的指导正文，300-400 字为基准上限；正文模型单轮只输出约 800-1200 字，指导必须让它在这个篇幅内完成本轮目标，不许塞进多个场景或多个转折；指导的压力等级必须与【本轮节奏】一致，低压轮不许写危机）、summary（一句话本轮要点）、可选 constraints（{"add":["新增的长期约束"],"retire":["要废除条目的 id 或原文"]}，增量登记：add 只写本轮新增，retire 只写本轮废除，不需要重抄既有清单——漏写不等于删除，重抄已有条目也不会报错；retire 必须精确引用活跃条目的 id 或原文）。\ninstruction 按下列字段组织，每个字段一到两句、总量控制在上限内，无内容的字段直接省略：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
+            content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|delegate|edit_outline|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["种子资料地址"]}。互不依赖的派工放在同一次输出里即为并发。reads 是你替它准备的初始资料（地址体系同 read 工具）；它拿到后还能自己 read/search 补充，但种子给得准能帮它少跑几轮。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\naction = edit_outline：直接用工具微调当前大纲，不发 AI 调用、立即生效。附加字段 edits，数组，每项是下列之一：\n{"op":"set_turn_goal","turnId":"轮次ID","goal":"新目标句"}\n{"op":"set_node_goal","nodeId":"节点ID","goal":"新节点目标"}\n{"op":"insert_turn","nodeId":"节点ID","afterTurnId":"锚点轮次ID或null(插入节点开头)","goal":"新增轮目标","pacing":"setup|pressure|turn|cooldown(可省，默认 setup)"}\n{"op":"remove_turn","turnId":"轮次ID"}\n节点与轮次的 ID 见大纲状态行，完整列表用 read $OUTLINE_WINDOW 调阅。约束：只能动未完成的部分——已完成轮次不可改，当前正在执行的轮次可以改目标但不可删除；增删会改变总轮数，必须留在阶段规模范围内；一次最多 12 处。编辑后的剩余轮次还要过节奏校验：本阶段低压轮（setup/cooldown）数量不得低于该阶段节奏形态对应的下限（形态见大纲状态行），且连续高压轮不得超过上限（跨阶段累计，高压型阶段豁免）。删掉低压轮或连插高压轮会被拒绝并把实际情况回灌给你——剧情挤不下时正确做法是插 setup/cooldown 轮把它摊开，而不是把目标句越写越满。注意低压轮不必均匀分散，插在哪里按叙事需要定。改几句目标、加减一两轮用它；整体走向要变才派 outline-architect。\n\naction = finalize：交付最终写作指导。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。交付前自检：存在未结算历史时已派工 hook-cognition-maintainer 结算完毕；instruction 里的伏笔与信息差操作有策划子代理的建议或伏笔账本条目作依据，不是你的即兴发挥。附加字段 instruction（发给正文模型的指导正文，300-400 字为基准上限；正文模型单轮只输出约 800-1200 字，指导必须让它在这个篇幅内完成本轮目标，不许塞进多个场景或多个转折；指导的压力等级必须与【本轮节奏】一致，低压轮不许写危机）、summary（一句话本轮要点）、可选 constraints（{"add":["新增的长期约束"],"retire":["要废除条目的 id 或原文"]}，增量登记：add 只写本轮新增，retire 只写本轮废除，不需要重抄既有清单——漏写不等于删除，重抄已有条目也不会报错；retire 必须精确引用活跃条目的 id 或原文）。\ninstruction 按下列字段组织，每个字段一到两句、总量控制在上限内，无内容的字段直接省略：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
             enabled: true,
             deletable: false,
             pinned: true,
@@ -105782,13 +105792,13 @@ $CONTENT
     const DEFAULT_OUTLINE_PROMPT_ACU = [
         {
             role: 'system',
-            content: '你是专业的小说阶段规划助手。负责根据故事背景与历史进展，为下一阶段规划剧情大纲。\n输出格式：把大纲内容写入下列标签，标签外可以自由书写你的思路与分析，系统只读取标签内的内容。\n<stage_title>阶段标题</stage_title>\n<stage_goal>阶段整体目标</stage_goal>\n<node>\n<node_title>节点标题</node_title>\n<node_goal>节点目标</node_goal>\n<turn pacing="setup">本轮剧情目标（每轮一个 turn 标签，内容为该轮要发生的具体剧情）</turn>\n</node>\n每个 <turn> 都必须带 pacing 属性，取值只能是 setup / pressure / turn / cooldown 四者之一，含义见节奏配比条款。\n节点数量不限，每个 <node> 内至少一个 <turn>；全部 <turn> 的总数就是本阶段的轮数，必须落在给定的阶段轮数范围内。\n不要输出 JSON，不要输出 id、编号或轮数统计字段——结构编号全部由系统自动生成。',
+            content: '你是专业的小说阶段规划助手。负责根据故事背景与历史进展，为下一阶段规划剧情大纲。\n输出格式：把大纲内容写入下列标签，标签外可以自由书写你的思路与分析，系统只读取标签内的内容。\n<stage_title>阶段标题</stage_title>\n<stage_goal>阶段整体目标</stage_goal>\n<stage_tempo>本阶段节奏形态，取值只能是 buildup / mixed / surge / aftermath 之一，含义见节奏条款</stage_tempo>\n<node>\n<node_title>节点标题</node_title>\n<node_goal>节点目标</node_goal>\n<turn pacing="setup">本轮剧情目标（每轮一个 turn 标签，内容为该轮要发生的具体剧情）</turn>\n</node>\n每个 <turn> 都必须带 pacing 属性，取值只能是 setup / pressure / turn / cooldown 四者之一，含义见节奏条款。\n节点数量不限，每个 <node> 内至少一个 <turn>；全部 <turn> 的总数就是本阶段的轮数，必须落在给定的阶段轮数范围内。\n不要输出 JSON，不要输出 id、编号或轮数统计字段——结构编号全部由系统自动生成。',
             enabled: true,
             deletable: true,
         },
         {
             role: 'assistant',
-            content: '收到。我作为小说阶段规划助手，会把阶段标题、阶段目标、各节点与逐轮剧情目标分别写入 <stage_title>、<stage_goal>、<node>、<node_title>、<node_goal>、<turn> 标签中，并给每个 <turn> 标注 pacing 属性；标签外只写思路分析，不输出 JSON、id 或任何编号统计字段，并保证全部 <turn> 总数落在给定的轮数范围内。',
+            content: '收到。我作为小说阶段规划助手，会把阶段标题、阶段目标、阶段节奏形态、各节点与逐轮剧情目标分别写入 <stage_title>、<stage_goal>、<stage_tempo>、<node>、<node_title>、<node_goal>、<turn> 标签中，并给每个 <turn> 标注 pacing 属性；标签外只写思路分析，不输出 JSON、id 或任何编号统计字段，并保证全部 <turn> 总数落在给定的轮数范围内。',
             enabled: true,
             deletable: true,
         },
@@ -105800,7 +105810,7 @@ $CONTENT
         },
         {
             role: 'user',
-            content: '【节奏配比：故事需要呼吸】\n每个 <turn> 标注四档之一：\n- setup 铺垫日常：关系推进、生活场景、准备工作、信息沉淀。没有外部危机，价值体现在人物关系变化、读者对角色的理解加深、或为后续埋线。\n- pressure 冲突推进：危机、对抗、外部高压。主角被逼做出选择并付出代价。\n- turn 转折揭示：反转、信息揭露、伏笔回收。局势的性质在这一轮发生改变。\n- cooldown 余波消化：战后疗伤、复盘、情绪落地、关系在事件之后的重新校准。\n\n硬性配比要求（不满足会被系统打回重排）：\n1. 低压轮（setup + cooldown）在本阶段占比不得低于给定的最低比例。\n2. 连续的 pressure / turn 不得超过 3 轮——第 4 轮必须是 setup 或 cooldown。\n\n为什么必须这样：读者对紧张的感知是相对的。连续八轮全是危机，第八轮的危机读起来和第一轮一样，甚至更钝；中间插一轮安静的日常，后面那轮危机才重新有分量。同理，重大冲突之后不给一轮 cooldown，人物的代价就没有落点，读者感受不到刚才那场戏的重量。低压轮不是浪费篇幅，它是让高压轮生效的前提。\nsetup 与 cooldown 轮同样要写具体：写清谁和谁在什么场景做什么、这一轮之后他们之间有什么变化，不要写「日常互动」「气氛缓和」这种空话。',
+            content: '【节奏：先定阶段形态，再排每轮松紧】\n\n第一步，用 <stage_tempo> 定这个阶段整体是什么形态。四档：\n- buildup 铺垫型：低压为主，攒关系、攒信息、攒资源，为后面的爆发蓄力。本阶段低压轮至少占一半。\n- mixed 起伏型：常规推进，松紧交替。本阶段低压轮至少占四分之一。\n- surge 高压型：决战、逃亡、连环变故这类一口气压到底的段落。允许整个阶段一轮低压都没有。\n- aftermath 余波型：消化上一段高压的代价，疗伤、复盘、关系重建、局势重新洗牌。本阶段低压轮至少占六成。\n选哪一档取决于总纲里本卷台阶推进到了哪一步，以及前面刚写完的是什么——当前节奏状态见下方的「节奏状态」段。\n\n第二步，给每个 <turn> 标 pacing 四档之一：\n- setup 铺垫日常：关系推进、生活场景、准备工作、信息沉淀。没有外部危机，价值体现在人物关系变化、读者对角色的理解加深、或为后续埋线。\n- pressure 冲突推进：危机、对抗、外部高压。主角被逼做出选择并付出代价。\n- turn 转折揭示：反转、信息揭露、伏笔回收。局势的性质在这一轮发生改变。\n- cooldown 余波消化：战后疗伤、复盘、情绪落地、关系在事件之后的重新校准。\n\n硬性要求（不满足会被系统打回重排）：\n1. 本阶段低压轮（setup + cooldown）的数量不得低于该形态对应的下限。\n2. 上一阶段是 surge 时，本阶段不能再选 surge，只能选 aftermath 或 mixed。\n3. 连续高压轮（pressure + turn）不得超过给定的上限，该计数跨阶段累计——前一阶段结尾连着三轮高压，本阶段开头就只剩上限减三轮的余量。surge 阶段豁免这一条。\n\n关键：低压轮放在哪里由你决定，不要均匀分散。\n把低压轮每隔三四轮撒一个，读者会感觉到一台节拍器，那比全程高压更假。真实的节奏是波浪：可以开头连着两轮日常把人物关系立住，然后连着四轮高压一口气推到底；也可以前面一路紧绷，最后两轮全用来收拾残局。同一份大纲里，「日常日常高压高压高压高压」和「高压高压高压高压日常日常」是完全不同的两段故事，但它们的低压轮数量一样——你要选的是哪一种叙事，而不是凑够数量。\n\n为什么需要低压轮：读者对紧张的感知是相对的。连续八轮全是危机，第八轮的危机读起来和第一轮一样甚至更钝；前面有一段安静，后面那场危机才重新有分量。同理，重大冲突之后不给余波，人物的代价就没有落点。低压轮不是浪费篇幅，它是让高压轮生效的前提。\nsetup 与 cooldown 轮同样要写具体：写清谁和谁在什么场景做什么、这一轮之后他们之间有什么变化，不要写「日常互动」「气氛缓和」这种空话。',
             enabled: true,
             deletable: true,
         },
@@ -105812,13 +105822,13 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 先按阶段容量算清楚这个阶段装得下多少内容，宁可把阶段目标定小写深，也不把一段旅程压进一个阶段；\n2. 给每个 <turn> 标注 pacing，保证低压轮占比达标、连续高压不超过三轮，让紧张有对照物、让代价有落点；\n3. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n4. 在 pressure / turn 轮落实“行动、阻碍、悬念”三要素并让冲突线逐级升高；setup / cooldown 轮写具体的关系变化、信息沉淀与情绪落地，不写空话也不硬造危机；\n5. 设计明显的情绪曲线（压抑后必有释放），涉及伏笔的轮目标写明操作种类与对象，信息揭露写明允许揭到哪一层；\n6. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n7. 尊重轮承载量：每轮只装一个场景片段、至多两个节拍，绝不把正文模型 800-1200 字写不完的内容塞进一轮；\n8. 让阶段目标落在故事总纲当前推进中的那一级台阶内，不触碰总纲里标注为禁止提前释放的底牌，并在阶段末留下跨阶段悬念。\n我会将这些原则落实到各个标签的内容中。',
+            content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 先按阶段容量算清楚这个阶段装得下多少内容，宁可把阶段目标定小写深，也不把一段旅程压进一个阶段；\n2. 先按总纲台阶与当前节奏状态定 <stage_tempo>，再按该形态的下限安排低压轮——低压轮按叙事需要成段安放，不平均分散成节拍器；\n3. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n4. 在 pressure / turn 轮落实“行动、阻碍、悬念”三要素并让冲突线逐级升高；setup / cooldown 轮写具体的关系变化、信息沉淀与情绪落地，不写空话也不硬造危机；\n5. 设计明显的情绪曲线（压抑后必有释放），涉及伏笔的轮目标写明操作种类与对象，信息揭露写明允许揭到哪一层；\n6. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n7. 尊重轮承载量：每轮只装一个场景片段、至多两个节拍，绝不把正文模型 800-1200 字写不完的内容塞进一轮；\n8. 让阶段目标落在故事总纲当前推进中的那一级台阶内，不触碰总纲里标注为禁止提前释放的底牌，并在阶段末留下跨阶段悬念。\n我会将这些原则落实到各个标签的内容中。',
             enabled: true,
             deletable: true,
         },
         {
             role: 'user',
-            content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n上一阶段纪要：\n$LAST_STAGE_CHRONICLES\n\n更早阶段概要：\n$EARLIER_STAGE_SUMMARIES\n\n最近剧情：\n$RECENT_STORY\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。',
+            content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n上一阶段纪要：\n$LAST_STAGE_CHRONICLES\n\n更早阶段概要：\n$EARLIER_STAGE_SUMMARIES\n\n最近剧情：\n$RECENT_STORY\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。',
             enabled: true,
             deletable: true,
         },
@@ -105857,10 +105867,19 @@ $CONTENT
      * 也仍带着「每个节点都必须升级障碍」这类把日常轮结构性排除掉的条款，必须强制刷新。
      */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU = 'spv2.2-continuation-story-arc-pacing-v14';
-    /** 低压轮（setup + cooldown）最低占比的默认值。 */
-    const CONTINUATION_DOWNTIME_TURN_RATIO_DEFAULT_ACU = 0.3;
-    /** 低压轮占比的可配置上限。超过 0.6 会让冲突线没有足够轮次推进。 */
-    const CONTINUATION_DOWNTIME_TURN_RATIO_MAX_ACU = 0.6;
+    /**
+     * 阶段节奏形态版本：V14 的节奏规则（每阶段固定低压占比 + 连续高压不超过 3 轮）在数学上只有
+     * 锯齿解，读者感知到的是每三四轮一次的固定喘息，而且所有阶段同构。改为阶段级 tempo 形态
+     * 决定疏密、跨阶段连续高压上限兜底。旧提示词写死了「连续高压不超过三轮」，必须强制刷新。
+     */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU = 'spv2.3-continuation-stage-tempo-v15';
+    /**
+     * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
+     * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
+     */
+    const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU = 8;
+    /** 连续高压轮上限的可配置上限。再大就等于关闭这条兜底。 */
+    const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU = 20;
     function clonePromptSegments_ACU(segments) {
         return segments.map(segment => ({ ...segment }));
     }
@@ -105890,7 +105909,7 @@ $CONTENT
             generationRetryLimit: 3,
             internalAiRetryLimit: 3,
             contextTurnCount: 3,
-            downtimeTurnRatio: CONTINUATION_DOWNTIME_TURN_RATIO_DEFAULT_ACU,
+            maxConsecutivePressureTurns: CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU,
             storyWindowFloors: AGENT_STORY_WINDOW_DEFAULT_ACU,
             agentHistoryTokenBudget: AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
             storyTailFloors: AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
@@ -105903,7 +105922,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -105927,6 +105946,9 @@ $CONTENT
     }
 
     const OUTLINE_KEYS_ACU = ['schemaVersion', 'title', 'goal', 'totalTurns', 'nodes'];
+    /** tempo 与 pacing 同理：晚于其余字段加入，写成必填会让存量信封加载即失败。缺失回填 mixed。 */
+    const OUTLINE_OPTIONAL_KEYS_ACU = ['tempo'];
+    const DEFAULT_STAGE_TEMPO_ACU = 'mixed';
     const NODE_KEYS_ACU = ['id', 'title', 'goal', 'suggestedTurns', 'turns'];
     const TURN_KEYS_ACU = ['id', 'goal'];
     /**
@@ -105935,8 +105957,30 @@ $CONTENT
      */
     const TURN_OPTIONAL_KEYS_ACU = ['pacing'];
     const DEFAULT_TURN_PACING_ACU = 'pressure';
-    /** 连续高压（pressure / turn）轮的上限。超过这个长度，读者对紧张的感知会钝化。 */
-    const STAGE_MAX_CONSECUTIVE_PRESSURE_TURNS_ACU = 3;
+    /**
+     * 各阶段形态的低压轮（setup + cooldown）下限占比。
+     *
+     * 这张表取代了旧的「全局统一占比 + 阶段内连续上限」。旧规则在数学上只有锯齿解：8 轮阶段
+     * 要求 3 轮低压且任意连续 4 轮内必有 1 轮低压，读者感知到的是固定节拍器，而且开篇铺垫与
+     * 最终决战被要求同样的配比。分档之后，阶段内不再有任何周期限制——低压轮可以扎堆在开头、
+     * 结尾或中段，形态之间的差异才是读者感知到的起伏。
+     */
+    const STAGE_TEMPO_DOWNTIME_FLOOR_ACU = {
+        buildup: 0.5,
+        mixed: 0.25,
+        surge: 0,
+        aftermath: 0.6,
+    };
+    const STAGE_TEMPO_LABELS_ACU = {
+        buildup: '铺垫型',
+        mixed: '起伏型',
+        surge: '高压型',
+        aftermath: '余波型',
+    };
+    /** 渲染形态名称，错误信息与提示词共用同一口径。 */
+    function describeStageTempo_ACU(tempo) {
+        return `${tempo}（${STAGE_TEMPO_LABELS_ACU[tempo]}）`;
+    }
     function fail_ACU$3(code, phase, message, details) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU(code, phase, message, false, details));
     }
@@ -106038,7 +106082,7 @@ $CONTENT
         if (!isRecord_ACU$7(raw)) {
             fail_ACU$3('CONTINUATION_OUTLINE_NOT_OBJECT', 'outline_validate', '阶段大纲必须是单一 JSON 对象');
         }
-        assertExactKeys_ACU(raw, OUTLINE_KEYS_ACU, 'outline');
+        assertExactKeys_ACU(raw, OUTLINE_KEYS_ACU, 'outline', OUTLINE_OPTIONAL_KEYS_ACU);
         if (raw.schemaVersion !== CONTINUATION_SCHEMA_VERSION_ACU) {
             fail_ACU$3('CONTINUATION_OUTLINE_SCHEMA_VERSION_INVALID', 'outline_validate', '阶段大纲 schemaVersion 必须为 1', { actual: raw.schemaVersion });
         }
@@ -106072,9 +106116,19 @@ $CONTENT
             schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
             title: requireText_ACU(raw.title, 'outline.title'),
             goal: requireText_ACU(raw.goal, 'outline.goal'),
+            tempo: validateStageTempo_ACU(raw.tempo),
             totalTurns: raw.totalTurns,
             nodes,
         };
+    }
+    /** 校验阶段形态。缺失回填 mixed（存量信封迁移），写错则报错——静默纠正会让模型学不会正确写法。 */
+    function validateStageTempo_ACU(raw) {
+        if (raw === undefined)
+            return DEFAULT_STAGE_TEMPO_ACU;
+        if (typeof raw !== 'string' || !STAGE_TEMPOS_ACU.includes(raw)) {
+            fail_ACU$3('CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'outline_validate', `阶段节奏形态非法：outline.tempo 只能是 ${STAGE_TEMPOS_ACU.join(' / ')}`, { path: 'outline.tempo', actual: raw });
+        }
+        return raw;
     }
     function flattenTurns_ACU(outline) {
         return outline.nodes.flatMap(node => node.turns);
@@ -106083,39 +106137,100 @@ $CONTENT
     function listStageOutlineTurns_ACU(outline) {
         return flattenTurns_ACU(outline);
     }
+    function isPressureTurn_ACU(pacing) {
+        return !STAGE_TURN_DOWNTIME_PACINGS_ACU.includes(pacing);
+    }
     function describePacingLabels_ACU(turns, offset) {
         return turns.map((turn, index) => `第${offset + index + 1}轮=${turn.pacing}`).join('、');
     }
+    /** 从轮次序列尾部往前数连续高压轮数。跨阶段继承计数用它。 */
+    function countTrailingPressureTurns_ACU(turns) {
+        let streak = 0;
+        for (let index = turns.length - 1; index >= 0; index -= 1) {
+            if (!isPressureTurn_ACU(turns[index].pacing))
+                break;
+            streak += 1;
+        }
+        return streak;
+    }
+    function activeOutlineOf_ACU(stage) {
+        return stage.revisions.find(item => item.revision === stage.activeRevision)?.outline ?? null;
+    }
+    /** 一个阶段里真正写出来的那部分轮次。未完成的轮次只是计划，不参与连续高压计数。 */
+    function completedTurnsOf_ACU(stage) {
+        const outline = activeOutlineOf_ACU(stage);
+        if (!outline)
+            return [];
+        return flattenTurns_ACU(outline).slice(0, Math.max(0, stage.completedTurns));
+    }
     /**
-     * 校验一份大纲的节奏配比。
+     * 从任务的阶段序列推导跨阶段节奏上下文。
+     *
+     * @param stages 任务的全部阶段（按顺序）
+     * @param currentStageId 本次规划所属阶段；传 null 表示正在规划一个尚未创建的新阶段
+     * @returns 上一阶段形态与进入本次规划范围时的连续高压轮数
+     */
+    function resolveStageOutlinePacingContext_ACU(stages, currentStageId) {
+        const found = currentStageId ? stages.findIndex(stage => stage.stageId === currentStageId) : -1;
+        const currentIndex = found >= 0 ? found : stages.length;
+        const previousStages = stages.slice(0, currentIndex);
+        const current = found >= 0 ? stages[found] : null;
+        // 连续段可能横跨多个阶段（上一阶段结尾三轮高压 + 本阶段已完成两轮高压 = 5），
+        // 因此把历史已完成轮次首尾相接后统一从尾部数，而不是只看最近一个阶段。
+        const history = previousStages.flatMap(stage => completedTurnsOf_ACU(stage));
+        if (current)
+            history.push(...completedTurnsOf_ACU(current));
+        const previous = previousStages.length ? previousStages[previousStages.length - 1] : null;
+        return {
+            previousTempo: previous ? activeOutlineOf_ACU(previous)?.tempo ?? null : null,
+            leadingPressureStreak: countTrailingPressureTurns_ACU(history),
+        };
+    }
+    /**
+     * 校验一份大纲的节奏。三条规则，全部围绕「长程能量守恒」而不是「短程节拍」：
+     *
+     * 1. 不允许连续两个 surge 阶段。这是 surge 能整段高压的代价——高压型阶段攒下的连续高压会
+     *    带进下一阶段，而下一阶段只能是 mixed 或 aftermath，两者都有低压下限，债务被强制清偿。
+     * 2. 低压轮下限按阶段形态查表，阶段内不限制分布位置：低压轮扎堆在开头、结尾还是中段都合法，
+     *    读者因此感知不到固定周期。
+     * 3. 连续高压轮上限跨阶段累计，只兜底「长时间没有任何喘息」；surge 阶段豁免这条。
      *
      * 与 validateStageOutline_ACU 分开调用而不是并入其中：结构校验在每次信封加载时对所有历史
      * revision 重跑，节奏规则是新增约束，并进去会让存量任务直接加载失败。它只用在生成链路上，
      * 目的是让模型经 $VALIDATION_ERRORS 自愈。
      * @param turns 待校验的全部轮次（按阶段内顺序）
-     * @param options 占比要求与跳过的前缀轮数
+     * @param options 本阶段形态、跨阶段上下文与上限配置
      */
     function validateStageOutlinePacing_ACU(turns, options) {
+        const { tempo, previousTempo } = options;
+        if (tempo === 'surge' && previousTempo === 'surge') {
+            fail_ACU$3('CONTINUATION_OUTLINE_PACING_INVALID', 'outline_validate', `不能连续两个高压型阶段：上一阶段已经是 ${describeStageTempo_ACU('surge')}，读者刚经历完一整段没有喘息的高压，再来一段同样强度的只会钝化。本阶段的 <stage_tempo> 请改成 aftermath（先把上一段的代价落地）或 mixed（松紧交替推进）。`, { rule: 'consecutive_surge_stages', tempo, previousTempo });
+        }
         const skip = Math.max(0, Math.min(options.skipTurns ?? 0, turns.length));
         const scope = turns.slice(skip);
         if (!scope.length)
             return;
         const labels = describePacingLabels_ACU(scope, skip);
-        const ratio = Number.isFinite(options.downtimeTurnRatio) ? Math.max(0, options.downtimeTurnRatio) : 0;
-        const required = Math.ceil(scope.length * ratio);
+        const floor = STAGE_TEMPO_DOWNTIME_FLOOR_ACU[tempo];
+        const required = Math.ceil(scope.length * floor);
         if (required > 0) {
-            const actual = scope.filter(turn => STAGE_TURN_DOWNTIME_PACINGS_ACU.includes(turn.pacing)).length;
+            const actual = scope.filter(turn => !isPressureTurn_ACU(turn.pacing)).length;
             if (actual < required) {
-                fail_ACU$3('CONTINUATION_OUTLINE_PACING_INVALID', 'outline_validate', `低压轮不足：本次规划的 ${scope.length} 轮里至少要有 ${required} 轮标为 setup 或 cooldown，实际只有 ${actual} 轮。请把其中 ${required - actual} 轮改成铺垫日常或余波消化——写关系推进、生活场景、情绪落地，不要再安排新的外部危机。当前各轮节奏：${labels}`, { scopeTurns: scope.length, required, actual, ratio, skippedTurns: skip, labels });
+                fail_ACU$3('CONTINUATION_OUTLINE_PACING_INVALID', 'outline_validate', `低压轮不足：本阶段形态是 ${describeStageTempo_ACU(tempo)}，本次规划的 ${scope.length} 轮里至少要有 ${required} 轮标为 setup 或 cooldown，实际只有 ${actual} 轮。请把其中 ${required - actual} 轮改成铺垫日常或余波消化——写关系推进、生活场景、情绪落地，不要再安排新的外部危机。这些低压轮放在哪里由你决定，可以连着放，不需要均匀分散。如果这一段剧情本来就该一路高压，那就把 <stage_tempo> 改成 surge（但上一阶段不能也是 surge）。当前各轮节奏：${labels}`, { rule: 'downtime_floor', tempo, scopeTurns: scope.length, required, actual, floor, skippedTurns: skip, labels });
             }
         }
-        let streak = 0;
+        // surge 的整段高压是设计允许的；它欠下的账由「下一阶段不能再是 surge」加下一阶段的低压下限来收。
+        const limit = Number.isFinite(options.maxConsecutivePressureTurns) ? Math.max(0, Math.trunc(options.maxConsecutivePressureTurns)) : 0;
+        if (tempo === 'surge' || limit <= 0)
+            return;
+        let streak = Math.max(0, Math.trunc(options.leadingPressureStreak));
         for (let index = 0; index < scope.length; index += 1) {
-            const pacing = scope[index].pacing;
-            streak = pacing === 'pressure' || pacing === 'turn' ? streak + 1 : 0;
-            if (streak > STAGE_MAX_CONSECUTIVE_PRESSURE_TURNS_ACU) {
-                const startTurnNumber = skip + index - STAGE_MAX_CONSECUTIVE_PRESSURE_TURNS_ACU + 1;
-                fail_ACU$3('CONTINUATION_OUTLINE_PACING_INVALID', 'outline_validate', `连续高压轮超限：从第 ${startTurnNumber} 轮起连续 ${streak} 轮都是 pressure 或 turn，上限为 ${STAGE_MAX_CONSECUTIVE_PRESSURE_TURNS_ACU} 轮。请在第 ${skip + index + 1} 轮之前插入一轮 setup 或 cooldown 让读者喘口气。当前各轮节奏：${labels}`, { startTurnNumber, streak, limit: STAGE_MAX_CONSECUTIVE_PRESSURE_TURNS_ACU, skippedTurns: skip, labels });
+            streak = isPressureTurn_ACU(scope[index].pacing) ? streak + 1 : 0;
+            if (streak > limit) {
+                const turnNumber = skip + index + 1;
+                const inherited = Math.max(0, Math.trunc(options.leadingPressureStreak));
+                const inheritedNote = inherited > 0 ? `（其中 ${inherited} 轮来自前面已经写完的剧情）` : '';
+                fail_ACU$3('CONTINUATION_OUTLINE_PACING_INVALID', 'outline_validate', `连续高压轮超限：到第 ${turnNumber} 轮为止已经连续 ${streak} 轮都是 pressure 或 turn${inheritedNote}，上限是 ${limit} 轮。请在第 ${turnNumber} 轮之前安排一轮 setup 或 cooldown 让读者喘口气。这不是要求你每隔几轮就插一轮日常——只是这一段已经绷得太久了。当前各轮节奏：${labels}`, { rule: 'pressure_streak', turnNumber, streak, limit, leadingPressureStreak: inherited, skippedTurns: skip, labels });
             }
         }
     }
@@ -106161,8 +106276,8 @@ $CONTENT
         '$AGENT_READ_MATERIALS', '$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$USER_INTENT', '$OUTLINE_WINDOW',
         // 目录+状态骨架占位符：正文楼层目录、大纲单行状态、已启用世界书目录、读集词汇表。
         '$STORY_CATALOG', '$OUTLINE_STATE', '$WORLDBOOK_CATALOG', '$AGENT_READ_CATALOG',
-        // 故事总纲与节奏控制：总纲内容与状态证据、本轮节奏标签、阶段字数容量锚。
-        '$STORY_ARC', '$STORY_ARC_STATE', '$CURRENT_TURN_PACING', '$STAGE_WORD_BUDGET',
+        // 故事总纲与节奏控制：总纲内容与状态证据、本轮节奏标签、阶段字数容量锚、跨阶段节奏状态。
+        '$STORY_ARC', '$STORY_ARC_STATE', '$CURRENT_TURN_PACING', '$STAGE_WORD_BUDGET', '$PACING_CONTEXT',
     ];
     /**
      * 占位符替换用的交替式正则。必须按长度降序排列：存在 $STORY_ARC 与 $STORY_ARC_STATE
@@ -106285,10 +106400,10 @@ $CONTENT
         }
         return value;
     }
-    /** 校验 0 到 maximum 之间的有限小数。NaN 与 Infinity 会让后续的 ceil 换算产出垃圾，必须在这里拦掉。 */
-    function requireRatio_ACU(value, path, maximum) {
-        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > maximum) {
-            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `字段必须是 0 到 ${maximum} 之间的小数：${path}`, { path });
+    /** 校验 0 到 maximum 之间的整数。上界存在的意义是：设得过大等于关闭兜底，应显式选 0 而不是靠大数糊弄。 */
+    function requireBoundedInteger_ACU(value, path, maximum) {
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > maximum) {
+            fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', `字段必须是 0 到 ${maximum} 之间的整数：${path}`, { path });
         }
         return value;
     }
@@ -106410,10 +106525,13 @@ $CONTENT
             raw.agentReadTokenBudget = AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU;
         if (!Object.prototype.hasOwnProperty.call(raw, 'agentReadFallbackTokens'))
             raw.agentReadFallbackTokens = AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU;
-        // 节奏配比校验上线之前的信封没有这一项；补默认即无感迁移。
-        if (!Object.prototype.hasOwnProperty.call(raw, 'downtimeTurnRatio'))
-            raw.downtimeTurnRatio = CONTINUATION_DOWNTIME_TURN_RATIO_DEFAULT_ACU;
-        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'downtimeTurnRatio', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+        // 节奏规则从「每阶段固定低压占比」改为「阶段形态 + 跨阶段连续高压上限」，旧键已无对应语义：
+        // 直接丢掉并补新键的默认值，保留旧值反而会把用户配过的比例误当成新语义使用。
+        if (Object.prototype.hasOwnProperty.call(raw, 'downtimeTurnRatio'))
+            delete raw.downtimeTurnRatio;
+        if (!Object.prototype.hasOwnProperty.call(raw, 'maxConsecutivePressureTurns'))
+            raw.maxConsecutivePressureTurns = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU;
+        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
         requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
         if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
@@ -106428,17 +106546,17 @@ $CONTENT
         let outlinePrompt = raw.outlinePrompt;
         let agentPrompts = raw.agentPrompts;
         let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU) {
+        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU;
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
             outlinePreview: requireBoolean_ACU(raw.outlinePreview, 'settings.outlinePreview'), autoNextStage: requireBoolean_ACU(raw.autoNextStage, 'settings.autoNextStage'),
             maxAutomaticStages: requireInteger_ACU(raw.maxAutomaticStages, 'settings.maxAutomaticStages', 1), loopTags: requireString_ACU(raw.loopTags, 'settings.loopTags'),
             loopDelaySeconds: requireInteger_ACU(raw.loopDelaySeconds, 'settings.loopDelaySeconds', 0), totalDurationMinutes: requireInteger_ACU(raw.totalDurationMinutes, 'settings.totalDurationMinutes', 0), retryDelaySeconds: requireInteger_ACU(raw.retryDelaySeconds, 'settings.retryDelaySeconds', 0),
-            generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0), downtimeTurnRatio: requireRatio_ACU(raw.downtimeTurnRatio, 'settings.downtimeTurnRatio', CONTINUATION_DOWNTIME_TURN_RATIO_MAX_ACU),
+            generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0), maxConsecutivePressureTurns: requireBoundedInteger_ACU(raw.maxConsecutivePressureTurns, 'settings.maxConsecutivePressureTurns', CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU),
             storyWindowFloors: requireInteger_ACU(raw.storyWindowFloors, 'settings.storyWindowFloors', 0), agentHistoryTokenBudget: requireInteger_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', 0),
             storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
             contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
@@ -106867,7 +106985,7 @@ $CONTENT
      * 结构字段全部由运行时生成推导，模型只负责创作内容。
      *
      * 标签契约（与 defaults.ts 的默认大纲提示词一一对应）：
-     * <stage_title>…</stage_title> <stage_goal>…</stage_goal>
+     * <stage_title>…</stage_title> <stage_goal>…</stage_goal> <stage_tempo>mixed</stage_tempo>
      * <node><node_title>…</node_title><node_goal>…</node_goal><turn pacing="setup">…</turn>…</node>
      */
     function failParse_ACU(message) {
@@ -106905,6 +107023,11 @@ $CONTENT
         const raw = readTagAttribute_ACU(attributes, 'pacing').toLowerCase();
         return STAGE_TURN_PACINGS_ACU.includes(raw) ? raw : 'pressure';
     }
+    /** 读取 <stage_tempo>。写错或没写返回 null，由构建层回落——重规划时要能沿用旧大纲的形态。 */
+    function readStageTempo_ACU(text) {
+        const raw = readTag_ACU(text, 'stage_tempo').toLowerCase();
+        return STAGE_TEMPOS_ACU.includes(raw) ? raw : null;
+    }
     /**
      * 从模型返回原文中宽容提取大纲标签结构。标签外内容（思路、围栏、JSON）全部忽略。
      * @param raw 模型返回的原始文本
@@ -106924,14 +107047,14 @@ $CONTENT
                 failParse_ACU(`第 ${index + 1} 个 <node> 中没有任何非空 <turn> 标签`);
             return { title: readTag_ACU(block, 'node_title'), goal: readTag_ACU(block, 'node_goal'), turns };
         });
-        return { title: readTag_ACU(text, 'stage_title'), goal: readTag_ACU(text, 'stage_goal'), nodes };
+        return { title: readTag_ACU(text, 'stage_title'), goal: readTag_ACU(text, 'stage_goal'), tempo: readStageTempo_ACU(text), nodes };
     }
     /**
      * 把标签解析结果构建为标准阶段大纲。全部结构字段在这里生成推导：
      * node/turn id 由 allocateId 分配，suggestedTurns=节点轮数，totalTurns=轮数总和。
      * @param parsed 标签解析结果
      * @param allocateId ID 分配器（与 edit_outline 插入轮次共用同一惯例）
-     * @param fallback 重规划时沿用旧大纲的阶段标题/目标（模型可不重述）
+     * @param fallback 重规划时沿用旧大纲的阶段标题/目标/形态（模型可不重述）
      * @returns 结构完整的 StageOutline，内容性缺失（空 goal）留给 schema 校验反馈
      */
     function buildStageOutlineFromTags_ACU(parsed, allocateId, fallback) {
@@ -106946,6 +107069,7 @@ $CONTENT
             schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
             title: parsed.title || fallback?.title || '',
             goal: parsed.goal || fallback?.goal || '',
+            tempo: parsed.tempo ?? fallback?.tempo ?? 'mixed',
             totalTurns: nodes.reduce((sum, node) => sum + node.suggestedTurns, 0),
             nodes,
         };
@@ -106977,6 +107101,7 @@ $CONTENT
             schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
             title: planned.title || previous.title,
             goal: planned.goal || previous.goal,
+            tempo: planned.tempo,
             totalTurns: nodes.reduce((sum, node) => sum + node.suggestedTurns, 0),
             nodes,
         };
@@ -107043,6 +107168,37 @@ $CONTENT
             : `本阶段有 ${planningMin} 到 ${planningMax} 轮`;
         return `${scope}，正文模型每轮只写 800-1200 字（按 ${CONTINUATION_TURN_WORD_ESTIMATE_ACU} 字估算），也就是说这些轮次加起来一共只有大约 ${lowWords} 到 ${highWords} 字的篇幅。`;
     }
+    /**
+     * 渲染 $PACING_CONTEXT。模型必须知道「上一阶段是什么形态、现在已经连着多少轮高压」才能
+     * 判断本阶段该选哪一档形态——只给规则不给状态，它只能瞎猜。
+     * @param context 跨阶段节奏上下文
+     * @param maxConsecutivePressureTurns 连续高压轮上限，0 表示该兜底已关闭
+     * @returns 给大纲 AI 的节奏状态说明与本次可选形态
+     */
+    function renderContinuationPacingContext_ACU(context, maxConsecutivePressureTurns) {
+        const limit = Number.isFinite(maxConsecutivePressureTurns) ? Math.max(0, Math.trunc(maxConsecutivePressureTurns)) : 0;
+        const streak = Math.max(0, Math.trunc(context.leadingPressureStreak));
+        const lines = [];
+        lines.push(context.previousTempo === null
+            ? '这是本次续写任务的第一个阶段，前面没有任何已写剧情。'
+            : `上一阶段的节奏形态是 ${describeStageTempo_ACU(context.previousTempo)}。`);
+        lines.push(streak > 0
+            ? `截至目前，故事已经连续 ${streak} 轮没有出现低压轮（setup / cooldown）。`
+            : '截至目前，最近写完的一轮是低压轮，读者刚喘过一口气。');
+        if (context.previousTempo === 'surge') {
+            lines.push('因为上一阶段是高压型，本阶段的 <stage_tempo> 只能选 aftermath 或 mixed，不能再选 surge——这是上一段整段高压的代价。');
+        }
+        else {
+            lines.push('本阶段的 <stage_tempo> 四档都可以选，选哪一档取决于总纲里本卷台阶推进到了哪一步。');
+        }
+        if (limit > 0) {
+            const remaining = Math.max(0, limit - streak);
+            lines.push(streak >= limit
+                ? `连续高压轮上限是 ${limit} 轮，已经用满：除非本阶段选 surge，否则本阶段第一轮必须是 setup 或 cooldown。`
+                : `连续高压轮上限是 ${limit} 轮（surge 阶段豁免这条），本阶段开头最多还能接着写 ${remaining} 轮高压。`);
+        }
+        return lines.join('\n');
+    }
     function isRetryableOutlineError_ACU(error) {
         if (error.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' || error.code === 'CONTINUATION_OUTLINE_JSON_INVALID')
             return true;
@@ -107059,6 +107215,7 @@ $CONTENT
             const range = resolveContinuationTurnRange_ACU(request.settings.stageSize, request.settings.customTurnMin ?? undefined, request.settings.customTurnMax ?? undefined);
             const preset = this.dependencies.resolveApiPreset(request.settings, 'outline', request.reason === 'manual_replan' ? 'replan' : 'outline_call', apiDependencies);
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
+            const pacingContext = request.pacingContext ?? { previousTempo: null, leadingPressureStreak: 0 };
             let lastError = null;
             for (let attempt = 0; attempt <= retries; attempt += 1) {
                 try {
@@ -107071,6 +107228,7 @@ $CONTENT
                     // $TURN_RANGE 由 planner 权威注入：只有这里同时知道范围与重规划约束。
                     resolvers.$TURN_RANGE = () => renderContinuationTurnRange_ACU(range, request.replanConstraints);
                     resolvers.$STAGE_WORD_BUDGET = () => renderContinuationStageWordBudget_ACU(range, request.replanConstraints);
+                    resolvers.$PACING_CONTEXT = () => renderContinuationPacingContext_ACU(pacingContext, request.settings.maxConsecutivePressureTurns);
                     if (attempt > 0 && lastError)
                         resolvers.$VALIDATION_ERRORS = () => compactValidationError_ACU(lastError);
                     const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
@@ -107080,17 +107238,21 @@ $CONTENT
                     }
                     const constraints = request.replanConstraints;
                     const parsed = parseOutlineTags_ACU(raw);
-                    const built = buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? { title: constraints.previousOutline.title, goal: constraints.previousOutline.goal } : undefined);
+                    const built = buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? { title: constraints.previousOutline.title, goal: constraints.previousOutline.goal, tempo: constraints.previousOutline.tempo } : undefined);
                     // 重规划：模型只规划剩余轮次，已完成前缀由运行时拼回；剩余轮数额度放宽，
                     // 只要求拼接后 totalTurns 落在阶段规模范围内（校验按实际拼接结果传额度）。
                     const candidate = constraints ? spliceOutlineWithCompletedPrefix_ACU(constraints.previousOutline, constraints.completedTurns, built) : built;
                     const outline = constraints
                         ? validateReplannedStageOutline_ACU(candidate, range, { ...constraints, expectedRemainingTurns: candidate.totalTurns - constraints.completedTurns })
                         : validateStageOutline_ACU(candidate, range);
-                    // 节奏校验只作用在本次真正规划出来的轮次上：重规划时已完成前缀不可改，其中还混着
-                    // 迁移回填的 pressure，把它算进配比会让重规划永远无法通过。
+                    // 低压占比只作用在本次真正规划出来的轮次上：重规划时已完成前缀不可改，其中还混着
+                    // 迁移回填的 pressure，把它算进占比会让重规划永远无法通过；前缀的连续高压段则由
+                    // pacingContext.leadingPressureStreak 带入，那部分是真实写过的剧情，必须参与计数。
                     validateStageOutlinePacing_ACU(listStageOutlineTurns_ACU(outline), {
-                        downtimeTurnRatio: request.settings.downtimeTurnRatio,
+                        tempo: outline.tempo,
+                        previousTempo: pacingContext.previousTempo,
+                        leadingPressureStreak: pacingContext.leadingPressureStreak,
+                        maxConsecutivePressureTurns: request.settings.maxConsecutivePressureTurns,
                         skipTurns: constraints ? constraints.completedTurns : 0,
                     });
                     return { outline, attempts: attempt + 1, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason }, requiresReview: request.settings.outlinePreview };
@@ -107292,6 +107454,64 @@ $CONTENT
             updatedAt,
             messages: projected,
         };
+    }
+    /**
+     * 读取完整的会话时间线（展示通道专用）：拼接所有楼层段，不做压缩投影，
+     * 而是把每一份压缩标记的交接报告合成 handoff 消息插在它的截止位置上。
+     *
+     * 与 readAgentConversation_ACU（模型通道）的区别：模型通道只保留最新标记之后的内容，
+     * 时间线保留全部原始消息——用户在 UI 里仍能回看交接文件之前的历史，并直观看到
+     * 「AI 可见性从哪条交接文件开始」。删除承载标记的楼层后，该标记连同其 handoff 一起消失。
+     * @param chat 聊天数组，缺省取当前聊天
+     * @returns 按时间顺序的完整消息数组（含合成的 handoff 条目）
+     */
+    function readAgentConversationTimeline_ACU(chat) {
+        const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+        let collected = [];
+        const marksById = new Map();
+        for (let index = 0; index < messages.length; index += 1) {
+            const message = messages[index];
+            if (!message || typeof message !== 'object')
+                continue;
+            if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU))
+                continue;
+            const raw = message[AGENT_CONVERSATION_FIELD_ACU];
+            const record = validateAgentConversationFloorRecord_ACU(raw);
+            if (record) {
+                collected = [...collected, ...record.segment];
+                if (record.compaction) {
+                    const existing = marksById.get(record.compaction.compactedThroughId);
+                    if (!existing || record.compaction.at > existing.at)
+                        marksById.set(record.compaction.compactedThroughId, record.compaction);
+                }
+                continue;
+            }
+            const legacy = validateAgentConversationSnapshot_ACU(raw);
+            if (legacy)
+                collected = [...legacy.messages];
+        }
+        const marks = [...marksById.values()].sort((a, b) => a.compactedThroughId - b.compactedThroughId);
+        if (!marks.length)
+            return collected;
+        const latestThroughId = marks[marks.length - 1].compactedThroughId;
+        const describe = (mark) => mark.compactedThroughId === latestThroughId ? '早期会话交接报告（此前内容对当前 AI 不可见）' : '早期会话交接报告（已被更晚的总结取代）';
+        const timeline = [];
+        let markIndex = 0;
+        for (const item of collected) {
+            // 消息 id 在拼接顺序上单调递增，因此「插在 id ≤ 截止值的最后一条之后」等价于
+            // 在第一条 id 超过截止值的消息之前插入。
+            while (markIndex < marks.length && item.id > marks[markIndex].compactedThroughId) {
+                timeline.push({ ...buildHandoffMessage_ACU(marks[markIndex]), digest: describe(marks[markIndex]) });
+                markIndex += 1;
+            }
+            timeline.push(item);
+        }
+        // 截止值不小于全部消息 id 的标记（含消息段所在楼层已被删除、只剩标记的情况）挂在末尾。
+        while (markIndex < marks.length) {
+            timeline.push({ ...buildHandoffMessage_ACU(marks[markIndex]), digest: describe(marks[markIndex]) });
+            markIndex += 1;
+        }
+        return timeline;
     }
     function floorRecordOf_ACU(container) {
         const raw = container[AGENT_CONVERSATION_FIELD_ACU];
@@ -108850,9 +109070,13 @@ $CONTENT
             if (enforcePacing) {
                 // 编辑通道同样要过节奏配比，否则 outline-architect 那边的硬校验可以被 edit_outline 绕开。
                 // 抛出的 outline_validate 错误在主循环里会直接中止本轮，转成写入拒绝才能回灌给主 Agent 自愈。
+                const pacingContext = resolveStageOutlinePacingContext_ACU(task.stages, stage.stageId);
                 try {
                     validateStageOutlinePacing_ACU(listStageOutlineTurns_ACU(validated), {
-                        downtimeTurnRatio: envelope.settings.downtimeTurnRatio,
+                        tempo: validated.tempo,
+                        previousTempo: pacingContext.previousTempo,
+                        leadingPressureStreak: pacingContext.leadingPressureStreak,
+                        maxConsecutivePressureTurns: envelope.settings.maxConsecutivePressureTurns,
                         skipTurns: stage.completedTurns,
                     });
                 }
@@ -109001,6 +109225,9 @@ $CONTENT
                 reason: context.reason,
                 replanInstruction: context.replanInstruction,
                 replanConstraints,
+                // 新建阶段时 context.stage 为 null，跨阶段上下文按「追加在末尾的新阶段」推导；
+                // 重规划时传本阶段 id，已完成前缀的连续高压段会被算进来。
+                pacingContext: resolveStageOutlinePacingContext_ACU(context.task.stages, context.stage?.stageId ?? null),
                 allocateId: this.dependencies.allocateId,
                 resolvers: this.dependencies.createOutlineResolvers(context),
                 createInternalRequestIdentity: attempt => ({ source: 'outline', requestId: this.dependencies.allocateId('outline-request'), chatIdentity, taskId: context.task.taskId, stageId, revision, attemptId: `outline-${attempt}` }),
@@ -111288,6 +111515,7 @@ $CONTENT
         return [
             `阶段 ${execution.stage.stageNumber}：${execution.revision.outline.title}`,
             `阶段目标：${execution.revision.outline.goal}`,
+            `阶段节奏形态：${describeStageTempo_ACU(execution.revision.outline.tempo)}——它决定本阶段低压轮的下限，也决定下一阶段不能选什么形态。`,
             `当前节点：[${execution.node.id}] ${execution.node.title}`,
             `节点目标：${execution.node.goal}`,
             `阶段内轮次进度：第 ${execution.turnNumber} / ${execution.revision.outline.totalTurns} 轮`,
@@ -111313,7 +111541,7 @@ $CONTENT
         if (!execution.revision || !execution.node || !execution.turn) {
             return `大纲状态：第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待确认或游标无效）。`;
         }
-        return `大纲状态：第 ${execution.stage.stageNumber} 阶段「${execution.revision.outline.title}」，第 ${execution.turnNumber}/${execution.revision.outline.totalTurns} 轮，当前节点 [${execution.node.id}]，本轮轮次 [${execution.turn.id}]，本轮节奏 ${execution.turn.pacing}。完整大纲窗口用 read $OUTLINE_WINDOW 调阅。`;
+        return `大纲状态：第 ${execution.stage.stageNumber} 阶段「${execution.revision.outline.title}」（节奏形态 ${describeStageTempo_ACU(execution.revision.outline.tempo)}），第 ${execution.turnNumber}/${execution.revision.outline.totalTurns} 轮，当前节点 [${execution.node.id}]，本轮轮次 [${execution.turn.id}]，本轮节奏 ${execution.turn.pacing}。完整大纲窗口用 read $OUTLINE_WINDOW 调阅。`;
     }
     const ROW_RANGE_PATTERN_ACU = /^(\d+)-(\d+)$/;
     function parseRowRange_ACU(raw) {
@@ -112371,6 +112599,9 @@ $CONTENT
                             compaction.withinBudget ? '' : '压缩后仍超出阈值：提示词骨架与最近一轮的内容本身较大，最近一轮已完整保留。',
                         ].filter(Boolean).join(''),
                     });
+                    // 交接报告正文单独作为一条会话条目插进会话流：用户在界面上直接看到
+                    // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
+                    logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: compaction.mark.report });
                 }
             }
             return {
@@ -153647,6 +153878,7 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     var AgentPage = /*#__PURE__*/ _export_sfc(_sfc_main$p, [["render", _sfc_render$p], ["__scopeId", "data-v-02722bdf"]]);
 
+    const FOLD_VISIBLE_STEP_ACU = 40;
     var _sfc_main$o = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationSessionFeed',
         props: {
@@ -153659,6 +153891,20 @@ Expected function or array of functions, received type ${typeof value}.`
             const feedElement = ref(null);
             /** 用户手动展开/收起的覆盖表；未覆盖时按条目类型取默认展开态。 */
             const expandedOverrides = ref({});
+            /** 默认只显示最近这么多条会话消息；更早的被折叠，点击折叠横幅每次多展开一批。 */
+            const visibleLimit = ref(FOLD_VISIBLE_STEP_ACU);
+            const hiddenCount = computed(() => Math.max(0, props.entries.length - visibleLimit.value));
+            const visibleEntries = computed(() => (hiddenCount.value > 0 ? props.entries.slice(hiddenCount.value) : props.entries));
+            const nextExpandCount = computed(() => Math.min(FOLD_VISIBLE_STEP_ACU, hiddenCount.value));
+            /** 展开更早的一批消息。内容插在顶部，用 scrollHeight 差补偿滚动位置，避免视口跳走。 */
+            async function expandOlder() {
+                const element = feedElement.value;
+                const beforeHeight = element?.scrollHeight ?? 0;
+                visibleLimit.value += FOLD_VISIBLE_STEP_ACU;
+                await nextTick();
+                if (element)
+                    element.scrollTop += element.scrollHeight - beforeHeight;
+            }
             const KIND_LABELS = {
                 run_started: '开始',
                 run_resumed: '恢复',
@@ -153669,6 +153915,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 tool_read: '调阅',
                 delegation: '子代理',
                 outline_op: '大纲',
+                handoff: '交接',
                 finalize: '交付',
                 block: '阻断',
                 run_failed: '失败',
@@ -153698,20 +153945,23 @@ Expected function or array of functions, received type ${typeof value}.`
             function formatTime(at) {
                 return new Date(at).toLocaleTimeString();
             }
-            watch(() => props.entries.length, async () => {
+            watch(() => props.entries.length, async (length, previous) => {
+                // 长度骤减说明会话流被清空重灌（切换聊天 / 一键清空），折叠窗口复位到默认值。
+                if (length < (previous ?? 0))
+                    visibleLimit.value = FOLD_VISIBLE_STEP_ACU;
                 await nextTick();
                 const element = feedElement.value;
                 if (element)
                     element.scrollTop = element.scrollHeight;
             });
-            const __returned__ = { props, feedElement, expandedOverrides, KIND_LABELS, kindLabel, defaultExpanded, isExpanded, toggle, formatTime };
+            const __returned__ = { props, feedElement, expandedOverrides, FOLD_VISIBLE_STEP_ACU, visibleLimit, hiddenCount, visibleEntries, nextExpandCount, expandOlder, KIND_LABELS, kindLabel, defaultExpanded, isExpanded, toggle, formatTime };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\r\n/* 纵向列表必须用 flex 列而不是 grid：容器带 max-height 时 grid 会把行压缩到最小贡献，\r\n   而卡片（overflow: hidden）的最小贡献是 0——条目会被纵向压扁成一条条细线。\r\n   flex 列 + 子项 flex: none 保证每个条目始终保持内容高度，超出部分滚动。 */\n.acu-v2-session-feed[data-v-8fb34eda] { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed[data-v-8fb34eda] > * { flex: 0 0 auto;\n}\n.acu-v2-session-feed__empty[data-v-8fb34eda] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-8fb34eda] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-8fb34eda]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-8fb34eda] { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-8fb34eda] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-8fb34eda] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-8fb34eda] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-8fb34eda] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-8fb34eda] { display: block; margin: 3px 0 0; text-align: right;\n}\r\n\r\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-8fb34eda] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-8fb34eda] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-8fb34eda] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\r\n\r\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-8fb34eda] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-8fb34eda 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-8fb34eda], .acu-v2-session-feed__card--outline_op[data-v-8fb34eda], .acu-v2-session-feed__card--protocol_retry[data-v-8fb34eda] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-8fb34eda], .acu-v2-session-feed__card--run_completed[data-v-8fb34eda] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-8fb34eda] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-8fb34eda] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-session-feed__card-head[data-v-8fb34eda] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-8fb34eda] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-8fb34eda] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-8fb34eda] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-8fb34eda] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-8fb34eda] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-8fb34eda 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-8fb34eda] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-8fb34eda] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-8fb34eda] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-8fb34eda] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-8fb34eda] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-8fb34eda] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-8fb34eda] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-8fb34eda] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-8fb34eda] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-8fb34eda 1.1s ease-in-out infinite;\n}\r\n/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，\r\n   横向空间留给正文；用户气泡放宽到近整行。 */\n@media (max-width: 640px) {\n.acu-v2-session-feed[data-v-8fb34eda] { max-height: 62vh; padding: 8px;\n}\n.acu-v2-session-feed__card--delegation[data-v-8fb34eda], .acu-v2-session-feed__card--outline_op[data-v-8fb34eda], .acu-v2-session-feed__card--protocol_retry[data-v-8fb34eda] { margin-left: 8px;\n}\n.acu-v2-session-feed__card-head[data-v-8fb34eda] { padding: 7px 8px; gap: 6px;\n}\n.acu-v2-session-feed__preview[data-v-8fb34eda] { padding: 0 8px 7px 12px;\n}\n.acu-v2-session-feed__detail[data-v-8fb34eda] { padding: 0 8px 8px 12px;\n}\n.acu-v2-session-feed__user-bubble[data-v-8fb34eda] { max-width: 94%;\n}\n}\n@keyframes acu-v2-session-feed-in-8fb34eda {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-8fb34eda {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-8fb34eda {\nto { transform: rotate(360deg);\n}\n}\r\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-8fb34eda");
-    var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_8fb34eda_lang = null;
+    injectSfcStyle("\r\n/* 纵向列表必须用 flex 列而不是 grid：容器带 max-height 时 grid 会把行压缩到最小贡献，\r\n   而卡片（overflow: hidden）的最小贡献是 0——条目会被纵向压扁成一条条细线。\r\n   flex 列 + 子项 flex: none 保证每个条目始终保持内容高度，超出部分滚动。 */\n.acu-v2-session-feed[data-v-1a5b974e] { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed[data-v-1a5b974e] > * { flex: 0 0 auto;\n}\n.acu-v2-session-feed__empty[data-v-1a5b974e] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 折叠横幅：置于列表顶部，提示还有多少更早消息被折叠 */\n.acu-v2-session-feed__fold[data-v-1a5b974e] { padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--acu-text-3) 40%, transparent); border-radius: 8px; background: transparent; color: var(--acu-text-3); font: inherit; font-size: var(--acu-font-size-caption, 11px); cursor: pointer; text-align: center;\n}\n.acu-v2-session-feed__fold[data-v-1a5b974e]:hover { color: var(--acu-text-2); border-color: color-mix(in srgb, var(--acu-text-3) 60%, transparent);\n}\r\n\r\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-1a5b974e] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-1a5b974e]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-1a5b974e] { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-1a5b974e] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-1a5b974e] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-1a5b974e] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-1a5b974e] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-1a5b974e] { display: block; margin: 3px 0 0; text-align: right;\n}\r\n\r\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-1a5b974e] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-1a5b974e] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-1a5b974e] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\r\n\r\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-1a5b974e] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-1a5b974e 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-1a5b974e], .acu-v2-session-feed__card--outline_op[data-v-1a5b974e], .acu-v2-session-feed__card--protocol_retry[data-v-1a5b974e] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-1a5b974e], .acu-v2-session-feed__card--run_completed[data-v-1a5b974e] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-1a5b974e] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-1a5b974e] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\r\n/* 交接报告：琥珀色标出「AI 可见性边界」，与成功/失败/进行中的语义色区分 */\n.acu-v2-session-feed__card--handoff[data-v-1a5b974e] { border-left: 3px solid color-mix(in srgb, #c9963e 75%, transparent); background: color-mix(in srgb, #c9963e 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card-head[data-v-1a5b974e] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-1a5b974e] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-1a5b974e] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-1a5b974e] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-1a5b974e] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-1a5b974e] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-1a5b974e 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-1a5b974e] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-1a5b974e] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-1a5b974e] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-1a5b974e] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-1a5b974e] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-1a5b974e] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-1a5b974e] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-1a5b974e] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-1a5b974e] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-1a5b974e 1.1s ease-in-out infinite;\n}\r\n/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，\r\n   横向空间留给正文；用户气泡放宽到近整行。 */\n@media (max-width: 640px) {\n.acu-v2-session-feed[data-v-1a5b974e] { max-height: 62vh; padding: 8px;\n}\n.acu-v2-session-feed__card--delegation[data-v-1a5b974e], .acu-v2-session-feed__card--outline_op[data-v-1a5b974e], .acu-v2-session-feed__card--protocol_retry[data-v-1a5b974e] { margin-left: 8px;\n}\n.acu-v2-session-feed__card-head[data-v-1a5b974e] { padding: 7px 8px; gap: 6px;\n}\n.acu-v2-session-feed__preview[data-v-1a5b974e] { padding: 0 8px 7px 12px;\n}\n.acu-v2-session-feed__detail[data-v-1a5b974e] { padding: 0 8px 8px 12px;\n}\n.acu-v2-session-feed__user-bubble[data-v-1a5b974e] { max-width: 94%;\n}\n}\n@keyframes acu-v2-session-feed-in-1a5b974e {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-1a5b974e {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-1a5b974e {\nto { transform: rotate(360deg);\n}\n}\r\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-1a5b974e");
+    var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_1a5b974e_lang = null;
 
     const _hoisted_1$o = {
 	ref: "feedElement",
@@ -153752,7 +154002,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-session-feed__detail"
     };
     const _hoisted_21$5 = {
-	key: 1,
+	key: 2,
 	class: "acu-v2-session-feed__running"
     };
     function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
@@ -153761,10 +154011,22 @@ Expected function or array of functions, received type ${typeof value}.`
 		_hoisted_1$o,
 		[
 			!$props.entries.length ? (openBlock(), createElementBlock("p", _hoisted_2$m, " 还没有运行记录。点击「继续当前轮次」后，主 Agent 的思考、派工、大纲操作与交付过程会实时显示在这里。 ")) : createCommentVNode("v-if", true),
+			$setup.hiddenCount > 0 ? (openBlock(), createElementBlock(
+				"button",
+				{
+					key: 1,
+					type: "button",
+					class: "acu-v2-session-feed__fold",
+					onClick: $setup.expandOlder
+				},
+				" 已折叠 " + toDisplayString($setup.hiddenCount) + " 条更早消息 · 点击展开更早的 " + toDisplayString($setup.nextExpandCount) + " 条 ",
+				1
+				/* TEXT */
+			)) : createCommentVNode("v-if", true),
 			(openBlock(true), createElementBlock(
 				Fragment,
 				null,
-				renderList($props.entries, (entry) => {
+				renderList($setup.visibleEntries, (entry) => {
 					return openBlock(), createElementBlock(
 						Fragment,
 						{ key: entry.id },
@@ -153931,7 +154193,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-8fb34eda"]]);
+    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-1a5b974e"]]);
 
     var _sfc_main$n = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationChat',
@@ -154643,8 +154905,8 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-294e98ea"]]);
 
-    /** 日常轮占比上限。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
-    const CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU = CONTINUATION_DOWNTIME_TURN_RATIO_MAX_ACU;
+    /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
+    const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
     function errorMessage_ACU(error) {
         if (error instanceof ContinuationValidationError_ACU)
             return error.error.message;
@@ -154955,7 +155217,7 @@ Expected function or array of functions, received type ${typeof value}.`
         if (message.kind === 'turn')
             return { kind: 'run_started', title: message.digest || '新的一轮', detail: message.text };
         if (message.kind === 'handoff')
-            return { kind: 'thought', title: '早期会话交接报告', detail: message.text };
+            return { kind: 'handoff', title: message.digest || '早期会话交接报告', detail: message.text };
         if (message.kind === 'tool')
             return { kind: 'delegation', title: message.digest || '运行时结果', detail: message.text };
         return { kind: 'main_action', title: message.digest || '主 Agent 输出', detail: message.text };
@@ -154976,15 +155238,17 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         /**
          * 从持久会话回灌历史条目。切换聊天后也应调用：不同聊天的会话记录互不相干。
+         * 回灌用完整时间线而不是模型投影视图：压缩不删原始消息，用户在界面上仍能
+         * 回看交接文件之前的历史；交接文件本身按发生位置插在时间线里。
          * 读取失败不影响页面可用性——回灌只是历史展示，实时通道仍然工作。
          */
         function hydrate() {
             if (hasAgentSessionEntries_ACU())
                 return;
             try {
-                const snapshot = readAgentConversation_ACU();
-                if (snapshot.messages.length)
-                    hydrateAgentSessionLog_ACU(snapshot.messages.map(projectMessage_ACU));
+                const timeline = readAgentConversationTimeline_ACU();
+                if (timeline.length)
+                    hydrateAgentSessionLog_ACU(timeline.map(projectMessage_ACU));
             }
             catch { /* 持久会话不可读时保持空会话流，实时事件仍会显示。 */ }
             sync();
@@ -155069,7 +155333,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 { value: 'user', label: 'USER' },
                 { value: 'assistant', label: 'ASSISTANT' },
             ];
-            const downtimeTurnRatioMax = CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU;
+            const maxConsecutivePressureTurnsMax = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU;
             /** 渠道下拉里「跟随全局默认」的哨兵值：空串已被「跟随当前活动 API」占用。 */
             const agentChannelRoles = [
                 { role: 'main', label: '主 Agent' },
@@ -155182,11 +155446,11 @@ Expected function or array of functions, received type ${typeof value}.`
                     throw new Error(`${label} 必须是整数`);
                 return numeric;
             }
-            /** 占比类设置接受 0 到上限之间的有限小数；空串与 NaN 会让落盘校验报「字段必须是小数」，在这里先拦成可读提示。 */
-            function requiredRatio(value, label, maximum) {
+            /** 有上界的整数设置；空串与 NaN 会让落盘校验报「字段必须是整数」，在这里先拦成可读提示。 */
+            function requiredBoundedInteger(value, label, maximum) {
                 const numeric = typeof value === 'number' ? value : Number(String(value ?? '').trim());
-                if (!Number.isFinite(numeric) || numeric < 0 || numeric > maximum)
-                    throw new Error(`${label} 必须是 0 到 ${maximum} 之间的小数`);
+                if (!Number.isInteger(numeric) || numeric < 0 || numeric > maximum)
+                    throw new Error(`${label} 必须是 0 到 ${maximum} 之间的整数`);
                 return numeric;
             }
             /** 读取预算接受两种形态：正整数（固定 token 数）或 1%-100% 的百分比串（按总结阈值折算）。 */
@@ -155225,7 +155489,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     retryDelaySeconds: requiredInteger(source.retryDelaySeconds, '重试延迟'),
                     totalDurationMinutes: requiredInteger(source.totalDurationMinutes, '总时长'),
                     contextTurnCount: requiredInteger(source.contextTurnCount, '最近剧情轮数'),
-                    downtimeTurnRatio: requiredRatio(source.downtimeTurnRatio, '日常轮占比下限', CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU),
+                    maxConsecutivePressureTurns: requiredBoundedInteger(source.maxConsecutivePressureTurns, '连续高压轮上限', CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU),
                     storyWindowFloors: requiredInteger(source.storyWindowFloors, '正文可读窗口楼数'),
                     storyTailFloors: requiredInteger(source.storyTailFloors, '正文目录尾部全文楼数'),
                     agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, '会话自动总结阈值'),
@@ -155428,14 +155692,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, downtimeTurnRatioMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, sendMessage, saveOutline, clearData, requiredInteger, requiredRatio, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
+            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-f2fd3bb5] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-f2fd3bb5] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-f2fd3bb5] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-f2fd3bb5] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-f2fd3bb5] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-f2fd3bb5] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-f2fd3bb5] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-f2fd3bb5] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-f2fd3bb5] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-f2fd3bb5] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-f2fd3bb5] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-f2fd3bb5] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-f2fd3bb5] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-f2fd3bb5] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-f2fd3bb5] > * { flex: 1 1 auto;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-f2fd3bb5");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_f2fd3bb5_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-6d20bd54] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-6d20bd54] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-6d20bd54] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-6d20bd54] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-6d20bd54] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-6d20bd54] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-6d20bd54] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-6d20bd54] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-6d20bd54] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-6d20bd54] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-6d20bd54] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-6d20bd54] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-6d20bd54] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-6d20bd54] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-6d20bd54] > * { flex: 1 1 auto;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-6d20bd54");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_6d20bd54_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-continuation-page" };
     const _hoisted_2$j = {
@@ -155643,14 +155907,13 @@ Expected function or array of functions, received type ${typeof value}.`
 							}, null, 8, ["modelValue"])]),
 							_: 1
 						})) : createCommentVNode("v-if", true),
-						createVNode($setup["AcuFormRow"], { label: "日常轮占比下限：阶段大纲里 setup/cooldown 低压轮的最低比例，0 为不作要求，最高 0.6" }, {
+						createVNode($setup["AcuFormRow"], { label: "连续高压轮上限：跨阶段累计多少轮没有日常/余波轮就强制安排一轮，0 为不作要求。每阶段的松紧由大纲自选的节奏形态决定，这里只兜底极端情况" }, {
 							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								modelValue: $setup.settingsDraft.downtimeTurnRatio,
-								"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.settingsDraft.downtimeTurnRatio = $event),
+								modelValue: $setup.settingsDraft.maxConsecutivePressureTurns,
+								"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.settingsDraft.maxConsecutivePressureTurns = $event),
 								type: "number",
 								min: 0,
-								max: $setup.downtimeTurnRatioMax,
-								step: .05
+								max: $setup.maxConsecutivePressureTurnsMax
 							}, null, 8, ["modelValue", "max"])]),
 							_: 1
 						}),
@@ -155920,7 +156183,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				_cache[69] || (_cache[69] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
-					"大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$VALIDATION_ERRORS。",
+					"大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$PACING_CONTEXT（跨阶段节奏状态：上一阶段形态与已连续高压轮数）、$VALIDATION_ERRORS。",
 					-1
 					/* CACHED */
 				)),
@@ -156106,7 +156369,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-f2fd3bb5"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-6d20bd54"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

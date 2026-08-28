@@ -1,7 +1,7 @@
 import { callContinuationInternalAi_ACU } from './internal-ai-call';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from './defaults';
 import { resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from './api-preset';
-import { listStageOutlineTurns_ACU, validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
+import { describeStageTempo_ACU, listStageOutlineTurns_ACU, validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutline_ACU, validateStageOutlinePacing_ACU, type StageOutlinePacingContext_ACU } from './outline-schema';
 import { buildStageOutlineFromTags_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from './outline-tags';
 import { renderContinuationPrompt_ACU, type ContinuationPromptPlaceholder_ACU } from './prompt-template';
 import {
@@ -25,6 +25,8 @@ export interface ContinuationOutlinePlanningRequest_ACU {
   allocateId: (prefix: string) => string;
   replanInstruction?: string;
   replanConstraints?: ContinuationReplanConstraints_ACU;
+  /** 跨阶段节奏上下文。缺省按「第一个阶段、无历史连续高压」处理。 */
+  pacingContext?: StageOutlinePacingContext_ACU;
   resolvers?: Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
 }
 
@@ -103,6 +105,37 @@ export function renderContinuationStageWordBudget_ACU(range: { min: number; max:
   return `${scope}，正文模型每轮只写 800-1200 字（按 ${CONTINUATION_TURN_WORD_ESTIMATE_ACU} 字估算），也就是说这些轮次加起来一共只有大约 ${lowWords} 到 ${highWords} 字的篇幅。`;
 }
 
+/**
+ * 渲染 $PACING_CONTEXT。模型必须知道「上一阶段是什么形态、现在已经连着多少轮高压」才能
+ * 判断本阶段该选哪一档形态——只给规则不给状态，它只能瞎猜。
+ * @param context 跨阶段节奏上下文
+ * @param maxConsecutivePressureTurns 连续高压轮上限，0 表示该兜底已关闭
+ * @returns 给大纲 AI 的节奏状态说明与本次可选形态
+ */
+export function renderContinuationPacingContext_ACU(context: StageOutlinePacingContext_ACU, maxConsecutivePressureTurns: number): string {
+  const limit = Number.isFinite(maxConsecutivePressureTurns) ? Math.max(0, Math.trunc(maxConsecutivePressureTurns)) : 0;
+  const streak = Math.max(0, Math.trunc(context.leadingPressureStreak));
+  const lines: string[] = [];
+  lines.push(context.previousTempo === null
+    ? '这是本次续写任务的第一个阶段，前面没有任何已写剧情。'
+    : `上一阶段的节奏形态是 ${describeStageTempo_ACU(context.previousTempo)}。`);
+  lines.push(streak > 0
+    ? `截至目前，故事已经连续 ${streak} 轮没有出现低压轮（setup / cooldown）。`
+    : '截至目前，最近写完的一轮是低压轮，读者刚喘过一口气。');
+  if (context.previousTempo === 'surge') {
+    lines.push('因为上一阶段是高压型，本阶段的 <stage_tempo> 只能选 aftermath 或 mixed，不能再选 surge——这是上一段整段高压的代价。');
+  } else {
+    lines.push('本阶段的 <stage_tempo> 四档都可以选，选哪一档取决于总纲里本卷台阶推进到了哪一步。');
+  }
+  if (limit > 0) {
+    const remaining = Math.max(0, limit - streak);
+    lines.push(streak >= limit
+      ? `连续高压轮上限是 ${limit} 轮，已经用满：除非本阶段选 surge，否则本阶段第一轮必须是 setup 或 cooldown。`
+      : `连续高压轮上限是 ${limit} 轮（surge 阶段豁免这条），本阶段开头最多还能接着写 ${remaining} 轮高压。`);
+  }
+  return lines.join('\n');
+}
+
 function isRetryableOutlineError_ACU(error: ContinuationError_ACU): boolean {
   if (error.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' || error.code === 'CONTINUATION_OUTLINE_JSON_INVALID') return true;
   if (error.phase === 'outline_validate') return true;
@@ -118,6 +151,7 @@ export class ContinuationOutlinePlanner_ACU {
     const range = resolveContinuationTurnRange_ACU(request.settings.stageSize, request.settings.customTurnMin ?? undefined, request.settings.customTurnMax ?? undefined);
     const preset = this.dependencies.resolveApiPreset(request.settings, 'outline', request.reason === 'manual_replan' ? 'replan' : 'outline_call', apiDependencies);
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
+    const pacingContext: StageOutlinePacingContext_ACU = request.pacingContext ?? { previousTempo: null, leadingPressureStreak: 0 };
     let lastError: ContinuationError_ACU | null = null;
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -131,6 +165,7 @@ export class ContinuationOutlinePlanner_ACU {
         // $TURN_RANGE 由 planner 权威注入：只有这里同时知道范围与重规划约束。
         resolvers.$TURN_RANGE = () => renderContinuationTurnRange_ACU(range, request.replanConstraints);
         resolvers.$STAGE_WORD_BUDGET = () => renderContinuationStageWordBudget_ACU(range, request.replanConstraints);
+        resolvers.$PACING_CONTEXT = () => renderContinuationPacingContext_ACU(pacingContext, request.settings.maxConsecutivePressureTurns);
         if (attempt > 0 && lastError) resolvers.$VALIDATION_ERRORS = () => compactValidationError_ACU(lastError!);
         const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
         const raw = await this.dependencies.callInternalAi(rendered.messages, preset, identity);
@@ -139,17 +174,21 @@ export class ContinuationOutlinePlanner_ACU {
         }
         const constraints = request.replanConstraints;
         const parsed = parseOutlineTags_ACU(raw);
-        const built = buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? { title: constraints.previousOutline.title, goal: constraints.previousOutline.goal } : undefined);
+        const built = buildStageOutlineFromTags_ACU(parsed, request.allocateId, constraints ? { title: constraints.previousOutline.title, goal: constraints.previousOutline.goal, tempo: constraints.previousOutline.tempo } : undefined);
         // 重规划：模型只规划剩余轮次，已完成前缀由运行时拼回；剩余轮数额度放宽，
         // 只要求拼接后 totalTurns 落在阶段规模范围内（校验按实际拼接结果传额度）。
         const candidate = constraints ? spliceOutlineWithCompletedPrefix_ACU(constraints.previousOutline, constraints.completedTurns, built) : built;
         const outline = constraints
           ? validateReplannedStageOutline_ACU(candidate, range, { ...constraints, expectedRemainingTurns: candidate.totalTurns - constraints.completedTurns })
           : validateStageOutline_ACU(candidate, range);
-        // 节奏校验只作用在本次真正规划出来的轮次上：重规划时已完成前缀不可改，其中还混着
-        // 迁移回填的 pressure，把它算进配比会让重规划永远无法通过。
+        // 低压占比只作用在本次真正规划出来的轮次上：重规划时已完成前缀不可改，其中还混着
+        // 迁移回填的 pressure，把它算进占比会让重规划永远无法通过；前缀的连续高压段则由
+        // pacingContext.leadingPressureStreak 带入，那部分是真实写过的剧情，必须参与计数。
         validateStageOutlinePacing_ACU(listStageOutlineTurns_ACU(outline), {
-          downtimeTurnRatio: request.settings.downtimeTurnRatio,
+          tempo: outline.tempo,
+          previousTempo: pacingContext.previousTempo,
+          leadingPressureStreak: pacingContext.leadingPressureStreak,
+          maxConsecutivePressureTurns: request.settings.maxConsecutivePressureTurns,
           skipTurns: constraints ? constraints.completedTurns : 0,
         });
         return { outline, attempts: attempt + 1, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason }, requiresReview: request.settings.outlinePreview };

@@ -16,6 +16,7 @@ export type AgentSessionEventKind_ACU =
   | 'tool_read'
   | 'delegation'
   | 'outline_op'
+  | 'handoff'
   | 'finalize'
   | 'block'
   | 'run_failed'

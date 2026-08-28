@@ -28,8 +28,8 @@ export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
   '$AGENT_READ_MATERIALS', '$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$USER_INTENT', '$OUTLINE_WINDOW',
   // 目录+状态骨架占位符：正文楼层目录、大纲单行状态、已启用世界书目录、读集词汇表。
   '$STORY_CATALOG', '$OUTLINE_STATE', '$WORLDBOOK_CATALOG', '$AGENT_READ_CATALOG',
-  // 故事总纲与节奏控制：总纲内容与状态证据、本轮节奏标签、阶段字数容量锚。
-  '$STORY_ARC', '$STORY_ARC_STATE', '$CURRENT_TURN_PACING', '$STAGE_WORD_BUDGET',
+  // 故事总纲与节奏控制：总纲内容与状态证据、本轮节奏标签、阶段字数容量锚、跨阶段节奏状态。
+  '$STORY_ARC', '$STORY_ARC_STATE', '$CURRENT_TURN_PACING', '$STAGE_WORD_BUDGET', '$PACING_CONTEXT',
 ] as const;
 
 export type ContinuationPromptPlaceholder_ACU = typeof CONTINUATION_PROMPT_PLACEHOLDERS_ACU[number];

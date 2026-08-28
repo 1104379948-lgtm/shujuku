@@ -9,6 +9,7 @@ import {
   clearAgentConversationField_ACU,
   lastAnnouncedTurnKey_ACU,
   readAgentConversation_ACU,
+  readAgentConversationTimeline_ACU,
   renderAgentConversationMessages_ACU,
   validateAgentConversationSnapshot_ACU,
   writeAgentConversationCompactionMark_ACU,
@@ -106,6 +107,62 @@ describe('会话分段读取', () => {
   it('全程无命中时返回空会话', () => {
     useChat([{ mes: 'a' }, { mes: 'b' }]);
     expect(readAgentConversation_ACU()).toMatchObject({ messages: [], nextId: 1 });
+  });
+});
+
+describe('会话时间线（展示通道）', () => {
+  it('保留全部原始消息，交接报告按截止位置插入且最新一份标注 AI 可见性边界', () => {
+    const chat = [
+      { mes: 'a', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'turn', '早期通告'), message_ACU(2, 'agent', '早期输出')]) },
+      { mes: 'b', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(3, 'agent', '最近输出')], { compaction: { compactedThroughId: 2, report: '交接报告内容', at: 1 } }) },
+    ];
+    const timeline = readAgentConversationTimeline_ACU(chat);
+    expect(timeline.map(item => [item.kind, item.text])).toEqual([
+      ['turn', '早期通告'],
+      ['agent', '早期输出'],
+      ['handoff', '交接报告内容'],
+      ['agent', '最近输出'],
+    ]);
+    expect(timeline[2].digest).toBe('早期会话交接报告（此前内容对当前 AI 不可见）');
+
+    // 同一份数据在模型通道里只剩交接报告之后的内容——两个通道语义不同。
+    expect(readAgentConversation_ACU(chat).messages.map(item => item.kind)).toEqual(['handoff', 'agent']);
+  });
+
+  it('多份标记各插一次：更早的标注被取代；删掉末楼后时间线退回上一份标记', () => {
+    const chat = [
+      { mes: 'a', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'agent', '第一段')]) },
+      { mes: 'b', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(2, 'agent', '第二段')], { compaction: { compactedThroughId: 1, report: '第一份交接', at: 1 } }) },
+      { mes: 'c', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(3, 'agent', '第三段')], { compaction: { compactedThroughId: 2, report: '第二份交接', at: 2 } }) },
+    ];
+    const timeline = readAgentConversationTimeline_ACU(chat);
+    expect(timeline.map(item => item.text)).toEqual(['第一段', '第一份交接', '第二段', '第二份交接', '第三段']);
+    expect(timeline[1].digest).toBe('早期会话交接报告（已被更晚的总结取代）');
+    expect(timeline[3].digest).toBe('早期会话交接报告（此前内容对当前 AI 不可见）');
+
+    // 删掉承载第二份标记的楼层：时间线退回只有第一份交接，且它重新成为可见性边界。
+    const rolledBack = readAgentConversationTimeline_ACU(chat.slice(0, 2));
+    expect(rolledBack.map(item => item.text)).toEqual(['第一段', '第一份交接', '第二段']);
+    expect(rolledBack[1].digest).toBe('早期会话交接报告（此前内容对当前 AI 不可见）');
+  });
+
+  it('只剩标记没有消息段时仍输出交接条目；截止值不小于全部消息 id 时挂在末尾', () => {
+    const markOnly = [{ mes: 'a', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([], { compaction: { compactedThroughId: 9, report: '孤立交接', at: 1 } }) }];
+    expect(readAgentConversationTimeline_ACU(markOnly).map(item => [item.kind, item.text])).toEqual([['handoff', '孤立交接']]);
+
+    const trailing = [
+      { mes: 'a', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'agent', '唯一消息')], { compaction: { compactedThroughId: 1, report: '覆盖全部的交接', at: 1 } }) },
+    ];
+    expect(readAgentConversationTimeline_ACU(trailing).map(item => item.text)).toEqual(['唯一消息', '覆盖全部的交接']);
+  });
+
+  it('没有任何标记时与拼接视图一致，全程无命中时为空数组', () => {
+    const chat = [
+      { mes: 'a', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(1, 'user', '第一句')]) },
+      { mes: 'b', [AGENT_CONVERSATION_FIELD_ACU]: floorRecordWith([message_ACU(2, 'agent', '第二句')]) },
+    ];
+    expect(readAgentConversationTimeline_ACU(chat).map(item => item.text)).toEqual(['第一句', '第二句']);
+    expect(readAgentConversationTimeline_ACU([{ mes: 'a' }])).toEqual([]);
   });
 });
 

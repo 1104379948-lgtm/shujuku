@@ -17,13 +17,13 @@ export const CONTINUATION_TURN_RANGES_ACU: Readonly<Record<Exclude<ContinuationS
 const DEFAULT_OUTLINE_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   {
     role: 'system',
-    content: '你是专业的小说阶段规划助手。负责根据故事背景与历史进展，为下一阶段规划剧情大纲。\n输出格式：把大纲内容写入下列标签，标签外可以自由书写你的思路与分析，系统只读取标签内的内容。\n<stage_title>阶段标题</stage_title>\n<stage_goal>阶段整体目标</stage_goal>\n<node>\n<node_title>节点标题</node_title>\n<node_goal>节点目标</node_goal>\n<turn pacing="setup">本轮剧情目标（每轮一个 turn 标签，内容为该轮要发生的具体剧情）</turn>\n</node>\n每个 <turn> 都必须带 pacing 属性，取值只能是 setup / pressure / turn / cooldown 四者之一，含义见节奏配比条款。\n节点数量不限，每个 <node> 内至少一个 <turn>；全部 <turn> 的总数就是本阶段的轮数，必须落在给定的阶段轮数范围内。\n不要输出 JSON，不要输出 id、编号或轮数统计字段——结构编号全部由系统自动生成。',
+    content: '你是专业的小说阶段规划助手。负责根据故事背景与历史进展，为下一阶段规划剧情大纲。\n输出格式：把大纲内容写入下列标签，标签外可以自由书写你的思路与分析，系统只读取标签内的内容。\n<stage_title>阶段标题</stage_title>\n<stage_goal>阶段整体目标</stage_goal>\n<stage_tempo>本阶段节奏形态，取值只能是 buildup / mixed / surge / aftermath 之一，含义见节奏条款</stage_tempo>\n<node>\n<node_title>节点标题</node_title>\n<node_goal>节点目标</node_goal>\n<turn pacing="setup">本轮剧情目标（每轮一个 turn 标签，内容为该轮要发生的具体剧情）</turn>\n</node>\n每个 <turn> 都必须带 pacing 属性，取值只能是 setup / pressure / turn / cooldown 四者之一，含义见节奏条款。\n节点数量不限，每个 <node> 内至少一个 <turn>；全部 <turn> 的总数就是本阶段的轮数，必须落在给定的阶段轮数范围内。\n不要输出 JSON，不要输出 id、编号或轮数统计字段——结构编号全部由系统自动生成。',
     enabled: true,
     deletable: true,
   },
   {
     role: 'assistant',
-    content: '收到。我作为小说阶段规划助手，会把阶段标题、阶段目标、各节点与逐轮剧情目标分别写入 <stage_title>、<stage_goal>、<node>、<node_title>、<node_goal>、<turn> 标签中，并给每个 <turn> 标注 pacing 属性；标签外只写思路分析，不输出 JSON、id 或任何编号统计字段，并保证全部 <turn> 总数落在给定的轮数范围内。',
+    content: '收到。我作为小说阶段规划助手，会把阶段标题、阶段目标、阶段节奏形态、各节点与逐轮剧情目标分别写入 <stage_title>、<stage_goal>、<stage_tempo>、<node>、<node_title>、<node_goal>、<turn> 标签中，并给每个 <turn> 标注 pacing 属性；标签外只写思路分析，不输出 JSON、id 或任何编号统计字段，并保证全部 <turn> 总数落在给定的轮数范围内。',
     enabled: true,
     deletable: true,
   },
@@ -35,7 +35,7 @@ const DEFAULT_OUTLINE_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '【节奏配比：故事需要呼吸】\n每个 <turn> 标注四档之一：\n- setup 铺垫日常：关系推进、生活场景、准备工作、信息沉淀。没有外部危机，价值体现在人物关系变化、读者对角色的理解加深、或为后续埋线。\n- pressure 冲突推进：危机、对抗、外部高压。主角被逼做出选择并付出代价。\n- turn 转折揭示：反转、信息揭露、伏笔回收。局势的性质在这一轮发生改变。\n- cooldown 余波消化：战后疗伤、复盘、情绪落地、关系在事件之后的重新校准。\n\n硬性配比要求（不满足会被系统打回重排）：\n1. 低压轮（setup + cooldown）在本阶段占比不得低于给定的最低比例。\n2. 连续的 pressure / turn 不得超过 3 轮——第 4 轮必须是 setup 或 cooldown。\n\n为什么必须这样：读者对紧张的感知是相对的。连续八轮全是危机，第八轮的危机读起来和第一轮一样，甚至更钝；中间插一轮安静的日常，后面那轮危机才重新有分量。同理，重大冲突之后不给一轮 cooldown，人物的代价就没有落点，读者感受不到刚才那场戏的重量。低压轮不是浪费篇幅，它是让高压轮生效的前提。\nsetup 与 cooldown 轮同样要写具体：写清谁和谁在什么场景做什么、这一轮之后他们之间有什么变化，不要写「日常互动」「气氛缓和」这种空话。',
+    content: '【节奏：先定阶段形态，再排每轮松紧】\n\n第一步，用 <stage_tempo> 定这个阶段整体是什么形态。四档：\n- buildup 铺垫型：低压为主，攒关系、攒信息、攒资源，为后面的爆发蓄力。本阶段低压轮至少占一半。\n- mixed 起伏型：常规推进，松紧交替。本阶段低压轮至少占四分之一。\n- surge 高压型：决战、逃亡、连环变故这类一口气压到底的段落。允许整个阶段一轮低压都没有。\n- aftermath 余波型：消化上一段高压的代价，疗伤、复盘、关系重建、局势重新洗牌。本阶段低压轮至少占六成。\n选哪一档取决于总纲里本卷台阶推进到了哪一步，以及前面刚写完的是什么——当前节奏状态见下方的「节奏状态」段。\n\n第二步，给每个 <turn> 标 pacing 四档之一：\n- setup 铺垫日常：关系推进、生活场景、准备工作、信息沉淀。没有外部危机，价值体现在人物关系变化、读者对角色的理解加深、或为后续埋线。\n- pressure 冲突推进：危机、对抗、外部高压。主角被逼做出选择并付出代价。\n- turn 转折揭示：反转、信息揭露、伏笔回收。局势的性质在这一轮发生改变。\n- cooldown 余波消化：战后疗伤、复盘、情绪落地、关系在事件之后的重新校准。\n\n硬性要求（不满足会被系统打回重排）：\n1. 本阶段低压轮（setup + cooldown）的数量不得低于该形态对应的下限。\n2. 上一阶段是 surge 时，本阶段不能再选 surge，只能选 aftermath 或 mixed。\n3. 连续高压轮（pressure + turn）不得超过给定的上限，该计数跨阶段累计——前一阶段结尾连着三轮高压，本阶段开头就只剩上限减三轮的余量。surge 阶段豁免这一条。\n\n关键：低压轮放在哪里由你决定，不要均匀分散。\n把低压轮每隔三四轮撒一个，读者会感觉到一台节拍器，那比全程高压更假。真实的节奏是波浪：可以开头连着两轮日常把人物关系立住，然后连着四轮高压一口气推到底；也可以前面一路紧绷，最后两轮全用来收拾残局。同一份大纲里，「日常日常高压高压高压高压」和「高压高压高压高压日常日常」是完全不同的两段故事，但它们的低压轮数量一样——你要选的是哪一种叙事，而不是凑够数量。\n\n为什么需要低压轮：读者对紧张的感知是相对的。连续八轮全是危机，第八轮的危机读起来和第一轮一样甚至更钝；前面有一段安静，后面那场危机才重新有分量。同理，重大冲突之后不给余波，人物的代价就没有落点。低压轮不是浪费篇幅，它是让高压轮生效的前提。\nsetup 与 cooldown 轮同样要写具体：写清谁和谁在什么场景做什么、这一轮之后他们之间有什么变化，不要写「日常互动」「气氛缓和」这种空话。',
     enabled: true,
     deletable: true,
   },
@@ -47,13 +47,13 @@ const DEFAULT_OUTLINE_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'assistant',
-    content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 先按阶段容量算清楚这个阶段装得下多少内容，宁可把阶段目标定小写深，也不把一段旅程压进一个阶段；\n2. 给每个 <turn> 标注 pacing，保证低压轮占比达标、连续高压不超过三轮，让紧张有对照物、让代价有落点；\n3. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n4. 在 pressure / turn 轮落实“行动、阻碍、悬念”三要素并让冲突线逐级升高；setup / cooldown 轮写具体的关系变化、信息沉淀与情绪落地，不写空话也不硬造危机；\n5. 设计明显的情绪曲线（压抑后必有释放），涉及伏笔的轮目标写明操作种类与对象，信息揭露写明允许揭到哪一层；\n6. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n7. 尊重轮承载量：每轮只装一个场景片段、至多两个节拍，绝不把正文模型 800-1200 字写不完的内容塞进一轮；\n8. 让阶段目标落在故事总纲当前推进中的那一级台阶内，不触碰总纲里标注为禁止提前释放的底牌，并在阶段末留下跨阶段悬念。\n我会将这些原则落实到各个标签的内容中。',
+    content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 先按阶段容量算清楚这个阶段装得下多少内容，宁可把阶段目标定小写深，也不把一段旅程压进一个阶段；\n2. 先按总纲台阶与当前节奏状态定 <stage_tempo>，再按该形态的下限安排低压轮——低压轮按叙事需要成段安放，不平均分散成节拍器；\n3. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n4. 在 pressure / turn 轮落实“行动、阻碍、悬念”三要素并让冲突线逐级升高；setup / cooldown 轮写具体的关系变化、信息沉淀与情绪落地，不写空话也不硬造危机；\n5. 设计明显的情绪曲线（压抑后必有释放），涉及伏笔的轮目标写明操作种类与对象，信息揭露写明允许揭到哪一层；\n6. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n7. 尊重轮承载量：每轮只装一个场景片段、至多两个节拍，绝不把正文模型 800-1200 字写不完的内容塞进一轮；\n8. 让阶段目标落在故事总纲当前推进中的那一级台阶内，不触碰总纲里标注为禁止提前释放的底牌，并在阶段末留下跨阶段悬念。\n我会将这些原则落实到各个标签的内容中。',
     enabled: true,
     deletable: true,
   },
   {
     role: 'user',
-    content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n上一阶段纪要：\n$LAST_STAGE_CHRONICLES\n\n更早阶段概要：\n$EARLIER_STAGE_SUMMARIES\n\n最近剧情：\n$RECENT_STORY\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。',
+    content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n上一阶段纪要：\n$LAST_STAGE_CHRONICLES\n\n更早阶段概要：\n$EARLIER_STAGE_SUMMARIES\n\n最近剧情：\n$RECENT_STORY\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。',
     enabled: true,
     deletable: true,
   },
@@ -93,12 +93,21 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V13_ACU = 'spv2.1-continu
  * 也仍带着「每个节点都必须升级障碍」这类把日常轮结构性排除掉的条款，必须强制刷新。
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU = 'spv2.2-continuation-story-arc-pacing-v14';
+/**
+ * 阶段节奏形态版本：V14 的节奏规则（每阶段固定低压占比 + 连续高压不超过 3 轮）在数学上只有
+ * 锯齿解，读者感知到的是每三四轮一次的固定喘息，而且所有阶段同构。改为阶段级 tempo 形态
+ * 决定疏密、跨阶段连续高压上限兜底。旧提示词写死了「连续高压不超过三轮」，必须强制刷新。
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU = 'spv2.3-continuation-stage-tempo-v15';
 
-/** 低压轮（setup + cooldown）最低占比的默认值。 */
-export const CONTINUATION_DOWNTIME_TURN_RATIO_DEFAULT_ACU = 0.3;
+/**
+ * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
+ * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
+ */
+export const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU = 8;
 
-/** 低压轮占比的可配置上限。超过 0.6 会让冲突线没有足够轮次推进。 */
-export const CONTINUATION_DOWNTIME_TURN_RATIO_MAX_ACU = 0.6;
+/** 连续高压轮上限的可配置上限。再大就等于关闭这条兜底。 */
+export const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU = 20;
 
 function clonePromptSegments_ACU(segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
   return segments.map(segment => ({ ...segment }));
@@ -132,7 +141,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     generationRetryLimit: 3,
     internalAiRetryLimit: 3,
     contextTurnCount: 3,
-    downtimeTurnRatio: CONTINUATION_DOWNTIME_TURN_RATIO_DEFAULT_ACU,
+    maxConsecutivePressureTurns: CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU,
     storyWindowFloors: AGENT_STORY_WINDOW_DEFAULT_ACU,
     agentHistoryTokenBudget: AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
     storyTailFloors: AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
@@ -145,7 +154,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU,
   };
 }
 

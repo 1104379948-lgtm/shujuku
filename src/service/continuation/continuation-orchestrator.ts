@@ -1,7 +1,7 @@
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
 import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
-import { listStageOutlineTurns_ACU, resolveContinuationTurnRange_ACU, validateReplannedStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
+import { listStageOutlineTurns_ACU, resolveContinuationTurnRange_ACU, resolveStageOutlinePacingContext_ACU, validateReplannedStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
 import { CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationError_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationSettings_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
 import type { AgentConversationAppend_ACU, AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU } from './agent/agent-model';
@@ -774,9 +774,13 @@ export class ContinuationOrchestrator_ACU {
     if (enforcePacing) {
       // 编辑通道同样要过节奏配比，否则 outline-architect 那边的硬校验可以被 edit_outline 绕开。
       // 抛出的 outline_validate 错误在主循环里会直接中止本轮，转成写入拒绝才能回灌给主 Agent 自愈。
+      const pacingContext = resolveStageOutlinePacingContext_ACU(task.stages, stage.stageId);
       try {
         validateStageOutlinePacing_ACU(listStageOutlineTurns_ACU(validated), {
-          downtimeTurnRatio: envelope.settings.downtimeTurnRatio,
+          tempo: validated.tempo,
+          previousTempo: pacingContext.previousTempo,
+          leadingPressureStreak: pacingContext.leadingPressureStreak,
+          maxConsecutivePressureTurns: envelope.settings.maxConsecutivePressureTurns,
           skipTurns: stage.completedTurns,
         });
       } catch (error) {
@@ -928,6 +932,9 @@ export class ContinuationOrchestrator_ACU {
       reason: context.reason,
       replanInstruction: context.replanInstruction,
       replanConstraints,
+      // 新建阶段时 context.stage 为 null，跨阶段上下文按「追加在末尾的新阶段」推导；
+      // 重规划时传本阶段 id，已完成前缀的连续高压段会被算进来。
+      pacingContext: resolveStageOutlinePacingContext_ACU(context.task.stages, context.stage?.stageId ?? null),
       allocateId: this.dependencies.allocateId,
       resolvers: this.dependencies.createOutlineResolvers(context),
       createInternalRequestIdentity: attempt => ({ source: 'outline', requestId: this.dependencies.allocateId('outline-request'), chatIdentity, taskId: context.task.taskId, stageId, revision, attemptId: `outline-${attempt}` }),

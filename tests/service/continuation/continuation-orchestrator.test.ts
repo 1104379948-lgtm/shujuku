@@ -415,29 +415,47 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(1);
   });
 
-  it('工具编辑同样要过节奏配比：插高压轮或删低压轮都被拒绝，默认插入轮标为 setup', async () => {
+  it('工具编辑要过阶段形态的低压下限，但不受任何周期约束，默认插入轮标为 setup', async () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
 
-    // 固定件是 setup/pressure/pressure/setup/pressure/pressure：再插一轮 pressure 后低压只剩 2/7，不足 3。
-    await expectCode(() => (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
-      { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-2', goal: '再加一场追杀', pacing: 'pressure' },
-    ], 'running'), 'CONTINUATION_AGENT_WRITE_REJECTED');
-
-    // 删掉一轮低压轮同样跌破占比下限。
+    // 固定件是 setup/pressure/pressure/setup/pressure/pressure，形态回填为 mixed（低压下限四分之一）。
+    // 删掉一轮低压再补一轮高压，6 轮里只剩 1 轮低压，跌破下限。
     await expectCode(() => (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
       { op: 'remove_turn', turnId: 'turn-4' },
       { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-5', goal: '补一场冲突', pacing: 'pressure' },
     ], 'running'), 'CONTINUATION_AGENT_WRITE_REJECTED');
     expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(1);
 
-    // 不写 pacing 时按 setup 落值，配比因此变好而不是变差。
+    // 只插一轮 pressure：低压轮数量没变，仍满足下限，因此放行——阶段内不存在「每几轮必须有一轮低压」的要求。
+    await (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
+      { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-2', goal: '再加一场追杀', pacing: 'pressure' },
+    ], 'running');
+    const denser = store.readPersisted()!.activeTask!.stages[0].revisions.find(item => item.revision === 2)!;
+    expect(denser.outline.nodes[0].turns.map(turn => turn.pacing)).toEqual(['setup', 'pressure', 'pressure', 'pressure', 'setup', 'pressure', 'pressure']);
+
+    // 不写 pacing 时按 setup 落值，低压轮因此变多而不是变少。
     await (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
       { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-2', goal: '两人在檐下躲雨说话' },
     ], 'running');
-    const revision = store.readPersisted()!.activeTask!.stages[0].revisions.find(item => item.revision === 2)!;
+    const revision = store.readPersisted()!.activeTask!.stages[0].revisions.find(item => item.revision === 3)!;
     expect(revision.outline.nodes[0].turns[2].pacing).toBe('setup');
+  });
+
+  it('规划时把跨阶段节奏上下文交给 planner：上一阶段形态与尾部连续高压段都被带上', async () => {
+    const { orchestrator, store, planner } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+
+    expect(planner.mock.calls[0][0].pacingContext).toEqual({ previousTempo: null, leadingPressureStreak: 0 });
+
+    await confirmTurns(orchestrator, store, 3);
+    await orchestrator.replanRemaining({ instruction: '改写剩余部分' });
+
+    // 已完成 3 轮 setup/pressure/pressure，尾部两轮高压要带进重规划；上一阶段形态取它前面的阶段（没有）。
+    const revised = planner.mock.calls[planner.mock.calls.length - 1][0];
+    expect(revised.pacingContext).toEqual({ previousTempo: null, leadingPressureStreak: 2 });
   });
 
   it('stays busy while the bridge holds a live claim for the awaiting host turn', async () => {

@@ -178,6 +178,61 @@ export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapsh
   };
 }
 
+/**
+ * 读取完整的会话时间线（展示通道专用）：拼接所有楼层段，不做压缩投影，
+ * 而是把每一份压缩标记的交接报告合成 handoff 消息插在它的截止位置上。
+ *
+ * 与 readAgentConversation_ACU（模型通道）的区别：模型通道只保留最新标记之后的内容，
+ * 时间线保留全部原始消息——用户在 UI 里仍能回看交接文件之前的历史，并直观看到
+ * 「AI 可见性从哪条交接文件开始」。删除承载标记的楼层后，该标记连同其 handoff 一起消失。
+ * @param chat 聊天数组，缺省取当前聊天
+ * @returns 按时间顺序的完整消息数组（含合成的 handoff 条目）
+ */
+export function readAgentConversationTimeline_ACU(chat?: any[]): AgentConversationMessage_ACU[] {
+  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  let collected: AgentConversationMessage_ACU[] = [];
+  const marksById = new Map<number, AgentConversationCompactionMark_ACU>();
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (!message || typeof message !== 'object') continue;
+    if (!Object.prototype.hasOwnProperty.call(message, AGENT_CONVERSATION_FIELD_ACU)) continue;
+    const raw = (message as Record<string, unknown>)[AGENT_CONVERSATION_FIELD_ACU];
+    const record = validateAgentConversationFloorRecord_ACU(raw);
+    if (record) {
+      collected = [...collected, ...record.segment];
+      if (record.compaction) {
+        const existing = marksById.get(record.compaction.compactedThroughId);
+        if (!existing || record.compaction.at > existing.at) marksById.set(record.compaction.compactedThroughId, record.compaction);
+      }
+      continue;
+    }
+    const legacy = validateAgentConversationSnapshot_ACU(raw);
+    if (legacy) collected = [...legacy.messages];
+  }
+  const marks = [...marksById.values()].sort((a, b) => a.compactedThroughId - b.compactedThroughId);
+  if (!marks.length) return collected;
+  const latestThroughId = marks[marks.length - 1].compactedThroughId;
+  const describe = (mark: AgentConversationCompactionMark_ACU): string =>
+    mark.compactedThroughId === latestThroughId ? '早期会话交接报告（此前内容对当前 AI 不可见）' : '早期会话交接报告（已被更晚的总结取代）';
+  const timeline: AgentConversationMessage_ACU[] = [];
+  let markIndex = 0;
+  for (const item of collected) {
+    // 消息 id 在拼接顺序上单调递增，因此「插在 id ≤ 截止值的最后一条之后」等价于
+    // 在第一条 id 超过截止值的消息之前插入。
+    while (markIndex < marks.length && item.id > marks[markIndex].compactedThroughId) {
+      timeline.push({ ...buildHandoffMessage_ACU(marks[markIndex]), digest: describe(marks[markIndex]) });
+      markIndex += 1;
+    }
+    timeline.push(item);
+  }
+  // 截止值不小于全部消息 id 的标记（含消息段所在楼层已被删除、只剩标记的情况）挂在末尾。
+  while (markIndex < marks.length) {
+    timeline.push({ ...buildHandoffMessage_ACU(marks[markIndex]), digest: describe(marks[markIndex]) });
+    markIndex += 1;
+  }
+  return timeline;
+}
+
 function floorRecordOf_ACU(container: Record<string, unknown>): AgentConversationFloorRecord_ACU {
   const raw = container[AGENT_CONVERSATION_FIELD_ACU];
   const record = validateAgentConversationFloorRecord_ACU(raw);

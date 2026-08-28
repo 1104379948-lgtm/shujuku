@@ -6,7 +6,7 @@
  * 结构字段全部由运行时生成推导，模型只负责创作内容。
  *
  * 标签契约（与 defaults.ts 的默认大纲提示词一一对应）：
- * <stage_title>…</stage_title> <stage_goal>…</stage_goal>
+ * <stage_title>…</stage_title> <stage_goal>…</stage_goal> <stage_tempo>mixed</stage_tempo>
  * <node><node_title>…</node_title><node_goal>…</node_goal><turn pacing="setup">…</turn>…</node>
  */
 
@@ -14,9 +14,11 @@ import {
   CONTINUATION_SCHEMA_VERSION_ACU,
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
+  STAGE_TEMPOS_ACU,
   STAGE_TURN_PACINGS_ACU,
   type StageNode_ACU,
   type StageOutline_ACU,
+  type StageTempo_ACU,
   type StageTurnPacing_ACU,
 } from './model';
 
@@ -34,6 +36,8 @@ export interface ParsedOutlineTagNode_ACU {
 export interface ParsedOutlineTags_ACU {
   title: string;
   goal: string;
+  /** 阶段节奏形态；标签缺失或写错时为 null，由构建层决定回落值。 */
+  tempo: StageTempo_ACU | null;
   nodes: ParsedOutlineTagNode_ACU[];
 }
 
@@ -82,6 +86,12 @@ function readTurnPacing_ACU(attributes: string): StageTurnPacing_ACU {
   return (STAGE_TURN_PACINGS_ACU as readonly string[]).includes(raw) ? raw as StageTurnPacing_ACU : 'pressure';
 }
 
+/** 读取 <stage_tempo>。写错或没写返回 null，由构建层回落——重规划时要能沿用旧大纲的形态。 */
+function readStageTempo_ACU(text: string): StageTempo_ACU | null {
+  const raw = readTag_ACU(text, 'stage_tempo').toLowerCase();
+  return (STAGE_TEMPOS_ACU as readonly string[]).includes(raw) ? raw as StageTempo_ACU : null;
+}
+
 /**
  * 从模型返回原文中宽容提取大纲标签结构。标签外内容（思路、围栏、JSON）全部忽略。
  * @param raw 模型返回的原始文本
@@ -99,7 +109,7 @@ export function parseOutlineTags_ACU(raw: string | null | undefined): ParsedOutl
     if (!turns.length) failParse_ACU(`第 ${index + 1} 个 <node> 中没有任何非空 <turn> 标签`);
     return { title: readTag_ACU(block, 'node_title'), goal: readTag_ACU(block, 'node_goal'), turns };
   });
-  return { title: readTag_ACU(text, 'stage_title'), goal: readTag_ACU(text, 'stage_goal'), nodes };
+  return { title: readTag_ACU(text, 'stage_title'), goal: readTag_ACU(text, 'stage_goal'), tempo: readStageTempo_ACU(text), nodes };
 }
 
 /**
@@ -107,10 +117,10 @@ export function parseOutlineTags_ACU(raw: string | null | undefined): ParsedOutl
  * node/turn id 由 allocateId 分配，suggestedTurns=节点轮数，totalTurns=轮数总和。
  * @param parsed 标签解析结果
  * @param allocateId ID 分配器（与 edit_outline 插入轮次共用同一惯例）
- * @param fallback 重规划时沿用旧大纲的阶段标题/目标（模型可不重述）
+ * @param fallback 重规划时沿用旧大纲的阶段标题/目标/形态（模型可不重述）
  * @returns 结构完整的 StageOutline，内容性缺失（空 goal）留给 schema 校验反馈
  */
-export function buildStageOutlineFromTags_ACU(parsed: ParsedOutlineTags_ACU, allocateId: (prefix: string) => string, fallback?: { title?: string; goal?: string }): StageOutline_ACU {
+export function buildStageOutlineFromTags_ACU(parsed: ParsedOutlineTags_ACU, allocateId: (prefix: string) => string, fallback?: { title?: string; goal?: string; tempo?: StageTempo_ACU }): StageOutline_ACU {
   const nodes: StageNode_ACU[] = parsed.nodes.map((node, index) => ({
     id: allocateId('node'),
     title: node.title || `节点${index + 1}`,
@@ -122,6 +132,7 @@ export function buildStageOutlineFromTags_ACU(parsed: ParsedOutlineTags_ACU, all
     schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
     title: parsed.title || fallback?.title || '',
     goal: parsed.goal || fallback?.goal || '',
+    tempo: parsed.tempo ?? fallback?.tempo ?? 'mixed',
     totalTurns: nodes.reduce((sum, node) => sum + node.suggestedTurns, 0),
     nodes,
   };
@@ -152,6 +163,7 @@ export function spliceOutlineWithCompletedPrefix_ACU(previous: StageOutline_ACU,
     schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,
     title: planned.title || previous.title,
     goal: planned.goal || previous.goal,
+    tempo: planned.tempo,
     totalTurns: nodes.reduce((sum, node) => sum + node.suggestedTurns, 0),
     nodes,
   };

@@ -3,7 +3,10 @@
     <p v-if="!entries.length" class="acu-v2-session-feed__empty">
       还没有运行记录。点击「继续当前轮次」后，主 Agent 的思考、派工、大纲操作与交付过程会实时显示在这里。
     </p>
-    <template v-for="entry in entries" :key="entry.id">
+    <button v-if="hiddenCount > 0" type="button" class="acu-v2-session-feed__fold" @click="expandOlder">
+      已折叠 {{ hiddenCount }} 条更早消息 · 点击展开更早的 {{ nextExpandCount }} 条
+    </button>
+    <template v-for="entry in visibleEntries" :key="entry.id">
       <!-- 运行分隔条：一次运行（或恢复）的起点 -->
       <div v-if="entry.kind === 'run_started' || entry.kind === 'run_resumed'" class="acu-v2-session-feed__run-divider">
         <span class="acu-v2-session-feed__run-divider-badge">{{ entry.kind === 'run_resumed' ? '恢复运行' : '开始运行' }}</span>
@@ -53,7 +56,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import type { AgentSessionEntry_ACU } from '../../service/continuation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 
 const props = defineProps<{
@@ -65,6 +68,22 @@ const feedElement = ref<HTMLElement | null>(null);
 /** 用户手动展开/收起的覆盖表；未覆盖时按条目类型取默认展开态。 */
 const expandedOverrides = ref<Record<number, boolean>>({});
 
+/** 默认只显示最近这么多条会话消息；更早的被折叠，点击折叠横幅每次多展开一批。 */
+const FOLD_VISIBLE_STEP_ACU = 40;
+const visibleLimit = ref(FOLD_VISIBLE_STEP_ACU);
+const hiddenCount = computed(() => Math.max(0, props.entries.length - visibleLimit.value));
+const visibleEntries = computed(() => (hiddenCount.value > 0 ? props.entries.slice(hiddenCount.value) : props.entries));
+const nextExpandCount = computed(() => Math.min(FOLD_VISIBLE_STEP_ACU, hiddenCount.value));
+
+/** 展开更早的一批消息。内容插在顶部，用 scrollHeight 差补偿滚动位置，避免视口跳走。 */
+async function expandOlder(): Promise<void> {
+  const element = feedElement.value;
+  const beforeHeight = element?.scrollHeight ?? 0;
+  visibleLimit.value += FOLD_VISIBLE_STEP_ACU;
+  await nextTick();
+  if (element) element.scrollTop += element.scrollHeight - beforeHeight;
+}
+
 const KIND_LABELS: Record<AgentSessionEntry_ACU['kind'], string> = {
   run_started: '开始',
   run_resumed: '恢复',
@@ -75,6 +94,7 @@ const KIND_LABELS: Record<AgentSessionEntry_ACU['kind'], string> = {
   tool_read: '调阅',
   delegation: '子代理',
   outline_op: '大纲',
+  handoff: '交接',
   finalize: '交付',
   block: '阻断',
   run_failed: '失败',
@@ -106,7 +126,9 @@ function formatTime(at: number): string {
   return new Date(at).toLocaleTimeString();
 }
 
-watch(() => props.entries.length, async () => {
+watch(() => props.entries.length, async (length, previous) => {
+  // 长度骤减说明会话流被清空重灌（切换聊天 / 一键清空），折叠窗口复位到默认值。
+  if (length < (previous ?? 0)) visibleLimit.value = FOLD_VISIBLE_STEP_ACU;
   await nextTick();
   const element = feedElement.value;
   if (element) element.scrollTop = element.scrollHeight;
@@ -120,6 +142,10 @@ watch(() => props.entries.length, async () => {
 .acu-v2-session-feed { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent); }
 .acu-v2-session-feed > * { flex: 0 0 auto; }
 .acu-v2-session-feed__empty { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px); }
+
+/* 折叠横幅：置于列表顶部，提示还有多少更早消息被折叠 */
+.acu-v2-session-feed__fold { padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--acu-text-3) 40%, transparent); border-radius: 8px; background: transparent; color: var(--acu-text-3); font: inherit; font-size: var(--acu-font-size-caption, 11px); cursor: pointer; text-align: center; }
+.acu-v2-session-feed__fold:hover { color: var(--acu-text-2); border-color: color-mix(in srgb, var(--acu-text-3) 60%, transparent); }
 
 /* 运行分隔条 */
 .acu-v2-session-feed__run-divider { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px; }
@@ -144,6 +170,8 @@ watch(() => props.entries.length, async () => {
 .acu-v2-session-feed__card--finalize, .acu-v2-session-feed__card--run_completed { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2)); }
 .acu-v2-session-feed__card--failed { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2)); }
 .acu-v2-session-feed__card--running { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent); }
+/* 交接报告：琥珀色标出「AI 可见性边界」，与成功/失败/进行中的语义色区分 */
+.acu-v2-session-feed__card--handoff { border-left: 3px solid color-mix(in srgb, #c9963e 75%, transparent); background: color-mix(in srgb, #c9963e 7%, var(--acu-bg-2)); }
 .acu-v2-session-feed__card-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit; }
 .acu-v2-session-feed__status { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px; }
 .acu-v2-session-feed__status--done { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c); }

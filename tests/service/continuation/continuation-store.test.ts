@@ -144,14 +144,17 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(loaded.settings).toMatchObject({ apiPresetMode: 'fixed', fixedApiPresetName: 'p1' });
   });
 
-  it('为缺少 downtimeTurnRatio 的存量信封补默认值，并拒绝越界的比例', () => {
+  it('丢弃语义已作废的 downtimeTurnRatio 并补上连续高压轮上限，越界值仍被拒绝', () => {
     const legacy = buildEnvelope_ACU() as any;
-    delete legacy.settings.downtimeTurnRatio;
+    delete legacy.settings.maxConsecutivePressureTurns;
+    legacy.settings.downtimeTurnRatio = 0.3;
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: legacy }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
-    expect(new FirstFloorContinuationStore_ACU().read()!.settings.downtimeTurnRatio).toBe(0.3);
+    const migrated = new FirstFloorContinuationStore_ACU().read()!.settings as any;
+    expect(migrated.maxConsecutivePressureTurns).toBe(8);
+    expect(migrated.downtimeTurnRatio).toBeUndefined();
 
     const outOfRange = buildEnvelope_ACU() as any;
-    outOfRange.settings.downtimeTurnRatio = 0.9;
+    outOfRange.settings.maxConsecutivePressureTurns = 99;
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: outOfRange }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
     expect(() => new FirstFloorContinuationStore_ACU().read()).toThrow(ContinuationValidationError_ACU);
   });
@@ -164,8 +167,9 @@ describe('FirstFloorContinuationStore_ACU', () => {
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: stale }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.2-continuation-story-arc-pacing-v14');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.3-continuation-stage-tempo-v15');
     expect(loaded.settings.agentPrompts.arcArchitect[0].content).toContain('故事总纲子代理');
+    expect(loaded.settings.outlinePrompt.some(segment => segment.content.includes('<stage_tempo>'))).toBe(true);
     expect(loaded.settings.agentPrompts.main[0].content).not.toBe('用户改过的旧提示词');
   });
 

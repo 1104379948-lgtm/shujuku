@@ -152,6 +152,18 @@ export type StageTurnPacing_ACU = typeof STAGE_TURN_PACINGS_ACU[number];
 /** setup 与 cooldown 合称低压轮，是节奏配比校验里被计数的那一侧。 */
 export const STAGE_TURN_DOWNTIME_PACINGS_ACU: readonly StageTurnPacing_ACU[] = ['setup', 'cooldown'];
 
+/**
+ * 阶段级节奏形态。它存在的理由是：把张弛的周期从「阶段内每几轮」拉长到「阶段与阶段之间」。
+ * 若所有阶段共用同一套配比要求，读者感知到的就是固定节拍器；形态分档之后，铺垫阶段可以
+ * 大段日常、高潮阶段可以整段高压，起伏发生在卷的尺度上而不是轮的尺度上。
+ * - buildup：铺垫型，低压为主，攒关系与信息，为后面的爆发蓄力
+ * - mixed：起伏型，常规推进，松紧交替但不要求均匀
+ * - surge：高压型，决战/逃亡/密集事件，允许整阶段没有低压轮
+ * - aftermath：余波型，消化代价、重建关系，把前一段高压的重量落地
+ */
+export const STAGE_TEMPOS_ACU = ['buildup', 'mixed', 'surge', 'aftermath'] as const;
+export type StageTempo_ACU = typeof STAGE_TEMPOS_ACU[number];
+
 export interface StageTurn_ACU {
   id: string;
   goal: string;
@@ -170,6 +182,8 @@ export interface StageOutline_ACU {
   schemaVersion: typeof CONTINUATION_SCHEMA_VERSION_ACU;
   title: string;
   goal: string;
+  /** 本阶段的节奏形态。决定低压轮下限，也决定下一阶段能选什么形态。 */
+  tempo: StageTempo_ACU;
   totalTurns: number;
   nodes: StageNode_ACU[];
 }
@@ -188,8 +202,12 @@ export interface ContinuationSettings_ACU {
   generationRetryLimit: number;
   internalAiRetryLimit: number;
   contextTurnCount: number;
-  /** 阶段大纲里低压轮（setup + cooldown）的最低占比，0 表示关闭该校验。 */
-  downtimeTurnRatio: number;
+  /**
+   * 连续高压轮（pressure + turn）的上限，跨阶段累计，0 表示关闭该校验。
+   * 它只兜底「长时间没有任何喘息」这种病态，不规定张弛的周期——周期由阶段形态决定。
+   * 高压型（surge）阶段豁免这条，其攒下的连续高压会带进下一阶段强制清偿。
+   */
+  maxConsecutivePressureTurns: number;
   /** Agent 可读/可搜正文窗口：只有最近 N 个已结算 AI 楼层可被 read/search；0 表示只给未结算部分。 */
   storyWindowFloors: number;
   /** 主 Agent 自身会话历史的 token 预算；超出后压缩最早的轮次为交接报告。0 表示不限制。 */

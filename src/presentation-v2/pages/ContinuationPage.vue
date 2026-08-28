@@ -60,8 +60,8 @@
           <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最多轮次">
             <AcuInput v-model="settingsDraft.customTurnMax" type="number" :min="1" :max="50" />
           </AcuFormRow>
-          <AcuFormRow label="日常轮占比下限：阶段大纲里 setup/cooldown 低压轮的最低比例，0 为不作要求，最高 0.6">
-            <AcuInput v-model="settingsDraft.downtimeTurnRatio" type="number" :min="0" :max="downtimeTurnRatioMax" :step="0.05" />
+          <AcuFormRow label="连续高压轮上限：跨阶段累计多少轮没有日常/余波轮就强制安排一轮，0 为不作要求。每阶段的松紧由大纲自选的节奏形态决定，这里只兜底极端情况">
+            <AcuInput v-model="settingsDraft.maxConsecutivePressureTurns" type="number" :min="0" :max="maxConsecutivePressureTurnsMax" />
           </AcuFormRow>
           <AcuFormRow label="自动阶段上限">
             <AcuInput v-model="settingsDraft.maxAutomaticStages" type="number" :min="1" />
@@ -140,7 +140,7 @@
       <h3>大纲子代理（outline-architect）提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.outlinePrompt" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('outlinePrompt', position)" @delete="index => deletePrompt('outlinePrompt', index)" @move="(index, delta) => movePrompt('outlinePrompt', index, delta)" @update="(index, patch) => updatePrompt('outlinePrompt', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('outline')">恢复大纲提示词默认值</AcuButton></div>
-      <p class="acu-v2-continuation-page__meta">大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$VALIDATION_ERRORS。</p>
+      <p class="acu-v2-continuation-page__meta">大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$PACING_CONTEXT（跨阶段节奏状态：上一阶段形态与已连续高压轮数）、$VALIDATION_ERRORS。</p>
 
       <h3>主 Agent 提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.agentPrompts.main" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('main', position)" @delete="index => deletePrompt('main', index)" @move="(index, delta) => movePrompt('main', index, delta)" @update="(index, patch) => updatePrompt('main', index, patch)" />
@@ -190,7 +190,7 @@ import ContinuationChat from '../components/ContinuationChat.vue';
 import ContinuationMaterialsPanel from '../components/ContinuationMaterialsPanel.vue';
 import { useApiPresetSelectOptions } from '../composables/useApiPresetSelectOptions';
 import { useChatChangedTick } from '../composables/useChatChangedListener';
-import { CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU, useContinuationRuntime } from '../composables/useContinuationRuntime';
+import { CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU, useContinuationRuntime } from '../composables/useContinuationRuntime';
 import { useContinuationSession } from '../composables/useContinuationSession';
 
 const runtime = useContinuationRuntime();
@@ -248,7 +248,7 @@ const continuationRoleOptions = [
   { value: 'assistant', label: 'ASSISTANT' },
 ];
 
-const downtimeTurnRatioMax = CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU;
+const maxConsecutivePressureTurnsMax = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU;
 
 /** 渠道下拉里「跟随全局默认」的哨兵值：空串已被「跟随当前活动 API」占用。 */
 const INHERIT_CHANNEL_VALUE = '__inherit__';
@@ -368,10 +368,10 @@ function requiredInteger(value: unknown, label: string): number {
   return numeric;
 }
 
-/** 占比类设置接受 0 到上限之间的有限小数；空串与 NaN 会让落盘校验报「字段必须是小数」，在这里先拦成可读提示。 */
-function requiredRatio(value: unknown, label: string, maximum: number): number {
+/** 有上界的整数设置；空串与 NaN 会让落盘校验报「字段必须是整数」，在这里先拦成可读提示。 */
+function requiredBoundedInteger(value: unknown, label: string, maximum: number): number {
   const numeric = typeof value === 'number' ? value : Number(String(value ?? '').trim());
-  if (!Number.isFinite(numeric) || numeric < 0 || numeric > maximum) throw new Error(`${label} 必须是 0 到 ${maximum} 之间的小数`);
+  if (!Number.isInteger(numeric) || numeric < 0 || numeric > maximum) throw new Error(`${label} 必须是 0 到 ${maximum} 之间的整数`);
   return numeric;
 }
 
@@ -408,7 +408,7 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     retryDelaySeconds: requiredInteger(source.retryDelaySeconds, '重试延迟'),
     totalDurationMinutes: requiredInteger(source.totalDurationMinutes, '总时长'),
     contextTurnCount: requiredInteger(source.contextTurnCount, '最近剧情轮数'),
-    downtimeTurnRatio: requiredRatio(source.downtimeTurnRatio, '日常轮占比下限', CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU),
+    maxConsecutivePressureTurns: requiredBoundedInteger(source.maxConsecutivePressureTurns, '连续高压轮上限', CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU),
     storyWindowFloors: requiredInteger(source.storyWindowFloors, '正文可读窗口楼数'),
     storyTailFloors: requiredInteger(source.storyTailFloors, '正文目录尾部全文楼数'),
     agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, '会话自动总结阈值'),

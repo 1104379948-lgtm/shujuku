@@ -11,6 +11,7 @@ function tagText_ACU(): string {
   return [
     '<stage_title>初入江南</stage_title>',
     '<stage_goal>接管鬼船案调查权</stage_goal>',
+    '<stage_tempo>buildup</stage_tempo>',
     '<node>',
     '<node_title>抵达江南府</node_title>',
     '<node_goal>宣示接管权力</node_goal>',
@@ -30,6 +31,7 @@ function previousOutline_ACU(): StageOutline_ACU {
     schemaVersion: 1,
     title: '旧阶段标题',
     goal: '旧阶段目标',
+    tempo: 'aftermath',
     totalTurns: 4,
     nodes: [
       { id: 'node-a', title: '节点A', goal: '目标A', suggestedTurns: 3, turns: [{ id: 'turn-a1', goal: '轮A1', pacing: 'setup' as const }, { id: 'turn-a2', goal: '轮A2', pacing: 'pressure' as const }, { id: 'turn-a3', goal: '轮A3', pacing: 'cooldown' as const }] },
@@ -58,6 +60,7 @@ describe('parseOutlineTags_ACU', () => {
     const parsed = parseOutlineTags_ACU(tagText_ACU());
     expect(parsed.title).toBe('初入江南');
     expect(parsed.goal).toBe('接管鬼船案调查权');
+    expect(parsed.tempo).toBe('buildup');
     expect(parsed.nodes).toHaveLength(2);
     expect(parsed.nodes[0]).toMatchObject({ title: '抵达江南府', goal: '宣示接管权力', turns: [{ goal: '钦差抵达，宣读圣旨', pacing: 'setup' }] });
     // 第二轮没写 pacing：缺属性回落 pressure，与 schema 的默认值口径一致。
@@ -84,6 +87,13 @@ describe('parseOutlineTags_ACU', () => {
       { goal: '非法值', pacing: 'pressure' },
       { goal: '没写', pacing: 'pressure' },
     ]);
+  });
+
+  it('解析 stage_tempo：合法值原样保留，非法值与缺失都留空交给构建层回落', () => {
+    const body = '<node><node_goal>目标</node_goal><turn>一轮</turn></node>';
+    expect(parseOutlineTags_ACU(`<stage_tempo>SURGE</stage_tempo>${body}`).tempo).toBe('surge');
+    expect(parseOutlineTags_ACU(`<stage_tempo>激烈</stage_tempo>${body}`).tempo).toBeNull();
+    expect(parseOutlineTags_ACU(body).tempo).toBeNull();
   });
 
   it('带属性的 node 正则不会吃掉 node_title', () => {
@@ -132,10 +142,18 @@ describe('buildStageOutlineFromTags_ACU', () => {
 
   it('falls back to positional node titles and previous stage title/goal', () => {
     const parsed = parseOutlineTags_ACU('<node><node_goal>目标</node_goal><turn>第一轮</turn></node>');
-    const outline = buildStageOutlineFromTags_ACU(parsed, allocator_ACU(), { title: '沿用标题', goal: '沿用目标' });
+    const outline = buildStageOutlineFromTags_ACU(parsed, allocator_ACU(), { title: '沿用标题', goal: '沿用目标', tempo: 'surge' });
     expect(outline.title).toBe('沿用标题');
     expect(outline.goal).toBe('沿用目标');
+    // 重规划时模型可以不重述形态，此时沿用旧大纲的；没有旧大纲可沿用才落 mixed。
+    expect(outline.tempo).toBe('surge');
     expect(outline.nodes[0].title).toBe('节点1');
+    expect(buildStageOutlineFromTags_ACU(parsed, allocator_ACU()).tempo).toBe('mixed');
+  });
+
+  it('模型写了形态就以模型的为准，不被旧大纲的形态覆盖', () => {
+    const parsed = parseOutlineTags_ACU('<stage_tempo>aftermath</stage_tempo><node><node_goal>目标</node_goal><turn>第一轮</turn></node>');
+    expect(buildStageOutlineFromTags_ACU(parsed, allocator_ACU(), { tempo: 'surge' }).tempo).toBe('aftermath');
   });
 });
 
@@ -151,6 +169,8 @@ describe('spliceOutlineWithCompletedPrefix_ACU', () => {
     expect(spliced.nodes[1].id).toBe('node-1');
     expect(spliced.totalTurns).toBe(5);
     expect(spliced.title).toBe('初入江南');
+    // 形态属于本次规划的决定，拼接后取新大纲的而不是旧的。
+    expect(spliced.tempo).toBe('buildup');
   });
 
   it('keeps previous stage title and goal when the replan omits them', () => {

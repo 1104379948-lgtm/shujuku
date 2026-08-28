@@ -4,11 +4,11 @@ import { CONTINUATION_AGENT_PROMPT_KEYS_ACU, CONTINUATION_RECOVERABLE_STOP_REASO
 import type { ContinuationOrchestratorResult_ACU } from '../../service/continuation/continuation-orchestrator';
 import type { ContinuationPreparedTurnInstruction_ACU } from '../../service/continuation/stage-execution-engine';
 import { restoreContinuationPromptDefault_ACU, validateContinuationPromptSegments_ACU, type ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template';
-import { CONTINUATION_DOWNTIME_TURN_RATIO_MAX_ACU } from '../../service/continuation/defaults';
+import { CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU } from '../../service/continuation/defaults';
 import { useToastStore } from '../stores/toast-store';
 
-/** 日常轮占比上限。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
-export const CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU = CONTINUATION_DOWNTIME_TURN_RATIO_MAX_ACU;
+/** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
+export const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
 
 /** 提示词导入导出的文件结构：大纲组 + 六组 Agent 提示词，一次打包全部。 */
 export interface ContinuationPromptBundle_ACU {

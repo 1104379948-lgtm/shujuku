@@ -7,6 +7,7 @@
  */
 
 import type { StageTurnPacing_ACU } from '../model';
+import { describeStageTempo_ACU } from '../outline-schema';
 import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
 import {
   AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
@@ -276,6 +277,7 @@ export function renderAgentOutlineWindow_ACU(context: AgentResolveContext_ACU): 
   return [
     `阶段 ${execution.stage.stageNumber}：${execution.revision.outline.title}`,
     `阶段目标：${execution.revision.outline.goal}`,
+    `阶段节奏形态：${describeStageTempo_ACU(execution.revision.outline.tempo)}——它决定本阶段低压轮的下限，也决定下一阶段不能选什么形态。`,
     `当前节点：[${execution.node.id}] ${execution.node.title}`,
     `节点目标：${execution.node.goal}`,
     `阶段内轮次进度：第 ${execution.turnNumber} / ${execution.revision.outline.totalTurns} 轮`,
@@ -301,7 +303,7 @@ export function renderAgentOutlineState_ACU(context: AgentResolveContext_ACU): s
   if (!execution.revision || !execution.node || !execution.turn) {
     return `大纲状态：第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待确认或游标无效）。`;
   }
-  return `大纲状态：第 ${execution.stage.stageNumber} 阶段「${execution.revision.outline.title}」，第 ${execution.turnNumber}/${execution.revision.outline.totalTurns} 轮，当前节点 [${execution.node.id}]，本轮轮次 [${execution.turn.id}]，本轮节奏 ${execution.turn.pacing}。完整大纲窗口用 read $OUTLINE_WINDOW 调阅。`;
+  return `大纲状态：第 ${execution.stage.stageNumber} 阶段「${execution.revision.outline.title}」（节奏形态 ${describeStageTempo_ACU(execution.revision.outline.tempo)}），第 ${execution.turnNumber}/${execution.revision.outline.totalTurns} 轮，当前节点 [${execution.node.id}]，本轮轮次 [${execution.turn.id}]，本轮节奏 ${execution.turn.pacing}。完整大纲窗口用 read $OUTLINE_WINDOW 调阅。`;
 }
 
 const ROW_RANGE_PATTERN_ACU = /^(\d+)-(\d+)$/;

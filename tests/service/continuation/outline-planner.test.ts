@@ -3,13 +3,13 @@ import { buildDefaultContinuationSettings_ACU } from '../../../src/service/conti
 import { ContinuationValidationError_ACU, type StageOutline_ACU } from '../../../src/service/continuation/model';
 import { ContinuationOutlinePlanner_ACU, acceptPlannedStageRevision_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU } from '../../../src/service/continuation/outline-planner';
 
-/** 每三轮一个低压轮：满足默认 0.3 的低压占比与连续高压不超过 3 轮两条节奏规则。 */
+/** 每三轮一个低压轮：足以满足 mixed 形态四分之一的低压下限。 */
 function pacingAt_ACU(index: number): 'setup' | 'pressure' {
   return index % 3 === 0 ? 'setup' : 'pressure';
 }
 
 function buildOutline_ACU(totalTurns = 6): StageOutline_ACU {
-  return { schemaVersion: 1, title: '阶段标题', goal: '阶段目标', totalTurns, nodes: [{ id: 'node-1', title: '节点', goal: '节点目标', suggestedTurns: totalTurns, turns: Array.from({ length: totalTurns }, (_, index) => ({ id: `turn-${index + 1}`, goal: `目标 ${index + 1}`, pacing: pacingAt_ACU(index) })) }] };
+  return { schemaVersion: 1, title: '阶段标题', goal: '阶段目标', tempo: 'mixed', totalTurns, nodes: [{ id: 'node-1', title: '节点', goal: '节点目标', suggestedTurns: totalTurns, turns: Array.from({ length: totalTurns }, (_, index) => ({ id: `turn-${index + 1}`, goal: `目标 ${index + 1}`, pacing: pacingAt_ACU(index) })) }] };
 }
 
 function tagTurns_ACU(turnCount: number, label: string, offset = 0): string {
@@ -147,6 +147,38 @@ describe('ContinuationOutlinePlanner_ACU', () => {
     const content = callInternalAi.mock.calls[0][0][0].content as string;
     expect(content).toContain('800-1200');
     expect(content).toContain('6000 到 10000 字');
+  });
+
+  it('注入 $PACING_CONTEXT：告诉模型上一阶段形态、已连续多少轮高压、本阶段还剩多少高压余量', async () => {
+    const pacingSettings = { ...settings_ACU(), outlinePrompt: [{ role: 'user' as const, content: '节奏状态：$PACING_CONTEXT' }] };
+    const { planner, callInternalAi } = createPlanner_ACU([tagOutline_ACU(6)]);
+    await planner.plan(request_ACU(pacingSettings, { pacingContext: { previousTempo: 'buildup', leadingPressureStreak: 3 } }));
+    const content = callInternalAi.mock.calls[0][0][0].content as string;
+    expect(content).toContain('上一阶段的节奏形态是 buildup（铺垫型）');
+    expect(content).toContain('已经连续 3 轮没有出现低压轮');
+    expect(content).toContain('最多还能接着写 5 轮高压');
+    expect(content).toContain('四档都可以选');
+  });
+
+  it('上一阶段是 surge 时，$PACING_CONTEXT 明说本阶段不能再选 surge，模型照选会被打回', async () => {
+    const pacingSettings = { ...settings_ACU(1), outlinePrompt: [{ role: 'user' as const, content: '节奏状态：$PACING_CONTEXT $VALIDATION_ERRORS' }] };
+    const surgeAgain = `<stage_title>阶段标题</stage_title>\n<stage_goal>阶段目标</stage_goal>\n<stage_tempo>surge</stage_tempo>\n<node>\n<node_title>节点</node_title>\n<node_goal>节点目标</node_goal>\n${Array.from({ length: 6 }, (_, index) => `<turn pacing="pressure">目标 ${index + 1}</turn>`).join('\n')}\n</node>`;
+    const { planner, callInternalAi } = createPlanner_ACU([surgeAgain, tagOutline_ACU(6)]);
+    const result = await planner.plan(request_ACU(pacingSettings, { pacingContext: { previousTempo: 'surge', leadingPressureStreak: 9 } }));
+
+    expect(result.attempts).toBe(2);
+    expect(callInternalAi.mock.calls[0][0][0].content as string).toContain('只能选 aftermath 或 mixed');
+    const retryContent = callInternalAi.mock.calls[1][0][0].content as string;
+    expect(retryContent).toContain('CONTINUATION_OUTLINE_PACING_INVALID@outline_validate');
+    expect(retryContent).toContain('consecutive_surge_stages');
+  });
+
+  it('高压型阶段整段无低压也放行，形态原样落进大纲', async () => {
+    const surge = `<stage_title>决战</stage_title>\n<stage_goal>一口气打到底</stage_goal>\n<stage_tempo>surge</stage_tempo>\n<node>\n<node_title>节点</node_title>\n<node_goal>节点目标</node_goal>\n${Array.from({ length: 8 }, (_, index) => `<turn pacing="pressure">目标 ${index + 1}</turn>`).join('\n')}\n</node>`;
+    const { planner } = createPlanner_ACU([surge]);
+    const result = await planner.plan(request_ACU(settings_ACU(0), { pacingContext: { previousTempo: 'buildup', leadingPressureStreak: 6 } }));
+    expect(result.outline.tempo).toBe('surge');
+    expect(result.outline.nodes[0].turns.every(turn => turn.pacing === 'pressure')).toBe(true);
   });
 
   it('counts the first call separately and stops after the configured retry limit', async () => {
