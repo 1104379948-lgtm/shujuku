@@ -12,7 +12,7 @@ import { SqliteEngine } from './sqlite-engine';
 import { buildRuntimeFallbackDDL_ACU, createSheetInsertPlan, generateInserts, resultToContent, parseDDLTableName, parseDDLColumnNames, buildColumnNameMap, resolveEffectiveDDL } from './schema-mapper';
 import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../shared/models/table-data';
 import { hashUserInput_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
-import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU, repairLegacyAutoMergedRowTails_ACU } from '../../shared/canonical-row-normalizer';
+import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU, repairLegacyAutoMergedRowTails_ACU, repairLegacyOrphanIdentityColumn_ACU } from '../../shared/canonical-row-normalizer';
 import { validateCanonicalCheckpointSheet_ACU } from '../../shared/canonical-checkpoint-validator';
 import { resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { downgradeRowIdPrimaryKeyForLegacyReplay_ACU } from '../../shared/ddl-utils';
@@ -121,6 +121,14 @@ export class SyncBridge {
     const workingData = options.strict ? JSON.parse(JSON.stringify(data)) as TableDataObject_ACU : data;
     // 仅兼容历史版本错误追加的精确尾标记，其他宽度异常仍由后续 strict 校验拒绝。
     repairLegacyAutoMergedRowTails_ACU(workingData);
+    // 孤儿身份列错位（表头 ["row_id", 空占位, …]）与 auto_merged 同点复位：
+    // hydrate 前归位列对齐，防止空标签列进入物理表结构。歧义表按原样进入
+    // 后续 strict 校验，由校验决定接受或拒绝。
+    const orphanRepair = repairLegacyOrphanIdentityColumn_ACU(workingData);
+    if (orphanRepair.changedSheetKeys.length > 0) {
+      logWarn_ACU(`[SyncBridge] 已复位孤儿身份列错位：${orphanRepair.changedSheetKeys.join('、')}`);
+    }
+    orphanRepair.warnings.forEach(warning => logWarn_ACU(warning));
     if (!legacyDuplicateRowIds) {
       const normalization = normalizeCanonicalTableRows_ACU(workingData);
       const canonicalIssues = [...normalization.errors, ...normalization.removedRows];

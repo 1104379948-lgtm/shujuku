@@ -544,7 +544,7 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     }]);
   });
 
-  it('拒绝 INSERT SELECT，避免将不可确定的 row_id 写入 V2 日志', async () => {
+  it('无显式列清单的 INSERT SELECT 维持 fail-closed（无法确定 row_id 之外的列对应）', async () => {
     const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
     inputSnapshot.sheet_1 = {
       uid: 'quest_log',
@@ -564,8 +564,34 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     );
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('不支持 INSERT SELECT');
+    expect(result.error).toContain('必须显式列出业务列');
     expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
+  });
+
+  it('显式列清单的 INSERT SELECT 先执行后物化：结果行转为 VALUES 字面量 + 系统 row_id', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_1 = {
+      uid: 'quest_log',
+      name: '任务表',
+      sourceData: { ddl: 'CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, item_name TEXT NOT NULL, quantity INTEGER DEFAULT 1);' },
+      content: [['row_id', 'item_name', 'quantity'], ['2', '支线任务', '7']],
+      updateConfig: {},
+      exportConfig: {},
+      orderNo: 1,
+    };
+
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      'INSERT INTO inventory (item_name, quantity) SELECT item_name, quantity FROM quest_log;',
+      inputSnapshot,
+      'auto_standard',
+      { targetSheetKeys: ['sheet_0', 'sheet_1'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
+    );
+
+    expect(result.success).toBe(true);
+    // 原行（铁剑）保留，SELECT 结果行（支线任务, 7）以系统 row_id 物化插入。
+    const rows = (result.workingData as any).sheet_0.content.slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[1].slice(1)).toEqual(['支线任务', '7']);
   });
 
   it('7.3 双轨：runtime 目标为 fallback 拼音，SQL 用模板 authored 英文列名 → 写入成功', async () => {
@@ -832,11 +858,16 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     expect(() => materializeSystemRowIdsForSqlInserts_ACU(
       ['INSERT INTO beibaowupinbiao SELECT * FROM other'],
       inputSnapshot,
-    )).toThrow('不支持 INSERT SELECT');
+    )).toThrow('必须显式列出业务列');
     expect(() => materializeSystemRowIdsForSqlInserts_ACU(
       ['INSERT INTO beibaowupinbiao VALUES (1, \'药水\', 5)'],
       inputSnapshot,
     )).toThrow('必须显式列出业务列');
+    // 带显式列清单但当前路径没有 SELECT 预执行器 → 仍拒绝。
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU(
+      ['INSERT INTO beibaowupinbiao (item_name, quantity) SELECT item_name, quantity FROM other'],
+      inputSnapshot,
+    )).toThrow('不支持 INSERT SELECT');
   });
 
   it('显式 row_id 重分配 + 多 VALUES tuple + 注释同时存在时逐 tuple 物化', () => {
@@ -848,6 +879,126 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     expect(result).toEqual([
       "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', 5), (3, '卷轴', 2)",
     ]);
+  });
+
+  // ── 修复六：AI SQL 语法宽容 ──
+
+  it('INSERT OR IGNORE/ABORT/FAIL/ROLLBACK 保留冲突子句前缀并照常物化系统 row_id', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const result = materializeSystemRowIdsForSqlInserts_ACU([
+      "INSERT OR IGNORE INTO beibaowupinbiao (item_name, quantity) VALUES ('药水', 5)",
+      "INSERT OR ABORT INTO beibaowupinbiao (item_name, quantity) VALUES ('卷轴', 2)",
+    ], inputSnapshot);
+    expect(result).toEqual([
+      "INSERT OR IGNORE INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', 5)",
+      "INSERT OR ABORT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (3, '卷轴', 2)",
+    ]);
+  });
+
+  it('INSERT OR REPLACE 维持原生语义原样放行（不物化）', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const sql = "INSERT OR REPLACE INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (1, '铁剑', 9)";
+    expect(materializeSystemRowIdsForSqlInserts_ACU([sql], inputSnapshot)).toEqual([sql]);
+  });
+
+  it('值比列多 1 且列清单未含 row_id → 首值按 AI 自带 row_id 剔除', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const result = materializeSystemRowIdsForSqlInserts_ACU([
+      "INSERT INTO beibaowupinbiao (item_name, quantity) VALUES (7, '药水', 5)",
+    ], inputSnapshot);
+    expect(result).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', 5)",
+    ]);
+  });
+
+  it('值比列少 → 尾部补 NULL', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const result = materializeSystemRowIdsForSqlInserts_ACU([
+      "INSERT INTO beibaowupinbiao (item_name, quantity) VALUES ('药水')",
+    ], inputSnapshot);
+    expect(result).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', NULL)",
+    ]);
+  });
+
+  it('值比列多 1 但列清单已含 row_id → 维持拒绝', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (9, '药水', 5, 'extra')",
+    ], inputSnapshot)).toThrow('值数量与列数量不一致');
+  });
+
+  it('值比列多 2 及以上 → 维持拒绝', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU([
+      "INSERT INTO beibaowupinbiao (item_name, quantity) VALUES (1, '药水', 5, 'extra')",
+    ], inputSnapshot)).toThrow('值数量与列数量不一致');
+  });
+
+  it('WITH ... INSERT ... SELECT 有预执行器时先执行后物化（WITH 前缀不进物化结果）', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const seenQueries: string[] = [];
+    const result = materializeSystemRowIdsForSqlInserts_ACU([
+      "WITH src AS (SELECT '药水' AS n, 5 AS q) INSERT INTO beibaowupinbiao (item_name, quantity) SELECT n, q FROM src",
+    ], inputSnapshot, undefined, {
+      selectQueryRunner: (sql: string) => {
+        seenQueries.push(sql);
+        return { columns: ['n', 'q'], values: [['药水', 5]] };
+      },
+    });
+    expect(seenQueries).toEqual(["WITH src AS (SELECT '药水' AS n, 5 AS q) SELECT n, q FROM src"]);
+    expect(result).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', 5)",
+    ]);
+  });
+
+  it('INSERT SELECT 结果为空 → 物化为空串（调用方过滤为无操作）', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const result = materializeSystemRowIdsForSqlInserts_ACU([
+      'INSERT INTO beibaowupinbiao (item_name, quantity) SELECT n, q FROM src',
+    ], inputSnapshot, undefined, {
+      selectQueryRunner: () => ({ columns: [], values: [] }),
+    });
+    expect(result).toEqual(['']);
+  });
+
+  it('INSERT SELECT 结果超过 500 行上限 → 拒绝', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU([
+      'INSERT INTO beibaowupinbiao (item_name, quantity) SELECT n, q FROM src',
+    ], inputSnapshot, undefined, {
+      selectQueryRunner: () => ({ columns: ['n', 'q'], values: new Array(501).fill(['x', 1]) }),
+    })).toThrow('超过物化上限');
+  });
+
+  it('INSERT SELECT 结果列数与插入列清单不一致 → 拒绝', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU([
+      'INSERT INTO beibaowupinbiao (item_name, quantity) SELECT n FROM src',
+    ], inputSnapshot, undefined, {
+      selectQueryRunner: () => ({ columns: ['n'], values: [['药水']] }),
+    })).toThrow('结果列数');
+  });
+
+  it('INSERT SELECT 结果字符串含单引号时按 SQL 转义物化', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const result = materializeSystemRowIdsForSqlInserts_ACU([
+      'INSERT INTO beibaowupinbiao (item_name, quantity) SELECT n, q FROM src',
+    ], inputSnapshot, undefined, {
+      selectQueryRunner: () => ({ columns: ['n', 'q'], values: [["it's", null]] }),
+    });
+    expect(result).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, 'it''s', NULL)",
+    ]);
+  });
+
+  it('WITH 前缀 + VALUES 插入维持拒绝', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU([
+      "WITH src AS (SELECT 1) INSERT INTO beibaowupinbiao (item_name, quantity) VALUES ('药水', 5)",
+    ], inputSnapshot, undefined, {
+      selectQueryRunner: () => ({ columns: [], values: [] }),
+    })).toThrow('不支持 WITH 前缀的 VALUES 插入');
   });
 
 });

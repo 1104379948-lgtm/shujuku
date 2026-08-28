@@ -72,6 +72,7 @@ import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers
 import { isSameSheetHeader_ACU } from '../template/guide-metadata-overlay';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from './table-write-transaction';
 import { runTableUpdateCommit_ACU, type TableUpdateCommitErrorCategory_ACU } from './table-update-commit';
+import { commitPreparedV2Recovery_ACU, prepareV2Recovery_ACU } from './table-v2-recovery-service';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 import { getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU } from '../flight-mode/flight-mode-hidden-rows';
 import { getCurrentFlightModeState_ACU, stageFlightModeHiddenRowIds_ACU } from '../flight-mode/flight-mode-state';
@@ -661,6 +662,33 @@ function buildSheetReplaceOperationsFromData_ACU(
         operations.push({ kind: 'sheet_replace', sheetKey, sheet: JSON.parse(JSON.stringify(sheet)), reason });
     });
     return operations;
+}
+
+/**
+ * 对 afterData 中给定持久化范围内的总结/大纲表应用自动编号，返回内容实际变化的表键。
+ *
+ * 编号只作用于本次会被持久化的表（scopeKeys）：编号变更必须随 afterData 一起落盘，
+ * 否则 persist 的 replay === afterData 校验会失败或编号静默丢失。调用方须对返回的
+ * 表键追加 sheet_replace 操作——sql_sheet_batch 回放不应用编号，必须由 replace 覆盖
+ * 才能保证回放结果与 afterData 一致（回放零语义改动）。
+ */
+function applyAutoNumberingWithinScope_ACU(afterData: Record<string, any>, scopeKeys: readonly string[]): string[] {
+    if (!afterData || typeof afterData !== 'object' || !Array.isArray(scopeKeys) || scopeKeys.length === 0) return [];
+    const view: Record<string, any> = {};
+    const before = new Map<string, string>();
+    for (const sheetKey of scopeKeys) {
+        if (typeof sheetKey !== 'string' || !sheetKey.startsWith('sheet_')) continue;
+        const sheet = afterData[sheetKey];
+        if (!sheet || typeof sheet !== 'object') continue;
+        view[sheetKey] = sheet;
+        before.set(sheetKey, JSON.stringify(sheet.content ?? null));
+    }
+    applySpecialIndexSequenceToSummaryTables_ACU(view);
+    const renumbered: string[] = [];
+    for (const [sheetKey, snapshot] of before) {
+        if (JSON.stringify(view[sheetKey]?.content ?? null) !== snapshot) renumbered.push(sheetKey);
+    }
+    return renumbered;
 }
 
 function getTouchedSheetKeysFromSqlText_ACU(sqlText: string, tableData: Record<string, any>): string[] {
@@ -1517,6 +1545,8 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                 ? allRuntimeSheetKeys
                 : scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
             const keysToTrack = scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
+            // 自动编号（live SQL 填表出口）：作用于本次持久化范围内启用锁的总结/大纲表。
+            const renumberedSheetKeys = applyAutoNumberingWithinScope_ACU(runtimeData, keysToSave);
             // 与快照路径同理：缺少 full checkpoint 锚点时本次写入是初始
             // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations；但若已存在
             // 可由模板临时基线回放的 orphan artifacts，则必须保留本次 operations，供 persist
@@ -1547,6 +1577,9 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                     }
                     operations.push(...operationBuild.operations);
                 }
+                // sql_sheet_batch 回放不应用自动编号：对编号实际变化的表追加 sheet_replace
+                // 覆盖，保证回放结果与 afterData（含编号）逐字节一致。
+                operations.push(...buildSheetReplaceOperationsFromData_ACU(runtimeData, renumberedSheetKeys, 'system'));
             } else {
                 logDebug_ACU(
                     `[V2 Fill] 目标楼层 #${options.saveTargetIndex} 前无承载目标表的 full checkpoint，`
@@ -2739,9 +2772,10 @@ export async function executeCardUpdateCore_ACU(
                             return { success: false, error: sanitizeRetryFeedback_ACU(operationBuild.error), errorCategory: 'model' as const };
                         }
                         const operations = operationBuild.operations;
-                        applySpecialIndexSequenceToSummaryTables_ACU(runtimeData);
 
                         if (isImportMode) {
+                            // import 不写聊天帧、无回放操作，编号可全量应用（无漂移风险）。
+                            applySpecialIndexSequenceToSummaryTables_ACU(runtimeData);
                             emitProgress({ phase: 'chunk_done' });
                             logDebug_ACU('Import mode: skipping save to chat history for this chunk.');
                             return {
@@ -2794,6 +2828,10 @@ export async function executeCardUpdateCore_ACU(
                                 return keysToTrackAsUpdated.includes(sheetKey);
                             })
                             : fillAttemptKeys;
+                        // 自动编号（卡级 SQL 出口）：只作用于本次持久化范围内的表，并对编号
+                        // 变化的表追加 sheet_replace，消除既有的 live/回放编号漂移。
+                        const renumberedSheetKeys = applyAutoNumberingWithinScope_ACU(runtimeData, keysToActuallySave);
+                        operations.push(...buildSheetReplaceOperationsFromData_ACU(runtimeData, renumberedSheetKeys, 'system'));
                         const revisionWriteSet = parsedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
 
                         return {
@@ -4040,6 +4078,60 @@ export async function orchestrateManualCatchUp_ACU(
 }
 
 /**
+ * 手动重填锚点健康检查 + 自动收敛（无 UI，仅后台日志）。
+ *
+ * 两类死锁形态同族处理：
+ * - 多根：同一隔离键存在 >=2 个 full checkpoint，回放只认最后一个，之前增量全部失效；
+ * - 零根有帧：存在 V2 storage frame 但没有任何 full/transition checkpoint 锚点，
+ *   persist 层会 fail-closed 拒绝隐式 migration checkpoint（先烧完 AI 费用才撞墙）。
+ *
+ * 命中任一形态时调用 V2 恢复服务：requiresConfirmation=false 的恢复计划（冗余根收敛、
+ * recoveryBackup 重建、full 修复候选）自动 prepare+commit，成功后重跑健康检查；
+ * 计划缺失、需人工确认（无锚点 data_replace 提升无法证明不截断数据）或提交失败
+ * 则维持阻断并返回原始违规描述。
+ */
+async function ensureManualRefillAnchorHealth_ACU(
+    liveChat: any[],
+    isolationKey: string,
+    options: { checkZeroRoot: boolean },
+): Promise<{ blockedError: string | null; healed: boolean }> {
+    const healthViolation = (chat: any[]): string | null => {
+        const multiRoot = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'orchestrateManualUpdate:anchor_preflight');
+        if (multiRoot) return multiRoot;
+        // 零根检测只针对增量重填：clearBeforeUpdate 路径清理后会自行补写单表快照/模板
+        // 临时根（零根是其合法中间态），增量路径则会在 persist 层撞隐式 migration 拒绝。
+        if (!options.checkZeroRoot) return null;
+        const hasFrames = chat.some(message => message && !message.is_user && isV2TagData_ACU(readIsolatedTagData_ACU(message, isolationKey)));
+        if (hasFrames && !hasAnyV2Checkpoint_ACU(chat, isolationKey)) {
+            return 'V2 orchestrateManualUpdate:anchor_preflight 检测到零根状态：该隔离键存在 V2 storage frame 但没有任何 full checkpoint 锚点，persist 层将拒绝隐式 migration checkpoint。';
+        }
+        return null;
+    };
+    const initialViolation = healthViolation(liveChat);
+    if (!initialViolation) return { blockedError: null, healed: false };
+    logWarn_ACU('[ManualUpdate] 锚点预检发现异常，尝试自动收敛：', initialViolation);
+    try {
+        const summary = await prepareV2Recovery_ACU({ chat: liveChat, isolationKey });
+        if (!summary.planId || summary.requiresConfirmation) {
+            logWarn_ACU('[ManualUpdate] 锚点自动收敛不可行（无恢复计划或需人工确认）：', summary.status, summary.message);
+            return { blockedError: `手动重填被锚点预检阻断：${initialViolation}`, healed: false };
+        }
+        const commitResult = await commitPreparedV2Recovery_ACU(summary.planId);
+        if (commitResult.status !== 'committed') {
+            logWarn_ACU('[ManualUpdate] 锚点自动收敛提交失败：', commitResult.error || commitResult.status);
+            return { blockedError: `手动重填被锚点预检阻断：${initialViolation}`, healed: false };
+        }
+        logWarn_ACU('[ManualUpdate] 锚点自动收敛完成：', summary.message);
+    } catch (error) {
+        logWarn_ACU('[ManualUpdate] 锚点自动收敛异常：', error);
+        return { blockedError: `手动重填被锚点预检阻断：${initialViolation}`, healed: false };
+    }
+    const postViolation = healthViolation(getChatArray_ACU());
+    if (postViolation) return { blockedError: `手动重填被锚点预检阻断（自动收敛后仍未通过）：${postViolation}`, healed: false };
+    return { blockedError: null, healed: true };
+}
+
+/**
  * 手动更新编排（纯业务逻辑）
  * 从 handleManualUpdate_ACU 提取。不驱动 UI，只返回结果。
  * presentation 层负责：收集 manualSelection、设置 manualExtraHint、刷新 UI、显示 toast、弹出确认框。
@@ -4160,17 +4252,22 @@ export async function orchestrateManualUpdate_ACU(
             return { success: false, error: '未选择需要更新的表格。' };
         }
 
-        // 锚点预检：同一隔离键下必须至多一个 full checkpoint，否则手动重填会把
-        // 增量写到错误的回放根上（回放只认最后一个 full，之前增量全部失效）。
-        // 在首次 AI 调用（processBatch）前阻断，避免先付完 AI 费用才撞 persist 层 fail-fast。
+        // 锚点预检（健康检查 + 自动收敛）：多根 / 零根有帧两类死锁形态在首次 AI 调用
+        // （processBatch）前先尝试用 V2 恢复服务自动收敛（requiresConfirmation=false 才
+        // 自动执行）；无法自愈才阻断，避免先付完 AI 费用才撞 persist 层 fail-fast。
         const preflightIsolationKey = getCurrentIsolationKey_ACU();
-        const preflightViolation = assertSingleActiveFullCheckpointV2_ACU(
-            liveChat,
-            preflightIsolationKey,
-            'orchestrateManualUpdate:anchor_preflight',
-        );
-        if (preflightViolation) {
-            return { success: false, error: `手动重填被锚点预检阻断：${preflightViolation}` };
+        const anchorHealth = await ensureManualRefillAnchorHealth_ACU(liveChat, preflightIsolationKey, {
+            checkZeroRoot: options.clearBeforeUpdate !== true,
+        });
+        if (anchorHealth.blockedError) {
+            return { success: false, error: anchorHealth.blockedError };
+        }
+        if (anchorHealth.healed) {
+            // 自动收敛可能改变回放输出（如 recoveryBackup 重建根），重填基线必须基于收敛后状态。
+            await refreshData();
+            if (!currentJsonTableData_ACU) {
+                return { success: false, error: '锚点自动收敛后数据库未能重新加载。' };
+            }
         }
 
         const uiThreshold = settings_ACU.autoUpdateThreshold || 3;

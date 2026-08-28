@@ -16,7 +16,7 @@ import {
   setChatSheetGuideDataForIsolationKey_ACU,
 } from '../template/chat-scope';
 import { deleteAllGeneratedEntries_ACU } from '../worldbook/pipeline';
-import { mergeAllIndependentTables_ACU, mergeAllIndependentTablesLegacyV1_ACU } from '../runtime/helpers-remaining';
+import { consumeLastMergeSourceInventory_ACU, mergeAllIndependentTables_ACU, mergeAllIndependentTablesLegacyV1_ACU } from '../runtime/helpers-remaining';
 import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, isLegacyMatchForIsolation_ACU } from '../../data/repositories/chat-message-data-repo';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 import { persistTableMutationLogV2_ACU, type ReplaceExistingIncrementalOptions_ACU } from './storage-frame-v2-persist';
@@ -85,6 +85,7 @@ export async function ensureLegacyStorageMigratedBeforeWrite_ACU(reason = 'table
 
   logWarn_ACU(`[LegacyMigrationGate] ${reason}: detected legacy-v1 before write, migrating first. reason=${strategy.reason}${strategy.warning ? `; warning=${strategy.warning}` : ''}`);
   const mergedLegacyData = await mergeAllIndependentTablesLegacyV1_ACU();
+  const sourceInventory = consumeLastMergeSourceInventory_ACU();
   if (!mergedLegacyData || !Object.keys(mergedLegacyData).some(k => k.startsWith('sheet_'))) {
     return { success: false, error: '旧存储迁移失败：无法从 legacy-v1 合并出有效表格数据。' };
   }
@@ -94,6 +95,7 @@ export async function ensureLegacyStorageMigratedBeforeWrite_ACU(reason = 'table
     isolationKey,
     isolationConfig,
     skipUpdateFloors: settings_ACU.skipUpdateFloors,
+    sourceInventory,
   });
   if (!migrationResult.migrated) {
     return { success: false, error: `旧存储迁移到 V2 失败: ${migrationResult.error || '未执行迁移'}` };

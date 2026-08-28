@@ -8,6 +8,7 @@ import { isWorldbookApiAvailable_ACU, getLorebookEntries_ACU, setLorebookEntries
 import { saveSettings_ACU } from '../settings/settings-service';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+import { classifyLorebookReadError_ACU } from '../../shared/lorebook-read-error';
 import { getImportBatchPrefix_ACU } from '../../shared/constants';
 import { DEFAULT_ENTRY_PLACEMENT_ACU, DEFAULT_EXTRA_INDEX_PLACEMENT_ACU, ensureExportConfigDefaults_ACU, normalizePlacementConfig_ACU, applyPlacementToEntry_ACU } from './injection-engine-config';
 import { buildUsedOrderSet_ACU, allocOrder_ACU, allocConsecutiveOrderBlock_ACU } from './injection-engine-order';
@@ -741,6 +742,12 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
           }
 
       } catch (error) {
-          logError_ACU('Failed to update custom table export entries:', error);
+          // not-found 属于目标世界书重命名/切换期间的瞬态形态：导出条目下次触发会重建，
+          // 只记 warn；其余失败仍按 error 上报。
+          if (classifyLorebookReadError_ACU(error) === 'lorebook_not_found') {
+              logWarn_ACU('Custom table export skipped: target lorebook not found (likely renamed or switching).', error);
+          } else {
+              logError_ACU('Failed to update custom table export entries:', error);
+          }
       }
   }
