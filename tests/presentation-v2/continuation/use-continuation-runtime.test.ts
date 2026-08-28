@@ -23,6 +23,8 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
+  // 展示兜底设置：composable 初始化即调用，mock 里给最小骨架即可（测试不断言其内容）。
+  buildInitialContinuationSettings_ACU: () => ({}) as any,
   getContinuationRuntime_ACU: () => ({
     bridge: { send: harness.bridgeSend },
     orchestrator: {

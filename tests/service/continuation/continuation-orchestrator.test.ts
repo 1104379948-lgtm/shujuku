@@ -12,7 +12,7 @@ const outline = { schemaVersion: 1 as const, title: '阶段', goal: '目标', to
  * 执行引擎桩：模拟主 Agent 的大纲行为——没有可执行大纲（无阶段或阶段已完成）时
  * 先通过注入的回调派工大纲子代理，review/stopped 时按真实循环的行为抛错中止。
  */
-function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<typeof vi.fn>; hasLiveHostClaim?: () => boolean; conversation?: ReturnType<typeof vi.fn> } = {}) {
+function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<typeof vi.fn>; hasLiveHostClaim?: () => boolean; conversation?: ReturnType<typeof vi.fn>; onSettingsReplaced?: ReturnType<typeof vi.fn> } = {}) {
   const planner = options.planner ?? vi.fn().mockResolvedValue({ outline, attempts: 1, requiresReview: !!options.preview, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
   let sequence = 0;
   const store = new FirstFloorContinuationStore_ACU();
@@ -44,6 +44,7 @@ function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<t
     createOutlineResolvers: () => ({}),
     appendAgentConversation, clearAgentModules, clearAgentConversation,
     ...(options.hasLiveHostClaim ? { hasLiveHostClaim: options.hasLiveHostClaim } : {}),
+    ...(options.onSettingsReplaced ? { onSettingsReplaced: options.onSettingsReplaced } : {}),
   });
   return { orchestrator, planner, store, executionEngine, appendAgentConversation, clearAgentModules, clearAgentConversation };
 }
@@ -262,6 +263,72 @@ describe('ContinuationOrchestrator_ACU', () => {
     await recordPendingHostTurn(orchestrator, identity);
     await orchestrator.rejectHostTurnForMissingTags({ identity, messageIndex: 2 });
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'generation_retry_exhausted', pendingHostTurn: { retryCount: 1, status: 'exhausted' }, lastError: { code: 'CONTINUATION_GENERATION_TAGS_MISSING', retryable: false } });
+
+    // 重试耗尽不再是死路：用户显式点继续等于手动追加一次重试——清空作废的等待轮，
+    // 从同一轮次重新出发（轮次未 confirm 过，游标未动，不会跳轮）。
+    await orchestrator.continueTask();
+    const recovered = store.readPersisted()!.activeTask!;
+    expect(recovered).toMatchObject({ status: 'running', stopReason: null, lastError: null });
+    expect(recovered.pendingHostTurn).toBeNull();
+    expect(recovered.stages[0].completedTurns).toBe(0);
+  });
+
+  it('accounts failed generations against the retry limit and stays recoverable after exhaustion', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    const initial = store.readPersisted()!;
+    initial.settings = { ...initial.settings, generationRetryLimit: 1 };
+    await store.replaceAtomically(initial, { chatIdentity: 'chat-a' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-host-a' };
+
+    // 首次生成失败：消耗一次重试额度，转 retry_ready（桥据此自动重发），不设停止原因。
+    await recordPendingHostTurn(orchestrator, identity);
+    await orchestrator.rejectHostTurnForFailedGeneration(identity);
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: null, pendingHostTurn: { retryCount: 1, status: 'retry_ready' }, lastError: { code: 'CONTINUATION_GENERATION_FAILED', retryable: true } });
+
+    // 额度耗尽：落 generation_retry_exhausted + exhausted。
+    await orchestrator.continueTask();
+    await recordPendingHostTurn(orchestrator, identity);
+    await orchestrator.rejectHostTurnForFailedGeneration(identity);
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'generation_retry_exhausted', pendingHostTurn: { retryCount: 1, status: 'exhausted' }, lastError: { code: 'CONTINUATION_GENERATION_FAILED', retryable: false } });
+
+    // 自动链停下后，手动「继续」仍能从当前轮次恢复（衔接可恢复停止语义）。
+    await orchestrator.continueTask();
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'running', stopReason: null, lastError: null });
+  });
+
+  it('recovers from a host attribution failure (state_invalid) through an explicit continue', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-host-a' };
+
+    await recordPendingHostTurn(orchestrator, identity);
+    await orchestrator.pauseForHostResultFailure(identity);
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'state_invalid', pendingHostTurn: { status: 'exhausted' }, lastError: { code: 'CONTINUATION_TASK_STATE_INVALID' } });
+
+    // 正文生成出错/归属失败后，继续按钮直接从当前轮次恢复，不再要求清空任务重新规划。
+    await orchestrator.continueTask();
+    const recovered = store.readPersisted()!.activeTask!;
+    expect(recovered).toMatchObject({ status: 'running', stopReason: null, lastError: null });
+    expect(recovered.pendingHostTurn).toBeNull();
+    expect(recovered.stages[0].completedTurns).toBe(0);
+  });
+
+  it('mirrors replaced settings to the global hook only after the envelope persists', async () => {
+    const onSettingsReplaced = vi.fn();
+    const { orchestrator } = createOrchestrator({ onSettingsReplaced });
+    const settings = { ...buildDefaultContinuationSettings_ACU(), loopTags: 'mirror-tag' };
+    await orchestrator.replaceSettings({ settings });
+    expect(onSettingsReplaced).toHaveBeenCalledTimes(1);
+    expect(onSettingsReplaced).toHaveBeenCalledWith(settings);
   });
 
   it('keeps a manual stop authoritative when an invalidated outline op returns late', async () => {
@@ -292,6 +359,9 @@ describe('ContinuationOrchestrator_ACU', () => {
     await confirmTurns(orchestrator, store, 6);
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'stage_limit_reached', runStageCount: 1 });
     expect(planner).toHaveBeenCalledTimes(1);
+
+    // 阶段上限是用户设定的终局停止：不在恢复集合内，继续仍被拒绝。
+    await expectCode(() => orchestrator.continueTask(), 'CONTINUATION_TASK_STATE_INVALID');
   });
 
   it('applies sentence-level outline edits as a frozen next revision without an AI call', async () => {

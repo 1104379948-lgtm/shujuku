@@ -130,3 +130,43 @@ describe('ContinuationRuntime_ACU migration', () => {
     expect(h.getBridge()).toBeNull();
   });
 });
+
+describe('全局续写设置副本', () => {
+  it('写入后持久化并可读回，读取深拷贝隔离，新聊天初始设置以全局副本为准', async () => {
+    const h = await createHarness();
+    const custom = { ...h.runtime.buildInitialContinuationSettings_ACU(), generationRetryLimit: 9, loopDelaySeconds: 42 };
+
+    h.runtime.writeGlobalContinuationSettings_ACU(custom);
+    expect(h.saveSettings).toHaveBeenCalledOnce();
+    expect(h.settings.continuationGlobalSettings).toMatchObject({ generationRetryLimit: 9, loopDelaySeconds: 42 });
+
+    const read = h.runtime.readGlobalContinuationSettings_ACU();
+    expect(read).toMatchObject({ generationRetryLimit: 9, loopDelaySeconds: 42 });
+    // 深拷贝隔离：改读出的对象不影响全局副本本体。
+    read!.generationRetryLimit = 1;
+    expect(h.settings.continuationGlobalSettings.generationRetryLimit).toBe(9);
+
+    // 无信封聊天的初始设置：全局副本优先于内置默认。
+    expect(h.runtime.buildInitialContinuationSettings_ACU()).toMatchObject({ generationRetryLimit: 9, loopDelaySeconds: 42 });
+  });
+
+  it('副本损坏时回落内置默认，不阻塞页面', async () => {
+    const h = await createHarness();
+    const defaults = h.runtime.buildInitialContinuationSettings_ACU();
+    h.settings.continuationGlobalSettings = { 坏: '数据' };
+
+    expect(h.runtime.readGlobalContinuationSettings_ACU()).toBeNull();
+    expect(h.runtime.buildInitialContinuationSettings_ACU()).toEqual(defaults);
+  });
+
+  it('保存失败时回滚内存态，保留原有全局副本', async () => {
+    const h = await createHarness();
+    const original = { ...h.runtime.buildInitialContinuationSettings_ACU(), generationRetryLimit: 9 };
+    h.runtime.writeGlobalContinuationSettings_ACU(original);
+    expect(h.settings.continuationGlobalSettings.generationRetryLimit).toBe(9);
+
+    h.saveSettings.mockReturnValueOnce({ saved: false });
+    h.runtime.writeGlobalContinuationSettings_ACU({ ...original, generationRetryLimit: 2 });
+    expect(h.settings.continuationGlobalSettings.generationRetryLimit).toBe(9);
+  });
+});

@@ -73,7 +73,9 @@ describe('阶段 J：长历史 replay 性能基准（本地可复现）', () => 
 
     // eslint-disable-next-line no-console
     console.table(results);
-  });
+    // 单次冷 replay 约 1.6-1.8s，alias 开/关各 5 次共 10 次 ≈ 17-18s；全量并行（8 worker）
+    // 的 CPU 争用下会顶破 15s 默认超时。基准的价值在耗时计量表与计数断言，超时只是防挂死护栏。
+  }, 60_000);
 
   it('阶段 H：多 boundary 一次前向捕获 vs 逐次冷 replay 的耗时与结果一致性', async () => {
     const boundaries = [10, 30, 50];

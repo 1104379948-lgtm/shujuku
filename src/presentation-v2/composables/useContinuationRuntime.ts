@@ -1,7 +1,6 @@
 import { computed, ref } from 'vue';
-import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
-import { buildDefaultContinuationSettings_ACU } from '../../service/continuation/defaults';
-import { CONTINUATION_AGENT_PROMPT_KEYS_ACU, ContinuationValidationError_ACU, type ContinuationEnvelope_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationTask_ACU, type StageOutline_ACU } from '../../service/continuation/model';
+import { buildInitialContinuationSettings_ACU, getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
+import { CONTINUATION_AGENT_PROMPT_KEYS_ACU, CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, type ContinuationEnvelope_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationTask_ACU, type StageOutline_ACU } from '../../service/continuation/model';
 import type { ContinuationOrchestratorResult_ACU } from '../../service/continuation/continuation-orchestrator';
 import type { ContinuationPreparedTurnInstruction_ACU } from '../../service/continuation/stage-execution-engine';
 import { restoreContinuationPromptDefault_ACU, validateContinuationPromptSegments_ACU, type ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template';
@@ -25,7 +24,8 @@ export function useContinuationRuntime() {
   const toast = useToastStore();
   const runtime = getContinuationRuntime_ACU();
   const envelope = ref<ContinuationEnvelope_ACU | null>(null);
-  const fallbackSettings = buildDefaultContinuationSettings_ACU();
+  // 无信封聊天的展示兜底：全局设置副本优先，用户在新聊天里看到的就是自己保存过的偏好。
+  const fallbackSettings = buildInitialContinuationSettings_ACU();
   const busy = ref(false);
   const originInstruction = ref('');
   let initialization: Promise<void> | null = null;
@@ -88,10 +88,11 @@ export function useContinuationRuntime() {
   const activeNode = computed(() => activeRevision.value?.outline.nodes[activeStage.value?.activeNodeIndex ?? -1] ?? null);
   const activeTurn = computed(() => activeNode.value?.turns[activeStage.value?.activeTurnIndex ?? -1] ?? null);
   // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）也可继续：由主 Agent 派工大纲子代理处理。
-  // 手动停止的任务允许从当前进度恢复；其余停止原因（时长/阶段上限等）不可恢复。
+  // 可恢复的停止（手停、正文归属失败、输入不可用、重试耗尽）允许从当前进度恢复；
+  // 终局停止（时长/阶段上限、completed）不可恢复。集合与 continueTask 的闸共用同一常量。
   const canContinue = computed(() => !!task.value
     && task.value.status === 'paused'
-    && (task.value.stopReason === null || task.value.stopReason === 'manual')
+    && (task.value.stopReason === null || CONTINUATION_RECOVERABLE_STOP_REASONS_ACU.includes(task.value.stopReason))
     && (!activeStage.value || ['running', 'completed'].includes(activeStage.value.status)));
   const isAwaitingHostResult = computed(() => task.value?.status === 'running' && task.value.pendingHostTurn?.status === 'awaiting_generation');
   const statusText = computed(() => task.value

@@ -2,7 +2,7 @@ import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
 import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
 import { resolveContinuationTurnRange_ACU, validateReplannedStageOutline_ACU } from './outline-schema';
-import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
+import { CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationError_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationSettings_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
 import type { AgentConversationAppend_ACU, AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU } from './agent/agent-model';
 import { appendAgentConversationToChat_ACU, clearAgentConversationField_ACU } from './agent/agent-conversation-store';
@@ -50,6 +50,10 @@ export interface ContinuationOrchestratorDependencies_ACU {
   clearAgentModules?: () => Promise<boolean>;
   /** 清除楼层上的会话记录字段。缺省用楼层锚定存储。 */
   clearAgentConversation?: () => Promise<boolean>;
+  /** 无信封聊天的初始设置来源（全局设置副本优先于内置默认）。缺省用内置默认。 */
+  buildFallbackSettings?: () => ContinuationSettings_ACU;
+  /** 设置持久化成功后的镜像回调（把设置同步到全局副本）。失败不影响本聊天信封。 */
+  onSettingsReplaced?: (settings: ContinuationSettings_ACU) => void;
 }
 
 type Lease_ACU = { id: string; epoch: number };
@@ -260,6 +264,8 @@ export class ContinuationOrchestrator_ACU {
         result = { ...envelope, settings: input.settings };
         return result;
       }, { chatIdentity });
+      // 镜像到全局副本（尽力而为）：本聊天信封已落盘成功，全局写失败由回调内部处理，不上抛。
+      this.dependencies.onSettingsReplaced?.(input.settings);
       return result!;
     });
   }
@@ -276,14 +282,17 @@ export class ContinuationOrchestrator_ACU {
         if (staleAwaitingTurn && this.dependencies.hasLiveHostClaim?.(chatIdentity)) {
           fail_ACU('CONTINUATION_OPERATION_BUSY', '当前轮次正在等待宿主生成结果');
         }
-        if (task.pendingHostTurn?.status === 'exhausted') fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前轮次正文重试已耗尽');
         if (task.status === 'awaiting_outline_review' || task.status === 'stopping_after_inflight' || task.status === 'abandoned' || task.status === 'completed' || task.status === 'failed') {
           fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前任务不可继续');
         }
-        // 手动停止允许从当前进度恢复；其余停止原因（时长/阶段上限、重试耗尽等）仍不可继续。
-        if (task.stopReason !== null && task.stopReason !== 'manual') {
+        // 可恢复的停止（手停、正文归属失败、输入不可用、重试耗尽）允许从当前进度恢复；
+        // 终局停止（时长/阶段上限、completed）仍不可继续——放行只会立刻再次触发停止。
+        if (task.stopReason !== null && !CONTINUATION_RECOVERABLE_STOP_REASONS_ACU.includes(task.stopReason)) {
           fail_ACU('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可继续');
         }
+        // exhausted 的等待轮是已作废的尝试（归属失败或重试耗尽时落下的）：用户显式继续即
+        // 从同一轮次重新出发，清掉它重新准备指令；轮次游标未 confirm 过，不会跳轮或重复计数。
+        const exhaustedTurn = task.pendingHostTurn?.status === 'exhausted';
         // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）都可以进循环，由主 Agent 派工大纲子代理处理。
         const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
         if (stage && stage.status !== 'completed' && (stage.status !== 'running' || !getActiveRevision_ACU(stage).frozen)) {
@@ -295,7 +304,7 @@ export class ContinuationOrchestrator_ACU {
           return started;
         }
         const deadlineAt = task.deadlineAt ?? (envelope.settings.totalDurationMinutes > 0 ? now + envelope.settings.totalDurationMinutes * 60_000 : null);
-        started = { ...envelope, activeTask: { ...task, status: 'running', runStartedAt: task.runStartedAt ?? now, deadlineAt, stopReason: null, lastError: null, updatedAt: now, ...(staleAwaitingTurn ? { pendingHostTurn: null } : {}) } };
+        started = { ...envelope, activeTask: { ...task, status: 'running', runStartedAt: task.runStartedAt ?? now, deadlineAt, stopReason: null, lastError: null, updatedAt: now, ...(staleAwaitingTurn || exhaustedTurn ? { pendingHostTurn: null } : {}) } };
         return started;
       }, { chatIdentity });
       const task = started!.activeTask!;
@@ -412,8 +421,32 @@ export class ContinuationOrchestrator_ACU {
   }
 
   async rejectHostTurnForMissingTags(input: RejectHostTurnInput_ACU): Promise<ContinuationOrchestratorResult_ACU> {
+    const error = createContinuationError_ACU('CONTINUATION_GENERATION_TAGS_MISSING', 'generation_evaluate', '宿主正文缺少必需标签', true, { messageIndex: input.messageIndex });
+    return this.rejectHostTurnAttempt_ACU(input.identity, error, input.messageIndex);
+  }
+
+  /**
+   * 宿主生成失败或未产出正文（GENERATION_ENDED 到达但没有可归属的新 AI 楼层，典型如
+   * 后端 API 报错）：与标签缺失同构地消耗一次重试额度并转 retry_ready，由桥按重试
+   * 延迟自动重发当前轮；额度耗尽落 generation_retry_exhausted（可手动继续恢复）。
+   * 没有楼层被写入宿主，重发不会产生重复正文。
+   */
+  async rejectHostTurnForFailedGeneration(identity: TurnAttemptIdentity_ACU): Promise<ContinuationOrchestratorResult_ACU> {
+    const error = createContinuationError_ACU('CONTINUATION_GENERATION_FAILED', 'generation_evaluate', '宿主生成失败或未产出正文，将自动重试当前轮次', true);
+    return this.rejectHostTurnAttempt_ACU(identity, error);
+  }
+
+  /**
+   * 登记一次失败的正文尝试（标签缺失 / 生成失败共用的事务核心）：
+   * 未达 generationRetryLimit 时 retryCount+1 并转 retry_ready（桥读到后自动重发）；
+   * 达到上限时落 generation_retry_exhausted + exhausted（可手动继续恢复）。
+   * @param identity 当前轮次尝试身份
+   * @param error 本次失败的错误对象（retryable=true，耗尽时改写为 false）
+   * @param messageIndex 失败正文的楼层号；生成未产出楼层时省略
+   */
+  private async rejectHostTurnAttempt_ACU(identity: TurnAttemptIdentity_ACU, error: ContinuationError_ACU, messageIndex?: number): Promise<ContinuationOrchestratorResult_ACU> {
     const chatIdentity = this.requireChatIdentity_ACU();
-    if (input.identity.chatIdentity !== chatIdentity) {
+    if (identity.chatIdentity !== chatIdentity) {
       throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文结果所属聊天已变化', false));
     }
     return this.withLease_ACU(async () => {
@@ -422,16 +455,16 @@ export class ContinuationOrchestrator_ACU {
         const envelope = this.requireEnvelope_ACU(current);
         const task = this.requireTask_ACU(envelope);
         const pending = task.pendingHostTurn;
-        if (task.status !== 'running' || !pending || pending.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, input.identity)) {
-          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '标签校验结果已不属于当前轮次', false));
+        if (task.status !== 'running' || !pending || pending.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, identity)) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文失败登记已不属于当前轮次', false));
         }
         const now = this.dependencies.now();
-        const error = createContinuationError_ACU('CONTINUATION_GENERATION_TAGS_MISSING', 'generation_evaluate', '宿主正文缺少必需标签', true, { messageIndex: input.messageIndex });
+        const timelineFields = { stageId: identity.stageId, revision: identity.revision, nodeId: identity.nodeId, turnId: identity.turnId, attemptId: identity.attemptId, ...(messageIndex !== undefined ? { messageIndex } : {}), errorCode: error.code };
         if (pending.retryCount >= envelope.settings.generationRetryLimit) {
-          result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: 'generation_retry_exhausted', lastError: { ...error, retryable: false }, pendingHostTurn: { ...pending, status: 'exhausted' }, timeline: [...task.timeline, this.timeline_ACU('failed', now, { stageId: input.identity.stageId, revision: input.identity.revision, nodeId: input.identity.nodeId, turnId: input.identity.turnId, attemptId: input.identity.attemptId, messageIndex: input.messageIndex, errorCode: error.code })] } };
+          result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: 'generation_retry_exhausted', lastError: { ...error, retryable: false }, pendingHostTurn: { ...pending, status: 'exhausted' }, timeline: [...task.timeline, this.timeline_ACU('failed', now, timelineFields)] } };
           return result;
         }
-        result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, lastError: error, pendingHostTurn: { ...pending, retryCount: pending.retryCount + 1, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, { stageId: input.identity.stageId, revision: input.identity.revision, nodeId: input.identity.nodeId, turnId: input.identity.turnId, attemptId: input.identity.attemptId, messageIndex: input.messageIndex, errorCode: error.code })] } };
+        result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, lastError: error, pendingHostTurn: { ...pending, retryCount: pending.retryCount + 1, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, timelineFields)] } };
         return result;
       }, { chatIdentity });
       return taskResult_ACU(result!);
@@ -925,12 +958,17 @@ export class ContinuationOrchestrator_ACU {
     return { attempts: result.attempts, apiPreset: result.apiPreset, requiresReview: result.requiresReview };
   }
 
+  /** 无信封聊天的初始设置：优先全局设置副本（由运行时装配），缺省内置默认。 */
+  private fallbackSettings_ACU(): ContinuationSettings_ACU {
+    return this.dependencies.buildFallbackSettings?.() ?? buildDefaultContinuationSettings_ACU();
+  }
+
   private baseEnvelope_ACU(): ContinuationEnvelope_ACU {
-    return this.dependencies.store.readPersisted() ?? { schemaVersion: 1, settings: buildDefaultContinuationSettings_ACU(), activeTask: null };
+    return this.dependencies.store.readPersisted() ?? { schemaVersion: 1, settings: this.fallbackSettings_ACU(), activeTask: null };
   }
 
   private requireEnvelope_ACU(value: ContinuationEnvelope_ACU | null): ContinuationEnvelope_ACU {
-    if (!value) return { schemaVersion: 1, settings: buildDefaultContinuationSettings_ACU(), activeTask: null };
+    if (!value) return { schemaVersion: 1, settings: this.fallbackSettings_ACU(), activeTask: null };
     return value;
   }
 

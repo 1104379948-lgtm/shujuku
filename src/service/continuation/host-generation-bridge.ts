@@ -17,6 +17,7 @@ export interface ContinuationHostTurnRuntime_ACU {
   bindHostTurnGeneration(identity: TurnAttemptIdentity_ACU, generationSeq: number): Promise<void>;
   confirmCurrentTurn(identity: TurnAttemptIdentity_ACU): Promise<unknown>;
   rejectHostTurnForMissingTags(input: { identity: TurnAttemptIdentity_ACU; messageIndex: number }): Promise<unknown>;
+  rejectHostTurnForFailedGeneration(identity: TurnAttemptIdentity_ACU): Promise<unknown>;
   pauseForHostInputFailure(identity: TurnAttemptIdentity_ACU): Promise<unknown>;
   pauseForHostResultFailure(identity: TurnAttemptIdentity_ACU): Promise<unknown>;
   failHostTurnForStoppedGeneration(identity: TurnAttemptIdentity_ACU): Promise<unknown>;
@@ -136,11 +137,23 @@ export class ContinuationHostGenerationBridge_ACU {
       if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.identity.attemptId !== claimedIdentity.attemptId) return;
       const boundSequence = snapshot.pending.capture.generationSeq;
       if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence) return;
-      const messageIndex = await this.resolveMessageIndex_ACU(eventMessageId, snapshot.pending.capture, chatIdentity);
-      if (messageIndex === null) {
+      const resolution = await this.resolveMessageIndex_ACU(eventMessageId, snapshot.pending.capture, chatIdentity);
+      if (resolution.kind === 'no_reply') {
+        // 生成失败/未产出正文（典型如后端 API 报错）：没有楼层被写入，重发不会重复正文，
+        // 走与标签缺失同构的自动重试链——消耗一次重试额度，延迟后自动重发当前轮。
+        await this.dependencies.runtime.rejectHostTurnForFailedGeneration(claimedIdentity);
+        const afterReject = this.dependencies.runtime.readPendingHostTurn();
+        if (afterReject?.pending.status === 'retry_ready' && afterReject.pending.identity.attemptId === claimedIdentity.attemptId) {
+          await this.retryCurrentHostTurn_ACU(snapshot.settings.retryDelaySeconds ?? 0);
+        }
+        return;
+      }
+      if (resolution.kind === 'unsafe') {
+        // 归属不安全（多候选歧义/快照失效）：自动重试可能重复楼层，fail closed 交人工。
         await this.dependencies.runtime.pauseForHostResultFailure(claimedIdentity);
         return;
       }
+      const messageIndex = resolution.messageIndex;
       const message = this.dependencies.runtime.getChat()[messageIndex];
       if (!message || !validateLoopTags_ACU(String(message.mes ?? ''), snapshot.settings.loopTags)) {
         // The legacy evaluator's retry_delete decision applies only to the exact
@@ -223,17 +236,26 @@ export class ContinuationHostGenerationBridge_ACU {
     }
   }
 
-  private async resolveMessageIndex_ACU(eventMessageId: unknown, capture: ContinuationHostGenerationCapture_ACU, chatIdentity: string): Promise<number | null> {
-    if (!Number.isInteger(eventMessageId)) return null;
-    const intent: AutoFillIntent_ACU = { eventMessageId: eventMessageId as number, chatKey: chatIdentity, isolationKey: '', capturedAt: capture.capturedAt, capturedChatLength: capture.capturedChatLength, capturedAiFloorCount: capture.capturedAiFloorCount, generationSeq: capture.generationSeq ?? undefined };
+  /**
+   * 解析本轮宿主正文的楼层归属。
+   * - resolved：唯一候选，可安全确认。
+   * - no_reply：物化等待耗尽仍无任何候选——生成失败或未产出正文，可安全自动重试
+   *   （没有楼层被写入）。生成出错时宿主的 message_id 常为 undefined，非整数锚点
+   *   不短路：解析器各锚点分支自带整数守卫，会自然落到捕获边界候选扫描。
+   * - unsafe：多候选歧义 / 快照失效 / 聊天已切换——自动重试可能重复楼层，fail closed。
+   */
+  private async resolveMessageIndex_ACU(eventMessageId: unknown, capture: ContinuationHostGenerationCapture_ACU, chatIdentity: string): Promise<{ kind: 'resolved'; messageIndex: number } | { kind: 'no_reply' } | { kind: 'unsafe' }> {
+    const anchor = Number.isInteger(eventMessageId) ? (eventMessageId as number) : Number.NaN;
+    const intent: AutoFillIntent_ACU = { eventMessageId: anchor, chatKey: chatIdentity, isolationKey: '', capturedAt: capture.capturedAt, capturedChatLength: capture.capturedChatLength, capturedAiFloorCount: capture.capturedAiFloorCount, generationSeq: capture.generationSeq ?? undefined };
     for (let attempt = 0; attempt <= this.dependencies.materializationRetries; attempt += 1) {
-      if (this.dependencies.runtime.getChatIdentity() !== chatIdentity) return null;
+      if (this.dependencies.runtime.getChatIdentity() !== chatIdentity) return { kind: 'unsafe' };
       const result = resolveGeneratedAiMessageIndex_ACU({ liveChat: this.dependencies.runtime.getChat(), intent });
-      if (result.kind === 'resolved') return result.messageIndex;
-      if (result.kind !== 'pending_materialization' || attempt === this.dependencies.materializationRetries) return null;
+      if (result.kind === 'resolved') return { kind: 'resolved', messageIndex: result.messageIndex };
+      if (result.kind !== 'pending_materialization') return { kind: 'unsafe' };
+      if (attempt === this.dependencies.materializationRetries) return { kind: 'no_reply' };
       await this.dependencies.wait(this.dependencies.materializationRetryDelayMs);
     }
-    return null;
+    return { kind: 'no_reply' };
   }
 
   private async retryCurrentHostTurn_ACU(retryDelaySeconds: number): Promise<void> {

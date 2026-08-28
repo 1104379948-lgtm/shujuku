@@ -1,7 +1,8 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
-import { buildMigratedContinuationEnvelope_ACU, stripLegacyContinuationLoopFields_ACU } from './continuation-store';
+import { buildMigratedContinuationEnvelope_ACU, stripLegacyContinuationLoopFields_ACU, validateContinuationSettings_ACU } from './continuation-store';
+import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { ContinuationOrchestrator_ACU, type ContinuationPlanningContext_ACU } from './continuation-orchestrator';
 import { ContinuationOutlinePlanner_ACU } from './outline-planner';
 import { StageExecutionEngine_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
@@ -13,7 +14,8 @@ import { settings_ACU } from '../runtime/state-manager';
 import { saveSettings_ACU } from '../settings/settings-service';
 import type { ContinuationHostGenerationBridge_ACU } from './host-generation-bridge';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
-import type { ContinuationEnvelope_ACU, ContinuationStage_ACU, ContinuationTask_ACU, StageRevision_ACU } from './model';
+import { logWarn_ACU } from '../../shared/utils';
+import type { ContinuationEnvelope_ACU, ContinuationSettings_ACU, ContinuationStage_ACU, ContinuationTask_ACU, StageRevision_ACU } from './model';
 
 export interface ContinuationRuntime_ACU {
   orchestrator: ContinuationOrchestrator_ACU;
@@ -134,11 +136,57 @@ function hasLegacyContinuationLoopFields_ACU(value: unknown): boolean {
     || Object.prototype.hasOwnProperty.call(loopSettings, 'currentPromptIndex');
 }
 
+/** 全局设置副本在 settings_ACU 上的字段名。写入走 saveSettings_ACU 与其他全局配置同通道持久化。 */
+const GLOBAL_CONTINUATION_SETTINGS_KEY_ACU = 'continuationGlobalSettings';
+
+/**
+ * 读取全局续写设置副本。深拷贝后过与信封同一套校验（含历史字段迁移与提示词版本强刷），
+ * 缺失或损坏时返回 null，由调用方回落内置默认——坏副本绝不阻塞页面。
+ * @returns 校验通过的全局设置；无副本或副本非法时为 null
+ */
+export function readGlobalContinuationSettings_ACU(): ContinuationSettings_ACU | null {
+  const raw = (settings_ACU as Record<string, unknown> | undefined)?.[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  try {
+    return validateContinuationSettings_ACU(JSON.parse(JSON.stringify(raw)));
+  } catch (error) {
+    logWarn_ACU('全局续写设置副本无效，回落内置默认:', error);
+    return null;
+  }
+}
+
+/**
+ * 把续写设置镜像写入全局副本并持久化。保存失败回滚内存态——本聊天信封已各自落盘成功，
+ * 全局镜像是尽力而为，失败只记警告不上抛。
+ * @param settings 刚保存到当前聊天信封的完整设置
+ */
+export function writeGlobalContinuationSettings_ACU(settings: ContinuationSettings_ACU): void {
+  const record = settings_ACU as Record<string, unknown> | undefined;
+  if (!record) return;
+  const previous = record[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU];
+  record[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU] = JSON.parse(JSON.stringify(settings));
+  try {
+    if (!saveSettings_ACU().saved) {
+      record[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU] = previous;
+      logWarn_ACU('全局续写设置副本保存失败，已回滚内存态');
+    }
+  } catch (error) {
+    record[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU] = previous;
+    logWarn_ACU('全局续写设置副本保存异常，已回滚内存态:', error);
+  }
+}
+
+/** 无信封聊天的初始设置：全局副本优先，缺失或非法时用内置默认。 */
+export function buildInitialContinuationSettings_ACU(): ContinuationSettings_ACU {
+  return readGlobalContinuationSettings_ACU() ?? buildDefaultContinuationSettings_ACU();
+}
+
 async function migrateLegacySettings_ACU(store: FirstFloorContinuationStore_ACU): Promise<ContinuationEnvelope_ACU | null> {
   const existing = store.readPersisted();
   const legacyPlotSettings = settings_ACU?.plotSettings;
   if (!existing) {
-    const migration = buildMigratedContinuationEnvelope_ACU(legacyPlotSettings);
+    // legacy 迁移也以全局副本为基底：只有 loop 类字段来自旧剧情设置，其余跟随全局偏好。
+    const migration = buildMigratedContinuationEnvelope_ACU(legacyPlotSettings, buildInitialContinuationSettings_ACU());
     if (!migration.didMigrate) return null;
     await store.replaceAtomically(migration.envelope);
   }
@@ -184,6 +232,8 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
       return buildResolvers_ACU(context.task, stage, revision, worldbook);
     },
     hasLiveHostClaim: chatIdentity => bridgeRef?.hasLiveClaim(chatIdentity) ?? false,
+    buildFallbackSettings: buildInitialContinuationSettings_ACU,
+    onSettingsReplaced: writeGlobalContinuationSettings_ACU,
   });
   const bridge = createSillyTavernContinuationHostBridge_ACU(orchestrator);
   bridgeRef = bridge;

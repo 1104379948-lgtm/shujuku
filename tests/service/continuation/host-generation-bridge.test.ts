@@ -22,6 +22,7 @@ function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; o
     bindHostTurnGeneration: vi.fn(async (_identity, generationSeq) => { pending = { ...pending, capture: { ...pending.capture, generationSeq } }; }),
     confirmCurrentTurn: vi.fn(async () => { pending = null; }),
     rejectHostTurnForMissingTags: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
+    rejectHostTurnForFailedGeneration: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
     pauseForHostInputFailure: vi.fn(async () => { pending = { ...pending, status: 'exhausted' }; }),
     pauseForHostResultFailure: vi.fn(async () => { pending = { ...pending, status: 'exhausted' }; }),
     failHostTurnForStoppedGeneration: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
@@ -136,6 +137,35 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
     expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
     expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
+  });
+
+  it('auto-retries the current turn when an errored generation ends without a message id or new floor', async () => {
+    const h = createHarness();
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(h.hostInput.send.mock.calls.length === 1 ? 7 : 8); return true; });
+    await h.bridge.send(prepared);
+
+    // 生成出错：GENERATION_ENDED 携带 undefined message_id，聊天里没有任何新楼层。
+    await h.bridge.onGenerationEnded(undefined, 7);
+
+    expect(h.runtime.rejectHostTurnForFailedGeneration).toHaveBeenCalledWith(identity);
+    expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
+    expect(h.retryCurrentTurn).toHaveBeenCalledOnce();
+    expect(h.hostInput.send).toHaveBeenCalledTimes(2);
+    expect(h.hostInput.send).toHaveBeenLastCalledWith('重试后的最终普通文本');
+    expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+  });
+
+  it('auto-retries when the anchored reply never materializes in the live chat', async () => {
+    const h = createHarness();
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+
+    // 事件带整数锚点但楼层始终未物化（生成失败没有写入正文）：物化等待耗尽后走自动重试。
+    await h.bridge.onGenerationEnded(9, 7);
+
+    expect(h.runtime.rejectHostTurnForFailedGeneration).toHaveBeenCalledWith(identity);
+    expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
+    expect(h.retryCurrentTurn).toHaveBeenCalledOnce();
   });
 
   it('fails closed when the host event has ambiguous AI candidates', async () => {

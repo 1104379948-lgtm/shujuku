@@ -83,7 +83,13 @@ const placeholder = computed(() => {
 
 const notice = computed(() => {
   if (props.awaitingHost) return '当前轮次正在等待酒馆的正文生成结束，这期间不能重规划或重复发送。';
-  if (props.task?.stopReason && props.task.stopReason !== 'manual') return `任务已停止：${props.task.stopReason}。这类停止不能直接继续，请清空后重新规划。`;
+  if (props.task?.stopReason && props.task.stopReason !== 'manual') {
+    // 可恢复停止（正文归属失败、输入不可用、重试耗尽）与终局停止（时长/阶段上限）
+    // 的判定以 canContinue 为准——它与运行时 continueTask 的闸使用同一恢复集合。
+    return props.canContinue
+      ? `任务已停止：${props.task.stopReason}。可点击「继续」从当前轮次重试恢复。`
+      : `任务已停止：${props.task.stopReason}。这类停止不能直接继续，请清空后重新规划。`;
+  }
   if (props.task?.lastError) return `上一次失败：${props.task.lastError.message}`;
   return '';
 });

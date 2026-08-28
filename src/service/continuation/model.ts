@@ -6,6 +6,16 @@ export type ContinuationStageStatus_ACU = 'planning' | 'awaiting_review' | 'runn
 export type ContinuationRevisionReason_ACU = 'initial' | 'auto_next_stage' | 'manual_replan';
 export type ContinuationInternalCallStatus_ACU = 'idle' | 'planning_outline' | 'generating_turn_instruction' | 'retry_waiting' | 'failed';
 export type ContinuationStopReason_ACU = 'manual' | 'duration_reached' | 'stage_limit_reached' | 'outline_validation_failed' | 'internal_ai_retry_exhausted' | 'generation_retry_exhausted' | 'host_input_unavailable' | 'api_preset_missing' | 'state_invalid' | 'chat_changed' | 'completed';
+
+/**
+ * 用户点「继续」即可从当前轮次恢复的停止原因。
+ * 这四类都是「环境或产出问题，任务本身还能走」：manual 是用户手停；state_invalid 是宿主正文
+ * 归属失败（如生成报错、楼层无法唯一归属）；host_input_unavailable 是酒馆输入框暂时不可用；
+ * generation_retry_exhausted 是自动重试用完——用户显式点继续等于手动追加一次重试。
+ * 不在集合内的保持不可继续：duration_reached / stage_limit_reached 是用户设定的上限（放行会
+ * 立刻再次触发停止），completed 是终态，其余枚举值当前无赋值点，按保守处理。
+ */
+export const CONTINUATION_RECOVERABLE_STOP_REASONS_ACU: readonly ContinuationStopReason_ACU[] = ['manual', 'state_invalid', 'host_input_unavailable', 'generation_retry_exhausted'];
 export type ContinuationErrorPhase_ACU = 'load' | 'persist' | 'outline_prompt' | 'outline_call' | 'outline_parse' | 'outline_validate' | 'turn_prompt' | 'turn_call' | 'host_send' | 'generation_evaluate' | 'replan' | 'agent_loop' | 'agent_delegate' | 'agent_persist';
 
 export type ContinuationErrorCode_ACU =
@@ -52,6 +62,7 @@ export type ContinuationErrorCode_ACU =
   | 'CONTINUATION_TASK_STATE_INVALID'
   | 'CONTINUATION_HOST_INPUT_UNAVAILABLE'
   | 'CONTINUATION_GENERATION_TAGS_MISSING'
+  | 'CONTINUATION_GENERATION_FAILED'
   | 'CONTINUATION_AGENT_PROTOCOL_INVALID'
   | 'CONTINUATION_AGENT_ITERATIONS_EXHAUSTED'
   | 'CONTINUATION_AGENT_BLOCKED'
