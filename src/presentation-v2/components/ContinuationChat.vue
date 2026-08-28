@@ -64,8 +64,13 @@ const emit = defineEmits<{
 const draft = ref('');
 const inputElement = ref<HTMLTextAreaElement | null>(null);
 
-/** 只有「循环真在跑」才给停止：等待宿主正文时停的是酒馆的生成，不属于这里的职责。 */
-const canStop = computed(() => !!props.task && props.task.status === 'running' && !props.awaitingHost);
+/**
+ * 只要「循环真在跑」就给停止。判定用两个信号取或：running 是会话流的实时运行标志
+ * （循环自己维护，无刷新延迟）；task.status 在 UI 发起的循环期间可能是陈旧的 paused
+ * （envelope 要等本次操作结束才刷新），只能作补充。等待宿主正文时停的是酒馆的生成，
+ * 不属于这里的职责，保持隐藏。
+ */
+const canStop = computed(() => !props.awaitingHost && (props.running || props.task?.status === 'running'));
 
 const statusTone = computed(() => {
   if (!props.task) return 'idle';

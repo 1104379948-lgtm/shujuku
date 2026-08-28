@@ -187,9 +187,31 @@ describe('ContinuationPage', () => {
     buttonByText(el, '继续当前轮次')!.click();
     await nextTick();
     expect(continueTask).toHaveBeenCalledOnce();
-    // paused 状态下不给停止：没有正在跑的循环可停。
+    // paused 且会话流没有运行标志时不给停止：没有正在跑的循环可停。
     expect(buttonByText(el, '停止生成')).toBeUndefined();
     app.unmount();
+  });
+
+  it('任务状态陈旧为 paused 但会话流显示循环在跑时，仍提供停止生成', async () => {
+    const sessionLog = await import('../../../src/service/continuation/agent/agent-session-log');
+    setTask();
+    const { app, el } = await mountPage();
+    try {
+      expect(buttonByText(el, '停止生成')).toBeUndefined();
+
+      // UI 发起的循环运行期间 envelope 不刷新，task.status 停留在陈旧的 paused；
+      // 会话日志的运行标志才是实时信号，停止按钮必须据它显示。
+      sessionLog.beginAgentSessionRun_ACU('第 1 阶段 · 第 1/6 轮');
+      await nextTick();
+      const stop = buttonByText(el, '停止生成');
+      expect(stop).not.toBeUndefined();
+      stop!.click();
+      await nextTick();
+      expect(stopTask).toHaveBeenCalledOnce();
+    } finally {
+      app.unmount();
+      sessionLog.resetAgentSessionLogForTests_ACU();
+    }
   });
 
   it('运行中提供停止生成，等待宿主正文时隐藏所有竞争操作并在聊天切换后刷新', async () => {

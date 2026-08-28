@@ -153322,8 +153322,13 @@ Expected function or array of functions, received type ${typeof value}.`
             const emit = __emit;
             const draft = ref('');
             const inputElement = ref(null);
-            /** 只有「循环真在跑」才给停止：等待宿主正文时停的是酒馆的生成，不属于这里的职责。 */
-            const canStop = computed(() => !!props.task && props.task.status === 'running' && !props.awaitingHost);
+            /**
+             * 只要「循环真在跑」就给停止。判定用两个信号取或：running 是会话流的实时运行标志
+             * （循环自己维护，无刷新延迟）；task.status 在 UI 发起的循环期间可能是陈旧的 paused
+             * （envelope 要等本次操作结束才刷新），只能作补充。等待宿主正文时停的是酒馆的生成，
+             * 不属于这里的职责，保持隐藏。
+             */
+            const canStop = computed(() => !props.awaitingHost && (props.running || props.task?.status === 'running'));
             const statusTone = computed(() => {
                 if (!props.task)
                     return 'idle';
@@ -153378,8 +153383,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-chat[data-v-d2e50a13] { display: grid; gap: 10px;\n}\n.acu-v2-continuation-chat__status[data-v-d2e50a13] { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-chat__badge[data-v-d2e50a13] { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2);\n}\n.acu-v2-continuation-chat__badge--running[data-v-d2e50a13] { background: color-mix(in srgb, var(--acu-primary, #5b8def) 20%, transparent); color: var(--acu-primary, #5b8def);\n}\n.acu-v2-continuation-chat__badge--failed[data-v-d2e50a13] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-continuation-chat__status-item[data-v-d2e50a13] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-chat__notice[data-v-d2e50a13] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-chat__composer[data-v-d2e50a13] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2);\n}\n.acu-v2-continuation-chat__input[data-v-d2e50a13] { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-chat__input[data-v-d2e50a13]:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-continuation-chat__composer-actions[data-v-d2e50a13] { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-chat__hint[data-v-d2e50a13] { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\r\n\r\n/* 手机窄屏：快捷键提示没有意义直接隐藏；按钮均分整行方便点按；\r\n   输入框字号提到 16px，避免 iOS Safari 聚焦时自动放大页面。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-chat__hint[data-v-d2e50a13] { display: none;\n}\n.acu-v2-continuation-chat__composer-actions[data-v-d2e50a13] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-chat__input[data-v-d2e50a13] { font-size: 16px; min-height: 56px;\n}\n.acu-v2-continuation-chat__composer[data-v-d2e50a13] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/ContinuationChat.vue#style-0-d2e50a13");
-    var ContinuationChat_vue_vue_type_style_index_0_scoped_d2e50a13_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-chat[data-v-600ebb23] { display: grid; gap: 10px;\n}\n.acu-v2-continuation-chat__status[data-v-600ebb23] { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-chat__badge[data-v-600ebb23] { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2);\n}\n.acu-v2-continuation-chat__badge--running[data-v-600ebb23] { background: color-mix(in srgb, var(--acu-primary, #5b8def) 20%, transparent); color: var(--acu-primary, #5b8def);\n}\n.acu-v2-continuation-chat__badge--failed[data-v-600ebb23] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-continuation-chat__status-item[data-v-600ebb23] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-chat__notice[data-v-600ebb23] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-chat__composer[data-v-600ebb23] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2);\n}\n.acu-v2-continuation-chat__input[data-v-600ebb23] { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-chat__input[data-v-600ebb23]:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-continuation-chat__composer-actions[data-v-600ebb23] { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-chat__hint[data-v-600ebb23] { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\r\n\r\n/* 手机窄屏：快捷键提示没有意义直接隐藏；按钮均分整行方便点按；\r\n   输入框字号提到 16px，避免 iOS Safari 聚焦时自动放大页面。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-chat__hint[data-v-600ebb23] { display: none;\n}\n.acu-v2-continuation-chat__composer-actions[data-v-600ebb23] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-chat__input[data-v-600ebb23] { font-size: 16px; min-height: 56px;\n}\n.acu-v2-continuation-chat__composer[data-v-600ebb23] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/ContinuationChat.vue#style-0-600ebb23");
+    var ContinuationChat_vue_vue_type_style_index_0_scoped_600ebb23_lang = null;
 
     const _hoisted_1$n = { class: "acu-v2-continuation-chat" };
     const _hoisted_2$l = { class: "acu-v2-continuation-chat__status" };
@@ -153516,7 +153521,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])])
 	]);
     }
-    var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-d2e50a13"]]);
+    var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-600ebb23"]]);
 
     function errorMessage_ACU$1(error) {
         if (error instanceof ContinuationValidationError_ACU)
@@ -154060,7 +154065,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 return true;
             }
             catch (error) {
-                toast.error(errorMessage_ACU(error), { muteable: false });
+                // STALE 意味着本次操作被更新的意图作废（用户点停止、插话打断、切换聊天）——
+                // 这是预期内的中断而不是故障，弹中性提示；其余错误仍按故障弹红。
+                if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') {
+                    toast.info(error.error.message);
+                }
+                else {
+                    toast.error(errorMessage_ACU(error), { muteable: false });
+                }
                 refresh();
                 return false;
             }
@@ -154119,8 +154131,23 @@ Expected function or array of functions, received type ${typeof value}.`
         async function continueTask() {
             await run_ACU(() => runtime.orchestrator.continueTask());
         }
+        /**
+         * 停止 Agent 循环。刻意不经 run_ACU：busy 恰好在循环运行期间为 true，
+         * 走 busy 闸会把停止请求静默吞掉——而那正是用户最需要停止的时刻。
+         * 并发安全由编排器保证：stopTask 先作废租约并 abort 在飞请求，再落盘手动停止态；
+         * 被中断的在途操作会以 STALE 错误收尾，由 run_ACU 的 catch 转成中性提示。
+         */
         async function stopTask() {
-            await run_ACU(() => runtime.orchestrator.stopTask());
+            try {
+                const result = await runtime.orchestrator.stopTask();
+                envelope.value = result.envelope;
+            }
+            catch (error) {
+                toast.error(errorMessage_ACU(error), { muteable: false });
+            }
+            finally {
+                refresh();
+            }
         }
         async function replanRemaining() {
             await run_ACU(() => runtime.orchestrator.replanRemaining());

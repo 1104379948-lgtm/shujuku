@@ -69,7 +69,13 @@ export function useContinuationRuntime() {
       refresh();
       return true;
     } catch (error) {
-      toast.error(errorMessage_ACU(error), { muteable: false });
+      // STALE 意味着本次操作被更新的意图作废（用户点停止、插话打断、切换聊天）——
+      // 这是预期内的中断而不是故障，弹中性提示；其余错误仍按故障弹红。
+      if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') {
+        toast.info(error.error.message);
+      } else {
+        toast.error(errorMessage_ACU(error), { muteable: false });
+      }
       refresh();
       return false;
     } finally {
@@ -128,8 +134,21 @@ export function useContinuationRuntime() {
     await run_ACU(() => runtime.orchestrator.continueTask());
   }
 
+  /**
+   * 停止 Agent 循环。刻意不经 run_ACU：busy 恰好在循环运行期间为 true，
+   * 走 busy 闸会把停止请求静默吞掉——而那正是用户最需要停止的时刻。
+   * 并发安全由编排器保证：stopTask 先作废租约并 abort 在飞请求，再落盘手动停止态；
+   * 被中断的在途操作会以 STALE 错误收尾，由 run_ACU 的 catch 转成中性提示。
+   */
   async function stopTask(): Promise<void> {
-    await run_ACU(() => runtime.orchestrator.stopTask());
+    try {
+      const result = await runtime.orchestrator.stopTask();
+      envelope.value = result.envelope;
+    } catch (error) {
+      toast.error(errorMessage_ACU(error), { muteable: false });
+    } finally {
+      refresh();
+    }
   }
 
   async function replanRemaining(): Promise<void> {

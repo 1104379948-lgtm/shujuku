@@ -20,6 +20,7 @@ const harness = vi.hoisted(() => ({
   read: vi.fn(() => null),
   toastError: vi.fn(),
   toastSuccess: vi.fn(),
+  toastInfo: vi.fn(),
 }));
 
 vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
@@ -45,7 +46,7 @@ vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
   }),
 }));
 vi.mock('../../../src/presentation-v2/stores/toast-store', () => ({
-  useToastStore: () => ({ error: harness.toastError, success: harness.toastSuccess }),
+  useToastStore: () => ({ error: harness.toastError, success: harness.toastSuccess, info: harness.toastInfo }),
 }));
 
 const envelope = { schemaVersion: 1, settings: {}, activeTask: null } as any;
@@ -169,6 +170,37 @@ describe('useContinuationRuntime', () => {
     harness.replaceSettings.mockRejectedValueOnce(new Error('持久化失败'));
     await expect(continuation.saveSettings(settings)).resolves.toBe('failed');
     expect(harness.toastError).toHaveBeenCalled();
+  });
+
+  it('停止不经 busy 闸：循环在跑（busy 为 true）时 stopTask 仍直达编排器并刷新状态', async () => {
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+    let release!: (value: unknown) => void;
+    harness.continueTask.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+
+    const inflight = continuation.continueTask();
+    expect(continuation.busy.value).toBe(true);
+
+    await continuation.stopTask();
+    expect(harness.stopTask).toHaveBeenCalledOnce();
+    expect(harness.read).toHaveBeenCalled();
+
+    release(result);
+    await inflight;
+    expect(continuation.busy.value).toBe(false);
+  });
+
+  it('在途操作被停止中断（STALE）时弹中性提示而不是错误吐司', async () => {
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const { ContinuationValidationError_ACU, createContinuationError_ACU } = await import('../../../src/service/continuation/model');
+    const continuation = useContinuationRuntime();
+
+    harness.continueTask.mockRejectedValueOnce(new ContinuationValidationError_ACU(
+      createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '本轮规划已被用户中断', false),
+    ));
+    await continuation.continueTask();
+    expect(harness.toastInfo).toHaveBeenCalledWith('本轮规划已被用户中断');
+    expect(harness.toastError).not.toHaveBeenCalled();
   });
 
   it('会话发送：空白不派发，编排器要求继续时紧接着跑一轮', async () => {
