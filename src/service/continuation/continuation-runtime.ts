@@ -7,6 +7,7 @@ import { ContinuationOrchestrator_ACU, type ContinuationPlanningContext_ACU } fr
 import { ContinuationOutlinePlanner_ACU } from './outline-planner';
 import { StageExecutionEngine_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
 import { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
+import { readAgentModuleSnapshot_ACU, renderAgentStoryArc_ACU } from './agent/agent-module-store';
 import { ContinuationWorldbookContext_ACU } from './worldbook-context';
 import { createSillyTavernContinuationHostBridge_ACU } from './sillytavern-host-bridge';
 import { registerContinuationHostGenerationBridge_ACU } from './host-generation-bridge-registry';
@@ -119,6 +120,8 @@ function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage
     $CURRENT_STAGE: () => stage && revision ? `阶段 ${stage.stageNumber}: ${revision.outline.title}\n${revision.outline.goal}` : '',
     $CURRENT_NODE: () => current ? `${current.node.title}\n${current.node.goal}` : '',
     $CURRENT_TURN_GOAL: () => current?.turn.goal ?? '',
+    // 总纲是大纲的方向约束：阶段目标必须落在当前 active 卷的台阶内，否则每个阶段都会各自为政。
+    $STORY_ARC: () => renderAgentStoryArc_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
     $TURN_NUMBER: () => current ? String(current.turnNumber) : '',
     $NODE_TURN_NUMBER: () => current ? String(current.nodeTurnNumber) : '',
   };

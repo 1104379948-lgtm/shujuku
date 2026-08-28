@@ -38,6 +38,8 @@ vi.mock('../../../src/presentation-v2/composables/useContinuationRuntime', () =>
     retryCurrentTurn, acceptOutline, sendAgentMessage, saveActiveOutline, clearData, restorePromptDefault,
     saveSettings, settings, statusText, stopTask, task,
   }),
+  // 低压轮占比输入框的上限常量：组件从 composable 取，mock 缺了它会整页渲染失败。
+  CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU: 0.6,
 }));
 vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({
   useChatChangedTick: () => chatTick,
@@ -112,13 +114,14 @@ function setSettings(): void {
     outlinePreview: false, autoNextStage: true, maxAutomaticStages: 6,
     loopTags: '', loopDelaySeconds: 5, totalDurationMinutes: 0,
     retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3,
-    contextTurnCount: 3, storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000,
+    contextTurnCount: 3, storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000, downtimeTurnRatio: 0.3,
     agentReadTokenBudget: '30%', agentReadFallbackTokens: 6000,
     contextExtractRules: [], contextExcludeRules: [],
     apiPresetMode: 'current', fixedApiPresetName: '',
     agentApiPresets: {
       main: { mode: 'inherit', presetName: '' },
       outline: { mode: 'inherit', presetName: '' },
+      arcArchitect: { mode: 'inherit', presetName: '' },
       maintainer: { mode: 'inherit', presetName: '' },
       mainlinePlanner: { mode: 'inherit', presetName: '' },
       beatPlanner: { mode: 'inherit', presetName: '' },
@@ -127,6 +130,7 @@ function setSettings(): void {
     outlinePrompt: [{ role: 'system', content: '规划', enabled: true, deletable: true }],
     agentPrompts: {
       main: [{ role: 'system', content: '主控', enabled: true, deletable: true }],
+      arcArchitect: [{ role: 'system', content: '总纲', enabled: true, deletable: true }],
       maintainer: [{ role: 'system', content: '维护', enabled: true, deletable: true }],
       mainlinePlanner: [{ role: 'system', content: '主线', enabled: true, deletable: true }],
       beatPlanner: [{ role: 'system', content: '节拍', enabled: true, deletable: true }],
@@ -282,6 +286,8 @@ describe('ContinuationPage', () => {
       expect(el.textContent).toContain('会话自动总结阈值');
       expect(el.textContent).toContain('读取预算');
       expect(el.textContent).toContain('精读兜底额度');
+      expect(el.textContent).toContain('日常轮占比下限');
+      expect(el.textContent).toContain('故事总纲子代理（arc-architect）提示词');
       // 保存按钮已移除：修改任意设置项后由防抖自动保存。
       expect(buttonByText(el, '保存续写设置')).toBeUndefined();
 
@@ -292,7 +298,7 @@ describe('ContinuationPage', () => {
       expect(saveSettings).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(900);
       expect(saveSettings).toHaveBeenCalledOnce();
-      expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 120000 });
+      expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short', storyWindowFloors: 20, agentHistoryTokenBudget: 120000, downtimeTurnRatio: 0.3 });
       app.unmount();
     } finally {
       vi.useRealTimers();

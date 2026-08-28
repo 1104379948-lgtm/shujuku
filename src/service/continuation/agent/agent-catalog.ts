@@ -14,7 +14,7 @@ export interface AgentSubagentDefinition_ACU {
   kind: AgentSubagentKind_ACU;
   description: string;
   triggers: string[];
-  promptKey: 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer';
+  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer';
 }
 
 export interface AgentModuleDefinition_ACU {
@@ -25,6 +25,13 @@ export interface AgentModuleDefinition_ACU {
 }
 
 export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_ACU[] = [
+  {
+    name: 'arc-architect',
+    kind: 'arc',
+    description: '维护故事总纲：全书方向、卷级台阶（每卷推到什么高度、收在哪）、禁止提前翻的底牌，以及各卷已由哪些阶段承载的进度',
+    triggers: ['总纲状态显示「还没有故事总纲」时必须先派它', '一个阶段完成后回写进度、必要时把下一卷切成 active', '真实剧情已明显偏离既定方向、需要修订台阶时'],
+    promptKey: 'arcArchitect',
+  },
   {
     name: 'hook-cognition-maintainer',
     kind: 'maintain',
@@ -57,6 +64,12 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
 
 export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] = [
   {
+    token: '$STORY_ARC',
+    description: '故事总纲：全书方向（唯一一条）与卷级台阶。每条写明本层推进方向、要抬到的高度与收束点、禁止提前翻的底牌，以及已由哪些阶段承载',
+    triggers: ['排新阶段大纲前确认本阶段该落在哪一级台阶上', '判断某张底牌本阶段能不能翻', '一个阶段完成后回写进度'],
+    writableBy: ['arc-architect'],
+  },
+  {
     token: '$HOOKS_LEDGER',
     description: '伏笔账本：已进入真实正文的伏笔及其生命周期状态（埋设/强化/误导/部分回收/回收/放弃）、埋设楼层与重要度',
     triggers: ['正文触碰异常线索', '本轮计划强化、误导或回收伏笔', '判断某条悬念是否已经欠账太久'],
@@ -76,8 +89,17 @@ export const AGENT_MODULE_DEFINITIONS_ACU: readonly AgentModuleDefinition_ACU[] 
   },
 ];
 
+/** 子代理目录里的类型中文名。 */
+const KIND_DISPLAY_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
+  arc: '总纲',
+  maintain: '结算维护',
+  plan: '策划',
+  review: '审查',
+};
+
 /** 按职责固定的写入说明，进子代理目录的「写入」行。 */
 const KIND_WRITE_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
+  arc: '$STORY_ARC（职责固定；不碰伏笔、信息差与约束）',
   maintain: '$HOOKS_LEDGER、$INFO_GAP（职责固定；约束只能提议，由主 Agent 裁决登记）',
   plan: '无（只返回建议）',
   review: '无（只返回判词）',
@@ -105,7 +127,7 @@ const OUTLINE_AGENT_CATALOG_BLOCK_ACU = [
 export function renderAgentSubagentCatalog_ACU(): string {
   const blocks = AGENT_SUBAGENT_DEFINITIONS_ACU.map(definition => [
     `- name: ${definition.name}`,
-    `  类型: ${definition.kind === 'maintain' ? '结算维护' : definition.kind === 'plan' ? '策划' : '审查'}`,
+    `  类型: ${KIND_DISPLAY_LABELS_ACU[definition.kind]}`,
     `  职责: ${definition.description}`,
     `  适用时机: ${definition.triggers.join('；')}`,
     '  读取: 全部资料域开放；派工时用 reads 给出种子地址，它还能自己 read/search 补充调阅',
@@ -139,6 +161,7 @@ export function renderAgentReadCatalog_ACU(): string {
     'read 工具的地址体系（reads 数组里可混用多种地址，一次批量取数）：',
     '- $STORY_RANGE:起始楼-结束楼：可读窗口内的 AI 正文楼层区间，逐楼全文。可用楼层与窗口范围见正文目录。',
     '- $TABLE:表名 / $TABLE:表名:起始行-结束行：整表或行区间。可用表名与行数见表格目录。',
+    '- $STORY_ARC / $STORY_ARC:ID,ID：故事总纲全部活跃条目（全书方向与卷台阶），或按 ID 精读（含已废止条目）。',
     '- $HOOKS_LEDGER / $HOOKS_LEDGER:ID,ID：伏笔账本全部活跃条目，或按 ID 精读（含已退休条目）。',
     '- $INFO_GAP / $INFO_GAP:ID,ID：认知与信息差时间线全部活跃条目，或按 ID 精读。',
     '- $ACTIVE_CONSTRAINTS / $ACTIVE_CONSTRAINTS:ID,ID：长期约束全部条目，或按 ID 精读。',

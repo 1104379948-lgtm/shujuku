@@ -60,6 +60,9 @@
           <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最多轮次">
             <AcuInput v-model="settingsDraft.customTurnMax" type="number" :min="1" :max="50" />
           </AcuFormRow>
+          <AcuFormRow label="日常轮占比下限：阶段大纲里 setup/cooldown 低压轮的最低比例，0 为不作要求，最高 0.6">
+            <AcuInput v-model="settingsDraft.downtimeTurnRatio" type="number" :min="0" :max="downtimeTurnRatioMax" :step="0.05" />
+          </AcuFormRow>
           <AcuFormRow label="自动阶段上限">
             <AcuInput v-model="settingsDraft.maxAutomaticStages" type="number" :min="1" />
           </AcuFormRow>
@@ -137,12 +140,16 @@
       <h3>大纲子代理（outline-architect）提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.outlinePrompt" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('outlinePrompt', position)" @delete="index => deletePrompt('outlinePrompt', index)" @move="(index, delta) => movePrompt('outlinePrompt', index, delta)" @update="(index, patch) => updatePrompt('outlinePrompt', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('outline')">恢复大纲提示词默认值</AcuButton></div>
-      <p class="acu-v2-continuation-page__meta">大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$VALIDATION_ERRORS。</p>
+      <p class="acu-v2-continuation-page__meta">大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$VALIDATION_ERRORS。</p>
 
       <h3>主 Agent 提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.agentPrompts.main" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('main', position)" @delete="index => deletePrompt('main', index)" @move="(index, delta) => movePrompt('main', index, delta)" @update="(index, patch) => updatePrompt('main', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_main')">恢复主 Agent 默认值</AcuButton></div>
-      <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。目录与状态占位符：$STORY_CATALOG（正文楼层目录，尾部若干楼带全文）、$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $STORY_TEXT、$OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。</p>
+      <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。目录与状态占位符：$STORY_CATALOG（正文楼层目录，尾部若干楼带全文）、$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$CURRENT_TURN_PACING（本轮节奏与写作约束）、$STORY_ARC_STATE（总纲状态）、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $STORY_TEXT、$OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。</p>
+
+      <h3>故事总纲子代理（arc-architect）提示词</h3>
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.arcArchitect" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('arcArchitect', position)" @delete="index => deletePrompt('arcArchitect', index)" @move="(index, delta) => movePrompt('arcArchitect', index, delta)" @update="(index, patch) => updatePrompt('arcArchitect', index, patch)" />
+      <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_arc')">恢复总纲子代理默认值</AcuButton></div>
 
       <h3>伏笔与认知维护子代理提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.agentPrompts.maintainer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('maintainer', position)" @delete="index => deletePrompt('maintainer', index)" @move="(index, delta) => movePrompt('maintainer', index, delta)" @update="(index, patch) => updatePrompt('maintainer', index, patch)" />
@@ -183,7 +190,7 @@ import ContinuationChat from '../components/ContinuationChat.vue';
 import ContinuationMaterialsPanel from '../components/ContinuationMaterialsPanel.vue';
 import { useApiPresetSelectOptions } from '../composables/useApiPresetSelectOptions';
 import { useChatChangedTick } from '../composables/useChatChangedListener';
-import { useContinuationRuntime } from '../composables/useContinuationRuntime';
+import { CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU, useContinuationRuntime } from '../composables/useContinuationRuntime';
 import { useContinuationSession } from '../composables/useContinuationSession';
 
 const runtime = useContinuationRuntime();
@@ -241,12 +248,15 @@ const continuationRoleOptions = [
   { value: 'assistant', label: 'ASSISTANT' },
 ];
 
+const downtimeTurnRatioMax = CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU;
+
 /** 渠道下拉里「跟随全局默认」的哨兵值：空串已被「跟随当前活动 API」占用。 */
 const INHERIT_CHANNEL_VALUE = '__inherit__';
 
 const agentChannelRoles = [
   { role: 'main', label: '主 Agent' },
   { role: 'outline', label: '大纲子代理' },
+  { role: 'arcArchitect', label: '故事总纲' },
   { role: 'maintainer', label: '伏笔与认知维护' },
   { role: 'mainlinePlanner', label: '主线推进策划' },
   { role: 'beatPlanner', label: '伏笔与节拍策划' },
@@ -296,6 +306,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
     agentApiPresets: {
       main: { ...settings.agentApiPresets.main },
       outline: { ...settings.agentApiPresets.outline },
+      arcArchitect: { ...settings.agentApiPresets.arcArchitect },
       maintainer: { ...settings.agentApiPresets.maintainer },
       mainlinePlanner: { ...settings.agentApiPresets.mainlinePlanner },
       beatPlanner: { ...settings.agentApiPresets.beatPlanner },
@@ -304,6 +315,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
     outlinePrompt: settings.outlinePrompt.map(segment => ({ ...segment })),
     agentPrompts: {
       main: settings.agentPrompts.main.map(segment => ({ ...segment })),
+      arcArchitect: settings.agentPrompts.arcArchitect.map(segment => ({ ...segment })),
       maintainer: settings.agentPrompts.maintainer.map(segment => ({ ...segment })),
       mainlinePlanner: settings.agentPrompts.mainlinePlanner.map(segment => ({ ...segment })),
       beatPlanner: settings.agentPrompts.beatPlanner.map(segment => ({ ...segment })),
@@ -356,6 +368,13 @@ function requiredInteger(value: unknown, label: string): number {
   return numeric;
 }
 
+/** 占比类设置接受 0 到上限之间的有限小数；空串与 NaN 会让落盘校验报「字段必须是小数」，在这里先拦成可读提示。 */
+function requiredRatio(value: unknown, label: string, maximum: number): number {
+  const numeric = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  if (!Number.isFinite(numeric) || numeric < 0 || numeric > maximum) throw new Error(`${label} 必须是 0 到 ${maximum} 之间的小数`);
+  return numeric;
+}
+
 /** 读取预算接受两种形态：正整数（固定 token 数）或 1%-100% 的百分比串（按总结阈值折算）。 */
 function normalizedReadBudget(value: unknown): number | string {
   const raw = String(value ?? '').trim();
@@ -389,6 +408,7 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     retryDelaySeconds: requiredInteger(source.retryDelaySeconds, '重试延迟'),
     totalDurationMinutes: requiredInteger(source.totalDurationMinutes, '总时长'),
     contextTurnCount: requiredInteger(source.contextTurnCount, '最近剧情轮数'),
+    downtimeTurnRatio: requiredRatio(source.downtimeTurnRatio, '日常轮占比下限', CONTINUATION_DOWNTIME_TURN_RATIO_MAX_UI_ACU),
     storyWindowFloors: requiredInteger(source.storyWindowFloors, '正文可读窗口楼数'),
     storyTailFloors: requiredInteger(source.storyTailFloors, '正文目录尾部全文楼数'),
     agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, '会话自动总结阈值'),
@@ -458,9 +478,9 @@ async function saveSettingsNow(): Promise<void> {
   }
 }
 
-type PromptKey = 'outlinePrompt' | 'main' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer';
+type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer';
 
-/** 取出指定提示词组的数组。大纲组在设置根层，五组 Agent 提示词在 agentPrompts 下。 */
+/** 取出指定提示词组的数组。大纲组在设置根层，六组 Agent 提示词在 agentPrompts 下。 */
 function promptList(key: PromptKey): ContinuationPromptSegment_ACU[] | null {
   if (!settingsDraft.value) return null;
   if (key === 'outlinePrompt') return settingsDraft.value.outlinePrompt;

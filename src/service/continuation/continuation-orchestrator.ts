@@ -1,7 +1,7 @@
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
 import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
-import { resolveContinuationTurnRange_ACU, validateReplannedStageOutline_ACU } from './outline-schema';
+import { listStageOutlineTurns_ACU, resolveContinuationTurnRange_ACU, validateReplannedStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
 import { CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationError_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationSettings_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
 import type { AgentConversationAppend_ACU, AgentOutlineEditOp_ACU, AgentOutlineOpResult_ACU } from './agent/agent-model';
@@ -104,7 +104,9 @@ function applyOutlineEditOps_ACU(outline: StageOutline_ACU, edits: readonly Agen
     if (edit.op === 'insert_turn') {
       const node = draft.nodes.find(item => item.id === edit.nodeId);
       if (!node) rejectOutlineEdit_ACU(`insert_turn 找不到节点：${edit.nodeId}`, { nodeId: edit.nodeId });
-      const newTurn = { id: allocateId('turn'), goal: edit.goal };
+      // 未指定节奏时按 setup 落值：插入轮多半是为了给挤在一起的剧情腾地方，
+      // 默认落在低压侧才不会让 edit_outline 变成悄悄推高压力的通道。
+      const newTurn = { id: allocateId('turn'), goal: edit.goal, pacing: edit.pacing ?? ('setup' as const) };
       if (edit.afterTurnId === null) {
         node.turns.unshift(newTurn);
         continue;
@@ -724,7 +726,7 @@ export class ContinuationOrchestrator_ACU {
       throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_loop', '当前大纲尚未冻结（可能等待确认），不可编辑', false));
     }
     const edited = applyOutlineEditOps_ACU(current.outline, edits, this.dependencies.allocateId);
-    return this.commitEditedOutline_ACU(chatIdentity, envelope, task, stage, current, edited, `Agent 工具编辑：${edits.length} 处`, `已按工具编辑改写大纲（${edits.length} 处`, endStatus);
+    return this.commitEditedOutline_ACU(chatIdentity, envelope, task, stage, current, edited, `Agent 工具编辑：${edits.length} 处`, `已按工具编辑改写大纲（${edits.length} 处`, endStatus, true);
   }
 
   /**
@@ -741,6 +743,8 @@ export class ContinuationOrchestrator_ACU {
    * @param reasonNote 写入 revision 的来源说明
    * @param summaryHead 回执摘要前半段，函数负责补上 revision 与轮数
    * @param endStatus 落盘后任务状态
+   * @param enforcePacing 是否复核剩余轮次的节奏配比。只对 Agent 工具编辑开启：
+   *   用户手改大纲是最终裁量权，被节奏规则挡住会让人存不下自己的编辑。
    * @returns 回执摘要
    */
   private async commitEditedOutline_ACU(
@@ -753,6 +757,7 @@ export class ContinuationOrchestrator_ACU {
     reasonNote: string,
     summaryHead: string,
     endStatus: 'running' | 'paused',
+    enforcePacing = false,
   ): Promise<{ summary: string }> {
     const oldCursorTurn = current.outline.nodes.flatMap(node => node.turns)[stage.completedTurns] ?? null;
     const newFlattened = candidate.nodes.flatMap(node => node.turns);
@@ -766,6 +771,19 @@ export class ContinuationOrchestrator_ACU {
       completedTurns: stage.completedTurns,
       expectedRemainingTurns: newFlattened.length - stage.completedTurns,
     });
+    if (enforcePacing) {
+      // 编辑通道同样要过节奏配比，否则 outline-architect 那边的硬校验可以被 edit_outline 绕开。
+      // 抛出的 outline_validate 错误在主循环里会直接中止本轮，转成写入拒绝才能回灌给主 Agent 自愈。
+      try {
+        validateStageOutlinePacing_ACU(listStageOutlineTurns_ACU(validated), {
+          downtimeTurnRatio: envelope.settings.downtimeTurnRatio,
+          skipTurns: stage.completedTurns,
+        });
+      } catch (error) {
+        if (!(error instanceof ContinuationValidationError_ACU)) throw error;
+        rejectOutlineEdit_ACU(error.error.message, error.error.details ?? undefined);
+      }
+    }
     const nextRevisionNumber = current.revision + 1;
     const summary = `${summaryHead}，revision ${nextRevisionNumber}，共 ${validated.totalTurns} 轮）`;
     await this.dependencies.store.updatePersistedAtomically(currentEnvelope => {

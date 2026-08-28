@@ -6,7 +6,10 @@ import { buildDefaultContinuationSettings_ACU } from '../../../src/service/conti
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../../../src/service/continuation/model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
-const outline = { schemaVersion: 1 as const, title: '阶段', goal: '目标', totalTurns: 6, nodes: [{ id: 'node-1', title: '节点', goal: '节点目标', suggestedTurns: 6, turns: Array.from({ length: 6 }, (_, index) => ({ id: `turn-${index + 1}`, goal: `轮次 ${index + 1}` })) }] };
+/** 每三轮一个低压轮，满足默认 0.3 的低压占比与连续高压上限，避免固定件本身就违反节奏规则。 */
+const pacingAt = (index: number) => (index % 3 === 0 ? 'setup' : 'pressure') as 'setup' | 'pressure';
+
+const outline = { schemaVersion: 1 as const, title: '阶段', goal: '目标', totalTurns: 6, nodes: [{ id: 'node-1', title: '节点', goal: '节点目标', suggestedTurns: 6, turns: Array.from({ length: 6 }, (_, index) => ({ id: `turn-${index + 1}`, goal: `轮次 ${index + 1}`, pacing: pacingAt(index) })) }] };
 
 /**
  * 执行引擎桩：模拟主 Agent 的大纲行为——没有可执行大纲（无阶段或阶段已完成）时
@@ -410,6 +413,31 @@ describe('ContinuationOrchestrator_ACU', () => {
       { op: 'set_turn_goal', turnId: 'turn-1', goal: '篡改已完成轮次' },
     ], 'running'), 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED');
     expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(1);
+  });
+
+  it('工具编辑同样要过节奏配比：插高压轮或删低压轮都被拒绝，默认插入轮标为 setup', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+
+    // 固定件是 setup/pressure/pressure/setup/pressure/pressure：再插一轮 pressure 后低压只剩 2/7，不足 3。
+    await expectCode(() => (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
+      { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-2', goal: '再加一场追杀', pacing: 'pressure' },
+    ], 'running'), 'CONTINUATION_AGENT_WRITE_REJECTED');
+
+    // 删掉一轮低压轮同样跌破占比下限。
+    await expectCode(() => (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
+      { op: 'remove_turn', turnId: 'turn-4' },
+      { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-5', goal: '补一场冲突', pacing: 'pressure' },
+    ], 'running'), 'CONTINUATION_AGENT_WRITE_REJECTED');
+    expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(1);
+
+    // 不写 pacing 时按 setup 落值，配比因此变好而不是变差。
+    await (orchestrator as any).applyOutlineEditsWithinLease_ACU('chat-a', {} as any, [
+      { op: 'insert_turn', nodeId: 'node-1', afterTurnId: 'turn-2', goal: '两人在檐下躲雨说话' },
+    ], 'running');
+    const revision = store.readPersisted()!.activeTask!.stages[0].revisions.find(item => item.revision === 2)!;
+    expect(revision.outline.nodes[0].turns[2].pacing).toBe('setup');
   });
 
   it('stays busy while the bridge holds a live claim for the awaiting host turn', async () => {

@@ -7,13 +7,15 @@
  * 直接输出完整 JSON，或只续写预填充之后的部分。
  */
 
-import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
+import { ContinuationValidationError_ACU, createContinuationError_ACU, STAGE_TURN_PACINGS_ACU, type StageTurnPacing_ACU } from '../model';
 import {
   AGENT_HOOK_IMPORTANCES_ACU,
   AGENT_HOOK_STATUSES_ACU,
   AGENT_REVEAL_STATUSES_ACU,
   AGENT_REVIEW_VERDICTS_ACU,
   AGENT_SEARCH_SCOPES_ACU,
+  AGENT_STORY_ARC_SCOPES_ACU,
+  AGENT_STORY_ARC_STATUSES_ACU,
   type AgentDelegation_ACU,
   type AgentHookDeltaItem_ACU,
   type AgentHookPatch_ACU,
@@ -26,6 +28,8 @@ import {
   type AgentPlannerOutput_ACU,
   type AgentReviewerOutput_ACU,
   type AgentSearchScope_ACU,
+  type AgentStoryArcDeltaItem_ACU,
+  type AgentStoryArcPatch_ACU,
   type AgentToolCall_ACU,
 } from './agent-model';
 
@@ -299,7 +303,11 @@ function parseOutlineEdits_ACU(value: unknown): AgentOutlineEditOp_ACU[] {
       const goal = readText_ACU(raw.goal);
       const afterTurnId = readText_ACU(raw.afterTurnId) || null;
       if (!nodeId || !goal) failProtocol_ACU(`edits[${index}] insert_turn 需要 nodeId 与非空 goal`);
-      return { op, nodeId, afterTurnId, goal };
+      const pacing = readText_ACU(raw.pacing);
+      if (pacing && !(STAGE_TURN_PACINGS_ACU as readonly string[]).includes(pacing)) {
+        failProtocol_ACU(`edits[${index}] insert_turn 的 pacing 必须是 ${STAGE_TURN_PACINGS_ACU.join(' / ')} 之一，实际收到：${pacing}`);
+      }
+      return pacing ? { op, nodeId, afterTurnId, goal, pacing: pacing as StageTurnPacing_ACU } : { op, nodeId, afterTurnId, goal };
     }
     if (op === 'remove_turn') {
       const turnId = readText_ACU(raw.turnId);
@@ -459,10 +467,71 @@ function parseInfoGapItems_ACU(value: unknown): { items: AgentInfoGapDeltaItem_A
   return { items, patches };
 }
 
+function parseStageNumbers_ACU(value: unknown, path: string): number[] {
+  if (!Array.isArray(value)) failProtocol_ACU(`${path} 必须是阶段编号数组`);
+  return value.map(item => {
+    if (typeof item !== 'number' || !Number.isInteger(item) || item < 1) failProtocol_ACU(`${path} 的元素必须是从 1 起的整数阶段编号，实际收到：${JSON.stringify(item)}`);
+    return item;
+  });
+}
+
+function parseStoryArcPatch_ACU(raw: Record<string, unknown>, index: number): AgentStoryArcPatch_ACU {
+  const id = readText_ACU(raw.id);
+  if (!id) failProtocol_ACU(`delta.storyArc[${index}] 的 patch 需要 id`);
+  const patch: AgentStoryArcPatch_ACU = { id };
+  if (typeof raw.title === 'string' && raw.title.trim()) patch.title = raw.title.trim();
+  if (typeof raw.direction === 'string' && raw.direction.trim()) patch.direction = raw.direction.trim();
+  if (typeof raw.escalation === 'string') patch.escalation = raw.escalation.trim();
+  if (typeof raw.withheld === 'string') patch.withheld = raw.withheld.trim();
+  const status = readText_ACU(raw.status);
+  if (status) {
+    if (!(AGENT_STORY_ARC_STATUSES_ACU as readonly string[]).includes(status)) failProtocol_ACU(`delta.storyArc[${index}] 的 patch.status 非法：${status}，只能是 ${AGENT_STORY_ARC_STATUSES_ACU.join(' / ')}`);
+    patch.status = status as AgentStoryArcPatch_ACU['status'];
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, 'stageNumbers')) patch.stageNumbers = parseStageNumbers_ACU(raw.stageNumbers, `delta.storyArc[${index}].stageNumbers`);
+  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.storyArc[${index}] 的 patch 至少要带一个要修改的字段`);
+  return patch;
+}
+
+function parseStoryArcItems_ACU(value: unknown): { items: AgentStoryArcDeltaItem_ACU[]; patches: AgentStoryArcPatch_ACU[] } {
+  if (value === undefined || value === null) return { items: [], patches: [] };
+  if (!Array.isArray(value)) failProtocol_ACU('delta.storyArc 必须是数组');
+  const items: AgentStoryArcDeltaItem_ACU[] = [];
+  const patches: AgentStoryArcPatch_ACU[] = [];
+  value.forEach((raw, index) => {
+    if (!isRecord_ACU(raw)) failProtocol_ACU(`delta.storyArc[${index}] 必须是对象`);
+    const action = readText_ACU(raw.action);
+    if (action === 'patch') { patches.push(parseStoryArcPatch_ACU(raw, index)); return; }
+    if (action !== 'upsert' && action !== 'retire') failProtocol_ACU(`delta.storyArc[${index}].action 必须是 upsert / patch / retire`);
+    const scope = readText_ACU(raw.scope);
+    // scope 决定这条是全书方向还是卷台阶，写错会让唯一性约束落在错误的层级上，不能静默回落。
+    if (action === 'upsert' && !(AGENT_STORY_ARC_SCOPES_ACU as readonly string[]).includes(scope)) {
+      failProtocol_ACU(`delta.storyArc[${index}].scope 必须是 ${AGENT_STORY_ARC_SCOPES_ACU.join(' / ')}，实际收到：${scope || '(空)'}`);
+    }
+    const status = readText_ACU(raw.status);
+    if (action === 'upsert' && status && !(AGENT_STORY_ARC_STATUSES_ACU as readonly string[]).includes(status)) {
+      failProtocol_ACU(`delta.storyArc[${index}].status 必须是 ${AGENT_STORY_ARC_STATUSES_ACU.join(' / ')}，实际收到：${status}`);
+    }
+    items.push({
+      action,
+      id: readText_ACU(raw.id),
+      scope: (scope || 'volume') as AgentStoryArcDeltaItem_ACU['scope'],
+      title: readText_ACU(raw.title),
+      direction: readText_ACU(raw.direction),
+      escalation: readText_ACU(raw.escalation),
+      withheld: readText_ACU(raw.withheld),
+      status: (status || 'planned') as AgentStoryArcDeltaItem_ACU['status'],
+      stageNumbers: raw.stageNumbers === undefined ? [] : parseStageNumbers_ACU(raw.stageNumbers, `delta.storyArc[${index}].stageNumbers`),
+      reason: readText_ACU(raw.reason),
+    });
+  });
+  return { items, patches };
+}
+
 function parseExpectedRevisions_ACU(value: unknown): AgentModuleDelta_ACU['expectedRevisions'] {
   if (!isRecord_ACU(value)) return {};
   const result: AgentModuleDelta_ACU['expectedRevisions'] = {};
-  for (const key of ['hooks', 'infoGap', 'constraints'] as const) {
+  for (const key of ['hooks', 'infoGap', 'constraints', 'storyArc'] as const) {
     const raw = value[key];
     if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0) result[key] = raw;
   }
@@ -478,6 +547,7 @@ export function parseAgentMaintainerOutput_ACU(payload: Record<string, unknown>)
   const rawDelta = isRecord_ACU(payload.delta) ? payload.delta : {};
   const hooks = parseHookItems_ACU(rawDelta.hooks);
   const infoGap = parseInfoGapItems_ACU(rawDelta.infoGap);
+  const storyArc = parseStoryArcItems_ACU(rawDelta.storyArc);
   return {
     summary: readText_ACU(payload.summary),
     delta: {
@@ -486,6 +556,8 @@ export function parseAgentMaintainerOutput_ACU(payload: Record<string, unknown>)
       hookPatches: hooks.patches,
       infoGap: infoGap.items,
       infoGapPatches: infoGap.patches,
+      storyArc: storyArc.items,
+      storyArcPatches: storyArc.patches,
       constraintProposals: readTextList_ACU(rawDelta.constraintProposals),
     },
   };

@@ -1,7 +1,7 @@
 import { callContinuationInternalAi_ACU } from './internal-ai-call';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from './defaults';
 import { resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from './api-preset';
-import { validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutline_ACU } from './outline-schema';
+import { listStageOutlineTurns_ACU, validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
 import { buildStageOutlineFromTags_ACU, parseOutlineTags_ACU, spliceOutlineWithCompletedPrefix_ACU } from './outline-tags';
 import { renderContinuationPrompt_ACU, type ContinuationPromptPlaceholder_ACU } from './prompt-template';
 import {
@@ -81,6 +81,28 @@ export function renderContinuationTurnRange_ACU(range: { min: number; max: numbe
   return `${total}其中已完成 ${completed} 轮不可改动；你只规划剩余轮次，剩余的 <turn> 数量必须在 ${remainingMin} 到 ${remainingMax} 之间（拼接后总轮数才会落在范围内）。`;
 }
 
+/** 正文模型单轮的稳定产出量。阶段容量锚按它换算，与大纲提示词里写的单轮承载量口径一致。 */
+const CONTINUATION_TURN_WORD_ESTIMATE_ACU = 1000;
+
+/**
+ * 渲染阶段字数容量锚。与 $TURN_RANGE 同理，只有 planner 同时知道阶段规模与重规划约束，
+ * 因此这个占位符也在这里注入。
+ * @param range 阶段总轮数范围
+ * @param constraints 重规划约束；提供时按剩余轮数换算
+ * @returns 一段说明本次规划实际能写多少字的文案
+ */
+export function renderContinuationStageWordBudget_ACU(range: { min: number; max: number }, constraints?: ContinuationReplanConstraints_ACU): string {
+  const completed = constraints ? Math.max(0, constraints.completedTurns) : 0;
+  const planningMin = Math.max(1, range.min - completed);
+  const planningMax = Math.max(planningMin, range.max - completed);
+  const lowWords = planningMin * CONTINUATION_TURN_WORD_ESTIMATE_ACU;
+  const highWords = planningMax * CONTINUATION_TURN_WORD_ESTIMATE_ACU;
+  const scope = completed > 0
+    ? `本次你要规划 ${planningMin} 到 ${planningMax} 轮剩余轮次`
+    : `本阶段有 ${planningMin} 到 ${planningMax} 轮`;
+  return `${scope}，正文模型每轮只写 800-1200 字（按 ${CONTINUATION_TURN_WORD_ESTIMATE_ACU} 字估算），也就是说这些轮次加起来一共只有大约 ${lowWords} 到 ${highWords} 字的篇幅。`;
+}
+
 function isRetryableOutlineError_ACU(error: ContinuationError_ACU): boolean {
   if (error.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' || error.code === 'CONTINUATION_OUTLINE_JSON_INVALID') return true;
   if (error.phase === 'outline_validate') return true;
@@ -108,6 +130,7 @@ export class ContinuationOutlinePlanner_ACU {
         const resolvers = { ...request.resolvers };
         // $TURN_RANGE 由 planner 权威注入：只有这里同时知道范围与重规划约束。
         resolvers.$TURN_RANGE = () => renderContinuationTurnRange_ACU(range, request.replanConstraints);
+        resolvers.$STAGE_WORD_BUDGET = () => renderContinuationStageWordBudget_ACU(range, request.replanConstraints);
         if (attempt > 0 && lastError) resolvers.$VALIDATION_ERRORS = () => compactValidationError_ACU(lastError!);
         const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
         const raw = await this.dependencies.callInternalAi(rendered.messages, preset, identity);
@@ -123,6 +146,12 @@ export class ContinuationOutlinePlanner_ACU {
         const outline = constraints
           ? validateReplannedStageOutline_ACU(candidate, range, { ...constraints, expectedRemainingTurns: candidate.totalTurns - constraints.completedTurns })
           : validateStageOutline_ACU(candidate, range);
+        // 节奏校验只作用在本次真正规划出来的轮次上：重规划时已完成前缀不可改，其中还混着
+        // 迁移回填的 pressure，把它算进配比会让重规划永远无法通过。
+        validateStageOutlinePacing_ACU(listStageOutlineTurns_ACU(outline), {
+          downtimeTurnRatio: request.settings.downtimeTurnRatio,
+          skipTurns: constraints ? constraints.completedTurns : 0,
+        });
         return { outline, attempts: attempt + 1, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason }, requiresReview: request.settings.outlinePreview };
       } catch (error) {
         lastError = toPlannerError_ACU(error);

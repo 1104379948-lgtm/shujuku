@@ -7,6 +7,7 @@ import {
 } from './model';
 import { buildDefaultContinuationOutlinePrompt_ACU } from './defaults';
 import {
+  buildDefaultAgentArcArchitectPrompt_ACU,
   buildDefaultAgentBeatPlannerPrompt_ACU,
   buildDefaultAgentMainPrompt_ACU,
   buildDefaultAgentMainlinePlannerPrompt_ACU,
@@ -27,10 +28,21 @@ export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
   '$AGENT_READ_MATERIALS', '$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$USER_INTENT', '$OUTLINE_WINDOW',
   // 目录+状态骨架占位符：正文楼层目录、大纲单行状态、已启用世界书目录、读集词汇表。
   '$STORY_CATALOG', '$OUTLINE_STATE', '$WORLDBOOK_CATALOG', '$AGENT_READ_CATALOG',
+  // 故事总纲与节奏控制：总纲内容与状态证据、本轮节奏标签、阶段字数容量锚。
+  '$STORY_ARC', '$STORY_ARC_STATE', '$CURRENT_TURN_PACING', '$STAGE_WORD_BUDGET',
 ] as const;
 
 export type ContinuationPromptPlaceholder_ACU = typeof CONTINUATION_PROMPT_PLACEHOLDERS_ACU[number];
-export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer';
+
+/**
+ * 占位符替换用的交替式正则。必须按长度降序排列：存在 $STORY_ARC 与 $STORY_ARC_STATE
+ * 这类前缀包含关系时，短的排在前面会先命中，把长占位符切成「已替换的短占位符 + 残留后缀」。
+ */
+const PLACEHOLDER_ALTERNATION_ACU = [...CONTINUATION_PROMPT_PLACEHOLDERS_ACU]
+  .sort((left, right) => right.length - left.length)
+  .map(token => token.replace(/[$]/g, '\\$'))
+  .join('|');
+export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_arc' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer';
 type PlaceholderResolver_ACU = () => string | Promise<string | null | undefined> | null | undefined;
 
 function failPrompt_ACU(code: 'CONTINUATION_ENVELOPE_INVALID' | 'CONTINUATION_PROMPT_INVALID' | 'CONTINUATION_PROMPT_EMPTY', phase: ContinuationErrorPhase_ACU, message: string, details?: Record<string, unknown>): never {
@@ -58,10 +70,16 @@ export async function renderContinuationPrompt_ACU(segments: unknown, resolvers:
   const validated = validateContinuationPromptSegments_ACU(segments, phase);
   const enabledSegments = validated.filter(segment => segment.enabled !== false);
   if (!enabledSegments.length) failPrompt_ACU('CONTINUATION_PROMPT_EMPTY', phase, '提示词至少需要一个启用段');
-  const usedPlaceholders = CONTINUATION_PROMPT_PLACEHOLDERS_ACU.filter(token => enabledSegments.some(segment => segment.content.includes(token)));
+  // 按实际匹配结果判定「用到了哪些占位符」，而不是子串包含：否则写了 $STORY_ARC_STATE
+  // 的段会被算成同时用了 $STORY_ARC，白跑一次解析器。
+  const matched = new Set<string>();
+  for (const segment of enabledSegments) {
+    for (const hit of segment.content.matchAll(new RegExp(PLACEHOLDER_ALTERNATION_ACU, 'g'))) matched.add(hit[0]);
+  }
+  const usedPlaceholders = CONTINUATION_PROMPT_PLACEHOLDERS_ACU.filter(token => matched.has(token));
   const values = new Map<ContinuationPromptPlaceholder_ACU, string>();
   for (const token of usedPlaceholders) values.set(token, String(await resolvers[token]?.() ?? ''));
-  const tokenPattern = new RegExp(CONTINUATION_PROMPT_PLACEHOLDERS_ACU.map(token => token.replace(/[$]/g, '\\$')).join('|'), 'g');
+  const tokenPattern = new RegExp(PLACEHOLDER_ALTERNATION_ACU, 'g');
   return { usedPlaceholders, messages: enabledSegments.map(segment => ({ role: segment.role, content: segment.content.replace(tokenPattern, token => values.get(token as ContinuationPromptPlaceholder_ACU) ?? '') })) };
 }
 
@@ -75,6 +93,7 @@ export function restoreContinuationPromptDefault_ACU(settings: ContinuationSetti
   if (kind === 'outline') return { ...settings, outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU() };
   const agentPrompts = { ...settings.agentPrompts };
   if (kind === 'agent_main') agentPrompts.main = buildDefaultAgentMainPrompt_ACU();
+  if (kind === 'agent_arc') agentPrompts.arcArchitect = buildDefaultAgentArcArchitectPrompt_ACU();
   if (kind === 'agent_maintainer') agentPrompts.maintainer = buildDefaultAgentMaintainerPrompt_ACU();
   if (kind === 'agent_mainline') agentPrompts.mainlinePlanner = buildDefaultAgentMainlinePlannerPrompt_ACU();
   if (kind === 'agent_beat') agentPrompts.beatPlanner = buildDefaultAgentBeatPlannerPrompt_ACU();

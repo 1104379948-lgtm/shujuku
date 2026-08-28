@@ -8,7 +8,7 @@ function baseSnapshot_ACU(): AgentModuleSnapshot_ACU {
   return {
     ...buildEmptyAgentModuleSnapshot_ACU(),
     settledThroughIndex: 5,
-    revisions: { hooks: 2, infoGap: 3, constraints: 1 },
+    revisions: { hooks: 2, infoGap: 3, constraints: 1, storyArc: 4 },
     hooks: [{ id: 'H1', summary: '断裂的封印', status: 'planted', importance: 'high', plantedIndex: 2, updatedIndex: 2, plannedPayoff: '第三阶段回收', retired: false, retiredReason: '' }],
     infoGap: [{ id: 'E1', topic: '守门人身份', objectiveFact: '内应', readerKnown: '行为反常', characterKnowledge: [], revealStatus: 'unrevealed', revealIndex: null, retired: false, retiredReason: '' }],
     constraints: [{ id: 'C01-1', text: '不得提前揭穿幕后', reason: '既有裁决', createdIndex: 3 }],
@@ -16,7 +16,7 @@ function baseSnapshot_ACU(): AgentModuleSnapshot_ACU {
 }
 
 function delta_ACU(patch: Partial<AgentModuleDelta_ACU> = {}): AgentModuleDelta_ACU {
-  return { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], constraintProposals: [], ...patch };
+  return { expectedRevisions: {}, hooks: [], hookPatches: [], infoGap: [], infoGapPatches: [], storyArc: [], storyArcPatches: [], constraintProposals: [], ...patch };
 }
 
 function hookItem_ACU(patch: Record<string, unknown> = {}) {
@@ -26,6 +26,91 @@ function hookItem_ACU(patch: Record<string, unknown> = {}) {
 function infoGapItem_ACU(patch: Record<string, unknown> = {}) {
   return { action: 'upsert' as const, id: 'E1', topic: '守门人身份', objectiveFact: '内应', readerKnown: '行为反常', characterKnowledge: [], revealStatus: 'unrevealed' as const, revealIndex: null, reason: '', ...patch };
 }
+
+function storyArcItem_ACU(patch: Record<string, unknown> = {}) {
+  return {
+    action: 'upsert' as const,
+    id: 'VOL-01',
+    scope: 'volume' as const,
+    title: '商行之乱',
+    direction: '主角夺回被夺走的商行控制权，对抗表亲与其背后的钱庄',
+    escalation: '从账目纠纷抬到人身威胁，收在主角拿回印信但发现账本上有第三方签名',
+    withheld: '第三方就是主角生父的旧部',
+    status: 'active' as const,
+    stageNumbers: [] as number[],
+    reason: '',
+    ...patch,
+  };
+}
+
+describe('Agent 总纲写集事务', () => {
+  it('storyArc 不在授权写集时整份拒绝', () => {
+    const input = delta_ACU({ storyArc: [storyArcItem_ACU()] });
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), input, ['hooks'], 6)).toThrowError(/未授权模块/);
+  });
+
+  it('upsert 校验必填字段：title、direction 与卷台阶的 escalation', () => {
+    const noTitle = delta_ACU({ storyArc: [storyArcItem_ACU({ title: '  ' })] });
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), noTitle, ['storyArc'], 6)).toThrowError(/title 不能为空/);
+
+    const noDirection = delta_ACU({ storyArc: [storyArcItem_ACU({ direction: '' })] });
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), noDirection, ['storyArc'], 6)).toThrowError(/direction 不能为空/);
+
+    const noEscalation = delta_ACU({ storyArc: [storyArcItem_ACU({ escalation: '' })] });
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), noEscalation, ['storyArc'], 6)).toThrowError(/escalation/);
+  });
+
+  it('全书方向只能有一条活跃条目，同一份写集里先 retire 再 upsert 放行', () => {
+    const twoStories = delta_ACU({
+      storyArc: [
+        storyArcItem_ACU({ id: 'ARC-STORY', scope: 'story', title: '全书方向', escalation: '' }),
+        storyArcItem_ACU({ id: 'ARC-STORY-2', scope: 'story', title: '另一个全书方向', escalation: '' }),
+      ],
+    });
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), twoStories, ['storyArc'], 6)).toThrowError(/只能有一条活跃条目/);
+
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ id: 'ARC-STORY', scope: 'story', escalation: '' })] }), ['storyArc'], 6);
+    const replaced = applyAgentModuleDelta_ACU(seeded, delta_ACU({
+      storyArc: [
+        storyArcItem_ACU({ action: 'retire', id: 'ARC-STORY', reason: '方向已被真实剧情推翻' }),
+        storyArcItem_ACU({ id: 'ARC-STORY-2', scope: 'story', escalation: '' }),
+      ],
+    }), ['storyArc'], 6);
+    expect(replaced.storyArc.filter(entry => entry.scope === 'story' && !entry.retired)).toHaveLength(1);
+  });
+
+  it('retire 必须命中既有条目并给出理由', () => {
+    const unknown = delta_ACU({ storyArc: [storyArcItem_ACU({ action: 'retire', id: 'VOL-09', reason: '不再需要' })] });
+    expect(() => applyAgentModuleDelta_ACU(baseSnapshot_ACU(), unknown, ['storyArc'], 6)).toThrowError(/retire 的总纲条目不存在/);
+
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU()] }), ['storyArc'], 6);
+    const noReason = delta_ACU({ storyArc: [storyArcItem_ACU({ action: 'retire', reason: '' })] });
+    expect(() => applyAgentModuleDelta_ACU(seeded, noReason, ['storyArc'], 6)).toThrowError(/必须给出理由/);
+  });
+
+  it('patch 回写阶段进度只改给定字段，且只给 storyArc 升版本、不动结算水位', () => {
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ stageNumbers: [1] })] }), ['storyArc'], 6);
+    expect(seeded.revisions).toEqual({ hooks: 2, infoGap: 3, constraints: 1, storyArc: 5 });
+
+    const patched = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', stageNumbers: [3, 2, 2] }] }), ['storyArc'], 9);
+    expect(patched.storyArc[0].stageNumbers).toEqual([2, 3]);
+    expect(patched.storyArc[0].direction).toBe(seeded.storyArc[0].direction);
+    expect(patched.revisions).toEqual({ hooks: 2, infoGap: 3, constraints: 1, storyArc: 6 });
+    expect(patched.settledThroughIndex).toBe(seeded.settledThroughIndex);
+  });
+
+  it('已废止的条目不可 patch', () => {
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU()] }), ['storyArc'], 6);
+    const retired = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArc: [storyArcItem_ACU({ action: 'retire', reason: '本卷取消' })] }), ['storyArc'], 6);
+    expect(() => applyAgentModuleDelta_ACU(retired, delta_ACU({ storyArcPatches: [{ id: 'VOL-01', status: 'done' }] }), ['storyArc'], 6)).toThrowError(/已废止/);
+  });
+
+  it('upsert 不带 stageNumbers 时保留既有进度锚', () => {
+    const seeded = applyAgentModuleDelta_ACU(baseSnapshot_ACU(), delta_ACU({ storyArc: [storyArcItem_ACU({ stageNumbers: [1, 2] })] }), ['storyArc'], 6);
+    const rewritten = applyAgentModuleDelta_ACU(seeded, delta_ACU({ storyArc: [storyArcItem_ACU({ direction: '方向改写为主角主动出击' })] }), ['storyArc'], 6);
+    expect(rewritten.storyArc[0].stageNumbers).toEqual([1, 2]);
+  });
+});
 
 describe('Agent 写集事务', () => {
   it('越权写入被拒绝', () => {
@@ -60,7 +145,7 @@ describe('Agent 写集事务', () => {
     expect(applied.hooks[0].plantedIndex).toBe(2);
     expect(applied.hooks[0].status).toBe('reinforced');
     expect(applied.hooks[0].updatedIndex).toBe(6);
-    expect(applied.revisions).toEqual({ hooks: 3, infoGap: 3, constraints: 1 });
+    expect(applied.revisions).toEqual({ hooks: 3, infoGap: 3, constraints: 1, storyArc: 4 });
   });
 
   it('retire 必须命中既有条目并给出理由', () => {

@@ -27,7 +27,7 @@ import { AGENT_PREFILLS_ACU } from './agent-defaults';
 import { beginAgentSessionRun_ACU, logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log';
 import { clearAgentRunState_ACU, readAgentRunState_ACU, saveAgentRunState_ACU } from './agent-run-cache';
 import { findAgentSubagentDefinition_ACU, renderAgentModuleCatalog_ACU, renderAgentReadCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
-import { readAgentModuleSnapshot_ACU, renderAgentConstraints_ACU, writeAgentModuleSnapshot_ACU } from './agent-module-store';
+import { findUnregisteredStageNumbers_ACU, hasActiveStoryArc_ACU, readAgentModuleSnapshot_ACU, renderAgentConstraints_ACU, writeAgentModuleSnapshot_ACU } from './agent-module-store';
 import {
   appendAgentConversation_ACU,
   appendPreparedAgentConversationMessages_ACU,
@@ -52,6 +52,7 @@ import {
   renderAgentOutlineWindow_ACU,
   renderAgentStoryCatalog_ACU,
   renderAgentStoryText_ACU,
+  renderAgentTurnPacingGuidance_ACU,
   resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
@@ -634,6 +635,8 @@ export class ContinuationAgentTurnPlanner_ACU {
       $USER_INTENT: () => context.originInstruction || '（用户未提供初始要求）',
       $CURRENT_TURN_GOAL: () => context.execution.turn?.goal || '（尚无可执行的大纲轮次，需先创建或继续大纲）',
       $UNSETTLED_RANGE: () => this.renderUnsettledRange_ACU(context),
+      $STORY_ARC_STATE: () => this.renderStoryArcState_ACU(context),
+      $CURRENT_TURN_PACING: () => renderAgentTurnPacingGuidance_ACU(context.execution.turn?.pacing ?? null),
       $AGENT_CATALOG: () => renderAgentSubagentCatalog_ACU(),
       $MODULE_CATALOG: () => renderAgentModuleCatalog_ACU(),
       $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
@@ -776,6 +779,21 @@ export class ContinuationAgentTurnPlanner_ACU {
     return `未结算楼层区间：${start} 到 ${last}（共 ${last - start + 1} 楼）。本轮必须先派工 hook-cognition-maintainer 把这些楼层结算进伏笔账本与信息差时间线，再进入策划与 finalize——你自己读过这些正文不等于结算。这些楼层的正文已在「已经发生的小说正文」中给出；派工结算时请把 $HISTORY_UNSETTLED 放进读集。`;
   }
 
+  /**
+   * 渲染总纲状态证据。只报「有没有、进度登记齐不齐」，总纲正文由 $STORY_ARC 按需调阅——
+   * 状态段每轮都发，把整份总纲塞进来是纯浪费。
+   */
+  private renderStoryArcState_ACU(context: AgentResolveContext_ACU): string {
+    if (!hasActiveStoryArc_ACU(context.moduleSnapshot)) {
+      return '故事总纲：尚未建立。本轮必须先派工 arc-architect 立总纲（一条全书方向 + 若干卷台阶），总纲为空时派工 outline-architect 会被直接拒绝。';
+    }
+    const completed = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
+    const unregistered = findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completed);
+    const head = `故事总纲：已建立（修订号 ${context.moduleSnapshot.revisions.storyArc}），完整内容用 read $STORY_ARC 调阅。`;
+    if (!unregistered.length) return `${head}已完成阶段的进度均已登记。`;
+    return `${head}第 ${unregistered.join('、')} 阶段已完成但没有登记进任何卷台阶的 stageNumbers，卷进度因此判断不了「本卷该收了没」。请派工 arc-architect 回写进度，必要时让它把走完的卷 patch 成 done、下一卷 patch 成 active。`;
+  }
+
   private spliceHistory_ACU(
     messages: ReadonlyArray<{ role: string; content: string }>,
     history: ReadonlyArray<{ role: string; content: string }>,
@@ -833,6 +851,12 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
       if (!request.applyOutline) {
         rejectImmediately(delegation.agentName, '正文重试轮次不允许改写大纲，请基于现有大纲交付或阻断');
+        continue;
+      }
+      // 总纲门禁：没有全书方向时排出来的阶段大纲只能各自为政，会把该留到后面的底牌提前打光。
+      // 与预算校验同级前置，且不消耗派工额度——主 Agent 在同一轮里改派 arc-architect 立总纲即可。
+      if (!hasActiveStoryArc_ACU(context.moduleSnapshot)) {
+        rejectImmediately(delegation.agentName, '故事总纲还是空的，阶段大纲没有可依据的方向与卷台阶。请先派工 arc-architect 立总纲（全书方向一条 + 卷台阶若干），拿到总纲后再派工排阶段大纲。本次未消耗派工额度。');
         continue;
       }
       ledger.delegationsUsed += 1;
@@ -952,6 +976,28 @@ export class ContinuationAgentTurnPlanner_ACU {
           });
         } catch (error) {
           settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
+        }
+        continue;
+      }
+      if (result.arc) {
+        try {
+          const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
+          const applied = applyAgentModuleDelta_ACU(nextSnapshot, delta, result.writes, chat.length - 1);
+          // 与结算分支的区别：只换快照，不推进 settledThroughIndex。
+          // 立总纲不等于把未结算正文结算掉，推水位会让伏笔账本永久落后于剧情。
+          if (applied !== nextSnapshot) { nextSnapshot = applied; snapshotChanged = true; }
+          settleOutcome(item.delegation, {
+            agentName: result.agentName,
+            ok: true,
+            summary: result.arc.summary,
+            detail: [
+              `总纲已更新：${result.arc.delta.storyArc.length} 条写入、${result.arc.delta.storyArcPatches.length} 处修补`,
+              result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : '',
+            ].filter(Boolean).join('\n'),
+            rejectedReason: '',
+          });
+        } catch (error) {
+          settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.arc.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
         }
         continue;
       }

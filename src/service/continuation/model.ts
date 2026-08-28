@@ -46,6 +46,7 @@ export type ContinuationErrorCode_ACU =
   | 'CONTINUATION_OUTLINE_SUGGESTED_TURNS_INVALID'
   | 'CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH'
   | 'CONTINUATION_OUTLINE_TOTAL_TURNS_MISMATCH'
+  | 'CONTINUATION_OUTLINE_PACING_INVALID'
   | 'CONTINUATION_REPLAN_CONTEXT_INVALID'
   | 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED'
   | 'CONTINUATION_REPLAN_REMAINING_TURNS_MISMATCH'
@@ -109,18 +110,19 @@ export interface ContinuationPromptSegment_ACU {
 /** 一组 Agent 提示词。每个 key 对应一个内部请求的伪 role + 预填充提示词组。 */
 export interface ContinuationAgentPrompts_ACU {
   main: ContinuationPromptSegment_ACU[];
+  arcArchitect: ContinuationPromptSegment_ACU[];
   maintainer: ContinuationPromptSegment_ACU[];
   mainlinePlanner: ContinuationPromptSegment_ACU[];
   beatPlanner: ContinuationPromptSegment_ACU[];
   reviewer: ContinuationPromptSegment_ACU[];
 }
 
-export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'] as const;
+export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'] as const;
 
 export type ContinuationAgentPromptKey_ACU = typeof CONTINUATION_AGENT_PROMPT_KEYS_ACU[number];
 
-/** 可独立配置 AI 渠道的六个角色：主 Agent、大纲子代理与四个派工子代理。 */
-export const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'] as const;
+/** 可独立配置 AI 渠道的七个角色：主 Agent、大纲子代理与五个派工子代理。 */
+export const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'] as const;
 
 export type ContinuationAgentApiPresetRole_ACU = typeof CONTINUATION_AGENT_API_PRESET_ROLES_ACU[number];
 
@@ -137,9 +139,23 @@ export interface ContinuationTurnRange_ACU {
   max: number;
 }
 
+/**
+ * 单轮的节奏档位。这是解决「事件事件事件、全程没有日常」的核心手段：
+ * - setup：铺垫日常（关系推进、生活场景、准备工作，无外部危机）
+ * - pressure：冲突推进（危机、对抗、外部高压）
+ * - turn：转折揭示（反转、信息揭露、伏笔回收）
+ * - cooldown：余波消化（战后疗伤、复盘、情绪落地）
+ */
+export const STAGE_TURN_PACINGS_ACU = ['setup', 'pressure', 'turn', 'cooldown'] as const;
+export type StageTurnPacing_ACU = typeof STAGE_TURN_PACINGS_ACU[number];
+
+/** setup 与 cooldown 合称低压轮，是节奏配比校验里被计数的那一侧。 */
+export const STAGE_TURN_DOWNTIME_PACINGS_ACU: readonly StageTurnPacing_ACU[] = ['setup', 'cooldown'];
+
 export interface StageTurn_ACU {
   id: string;
   goal: string;
+  pacing: StageTurnPacing_ACU;
 }
 
 export interface StageNode_ACU {
@@ -172,6 +188,8 @@ export interface ContinuationSettings_ACU {
   generationRetryLimit: number;
   internalAiRetryLimit: number;
   contextTurnCount: number;
+  /** 阶段大纲里低压轮（setup + cooldown）的最低占比，0 表示关闭该校验。 */
+  downtimeTurnRatio: number;
   /** Agent 可读/可搜正文窗口：只有最近 N 个已结算 AI 楼层可被 read/search；0 表示只给未结算部分。 */
   storyWindowFloors: number;
   /** 主 Agent 自身会话历史的 token 预算；超出后压缩最早的轮次为交接报告。0 表示不限制。 */

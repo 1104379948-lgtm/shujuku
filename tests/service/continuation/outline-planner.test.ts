@@ -3,13 +3,21 @@ import { buildDefaultContinuationSettings_ACU } from '../../../src/service/conti
 import { ContinuationValidationError_ACU, type StageOutline_ACU } from '../../../src/service/continuation/model';
 import { ContinuationOutlinePlanner_ACU, acceptPlannedStageRevision_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU } from '../../../src/service/continuation/outline-planner';
 
+/** 每三轮一个低压轮：满足默认 0.3 的低压占比与连续高压不超过 3 轮两条节奏规则。 */
+function pacingAt_ACU(index: number): 'setup' | 'pressure' {
+  return index % 3 === 0 ? 'setup' : 'pressure';
+}
+
 function buildOutline_ACU(totalTurns = 6): StageOutline_ACU {
-  return { schemaVersion: 1, title: '阶段标题', goal: '阶段目标', totalTurns, nodes: [{ id: 'node-1', title: '节点', goal: '节点目标', suggestedTurns: totalTurns, turns: Array.from({ length: totalTurns }, (_, index) => ({ id: `turn-${index + 1}`, goal: `目标 ${index + 1}` })) }] };
+  return { schemaVersion: 1, title: '阶段标题', goal: '阶段目标', totalTurns, nodes: [{ id: 'node-1', title: '节点', goal: '节点目标', suggestedTurns: totalTurns, turns: Array.from({ length: totalTurns }, (_, index) => ({ id: `turn-${index + 1}`, goal: `目标 ${index + 1}`, pacing: pacingAt_ACU(index) })) }] };
+}
+
+function tagTurns_ACU(turnCount: number, label: string, offset = 0): string {
+  return Array.from({ length: turnCount }, (_, index) => `<turn pacing="${pacingAt_ACU(offset + index)}">${label} ${index + 1}</turn>`).join('\n');
 }
 
 function tagOutline_ACU(turnCount = 6, title = '阶段标题'): string {
-  const turns = Array.from({ length: turnCount }, (_, index) => `<turn>目标 ${index + 1}</turn>`).join('\n');
-  return `<stage_title>${title}</stage_title>\n<stage_goal>阶段目标</stage_goal>\n<node>\n<node_title>节点</node_title>\n<node_goal>节点目标</node_goal>\n${turns}\n</node>`;
+  return `<stage_title>${title}</stage_title>\n<stage_goal>阶段目标</stage_goal>\n<node>\n<node_title>节点</node_title>\n<node_goal>节点目标</node_goal>\n${tagTurns_ACU(turnCount, '目标')}\n</node>`;
 }
 
 function createPlanner_ACU(outputs: Array<string | Error>, resolveApiPresetOverride?: () => any) {
@@ -97,7 +105,7 @@ describe('ContinuationOutlinePlanner_ACU', () => {
 
   it('tells the model the remaining-turn window on replan instead of only the stage total', async () => {
     const rangeSettings = { ...settings_ACU(), outlinePrompt: [{ role: 'user' as const, content: '范围：$TURN_RANGE' }] };
-    const remainingOnly = '<node>\n<node_title>剩余</node_title>\n<node_goal>目标</node_goal>\n<turn>1</turn>\n<turn>2</turn>\n<turn>3</turn>\n<turn>4</turn>\n</node>';
+    const remainingOnly = `<node>\n<node_title>剩余</node_title>\n<node_goal>目标</node_goal>\n${tagTurns_ACU(4, '剩余目标')}\n</node>`;
     const { planner, callInternalAi } = createPlanner_ACU([remainingOnly]);
     await planner.plan(request_ACU(rangeSettings, {
       reason: 'manual_replan',
@@ -107,6 +115,38 @@ describe('ContinuationOutlinePlanner_ACU', () => {
     expect(content).toContain('必须在 6 到 10 之间');
     expect(content).toContain('已完成 2 轮不可改动');
     expect(content).toContain('剩余的 <turn> 数量必须在 4 到 8 之间');
+  });
+
+  it('把节奏配比违规当作可重试的校验错误回灌，模型改标签后通过', async () => {
+    const allPressure = `<stage_title>阶段标题</stage_title>\n<stage_goal>阶段目标</stage_goal>\n<node>\n<node_title>节点</node_title>\n<node_goal>节点目标</node_goal>\n${Array.from({ length: 6 }, (_, index) => `<turn pacing="pressure">目标 ${index + 1}</turn>`).join('\n')}\n</node>`;
+    const { planner, callInternalAi } = createPlanner_ACU([allPressure, tagOutline_ACU(6)]);
+    const result = await planner.plan(request_ACU(settings_ACU(1)));
+    expect(result.attempts).toBe(2);
+    const retryContent = callInternalAi.mock.calls[1][0][0].content as string;
+    expect(retryContent).toContain('CONTINUATION_OUTLINE_PACING_INVALID@outline_validate');
+    expect(retryContent).toContain('第1轮=pressure');
+  });
+
+  it('重规划的节奏校验只作用于剩余轮次：已完成的高压前缀不参与判定', async () => {
+    // 旧大纲前 4 轮全是迁移回填的 pressure，全量校验必挂；只校验新排的 4 轮才排得出来。
+    const legacyPrefix: StageOutline_ACU = { ...buildOutline_ACU(6), nodes: [{ id: 'node-1', title: '节点', goal: '节点目标', suggestedTurns: 6, turns: Array.from({ length: 6 }, (_, index) => ({ id: `turn-${index + 1}`, goal: `目标 ${index + 1}`, pacing: 'pressure' as const })) }] };
+    const remainingOnly = `<node>\n<node_title>剩余</node_title>\n<node_goal>目标</node_goal>\n${tagTurns_ACU(4, '剩余目标')}\n</node>`;
+    const { planner } = createPlanner_ACU([remainingOnly]);
+    const result = await planner.plan(request_ACU(settings_ACU(0), {
+      reason: 'manual_replan',
+      replanConstraints: { previousOutline: legacyPrefix, completedTurns: 4, expectedRemainingTurns: 4 },
+    }));
+    expect(result.outline.totalTurns).toBe(8);
+    expect(result.outline.nodes[0].turns.map(turn => turn.pacing)).toEqual(['pressure', 'pressure', 'pressure', 'pressure']);
+  });
+
+  it('注入 $STAGE_WORD_BUDGET 容量锚，让模型先算清楚这个阶段装得下多少字', async () => {
+    const budgetSettings = { ...settings_ACU(), outlinePrompt: [{ role: 'user' as const, content: '容量：$STAGE_WORD_BUDGET' }] };
+    const { planner, callInternalAi } = createPlanner_ACU([tagOutline_ACU(6)]);
+    await planner.plan(request_ACU(budgetSettings));
+    const content = callInternalAi.mock.calls[0][0][0].content as string;
+    expect(content).toContain('800-1200');
+    expect(content).toContain('6000 到 10000 字');
   });
 
   it('counts the first call separately and stops after the configured retry limit', async () => {
@@ -139,7 +179,7 @@ describe('ContinuationOutlinePlanner_ACU', () => {
 
   it('splices the completed prefix back on replan and allows a different remaining quota', async () => {
     const previous = buildOutline_ACU(6);
-    const remainingOnly = '<node>\n<node_title>改写节点</node_title>\n<node_goal>改写目标</node_goal>\n<turn>新目标 1</turn>\n<turn>新目标 2</turn>\n<turn>新目标 3</turn>\n<turn>新目标 4</turn>\n<turn>新目标 5</turn>\n</node>';
+    const remainingOnly = `<node>\n<node_title>改写节点</node_title>\n<node_goal>改写目标</node_goal>\n${tagTurns_ACU(5, '新目标')}\n</node>`;
     const { planner } = createPlanner_ACU([remainingOnly]);
     const result = await planner.plan(request_ACU(settings_ACU(), {
       reason: 'manual_replan',
@@ -147,7 +187,7 @@ describe('ContinuationOutlinePlanner_ACU', () => {
     }));
     // 前缀逐字保留：原 node/turn id 与 goal 不变，截断处 suggestedTurns 重算。
     expect(result.outline.nodes[0]).toMatchObject({ id: 'node-1', suggestedTurns: 2 });
-    expect(result.outline.nodes[0].turns).toEqual([{ id: 'turn-1', goal: '目标 1' }, { id: 'turn-2', goal: '目标 2' }]);
+    expect(result.outline.nodes[0].turns).toEqual([{ id: 'turn-1', goal: '目标 1', pacing: 'setup' }, { id: 'turn-2', goal: '目标 2', pacing: 'pressure' }]);
     // 剩余额度放宽：旧额度 4 轮，模型给了 5 轮，拼接后 7 轮仍在 standard 范围内。
     expect(result.outline.totalTurns).toBe(7);
     expect(result.outline.nodes[1]).toMatchObject({ title: '改写节点', suggestedTurns: 5 });
@@ -158,8 +198,8 @@ describe('ContinuationOutlinePlanner_ACU', () => {
   it('still rejects a replan whose spliced total leaves the stage range', async () => {
     const previous = buildOutline_ACU(6);
     const { planner, callInternalAi } = createPlanner_ACU([
-      '<node><node_goal>目标</node_goal><turn>仅一轮</turn></node>',
-      '<node><node_title>补足</node_title><node_goal>目标</node_goal><turn>1</turn><turn>2</turn><turn>3</turn><turn>4</turn></node>',
+      '<node><node_goal>目标</node_goal><turn pacing="setup">仅一轮</turn></node>',
+      `<node><node_title>补足</node_title><node_goal>目标</node_goal>${tagTurns_ACU(4, '补足轮')}</node>`,
     ]);
     const result = await planner.plan(request_ACU(settings_ACU(1), {
       reason: 'manual_replan',
@@ -172,7 +212,7 @@ describe('ContinuationOutlinePlanner_ACU', () => {
 
   it('keeps preview revisions mutable until explicitly frozen and revalidates user edits', async () => {
     const previous = buildOutline_ACU();
-    const remainingOnly = '<node>\n<node_title>剩余节点</node_title>\n<node_goal>剩余目标</node_goal>\n<turn>新 1</turn>\n<turn>新 2</turn>\n<turn>新 3</turn>\n<turn>新 4</turn>\n</node>';
+    const remainingOnly = `<node>\n<node_title>剩余节点</node_title>\n<node_goal>剩余目标</node_goal>\n${tagTurns_ACU(4, '新')}\n</node>`;
     const { planner } = createPlanner_ACU([remainingOnly]);
     const result = await planner.plan(request_ACU({ ...settings_ACU(), outlinePreview: true }, { reason: 'manual_replan', replanConstraints: { previousOutline: previous, completedTurns: 2, expectedRemainingTurns: 4 } }));
     const planned = createPlannedStageRevision_ACU(result.outline, 2, 'manual_replan', '收束', 123);

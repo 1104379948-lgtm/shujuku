@@ -7,21 +7,28 @@
  *
  * 标签契约（与 defaults.ts 的默认大纲提示词一一对应）：
  * <stage_title>…</stage_title> <stage_goal>…</stage_goal>
- * <node><node_title>…</node_title><node_goal>…</node_goal><turn>…</turn>…</node>
+ * <node><node_title>…</node_title><node_goal>…</node_goal><turn pacing="setup">…</turn>…</node>
  */
 
 import {
   CONTINUATION_SCHEMA_VERSION_ACU,
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
+  STAGE_TURN_PACINGS_ACU,
   type StageNode_ACU,
   type StageOutline_ACU,
+  type StageTurnPacing_ACU,
 } from './model';
+
+export interface ParsedOutlineTagTurn_ACU {
+  goal: string;
+  pacing: StageTurnPacing_ACU;
+}
 
 export interface ParsedOutlineTagNode_ACU {
   title: string;
   goal: string;
-  turns: string[];
+  turns: ParsedOutlineTagTurn_ACU[];
 }
 
 export interface ParsedOutlineTags_ACU {
@@ -39,14 +46,40 @@ function readTag_ACU(text: string, tag: string): string {
   return match ? match[1].trim() : '';
 }
 
-function readTagList_ACU(text: string, tag: string): string[] {
-  const pattern = new RegExp(`<${tag}\\s*>([\\s\\S]*?)</${tag}\\s*>`, 'gi');
-  const values: string[] = [];
+interface TagEntry_ACU {
+  attributes: string;
+  value: string;
+}
+
+/**
+ * 提取同名标签的全部条目，连同开标签上的属性段。
+ *
+ * 属性段写成 `(\\s[^>]*)?` 而不是 `[^>]*`：后者会让 `<node…>` 直接吃掉 `<node_title>`，
+ * 把节点标题当成节点块。要求属性前必须有空白，标签名与后续字符才不会粘连。
+ */
+function readTagEntries_ACU(text: string, tag: string): TagEntry_ACU[] {
+  const pattern = new RegExp(`<${tag}(\\s[^>]*)?>([\\s\\S]*?)</${tag}\\s*>`, 'gi');
+  const entries: TagEntry_ACU[] = [];
   for (const match of text.matchAll(pattern)) {
-    const value = match[1].trim();
-    if (value) values.push(value);
+    const value = match[2].trim();
+    if (value) entries.push({ attributes: match[1] ?? '', value });
   }
-  return values;
+  return entries;
+}
+
+function readTagList_ACU(text: string, tag: string): string[] {
+  return readTagEntries_ACU(text, tag).map(entry => entry.value);
+}
+
+function readTagAttribute_ACU(attributes: string, name: string): string {
+  const match = attributes.match(new RegExp(`\\b${name}\\s*=\\s*["']?([^"'\\s>]+)`, 'i'));
+  return match ? match[1].trim() : '';
+}
+
+/** 读取 turn 的 pacing 属性。缺失或写错都回落 pressure——标签层不报错，交给 schema 层给出统一口径的错误。 */
+function readTurnPacing_ACU(attributes: string): StageTurnPacing_ACU {
+  const raw = readTagAttribute_ACU(attributes, 'pacing').toLowerCase();
+  return (STAGE_TURN_PACINGS_ACU as readonly string[]).includes(raw) ? raw as StageTurnPacing_ACU : 'pressure';
 }
 
 /**
@@ -62,7 +95,7 @@ export function parseOutlineTags_ACU(raw: string | null | undefined): ParsedOutl
     failParse_ACU(`返回内容不包含任何 <node> 标签。模型返回片段：${text.trim().slice(0, 300)}`);
   }
   const nodes = nodeBlocks.map((block, index) => {
-    const turns = readTagList_ACU(block, 'turn');
+    const turns = readTagEntries_ACU(block, 'turn').map(entry => ({ goal: entry.value, pacing: readTurnPacing_ACU(entry.attributes) }));
     if (!turns.length) failParse_ACU(`第 ${index + 1} 个 <node> 中没有任何非空 <turn> 标签`);
     return { title: readTag_ACU(block, 'node_title'), goal: readTag_ACU(block, 'node_goal'), turns };
   });
@@ -83,7 +116,7 @@ export function buildStageOutlineFromTags_ACU(parsed: ParsedOutlineTags_ACU, all
     title: node.title || `节点${index + 1}`,
     goal: node.goal,
     suggestedTurns: node.turns.length,
-    turns: node.turns.map(goal => ({ id: allocateId('turn'), goal })),
+    turns: node.turns.map(turn => ({ id: allocateId('turn'), goal: turn.goal, pacing: turn.pacing })),
   }));
   return {
     schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU,

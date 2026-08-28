@@ -24,7 +24,7 @@ const chat_ACU = () => ([
 
 const preOutlineContext_ACU = () => ({
   envelope: {} as any,
-  task: { taskId: 'task-1', originInstruction: '推进主角进入禁区' } as any,
+  task: { taskId: 'task-1', originInstruction: '推进主角进入禁区', stages: [] } as any,
   stage: null,
   revision: null,
   node: null,
@@ -35,7 +35,7 @@ const preOutlineContext_ACU = () => ({
 
 const execution_ACU = () => ({
   envelope: {} as any,
-  task: { taskId: 'task-1', originInstruction: '推进主角进入禁区' } as any,
+  task: { taskId: 'task-1', originInstruction: '推进主角进入禁区', stages: [{ stageId: 'stage-1', stageNumber: 2, status: 'running' }] } as any,
   stage: { stageId: 'stage-1', stageNumber: 2, status: 'running' } as any,
   revision: { outline: { title: '禁区试探', goal: '进入禁区', totalTurns: 6 } } as any,
   node: { id: 'node-1', title: '试探守门人', goal: '试探而不揭穿', turns: [{ id: 'turn-1', goal: '推门' }, { id: 'turn-2', goal: '试探' }] } as any,
@@ -49,6 +49,17 @@ const nextTurnContext_ACU = () => {
   const base = execution_ACU();
   base.node.turns = [...base.node.turns, { id: 'turn-3', goal: '收网' }];
   return { ...base, turn: { id: 'turn-3', goal: '收网' } as any, turnNumber: 3, nodeTurnNumber: 3 };
+};
+
+/** 已立总纲的快照：outline-architect 的派工门禁要求总纲非空，绝大多数用例都处于这个常态。 */
+const snapshotWithArc_ACU = (): AgentModuleSnapshot_ACU => {
+  const snapshot = buildEmptyAgentModuleSnapshot_ACU();
+  snapshot.storyArc = [
+    { id: 'A1', scope: 'story', title: '禁区真相', direction: '主角查明禁区吞人的真相', escalation: '从个人求生抬到与守门人体系对抗', withheld: '守门人是主角失踪的兄长', status: 'active', stageNumbers: [1], retired: false, retiredReason: '' },
+    { id: 'A2', scope: 'volume', title: '第一卷·试探', direction: '摸清禁区门禁规则', escalation: '收在主角第一次被守门人识破', withheld: '晶屑的真实来源', status: 'active', stageNumbers: [1, 2], retired: false, retiredReason: '' },
+  ];
+  snapshot.revisions.storyArc = 1;
+  return snapshot;
 };
 
 /**
@@ -106,7 +117,7 @@ function harness_ACU(options: {
   const outlineCalls: string[] = [];
   const presetRoles: string[] = [];
   const chat = chat_ACU();
-  let snapshot = options.snapshot ?? buildEmptyAgentModuleSnapshot_ACU();
+  let snapshot = options.snapshot ?? snapshotWithArc_ACU();
   let conversation = options.conversation ?? buildEmptyAgentConversation_ACU();
   const conversationWrites: AgentConversationSnapshot_ACU[] = [];
   let contextFactory = options.context ?? execution_ACU;
@@ -599,6 +610,76 @@ describe('主 Agent 循环收敛', () => {
     const h = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"指导"}'], isCurrent: () => false });
     await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_INTERNAL_REQUEST_STALE' } });
     expect(h.mainCalls).toHaveLength(0);
+  });
+});
+
+describe('故事总纲门禁', () => {
+  it('总纲为空时派工 outline-architect 被拒且不消耗额度，改派 arc-architect 立完总纲后同轮即可排大纲', async () => {
+    const h = harness_ACU({
+      snapshot: buildEmptyAgentModuleSnapshot_ACU(),
+      context: preOutlineContext_ACU,
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"先排第一阶段"}]}',
+        '{"action":"delegate","delegations":[{"agentName":"arc-architect","prompt":"立总纲"}]}',
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"围绕第一卷台阶排阶段"}]}',
+        '{"action":"finalize","instruction":"按新大纲写"}',
+      ],
+      subReplies: ['{"summary":"已立全书方向与第一卷台阶","delta":{"storyArc":[{"action":"upsert","id":"A1","scope":"story","title":"禁区真相","direction":"主角查明禁区吞人的真相","escalation":"从个人求生抬到与守门人体系对抗","withheld":"守门人是主角失踪的兄长","status":"active"}]}}'],
+      applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建第 1 阶段大纲「禁区试探」（共 6 轮）' }),
+    });
+    const original = h.request.applyOutline!;
+    h.request.applyOutline = async instruction => { const result = await original(instruction); h.setContext(execution_ACU); return result; };
+
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('按新大纲写');
+    // 被门禁拦下的那次没有真的调用大纲运行时。
+    expect(h.outlineCalls).toEqual(['围绕第一卷台阶排阶段']);
+    const rejection = h.mainCalls[1].map(message => message.content).join('\n');
+    expect(rejection).toContain('故事总纲还是空的');
+    expect(rejection).toContain('本次未消耗派工额度');
+    // 门禁不吃额度：三次派工里只有两次记账，maxDelegations=4 时仍够用。
+    expect(h.mainCalls[3].map(message => message.content).join('\n')).toContain('已创建第 1 阶段大纲');
+  });
+
+  it('arc-architect 的写入只换总纲快照，不推进结算水位', async () => {
+    const h = harness_ACU({
+      snapshot: buildEmptyAgentModuleSnapshot_ACU(),
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"arc-architect","prompt":"立总纲"}]}',
+        '{"action":"finalize","instruction":"指导"}',
+      ],
+      subReplies: ['{"summary":"已立全书方向","delta":{"storyArc":[{"action":"upsert","id":"A1","scope":"story","title":"禁区真相","direction":"主角查明禁区吞人的真相","escalation":"抬到与守门人体系对抗","withheld":"守门人是主角失踪的兄长","status":"active","stageNumbers":[1]}]}}'],
+    });
+    const result = await h.planner.plan(h.request);
+
+    expect(result.instruction).toBe('指导');
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('总纲已更新');
+    expect(h.written).toHaveLength(1);
+    expect(h.written[0].snapshot.storyArc.map(item => item.title)).toEqual(['禁区真相']);
+    expect(h.written[0].snapshot.revisions.storyArc).toBe(1);
+    // 结算水位归 hook-cognition-maintainer 管：立总纲不代表未结算正文已经进账本。
+    expect(h.written[0].snapshot.settledThroughIndex).toBe(buildEmptyAgentModuleSnapshot_ACU().settledThroughIndex);
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('总纲已更新');
+  });
+
+  it('总纲状态段报告缺失与阶段进度未登记两种情形', async () => {
+    const missing = harness_ACU({ snapshot: buildEmptyAgentModuleSnapshot_ACU(), mainReplies: ['{"action":"finalize","instruction":"指导"}'] });
+    await missing.planner.plan(missing.request);
+    expect(missing.mainCalls[0].map(message => message.content).join('\n')).toContain('故事总纲：尚未建立');
+
+    // 快照里的卷台阶只登记到第 2 阶段，第 3 阶段虽已完成却没进任何卷台阶。
+    const stale = harness_ACU({
+      mainReplies: ['{"action":"finalize","instruction":"指导"}'],
+      context: () => {
+        const base = execution_ACU();
+        base.task.stages = [{ stageNumber: 2, status: 'completed' }, { stageNumber: 3, status: 'completed' }];
+        return base;
+      },
+    });
+    await stale.planner.plan(stale.request);
+    const evidence = stale.mainCalls[0].map(message => message.content).join('\n');
+    expect(evidence).toContain('第 3 阶段已完成但没有登记');
+    expect(evidence).toContain('派工 arc-architect 回写进度');
   });
 });
 

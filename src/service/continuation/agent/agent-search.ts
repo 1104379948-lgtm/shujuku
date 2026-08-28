@@ -105,6 +105,13 @@ function collectTableLines_ACU(context: AgentResolveContext_ACU): AgentSearchLin
 function collectModuleLines_ACU(context: AgentResolveContext_ACU): AgentSearchLine_ACU[] {
   const snapshot = context.moduleSnapshot;
   const lines: AgentSearchLine_ACU[] = [];
+  for (const entry of snapshot.storyArc) {
+    lines.push({
+      label: `故事总纲 [${entry.id}]${entry.retired ? '（已废止）' : ''}`,
+      address: `$STORY_ARC:${entry.id}`,
+      text: [entry.title, entry.direction, entry.escalation, entry.withheld, entry.retiredReason].filter(Boolean).join('｜'),
+    });
+  }
   for (const hook of snapshot.hooks) {
     lines.push({
       label: `伏笔账本 [${hook.id}]${hook.retired ? '（已退休）' : ''}`,
@@ -140,7 +147,7 @@ function collectOutlineLines_ACU(context: AgentResolveContext_ACU): AgentSearchL
   for (const node of revision.outline.nodes) {
     lines.push({ label: `大纲 节点[${node.id}]`, address: '$OUTLINE_WINDOW', text: `${node.title}｜${node.goal}` });
     for (const turn of node.turns) {
-      lines.push({ label: `大纲 轮次[${turn.id}]`, address: '$OUTLINE_WINDOW', text: turn.goal });
+      lines.push({ label: `大纲 轮次[${turn.id}]（${turn.pacing}）`, address: '$OUTLINE_WINDOW', text: turn.goal });
     }
   }
   return lines;

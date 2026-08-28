@@ -135,12 +135,38 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(loaded.settings.agentApiPresets).toEqual({
       main: { mode: 'inherit', presetName: '' },
       outline: { mode: 'inherit', presetName: '' },
+      arcArchitect: { mode: 'inherit', presetName: '' },
       maintainer: { mode: 'inherit', presetName: '' },
       mainlinePlanner: { mode: 'inherit', presetName: '' },
       beatPlanner: { mode: 'inherit', presetName: '' },
       reviewer: { mode: 'inherit', presetName: '' },
     });
     expect(loaded.settings).toMatchObject({ apiPresetMode: 'fixed', fixedApiPresetName: 'p1' });
+  });
+
+  it('为缺少 downtimeTurnRatio 的存量信封补默认值，并拒绝越界的比例', () => {
+    const legacy = buildEnvelope_ACU() as any;
+    delete legacy.settings.downtimeTurnRatio;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: legacy }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().read()!.settings.downtimeTurnRatio).toBe(0.3);
+
+    const outOfRange = buildEnvelope_ACU() as any;
+    outOfRange.settings.downtimeTurnRatio = 0.9;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: outOfRange }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(() => new FirstFloorContinuationStore_ACU().read()).toThrow(ContinuationValidationError_ACU);
+  });
+
+  it('提示词版本落后时整体强刷，存量信封因此拿到总纲子代理提示词组', () => {
+    const stale = buildEnvelope_ACU() as any;
+    stale.settings.promptForceDefaultVersion = 'spv2.2-continuation-v13';
+    stale.settings.agentPrompts = { ...stale.settings.agentPrompts, main: [{ role: 'user', content: '用户改过的旧提示词', enabled: true, deletable: true }] };
+    delete stale.settings.agentPrompts.arcArchitect;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: stale }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+
+    const loaded = new FirstFloorContinuationStore_ACU().read()!;
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.2-continuation-story-arc-pacing-v14');
+    expect(loaded.settings.agentPrompts.arcArchitect[0].content).toContain('故事总纲子代理');
+    expect(loaded.settings.agentPrompts.main[0].content).not.toBe('用户改过的旧提示词');
   });
 
   it('fails closed on a persisted per-role channel with an illegal mode', () => {

@@ -18,8 +18,12 @@ import {
   type AgentModuleDelta_ACU,
   type AgentModuleRevisions_ACU,
   type AgentModuleSnapshot_ACU,
+  type AgentStoryArcDeltaItem_ACU,
+  type AgentStoryArcEntry_ACU,
+  type AgentStoryArcPatch_ACU,
   type AgentWritableModule_ACU,
 } from './agent-model';
+import { normalizeStageNumbers_ACU } from './agent-module-store';
 
 function reject_ACU(message: string, details?: Record<string, unknown>): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
@@ -29,6 +33,7 @@ function collectTouchedModules_ACU(delta: AgentModuleDelta_ACU): AgentWritableMo
   const touched: AgentWritableModule_ACU[] = [];
   if (delta.hooks.length || delta.hookPatches.length) touched.push('hooks');
   if (delta.infoGap.length || delta.infoGapPatches.length) touched.push('infoGap');
+  if (delta.storyArc.length || delta.storyArcPatches.length) touched.push('storyArc');
   return touched;
 }
 
@@ -177,6 +182,79 @@ function applyInfoGapPatches_ACU(entries: AgentInfoGapEntry_ACU[], patches: Agen
 }
 
 /**
+ * 全书方向在任何时刻只能有一条活跃条目。允许在同一份 delta 里先 retire 旧的再 upsert 新的，
+ * 因此判定放在全部条目应用完之后，而不是逐条拦截。
+ */
+function assertSingleActiveStoryScope_ACU(entries: readonly AgentStoryArcEntry_ACU[]): void {
+  const active = entries.filter(entry => entry.scope === 'story' && !entry.retired);
+  if (active.length > 1) {
+    reject_ACU(
+      `全书方向（scope=story）只能有一条活跃条目，当前会变成 ${active.length} 条：${active.map(entry => entry.id).join('、')}。修订全书方向请 patch 既有条目，或在同一份写集里先 retire 旧条目`,
+      { ids: active.map(entry => entry.id) },
+    );
+  }
+}
+
+function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: AgentStoryArcDeltaItem_ACU[]): AgentStoryArcEntry_ACU[] {
+  const byId = new Map(existing.map(entry => [entry.id, entry]));
+  for (const item of items) {
+    if (!item.id.trim()) reject_ACU('总纲条目缺少 id');
+    if (item.action === 'retire') {
+      const current = byId.get(item.id);
+      if (!current) reject_ACU(`retire 的总纲条目不存在：${item.id}`, { id: item.id });
+      if (!item.reason.trim()) reject_ACU(`retire 总纲条目 ${item.id} 必须给出理由`, { id: item.id });
+      byId.set(item.id, { ...current!, retired: true, retiredReason: item.reason.trim() });
+      continue;
+    }
+    if (!item.title.trim()) reject_ACU(`总纲条目 ${item.id} 的 title 不能为空`, { id: item.id });
+    // direction 是这个模块存在的意义：没有方向的条目只是一个标题，对大纲毫无约束力。
+    if (!item.direction.trim()) reject_ACU(`总纲条目 ${item.id} 的 direction 不能为空，必须写清谁追求什么、对抗什么`, { id: item.id });
+    if (item.scope === 'volume' && !item.escalation.trim()) {
+      reject_ACU(`卷台阶 ${item.id} 必须写 escalation：本卷冲突抬到什么高度、收在哪`, { id: item.id });
+    }
+    const previous = byId.get(item.id);
+    byId.set(item.id, {
+      id: item.id,
+      scope: item.scope,
+      title: item.title.trim(),
+      direction: item.direction.trim(),
+      escalation: item.escalation,
+      withheld: item.withheld,
+      status: item.status,
+      // 进度锚只增不减：upsert 不携带 stageNumbers 时保留既有记录，避免改一次方向就把承载历史抹平。
+      stageNumbers: item.stageNumbers.length ? normalizeStageNumbers_ACU(item.stageNumbers) : (previous ? previous.stageNumbers : []),
+      retired: false,
+      retiredReason: '',
+    });
+  }
+  const next = [...byId.values()];
+  assertSingleActiveStoryScope_ACU(next);
+  return next;
+}
+
+function applyStoryArcPatches_ACU(entries: AgentStoryArcEntry_ACU[], patches: AgentStoryArcPatch_ACU[]): AgentStoryArcEntry_ACU[] {
+  const byId = new Map(entries.map(entry => [entry.id, entry]));
+  for (const patch of patches) {
+    const current = byId.get(patch.id);
+    if (!current) reject_ACU(`patch 的总纲条目不存在：${patch.id}`, { id: patch.id });
+    if (current.retired) reject_ACU(`总纲条目 ${patch.id} 已废止，不可 patch；需要恢复请用 upsert 重新登记`, { id: patch.id });
+    const merged: AgentStoryArcEntry_ACU = {
+      ...current,
+      title: patch.title ?? current.title,
+      direction: patch.direction ?? current.direction,
+      escalation: patch.escalation ?? current.escalation,
+      withheld: patch.withheld ?? current.withheld,
+      status: patch.status ?? current.status,
+      stageNumbers: patch.stageNumbers ? normalizeStageNumbers_ACU(patch.stageNumbers) : current.stageNumbers,
+    };
+    if (!merged.title.trim()) reject_ACU(`总纲条目 ${patch.id} patch 后 title 为空`, { id: patch.id });
+    if (!merged.direction.trim()) reject_ACU(`总纲条目 ${patch.id} patch 后 direction 为空`, { id: patch.id });
+    byId.set(patch.id, merged);
+  }
+  return [...byId.values()];
+}
+
+/**
  * 把一份子代理写集事务应用到快照上。
  * @param snapshot 当前快照
  * @param delta 子代理返回的写集
@@ -196,18 +274,26 @@ export function applyAgentModuleDelta_ACU(
   if (!touched.length) return snapshot;
   const hooksTouched = delta.hooks.length > 0 || delta.hookPatches.length > 0;
   const infoGapTouched = delta.infoGap.length > 0 || delta.infoGapPatches.length > 0;
+  const storyArcTouched = delta.storyArc.length > 0 || delta.storyArcPatches.length > 0;
   let hooks = delta.hooks.length ? applyHookDelta_ACU(snapshot.hooks, delta.hooks, settledIndex) : snapshot.hooks;
   if (delta.hookPatches.length) hooks = applyHookPatches_ACU(hooks, delta.hookPatches, settledIndex);
   let infoGap = delta.infoGap.length ? applyInfoGapDelta_ACU(snapshot.infoGap, delta.infoGap, settledIndex) : snapshot.infoGap;
   if (delta.infoGapPatches.length) infoGap = applyInfoGapPatches_ACU(infoGap, delta.infoGapPatches);
+  let storyArc = delta.storyArc.length ? applyStoryArcDelta_ACU(snapshot.storyArc, delta.storyArc) : snapshot.storyArc;
+  if (delta.storyArcPatches.length) {
+    storyArc = applyStoryArcPatches_ACU(storyArc, delta.storyArcPatches);
+    assertSingleActiveStoryScope_ACU(storyArc);
+  }
   return {
     ...snapshot,
     hooks,
     infoGap,
+    storyArc,
     revisions: {
       hooks: snapshot.revisions.hooks + (hooksTouched ? 1 : 0),
       infoGap: snapshot.revisions.infoGap + (infoGapTouched ? 1 : 0),
       constraints: snapshot.revisions.constraints,
+      storyArc: snapshot.revisions.storyArc + (storyArcTouched ? 1 : 0),
     },
   };
 }

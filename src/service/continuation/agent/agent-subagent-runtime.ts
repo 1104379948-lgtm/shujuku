@@ -63,8 +63,14 @@ import type {
 export interface AgentSubagentRunResult_ACU {
   agentName: string;
   kind: AgentSubagentKind_ACU;
-  /** 该子代理职责固定对应的可写模块（maintain → hooks+infoGap，其余为空）。 */
+  /** 该子代理职责固定对应的可写模块（arc → storyArc，maintain → hooks+infoGap，其余为空）。 */
   writes: AgentWritableModule_ACU[];
+  /**
+   * 总纲子代理的输出。它与 maintainer 共用一份写集契约，但必须分成两个字段：
+   * 主循环对 maintainer 结果会把结算水位推到末楼，总纲写入不代表历史已结算，
+   * 复用同一字段会让未结算区间被误判为已处理。
+   */
+  arc: AgentMaintainerOutput_ACU | null;
   maintainer: AgentMaintainerOutput_ACU | null;
   planner: AgentPlannerOutput_ACU | null;
   reviewer: AgentReviewerOutput_ACU | null;
@@ -104,6 +110,7 @@ const defaultDependencies_ACU: AgentSubagentRuntimeDependencies_ACU = {
 };
 
 const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], string> = {
+  arcArchitect: AGENT_PREFILLS_ACU.arc,
   maintainer: AGENT_PREFILLS_ACU.maintainer,
   mainlinePlanner: AGENT_PREFILLS_ACU.planner,
   beatPlanner: AGENT_PREFILLS_ACU.planner,
@@ -112,6 +119,7 @@ const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], 
 
 /** 各类子代理契约对象的判别键：解析器据此从模型全文中挑出正确的 JSON 对象。 */
 const KIND_PAYLOAD_KEYS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = {
+  arc: ['delta', 'summary'],
   maintain: ['delta', 'summary'],
   plan: ['recommendation', 'summary'],
   review: ['verdict'],
@@ -119,6 +127,7 @@ const KIND_PAYLOAD_KEYS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = 
 
 /** 维护类子代理固定作用的模块。写入范围由职责决定，不再经派工写集协商。 */
 const KIND_FIXED_WRITES_ACU: Record<AgentSubagentKind_ACU, readonly AgentWritableModule_ACU[]> = {
+  arc: ['storyArc'],
   maintain: ['hooks', 'infoGap'],
   plan: [],
   review: [],
@@ -138,7 +147,7 @@ function selectPromptSegments_ACU(settings: ContinuationSettings_ACU, definition
 
 function describeWriteScope_ACU(writes: readonly AgentWritableModule_ACU[]): string {
   if (!writes.length) return '你的职责不含写入。你只需返回建议或判词，不要输出 delta。';
-  const labels: Record<AgentWritableModule_ACU, string> = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束' };
+  const labels: Record<AgentWritableModule_ACU, string> = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲' };
   return `你的职责固定写入：${writes.map(item => labels[item]).join('、')}。职责之外的模块一律不许出现在 delta 里。`;
 }
 
@@ -259,6 +268,7 @@ export class AgentSubagentRuntime_ACU {
           agentName: definition.name,
           kind: definition.kind,
           writes,
+          arc: definition.kind === 'arc' ? parseAgentMaintainerOutput_ACU(payload) : null,
           maintainer: definition.kind === 'maintain' ? parseAgentMaintainerOutput_ACU(payload) : null,
           planner: definition.kind === 'plan' ? parseAgentPlannerOutput_ACU(payload) : null,
           reviewer: definition.kind === 'review' ? parseAgentReviewerOutput_ACU(payload) : null,

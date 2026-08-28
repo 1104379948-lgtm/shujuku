@@ -16,10 +16,13 @@ import {
   AGENT_MODULE_FIELD_ACU,
   AGENT_MODULE_SCHEMA_VERSION_ACU,
   AGENT_REVEAL_STATUSES_ACU,
+  AGENT_STORY_ARC_SCOPES_ACU,
+  AGENT_STORY_ARC_STATUSES_ACU,
   type AgentConstraintEntry_ACU,
   type AgentHookEntry_ACU,
   type AgentInfoGapEntry_ACU,
   type AgentModuleSnapshot_ACU,
+  type AgentStoryArcEntry_ACU,
 } from './agent-model';
 
 const IMPORTANCE_WEIGHTS_ACU: Record<string, number> = { high: 3, mid: 2, low: 1 };
@@ -45,11 +48,19 @@ export function buildEmptyAgentModuleSnapshot_ACU(): AgentModuleSnapshot_ACU {
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
     settledThroughIndex: -1,
     updatedAt: 0,
-    revisions: { hooks: 0, infoGap: 0, constraints: 0 },
+    revisions: { hooks: 0, infoGap: 0, constraints: 0, storyArc: 0 },
     hooks: [],
     infoGap: [],
     constraints: [],
+    storyArc: [],
   };
+}
+
+/** 阶段编号列表：只接受正整数，去重后升序。乱序或重复是模型回写进度时的常见噪音。 */
+export function normalizeStageNumbers_ACU(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const numbers = value.filter((item): item is number => typeof item === 'number' && Number.isInteger(item) && item >= 1);
+  return [...new Set(numbers)].sort((left, right) => left - right);
 }
 
 function validateHookEntry_ACU(raw: unknown): AgentHookEntry_ACU | null {
@@ -96,6 +107,25 @@ function validateInfoGapEntry_ACU(raw: unknown): AgentInfoGapEntry_ACU | null {
   };
 }
 
+function validateStoryArcEntry_ACU(raw: unknown): AgentStoryArcEntry_ACU | null {
+  if (!isRecord_ACU(raw)) return null;
+  const id = readText_ACU(raw.id).trim();
+  const title = readText_ACU(raw.title).trim();
+  if (!id || !title) return null;
+  return {
+    id,
+    scope: readEnum_ACU(raw.scope, AGENT_STORY_ARC_SCOPES_ACU, 'volume') as AgentStoryArcEntry_ACU['scope'],
+    title,
+    direction: readText_ACU(raw.direction),
+    escalation: readText_ACU(raw.escalation),
+    withheld: readText_ACU(raw.withheld),
+    status: readEnum_ACU(raw.status, AGENT_STORY_ARC_STATUSES_ACU, 'planned') as AgentStoryArcEntry_ACU['status'],
+    stageNumbers: normalizeStageNumbers_ACU(raw.stageNumbers),
+    retired: raw.retired === true,
+    retiredReason: readText_ACU(raw.retiredReason),
+  };
+}
+
 function validateConstraintEntry_ACU(raw: unknown): AgentConstraintEntry_ACU | null {
   if (!isRecord_ACU(raw)) return null;
   const id = readText_ACU(raw.id).trim();
@@ -115,6 +145,9 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
   if (!Array.isArray(raw.hooks) || !Array.isArray(raw.infoGap) || !Array.isArray(raw.constraints)) return null;
   const settledThroughIndex = readIndex_ACU(raw.settledThroughIndex);
   if (settledThroughIndex < 0) return null;
+  // storyArc 晚于前三个模块加入，存量楼层的快照里没有这个键。写成必需会让全部历史快照
+  // 被判非法、资料静默回退成空，因此这里按「有则校验、无则空数组」处理。
+  const storyArc = Array.isArray(raw.storyArc) ? raw.storyArc : [];
   return {
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
     settledThroughIndex,
@@ -123,10 +156,12 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
       hooks: Math.max(0, readIndex_ACU(raw.revisions.hooks)),
       infoGap: Math.max(0, readIndex_ACU(raw.revisions.infoGap)),
       constraints: Math.max(0, readIndex_ACU(raw.revisions.constraints)),
+      storyArc: Math.max(0, readIndex_ACU(raw.revisions.storyArc)),
     },
     hooks: raw.hooks.flatMap(item => { const entry = validateHookEntry_ACU(item); return entry ? [entry] : []; }),
     infoGap: raw.infoGap.flatMap(item => { const entry = validateInfoGapEntry_ACU(item); return entry ? [entry] : []; }),
     constraints: raw.constraints.flatMap(item => { const entry = validateConstraintEntry_ACU(item); return entry ? [entry] : []; }),
+    storyArc: storyArc.flatMap(item => { const entry = validateStoryArcEntry_ACU(item); return entry ? [entry] : []; }),
   };
 }
 
@@ -184,7 +219,7 @@ function rejectSnapshotEdit_ACU(message: string, details?: Record<string, unknow
  * 与子代理写入的关键区别是「不容忍静默丢条目」：校验器为了容错会丢掉结构非法的单条记录，
  * 那对模型输出是合理的降级，但对用户编辑是数据丢失——用户会以为自己保存成功了。因此这里
  * 逐类比对条目数，只要有条目被丢弃就整份拒绝并指出是哪一类。
- * @param raw 用户编辑后的快照对象（可只带 hooks / infoGap / constraints）
+ * @param raw 用户编辑后的快照对象（可只带 hooks / infoGap / constraints / storyArc）
  * @param chat 聊天数组，缺省取当前聊天
  * @returns 落盘后的快照
  */
@@ -204,6 +239,7 @@ export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: 
       hooks: current.revisions.hooks + 1,
       infoGap: current.revisions.infoGap + 1,
       constraints: current.revisions.constraints + 1,
+      storyArc: current.revisions.storyArc + 1,
     },
   };
   const validated = validateAgentModuleSnapshot_ACU(merged);
@@ -212,6 +248,7 @@ export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: 
     ['伏笔账本 hooks', merged.hooks, validated.hooks],
     ['信息差 infoGap', merged.infoGap, validated.infoGap],
     ['长期约束 constraints', merged.constraints, validated.constraints],
+    ['故事总纲 storyArc', merged.storyArc, validated.storyArc],
   ];
   for (const [label, input, accepted] of checks) {
     const inputLength = Array.isArray(input) ? input.length : 0;
@@ -303,6 +340,64 @@ export function renderAgentConstraints_ACU(snapshot: AgentModuleSnapshot_ACU): s
   return truncateAgentBlock_ACU(`${head}\n${lines.join('\n')}`);
 }
 
+/** 总纲条目排序：全书方向永远在最前，其后按卷推进状态（active → planned → done）排列。 */
+const STORY_ARC_STATUS_WEIGHTS_ACU: Record<string, number> = { active: 0, planned: 1, done: 2 };
+
+function compareStoryArc_ACU(left: AgentStoryArcEntry_ACU, right: AgentStoryArcEntry_ACU): number {
+  if (left.scope !== right.scope) return left.scope === 'story' ? -1 : 1;
+  return (STORY_ARC_STATUS_WEIGHTS_ACU[left.status] ?? 3) - (STORY_ARC_STATUS_WEIGHTS_ACU[right.status] ?? 3);
+}
+
+function renderStoryArcEntry_ACU(entry: AgentStoryArcEntry_ACU): string {
+  const head = entry.scope === 'story' ? '全书方向' : '卷台阶';
+  return [
+    `- [${entry.id}] ${head}「${entry.title}」状态=${entry.status}${entry.stageNumbers.length ? ` 已承载阶段=${entry.stageNumbers.join('、')}` : ' 尚未由任何阶段承载'}${entry.retired ? ' 已废止' : ''}`,
+    entry.direction ? `  方向：${entry.direction}` : '',
+    entry.escalation ? `  升级目标：${entry.escalation}` : '',
+    entry.withheld ? `  禁止提前翻的底牌：${entry.withheld}` : '',
+    entry.retired && entry.retiredReason ? `  废止原因：${entry.retiredReason}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+/**
+ * 判断总纲是否已经立起来。全部条目退役等价于没有总纲——门禁按活跃条目判定，
+ * 否则用户清空总纲后大纲派工会以为总纲还在。
+ * @param snapshot 当前快照
+ * @returns 存在任一活跃总纲条目时为 true
+ */
+export function hasActiveStoryArc_ACU(snapshot: AgentModuleSnapshot_ACU): boolean {
+  return snapshot.storyArc.some(entry => !entry.retired);
+}
+
+/**
+ * 找出已完成但没有登记进任何活跃 volume 条目 stageNumbers 的阶段编号。
+ * 这些阶段是总纲进度的空洞：卷台阶不知道自己已经被走过，后续判断「本卷该收了没」就没有依据。
+ * @param snapshot 当前快照
+ * @param completedStageNumbers 已完成的阶段编号
+ * @returns 未登记的阶段编号，升序去重
+ */
+export function findUnregisteredStageNumbers_ACU(snapshot: AgentModuleSnapshot_ACU, completedStageNumbers: readonly number[]): number[] {
+  const registered = new Set<number>();
+  for (const entry of snapshot.storyArc) {
+    if (entry.retired) continue;
+    for (const stageNumber of entry.stageNumbers) registered.add(stageNumber);
+  }
+  return [...new Set(completedStageNumbers)].filter(stageNumber => !registered.has(stageNumber)).sort((left, right) => left - right);
+}
+
+/**
+ * 渲染故事总纲的热上下文。
+ * @param snapshot 当前快照
+ * @returns 自然语言文本；总纲为空时明确指出必须先派工 arc-architect
+ */
+export function renderAgentStoryArc_ACU(snapshot: AgentModuleSnapshot_ACU): string {
+  const head = `当前修订号=${snapshot.revisions.storyArc}`;
+  const active = snapshot.storyArc.filter(entry => !entry.retired);
+  if (!active.length) return `${head}\n当前还没有故事总纲。总纲缺失时无法判断本阶段该走到哪一步，必须先派工 arc-architect 立总纲。`;
+  const sorted = [...active].sort(compareStoryArc_ACU);
+  return truncateAgentBlock_ACU(`${head}\n${sorted.map(renderStoryArcEntry_ACU).join('\n')}`);
+}
+
 function renderHookFull_ACU(hook: AgentHookEntry_ACU): string {
   return [
     `- [${hook.id}] 重要度=${hook.importance} 状态=${hook.status} 埋设楼层=${hook.plantedIndex} 最近变动楼层=${hook.updatedIndex}${hook.retired ? ' 已退休' : ''}`,
@@ -377,4 +472,11 @@ export function renderAgentInfoGapByIds_ACU(snapshot: AgentModuleSnapshot_ACU, i
  */
 export function renderAgentConstraintsByIds_ACU(snapshot: AgentModuleSnapshot_ACU, ids?: readonly string[]): string {
   return renderModuleEntries_ACU({ label: '长期约束清单', revision: snapshot.revisions.constraints, entries: snapshot.constraints, render: renderConstraintFull_ACU }, ids);
+}
+
+/**
+ * 按 ID 精读故事总纲（含已废止条目）；不传 ID 则输出全部活跃条目，支撑 `$STORY_ARC` / `$STORY_ARC:ID1,ID2`。
+ */
+export function renderAgentStoryArcByIds_ACU(snapshot: AgentModuleSnapshot_ACU, ids?: readonly string[]): string {
+  return renderModuleEntries_ACU({ label: '故事总纲', revision: snapshot.revisions.storyArc, entries: snapshot.storyArc, render: renderStoryArcEntry_ACU }, ids);
 }

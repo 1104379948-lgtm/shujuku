@@ -6,7 +6,7 @@
  */
 
 import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
-import type { ContinuationInternalAiRequestIdentity_ACU, ContinuationPromptSegment_ACU, ContinuationSettings_ACU } from '../model';
+import type { ContinuationInternalAiRequestIdentity_ACU, ContinuationPromptSegment_ACU, ContinuationSettings_ACU, StageTurnPacing_ACU } from '../model';
 
 /** 楼层锚定快照挂在消息对象上的独立字段名，与首楼 `_qrf_continuation` 并列、互不干扰。 */
 export const AGENT_MODULE_FIELD_ACU = '_qrf_continuation_agent';
@@ -168,10 +168,40 @@ export interface AgentConstraintEntry_ACU {
   createdIndex: number;
 }
 
+/** 总纲条目的层级：story=全书方向（全局唯一一条活跃条目）；volume=卷/幕台阶。 */
+export const AGENT_STORY_ARC_SCOPES_ACU = ['story', 'volume'] as const;
+export type AgentStoryArcScope_ACU = typeof AGENT_STORY_ARC_SCOPES_ACU[number];
+
+export const AGENT_STORY_ARC_STATUSES_ACU = ['planned', 'active', 'done'] as const;
+export type AgentStoryArcStatus_ACU = typeof AGENT_STORY_ARC_STATUSES_ACU[number];
+
+/**
+ * 一条故事总纲。它是跨阶段的方向锚：阶段大纲只规划 6-10 轮，没有它每个阶段都会
+ * 倾向一次性用光手上的料。withheld 是「本层禁止提前翻的底牌」，stageNumbers 是
+ * 已由哪些阶段承载的进度记录——两者共同防止一次性打穿。
+ */
+export interface AgentStoryArcEntry_ACU {
+  id: string;
+  scope: AgentStoryArcScope_ACU;
+  title: string;
+  /** 谁追求什么、对抗什么（story）；本卷主推线（volume）。 */
+  direction: string;
+  /** 本层冲突要抬到什么高度，收在哪。 */
+  escalation: string;
+  /** 禁止提前释放的底牌。 */
+  withheld: string;
+  status: AgentStoryArcStatus_ACU;
+  /** 已由哪些阶段承载，作为进度锚。 */
+  stageNumbers: number[];
+  retired: boolean;
+  retiredReason: string;
+}
+
 export interface AgentModuleRevisions_ACU {
   hooks: number;
   infoGap: number;
   constraints: number;
+  storyArc: number;
 }
 
 /** 楼层锚定的全量快照。读取=从尾向前找最近的合法快照，删楼即自动回退。 */
@@ -183,15 +213,16 @@ export interface AgentModuleSnapshot_ACU {
   hooks: AgentHookEntry_ACU[];
   infoGap: AgentInfoGapEntry_ACU[];
   constraints: AgentConstraintEntry_ACU[];
+  storyArc: AgentStoryArcEntry_ACU[];
 }
 
-export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints'] as const;
+export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc'] as const;
 export type AgentWritableModule_ACU = typeof AGENT_WRITABLE_MODULES_ACU[number];
 
-export const AGENT_SUBAGENT_NAMES_ACU = ['hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer'] as const;
+export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer'] as const;
 export type AgentSubagentName_ACU = typeof AGENT_SUBAGENT_NAMES_ACU[number];
 
-export type AgentSubagentKind_ACU = 'maintain' | 'plan' | 'review';
+export type AgentSubagentKind_ACU = 'arc' | 'maintain' | 'plan' | 'review';
 
 /**
  * 大纲子代理的目录名。它不走通用子代理运行时：主循环拦截对它的派工，
@@ -273,7 +304,7 @@ export interface AgentBlockAction_ACU {
  */
 export type AgentOutlineEditOp_ACU =
   | { op: 'set_turn_goal'; turnId: string; goal: string }
-  | { op: 'insert_turn'; nodeId: string; afterTurnId: string | null; goal: string }
+  | { op: 'insert_turn'; nodeId: string; afterTurnId: string | null; goal: string; pacing?: StageTurnPacing_ACU }
   | { op: 'remove_turn'; turnId: string }
   | { op: 'set_node_goal'; nodeId: string; goal: string };
 
@@ -322,7 +353,33 @@ export interface AgentModuleDelta_ACU {
   hookPatches: AgentHookPatch_ACU[];
   infoGap: AgentInfoGapDeltaItem_ACU[];
   infoGapPatches: AgentInfoGapPatch_ACU[];
+  storyArc: AgentStoryArcDeltaItem_ACU[];
+  storyArcPatches: AgentStoryArcPatch_ACU[];
   constraintProposals: string[];
+}
+
+/** 总纲条目的句级修补：只有显式出现的字段会被修改。阶段进度回写通常只需 patch stageNumbers + status。 */
+export interface AgentStoryArcPatch_ACU {
+  id: string;
+  title?: string;
+  direction?: string;
+  escalation?: string;
+  withheld?: string;
+  status?: AgentStoryArcStatus_ACU;
+  stageNumbers?: number[];
+}
+
+export interface AgentStoryArcDeltaItem_ACU {
+  action: 'upsert' | 'retire';
+  id: string;
+  scope: AgentStoryArcScope_ACU;
+  title: string;
+  direction: string;
+  escalation: string;
+  withheld: string;
+  status: AgentStoryArcStatus_ACU;
+  stageNumbers: number[];
+  reason: string;
 }
 
 /** 伏笔条目的句级修补：只有显式出现的字段会被修改。 */
