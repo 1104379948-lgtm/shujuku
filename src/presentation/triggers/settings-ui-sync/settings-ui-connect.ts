@@ -30,6 +30,7 @@ import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/help
 import { triggerAutomaticUpdateIfNeeded_ACU } from './settings-ui-trigger';
 import { evaluateNewMessageAction_ACU, resolveGeneratedAiMessageIndex_ACU, type AutoFillIntent_ACU } from '../../../service/runtime/message-handler';
 import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
+import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../../shared/host-compat/tavern-helper-compat';
 
   export async function fetchModelsAndConnect_ACU() {
     if (
@@ -174,7 +175,11 @@ import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
     // TavernHelper/jQuery/toastr 同理：优先 iframe 自身，fallback 到 parent
     const iframeTH = typeof (window as any).TavernHelper !== 'undefined' ? (window as any).TavernHelper : undefined;
     const parentTH = typeof hostWin.TavernHelper !== 'undefined' ? hostWin.TavernHelper : undefined;
-    _set_TavernHelper_API_ACU(iframeTH || parentTH);
+    // 三级兼容适配：旧版扁平 API 透传 → 新版改名 API 映射 → SillyTavern 原生实现。
+    // 覆盖三种宿主形态：油猴脚本 iframe（旧版全量）、插件+新版酒馆助手（改名/部分导出）、
+    // 插件独立运行（无酒馆助手）。
+    const tavernHelperCompat = buildTavernHelperCompat_ACU(iframeTH || parentTH, () => stApi);
+    _set_TavernHelper_API_ACU(tavernHelperCompat.api);
 
     const iframe$ = typeof (window as any).$ !== 'undefined' ? (window as any).$ : undefined;
     const parent$ = typeof hostWin.$ !== 'undefined' ? hostWin.$ : undefined;
@@ -192,8 +197,21 @@ import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
       typeof TavernHelper_API_ACU.triggerSlash === 'function'
     ));
     if (!toastr_API_ACU) logWarn_ACU('toastr_API_ACU is MISSING.');
-    if (coreApisAreReady_ACU) logDebug_ACU('Core APIs successfully loaded/verified for AutoCardUpdater.');
-    else logError_ACU('Failed to load one or more critical APIs for AutoCardUpdater.');
+    if (coreApisAreReady_ACU) {
+      logDebug_ACU('Core APIs successfully loaded/verified for AutoCardUpdater.');
+    } else {
+      // 逐项列出缺失能力（不依赖 Debug 开关，console.error 保证在运行日志中可见）
+      const missingParts: string[] = [];
+      if (!SillyTavern_API_ACU) missingParts.push('SillyTavern API');
+      if (!jQuery_API_ACU) missingParts.push('jQuery');
+      const th: any = TavernHelper_API_ACU;
+      for (const method of ['getChatMessages', 'getLastMessageId', 'getCurrentCharPrimaryLorebook', 'getLorebookEntries', 'triggerSlash'] as const) {
+        if (!th || typeof th[method] !== 'function') missingParts.push(`TavernHelper.${method}`);
+      }
+      const diagnostics = `缺失项: [${missingParts.join(', ')}]；宿主能力: ${formatHostCapabilities_ACU(tavernHelperCompat.capabilities)}`;
+      logError_ACU(`Failed to load one or more critical APIs for AutoCardUpdater. ${diagnostics}`);
+      console.error(`[SP·数据库] 核心API加载失败。${diagnostics}`);
+    }
     return coreApisAreReady_ACU;
   }
 

@@ -5,7 +5,8 @@
  * - 不使用 UserScript 头
  * - 不依赖 jQuery ready（插件加载时 DOM 已就绪）
  * - 运行在酒馆主窗口中（不是 iframe）
- * - 仍然依赖酒馆助手（TavernHelper）提供的 API
+ * - 酒馆助手（TavernHelper）为可选依赖：存在时优先使用其 API，
+ *   不存在时由 host-compat 适配层落到 SillyTavern 原生接口独立运行
  */
 
 // ═══════════════════════════════════════════════════════════════
@@ -83,8 +84,8 @@ import { bootstrapAcuV2 } from './presentation-v2/bootstrap';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from './shared/utils';
 
 /**
- * 等待 TavernHelper 就绪。
- * 酒馆插件的加载顺序不确定，TavernHelper 可能还没挂载到 window 上。
+ * 等待宿主就绪：SillyTavern 核心为必需，TavernHelper（酒馆助手）为可选。
+ * 酒馆插件的加载顺序不确定，TavernHelper 可能还没挂载到 window 上，也可能根本未安装。
  *
  * 关键事实：酒馆主窗口的 window.SillyTavern 只有 {libs, getContext}。
  * 所有真正的 API 都必须通过 SillyTavern.getContext() 拿到。
@@ -115,6 +116,12 @@ async function waitForTavernHelper(maxWaitMs = 15000): Promise<boolean> {
         return { hasTH, hasST, hasGetContext, hasExtSettings, hasEventSource, hasSaveFn };
     };
 
+    // SillyTavern 核心就绪的持续观察窗口：ST 核心字段全部就绪后，再给 TavernHelper
+    // 一段宽限时间（酒馆助手作为扩展可能晚于本插件加载）；宽限期过仍无 TavernHelper，
+    // 则进入无酒馆助手兼容模式（host-compat 适配层落到 SillyTavern 原生接口）。
+    const TAVERN_HELPER_GRACE_MS = 5000;
+    let stCoreReadyAt: number | null = null;
+
     while (Date.now() - start < maxWaitMs) {
         const p = probe();
         const status = `TH=${p.hasTH},ST=${p.hasST},GC=${p.hasGetContext},Ext=${p.hasExtSettings},Evt=${p.hasEventSource},Save=${p.hasSaveFn}`;
@@ -123,24 +130,38 @@ async function waitForTavernHelper(maxWaitMs = 15000): Promise<boolean> {
             lastStatus = status;
         }
 
+        const stCoreReady = p.hasST && p.hasGetContext && p.hasExtSettings && p.hasEventSource && p.hasSaveFn;
+
         // 全部就绪：TavernHelper + SillyTavern.getContext() + 核心 API 字段
-        if (p.hasTH && p.hasST && p.hasGetContext && p.hasExtSettings && p.hasEventSource && p.hasSaveFn) {
+        if (p.hasTH && stCoreReady) {
             logDebug_ACU(`[插件启动] 酒馆 API 全部就绪，等待了 ${Date.now() - start}ms（轮询 ${pollCount} 次）`);
             return true;
+        }
+
+        // ST 核心就绪但 TavernHelper 缺席：给酒馆助手一段宽限期后进入兼容模式
+        if (stCoreReady) {
+            if (stCoreReadyAt === null) stCoreReadyAt = Date.now();
+            if (Date.now() - stCoreReadyAt >= TAVERN_HELPER_GRACE_MS) {
+                logWarn_ACU(`[插件启动] SillyTavern 已就绪，但未检测到酒馆助手（TavernHelper）。进入无酒馆助手兼容模式：世界书/聊天/Slash 走 SillyTavern 原生接口，"使用酒馆预设API生成" 功能不可用（可改用自定义API）。`);
+                return true;
+            }
+        } else {
+            stCoreReadyAt = null;
         }
         pollCount++;
         await new Promise(r => setTimeout(r, 100));
     }
 
-    // 超时降级：如果 TavernHelper + SillyTavern + getContext 都有，即使某些字段暂缺也允许启动
-    // （后续 Proxy 每次读取都会重新调 getContext()，可能某些字段稍后会就绪）
+    // 超时降级：只要 SillyTavern + getContext 可用即允许启动
+    // （后续 Proxy 每次读取都会重新调 getContext()，可能某些字段稍后会就绪；
+    // TavernHelper 缺席由 host-compat 适配层兜底）
     const p = probe();
-    if (p.hasTH && p.hasST && p.hasGetContext) {
-        logWarn_ACU(`[插件启动] 部分 API 未就绪（${maxWaitMs}ms），但 getContext 可用，降级启动。Ext=${p.hasExtSettings},Evt=${p.hasEventSource},Save=${p.hasSaveFn}`);
+    if (p.hasST && p.hasGetContext) {
+        logWarn_ACU(`[插件启动] 部分 API 未就绪（${maxWaitMs}ms），但 getContext 可用，降级启动。TH=${p.hasTH},Ext=${p.hasExtSettings},Evt=${p.hasEventSource},Save=${p.hasSaveFn}`);
         return true;
     }
 
-    logError_ACU(`[插件启动] 等待 TavernHelper 超时（${maxWaitMs}ms），TH=${p.hasTH},ST=${p.hasST},GC=${p.hasGetContext}`);
+    logError_ACU(`[插件启动] 等待 SillyTavern 超时（${maxWaitMs}ms），TH=${p.hasTH},ST=${p.hasST},GC=${p.hasGetContext}`);
     return false;
 }
 
@@ -154,15 +175,15 @@ async function extensionMain() {
         return;
     }
 
-    logDebug_ACU('[插件启动] 酒馆插件模式启动，等待 TavernHelper 就绪...');
+    logDebug_ACU('[插件启动] 酒馆插件模式启动，等待宿主 API 就绪...');
 
     const ready = await waitForTavernHelper();
     if (!ready) {
-        logError_ACU('[插件启动] 等待 TavernHelper 超时。请确保已安装酒馆助手（JS-Slash-Runner）。');
+        logError_ACU('[插件启动] 等待 SillyTavern 核心 API 超时（getContext 不可用），插件无法启动。');
         return;
     }
 
-    logDebug_ACU('[插件启动] TavernHelper 已就绪，开始初始化...');
+    logDebug_ACU('[插件启动] 宿主 API 已就绪，开始初始化...');
     mainInitialize_ACU();
     bootstrapAcuV2();
 }

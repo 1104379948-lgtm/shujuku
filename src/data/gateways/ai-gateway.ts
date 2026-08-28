@@ -49,7 +49,7 @@ export async function generateRaw_ACU(options: {
     [key: string]: any;
 }): Promise<string> {
     if (!isGenerateRawAvailable_ACU()) {
-        throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
+        throw new Error('主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或在设置中改用自定义API。');
     }
     const response = await TavernHelper_API_ACU.generateRaw(options);
     return typeof response === 'string' ? response : String(response ?? '');

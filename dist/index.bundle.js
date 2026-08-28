@@ -64746,7 +64746,7 @@ $CONTENT
      */
     async function generateRaw_ACU(options) {
         if (!isGenerateRawAvailable_ACU()) {
-            throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
+            throw new Error('主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或在设置中改用自定义API。');
         }
         const response = await TavernHelper_API_ACU.generateRaw(options);
         return typeof response === 'string' ? response : String(response ?? '');
@@ -99481,6 +99481,889 @@ $CONTENT
         return { action: 'update_only', reason: 'No content optimization configured', lastMessageIndex };
     }
 
+    /**
+     * shared/host-compat/entry-format.ts — 世界书条目三种格式的双向转换
+     *
+     * 三种格式：
+     * - 旧版扁平格式（LorebookEntry）：酒馆助手旧版 getLorebookEntries 系列 API 使用，
+     *   也是本代码库全部消费者约定的格式（见 @types/function/lorebook_entry.d.ts）。
+     * - 新版嵌套格式（WorldbookEntry）：酒馆助手新版 getWorldbook 系列 API 使用，
+     *   strategy/position/recursion/effect 为嵌套子对象（见 @types/function/worldbook.d.ts）。
+     * - SillyTavern 原生格式：loadWorldInfo/saveWorldInfo 的 entries 字典条目，
+     *   使用数字枚举 position/selectiveLogic/role（见 SillyTavern world-info.js）。
+     *
+     * 转换原则：读取方向输出完整的旧版扁平条目（未知字段给默认值）；
+     * 写入方向仅映射 patch 中实际存在的字段，不注入未指定的默认值。
+     */
+    // ═══ 映射常量表 ═══
+    /** 新版嵌套 position.type（非 at_depth 部分）与旧版扁平 position 同名直映 */
+    const NEW_POSITION_PASSTHROUGH_ACU = new Set([
+        'before_character_definition',
+        'after_character_definition',
+        'before_example_messages',
+        'after_example_messages',
+        'before_author_note',
+        'after_author_note',
+    ]);
+    /** ST 原生 position 数字 → 旧版扁平 position 字符串（at_depth 需再结合 role） */
+    const NATIVE_POSITION_TO_OLD_ACU = {
+        0: 'before_character_definition',
+        1: 'after_character_definition',
+        2: 'before_author_note',
+        3: 'after_author_note',
+        // 4 = atDepth，需结合 role 处理
+        5: 'before_example_messages',
+        6: 'after_example_messages',
+    };
+    const OLD_POSITION_TO_NATIVE_ACU = {
+        before_character_definition: 0,
+        after_character_definition: 1,
+        before_author_note: 2,
+        after_author_note: 3,
+        before_example_messages: 5,
+        after_example_messages: 6,
+        at_depth_as_system: 4,
+        at_depth_as_user: 4,
+        at_depth_as_assistant: 4,
+    };
+    /** ST 原生 role 数字（extension_prompt_roles: SYSTEM=0, USER=1, ASSISTANT=2） */
+    const NATIVE_ROLE_TO_NAME_ACU = {
+        0: 'system',
+        1: 'user',
+        2: 'assistant',
+    };
+    const ROLE_NAME_TO_NATIVE_ACU = {
+        system: 0,
+        user: 1,
+        assistant: 2,
+    };
+    /** ST 原生 selectiveLogic 数字（world_info_logic: AND_ANY=0, NOT_ALL=1, NOT_ANY=2, AND_ALL=3） */
+    const NATIVE_LOGIC_TO_OLD_ACU = {
+        0: 'and_any',
+        1: 'not_all',
+        2: 'not_any',
+        3: 'and_all',
+    };
+    const OLD_LOGIC_TO_NATIVE_ACU = {
+        and_any: 0,
+        not_all: 1,
+        not_any: 2,
+        and_all: 3,
+    };
+    // ═══ 工具函数 ═══
+    /** 新版 API 的 keys 可能含 RegExp 对象；旧格式与 ST 原生均要求字符串（/…/flags 形式即 ST 的正则字符串约定） */
+    function stringifyKeys_ACU(keys) {
+        if (!Array.isArray(keys))
+            return [];
+        return keys.map(k => (k instanceof RegExp ? String(k) : String(k ?? '')));
+    }
+    function numberOrNull_ACU(value) {
+        return typeof value === 'number' && Number.isFinite(value) ? value : null;
+    }
+    /** ST 原生 null → 旧版 'same_as_global' */
+    function nativeOptionalToOld_ACU(value) {
+        return value === null || value === undefined ? 'same_as_global' : value;
+    }
+    /** 旧版 'same_as_global' → ST 原生 null */
+    function oldOptionalToNative_ACU(value) {
+        return value === 'same_as_global' ? null : value;
+    }
+    // ═══ 新版嵌套 ↔ 旧版扁平 ═══
+    /**
+     * 新版嵌套 WorldbookEntry → 旧版扁平 LorebookEntry。
+     * 输出完整旧格式：新格式没有的字段（case_sensitive/group 等）给旧版语义默认值。
+     * @param entry 新版嵌套条目
+     * @param index 条目在书内的序号，用作 display_index（新格式无此字段）
+     */
+    function newToOldEntry_ACU(entry, index) {
+        const strategy = entry?.strategy ?? {};
+        const position = entry?.position ?? {};
+        const recursion = entry?.recursion ?? {};
+        const effect = entry?.effect ?? {};
+        const keysSecondary = strategy?.keys_secondary ?? {};
+        let oldPosition;
+        let oldDepth;
+        if (position?.type === 'at_depth') {
+            const role = typeof position.role === 'string' && position.role in ROLE_NAME_TO_NATIVE_ACU ? position.role : 'system';
+            oldPosition = `at_depth_as_${role}`;
+            oldDepth = numberOrNull_ACU(position.depth);
+        }
+        else {
+            oldPosition = NEW_POSITION_PASSTHROUGH_ACU.has(position?.type)
+                ? position.type
+                : 'before_character_definition';
+            oldDepth = null;
+        }
+        const delayUntil = recursion?.delay_until;
+        return {
+            uid: Number(entry?.uid ?? 0),
+            display_index: index,
+            comment: typeof entry?.name === 'string' ? entry.name : '',
+            enabled: entry?.enabled !== false,
+            type: strategy?.type === 'constant' || strategy?.type === 'vectorized' ? strategy.type : 'selective',
+            position: oldPosition,
+            depth: oldDepth,
+            order: typeof position?.order === 'number' ? position.order : 100,
+            probability: typeof entry?.probability === 'number' ? entry.probability : 100,
+            keys: stringifyKeys_ACU(strategy?.keys),
+            logic: typeof keysSecondary?.logic === 'string' && keysSecondary.logic in OLD_LOGIC_TO_NATIVE_ACU
+                ? keysSecondary.logic
+                : 'and_any',
+            filters: stringifyKeys_ACU(keysSecondary?.keys),
+            scan_depth: typeof strategy?.scan_depth === 'number' ? strategy.scan_depth : 'same_as_global',
+            case_sensitive: 'same_as_global',
+            match_whole_words: 'same_as_global',
+            use_group_scoring: 'same_as_global',
+            automation_id: null,
+            exclude_recursion: recursion?.prevent_incoming === true,
+            prevent_recursion: recursion?.prevent_outgoing === true,
+            delay_until_recursion: typeof delayUntil === 'number' ? delayUntil : false,
+            content: typeof entry?.content === 'string' ? entry.content : '',
+            group: '',
+            group_prioritized: false,
+            group_weight: 100,
+            sticky: numberOrNull_ACU(effect?.sticky),
+            cooldown: numberOrNull_ACU(effect?.cooldown),
+            delay: numberOrNull_ACU(effect?.delay),
+        };
+    }
+    /**
+     * 旧版扁平 partial → 新版嵌套 partial（PartialDeep<WorldbookEntry>）。
+     * 仅映射 patch 中实际存在的字段；新格式无对应物的字段
+     * （display_index/case_sensitive/match_whole_words/use_group_scoring/automation_id/group*）静默丢弃。
+     */
+    function oldPatchToNewPatch_ACU(patch) {
+        const out = {};
+        const strategy = {};
+        const position = {};
+        const recursion = {};
+        const effect = {};
+        if ('uid' in patch)
+            out.uid = patch.uid;
+        if ('comment' in patch)
+            out.name = patch.comment;
+        if ('enabled' in patch)
+            out.enabled = patch.enabled;
+        if ('content' in patch)
+            out.content = patch.content;
+        if ('probability' in patch)
+            out.probability = patch.probability;
+        if ('type' in patch)
+            strategy.type = patch.type;
+        if ('keys' in patch)
+            strategy.keys = patch.keys;
+        if ('scan_depth' in patch)
+            strategy.scan_depth = patch.scan_depth;
+        if ('logic' in patch || 'filters' in patch) {
+            const keysSecondary = {};
+            if ('logic' in patch)
+                keysSecondary.logic = patch.logic;
+            if ('filters' in patch)
+                keysSecondary.keys = patch.filters;
+            strategy.keys_secondary = keysSecondary;
+        }
+        if ('position' in patch && typeof patch.position === 'string') {
+            if (patch.position.startsWith('at_depth_as_')) {
+                position.type = 'at_depth';
+                position.role = patch.position.slice('at_depth_as_'.length);
+            }
+            else {
+                position.type = patch.position;
+            }
+        }
+        if ('depth' in patch && patch.depth !== null && patch.depth !== undefined)
+            position.depth = patch.depth;
+        if ('order' in patch)
+            position.order = patch.order;
+        if ('exclude_recursion' in patch)
+            recursion.prevent_incoming = patch.exclude_recursion;
+        if ('prevent_recursion' in patch)
+            recursion.prevent_outgoing = patch.prevent_recursion;
+        if ('delay_until_recursion' in patch) {
+            const v = patch.delay_until_recursion;
+            recursion.delay_until = v === false ? null : v === true ? 1 : v;
+        }
+        if ('sticky' in patch)
+            effect.sticky = patch.sticky;
+        if ('cooldown' in patch)
+            effect.cooldown = patch.cooldown;
+        if ('delay' in patch)
+            effect.delay = patch.delay;
+        if (Object.keys(strategy).length > 0)
+            out.strategy = strategy;
+        if (Object.keys(position).length > 0)
+            out.position = position;
+        if (Object.keys(recursion).length > 0)
+            out.recursion = recursion;
+        if (Object.keys(effect).length > 0)
+            out.effect = effect;
+        return out;
+    }
+    // ═══ ST 原生 ↔ 旧版扁平 ═══
+    /**
+     * ST 原生 world info 条目 → 旧版扁平 LorebookEntry。
+     */
+    function nativeToOldEntry_ACU(entry) {
+        const nativePosition = typeof entry?.position === 'number' ? entry.position : 0;
+        let oldPosition;
+        let oldDepth;
+        if (nativePosition === 4) {
+            const roleName = NATIVE_ROLE_TO_NAME_ACU[Number(entry?.role ?? 0)] ?? 'system';
+            oldPosition = `at_depth_as_${roleName}`;
+            oldDepth = numberOrNull_ACU(entry?.depth);
+        }
+        else {
+            oldPosition = NATIVE_POSITION_TO_OLD_ACU[nativePosition] ?? 'before_character_definition';
+            oldDepth = null;
+        }
+        const delayUntil = entry?.delayUntilRecursion;
+        return {
+            uid: Number(entry?.uid ?? 0),
+            display_index: typeof entry?.displayIndex === 'number' ? entry.displayIndex : Number(entry?.uid ?? 0),
+            comment: typeof entry?.comment === 'string' ? entry.comment : '',
+            enabled: entry?.disable !== true,
+            type: entry?.constant === true ? 'constant' : entry?.vectorized === true ? 'vectorized' : 'selective',
+            position: oldPosition,
+            depth: oldDepth,
+            order: typeof entry?.order === 'number' ? entry.order : 100,
+            probability: typeof entry?.probability === 'number' ? entry.probability : 100,
+            keys: stringifyKeys_ACU(entry?.key),
+            logic: NATIVE_LOGIC_TO_OLD_ACU[Number(entry?.selectiveLogic ?? 0)] ?? 'and_any',
+            filters: stringifyKeys_ACU(entry?.keysecondary),
+            scan_depth: nativeOptionalToOld_ACU(entry?.scanDepth),
+            case_sensitive: nativeOptionalToOld_ACU(entry?.caseSensitive),
+            match_whole_words: nativeOptionalToOld_ACU(entry?.matchWholeWords),
+            use_group_scoring: nativeOptionalToOld_ACU(entry?.useGroupScoring),
+            automation_id: entry?.automationId ? String(entry.automationId) : null,
+            exclude_recursion: entry?.excludeRecursion === true,
+            prevent_recursion: entry?.preventRecursion === true,
+            delay_until_recursion: typeof delayUntil === 'number' && delayUntil > 0 ? delayUntil : false,
+            content: typeof entry?.content === 'string' ? entry.content : '',
+            group: typeof entry?.group === 'string' ? entry.group : '',
+            group_prioritized: entry?.groupOverride === true,
+            group_weight: typeof entry?.groupWeight === 'number' ? entry.groupWeight : 100,
+            sticky: numberOrNull_ACU(entry?.sticky),
+            cooldown: numberOrNull_ACU(entry?.cooldown),
+            delay: numberOrNull_ACU(entry?.delay),
+        };
+    }
+    /**
+     * 旧版扁平 partial → ST 原生条目字段 patch。
+     * 仅映射 patch 中实际存在的字段。
+     */
+    function oldPatchToNativePatch_ACU(patch) {
+        const out = {};
+        if ('comment' in patch)
+            out.comment = patch.comment;
+        if ('enabled' in patch)
+            out.disable = patch.enabled === false;
+        if ('content' in patch)
+            out.content = patch.content;
+        if ('probability' in patch)
+            out.probability = patch.probability;
+        if ('keys' in patch)
+            out.key = stringifyKeys_ACU(patch.keys);
+        if ('filters' in patch)
+            out.keysecondary = stringifyKeys_ACU(patch.filters);
+        if ('logic' in patch && patch.logic in OLD_LOGIC_TO_NATIVE_ACU)
+            out.selectiveLogic = OLD_LOGIC_TO_NATIVE_ACU[patch.logic];
+        if ('order' in patch)
+            out.order = patch.order;
+        if ('group' in patch)
+            out.group = patch.group;
+        if ('group_prioritized' in patch)
+            out.groupOverride = patch.group_prioritized;
+        if ('group_weight' in patch)
+            out.groupWeight = patch.group_weight;
+        if ('automation_id' in patch)
+            out.automationId = patch.automation_id ?? '';
+        if ('exclude_recursion' in patch)
+            out.excludeRecursion = patch.exclude_recursion;
+        if ('prevent_recursion' in patch)
+            out.preventRecursion = patch.prevent_recursion;
+        if ('delay_until_recursion' in patch) {
+            const v = patch.delay_until_recursion;
+            out.delayUntilRecursion = v === false ? 0 : v === true ? 1 : v;
+        }
+        if ('scan_depth' in patch)
+            out.scanDepth = oldOptionalToNative_ACU(patch.scan_depth);
+        if ('case_sensitive' in patch)
+            out.caseSensitive = oldOptionalToNative_ACU(patch.case_sensitive);
+        if ('match_whole_words' in patch)
+            out.matchWholeWords = oldOptionalToNative_ACU(patch.match_whole_words);
+        if ('use_group_scoring' in patch)
+            out.useGroupScoring = oldOptionalToNative_ACU(patch.use_group_scoring);
+        if ('sticky' in patch)
+            out.sticky = patch.sticky;
+        if ('cooldown' in patch)
+            out.cooldown = patch.cooldown;
+        if ('delay' in patch)
+            out.delay = patch.delay;
+        if ('display_index' in patch)
+            out.displayIndex = patch.display_index;
+        if ('type' in patch) {
+            out.constant = patch.type === 'constant';
+            out.vectorized = patch.type === 'vectorized';
+            out.selective = patch.type === 'selective';
+        }
+        if ('position' in patch && typeof patch.position === 'string' && patch.position in OLD_POSITION_TO_NATIVE_ACU) {
+            out.position = OLD_POSITION_TO_NATIVE_ACU[patch.position];
+            if (patch.position.startsWith('at_depth_as_')) {
+                out.role = ROLE_NAME_TO_NATIVE_ACU[patch.position.slice('at_depth_as_'.length)] ?? 0;
+            }
+        }
+        if ('depth' in patch && patch.depth !== null && patch.depth !== undefined)
+            out.depth = patch.depth;
+        return out;
+    }
+    /**
+     * ST 原生新条目默认值（与 SillyTavern world-info.js newWorldInfoEntryTemplate 对齐）。
+     * 用于原生后端 createLorebookEntries 时补全未指定字段。
+     */
+    function buildNativeEntryDefaults_ACU() {
+        return {
+            key: [],
+            keysecondary: [],
+            comment: '',
+            content: '',
+            constant: false,
+            vectorized: false,
+            selective: true,
+            selectiveLogic: 0,
+            addMemo: true,
+            order: 100,
+            position: 0,
+            disable: false,
+            excludeRecursion: false,
+            preventRecursion: false,
+            matchPersonaDescription: false,
+            matchCharacterDescription: false,
+            matchCharacterPersonality: false,
+            matchCharacterDepthPrompt: false,
+            matchScenario: false,
+            matchCreatorNotes: false,
+            delayUntilRecursion: 0,
+            probability: 100,
+            useProbability: true,
+            depth: 4,
+            group: '',
+            groupOverride: false,
+            groupWeight: 100,
+            scanDepth: null,
+            caseSensitive: null,
+            matchWholeWords: null,
+            useGroupScoring: null,
+            automationId: '',
+            role: 0,
+            sticky: null,
+            cooldown: null,
+            delay: null,
+        };
+    }
+
+    /**
+     * shared/host-compat/native-st-backend.ts — SillyTavern 原生后端
+     *
+     * 在无酒馆助手（TavernHelper）的插件独立运行模式下，用 SillyTavern.getContext()
+     * 暴露的原生接口实现代码库依赖的旧版扁平 API 面。
+     *
+     * 能力来源（以 SillyTavern 1.13.x st-context.js 为准）：
+     * - 世界书读写：ctx.loadWorldInfo / ctx.saveWorldInfo
+     * - 聊天与角色：ctx.chat / ctx.characters / ctx.characterId
+     * - Slash 命令：ctx.executeSlashCommandsWithOptions
+     * - 世界书名称列表与角色附加书（charLore）不在 context 中，
+     *   经 POST /api/settings/get 获取（带 TTL 缓存）。
+     *
+     * generateRaw 在原生 context 中不存在，本后端不提供（保持"方法缺失"语义，
+     * 让调用方既有的可用性检查与降级路径自然生效）。
+     */
+    const SETTINGS_SNAPSHOT_TTL_MS_ACU = 8000;
+    function createNativeStBackend_ACU(getStApi) {
+        let settingsSnapshot = null;
+        let settingsSnapshotAt = 0;
+        function ctx() {
+            try {
+                return getStApi() ?? null;
+            }
+            catch {
+                return null;
+            }
+        }
+        function invalidateSettingsSnapshot() {
+            settingsSnapshot = null;
+            settingsSnapshotAt = 0;
+        }
+        async function fetchSettingsSnapshot() {
+            const now = Date.now();
+            if (settingsSnapshot && now - settingsSnapshotAt < SETTINGS_SNAPSHOT_TTL_MS_ACU) {
+                return settingsSnapshot;
+            }
+            const api = ctx();
+            try {
+                const headers = typeof api?.getRequestHeaders === 'function'
+                    ? api.getRequestHeaders()
+                    : { 'Content-Type': 'application/json' };
+                const res = await fetch('/api/settings/get', {
+                    method: 'POST',
+                    headers: { ...headers, 'Content-Type': 'application/json' },
+                    body: '{}',
+                });
+                if (!res.ok) {
+                    logWarn_ACU(`[NativeStBackend] /api/settings/get 返回 ${res.status}，世界书列表暂不可用`);
+                    return null;
+                }
+                const payload = await res.json();
+                const worldNames = Array.isArray(payload?.world_names)
+                    ? payload.world_names.map((n) => String(n))
+                    : [];
+                let charLore = [];
+                try {
+                    const parsed = typeof payload?.settings === 'string' ? JSON.parse(payload.settings) : payload?.settings;
+                    const rawCharLore = parsed?.world_info?.charLore;
+                    if (Array.isArray(rawCharLore)) {
+                        charLore = rawCharLore
+                            .filter((item) => item && typeof item.name === 'string')
+                            .map((item) => ({
+                            name: item.name,
+                            extraBooks: Array.isArray(item.extraBooks) ? item.extraBooks.map((b) => String(b)) : [],
+                        }));
+                    }
+                }
+                catch (e) {
+                    logWarn_ACU('[NativeStBackend] 解析 settings.world_info.charLore 失败，附加世界书降级为空', e);
+                }
+                settingsSnapshot = { worldNames, charLore };
+                settingsSnapshotAt = now;
+                return settingsSnapshot;
+            }
+            catch (e) {
+                logWarn_ACU('[NativeStBackend] 获取 /api/settings/get 失败', e);
+                return null;
+            }
+        }
+        // ═══ 世界书条目 CRUD ═══
+        async function loadBookOrThrow(bookName) {
+            const api = ctx();
+            if (!api || typeof api.loadWorldInfo !== 'function') {
+                throw new Error('SillyTavern loadWorldInfo 接口不可用');
+            }
+            const data = await api.loadWorldInfo(bookName);
+            // 不存在时的文案必须匹配 classifyLorebookReadError_ACU 的中文 not-found 正则
+            if (!data || typeof data !== 'object' || !data.entries) {
+                throw new Error(`世界书 "${bookName}" 不存在`);
+            }
+            return data;
+        }
+        async function saveBook(bookName, data) {
+            const api = ctx();
+            if (!api || typeof api.saveWorldInfo !== 'function') {
+                throw new Error('SillyTavern saveWorldInfo 接口不可用');
+            }
+            await api.saveWorldInfo(bookName, data, true);
+        }
+        function entriesDictToOldArray(data) {
+            const dict = data?.entries ?? {};
+            return Object.keys(dict).map(uid => nativeToOldEntry_ACU(dict[uid]));
+        }
+        async function getLorebookEntries(bookName) {
+            const data = await loadBookOrThrow(bookName);
+            return entriesDictToOldArray(data);
+        }
+        async function setLorebookEntries(bookName, entries) {
+            if (!Array.isArray(entries) || entries.length === 0)
+                return;
+            const data = await loadBookOrThrow(bookName);
+            let changed = false;
+            for (const patch of entries) {
+                const uid = patch?.uid;
+                if (uid === null || uid === undefined || !data.entries[uid]) {
+                    logWarn_ACU(`[NativeStBackend] setLorebookEntries: 世界书 "${bookName}" 中不存在 uid=${String(uid)} 的条目，已跳过`);
+                    continue;
+                }
+                Object.assign(data.entries[uid], oldPatchToNativePatch_ACU(patch));
+                changed = true;
+            }
+            if (changed)
+                await saveBook(bookName, data);
+        }
+        async function createLorebookEntries(bookName, entries) {
+            const data = await loadBookOrThrow(bookName);
+            const existingUids = Object.keys(data.entries).map(Number).filter(Number.isFinite);
+            let nextUid = existingUids.length > 0 ? Math.max(...existingUids) + 1 : 0;
+            const newUids = [];
+            for (const patch of Array.isArray(entries) ? entries : []) {
+                const uid = nextUid++;
+                data.entries[uid] = {
+                    uid,
+                    ...buildNativeEntryDefaults_ACU(),
+                    ...oldPatchToNativePatch_ACU(patch ?? {}),
+                    displayIndex: uid,
+                };
+                newUids.push(uid);
+            }
+            if (newUids.length > 0)
+                await saveBook(bookName, data);
+            return { entries: entriesDictToOldArray(data), new_uids: newUids };
+        }
+        async function deleteLorebookEntries(bookName, uids) {
+            const data = await loadBookOrThrow(bookName);
+            let deleteOccurred = false;
+            for (const uid of Array.isArray(uids) ? uids : []) {
+                if (data.entries[uid]) {
+                    delete data.entries[uid];
+                    deleteOccurred = true;
+                }
+            }
+            if (deleteOccurred)
+                await saveBook(bookName, data);
+            return { entries: entriesDictToOldArray(data), delete_occurred: deleteOccurred };
+        }
+        // ═══ 世界书列表与角色绑定 ═══
+        async function getLorebooks() {
+            const snapshot = await fetchSettingsSnapshot();
+            return snapshot?.worldNames ?? [];
+        }
+        function resolveCharacter(characterName) {
+            const api = ctx();
+            const characters = api?.characters;
+            if (!Array.isArray(characters))
+                return null;
+            if (!characterName || characterName === 'current') {
+                const chid = api?.characterId ?? api?.this_chid;
+                if (chid === undefined || chid === null || chid === '')
+                    return null;
+                return characters[Number(chid)] ?? null;
+            }
+            return characters.find((c) => c?.name === characterName || c?.avatar === characterName) ?? null;
+        }
+        async function getCharWorldbookNames(characterName) {
+            const character = resolveCharacter(characterName);
+            if (!character)
+                return { primary: null, additional: [] };
+            const primary = typeof character?.data?.extensions?.world === 'string' && character.data.extensions.world
+                ? character.data.extensions.world
+                : null;
+            let additional = [];
+            const avatar = typeof character?.avatar === 'string' ? character.avatar : '';
+            if (avatar) {
+                const avatarBase = avatar.replace(/\.[^.]+$/, '');
+                const snapshot = await fetchSettingsSnapshot();
+                const loreEntry = snapshot?.charLore?.find(item => item.name === avatarBase);
+                additional = loreEntry?.extraBooks ?? [];
+            }
+            return { primary, additional };
+        }
+        async function getCharLorebooks(options = {}) {
+            const binding = await getCharWorldbookNames(options.name ?? 'current');
+            const type = options.type ?? 'all';
+            if (type === 'primary')
+                return { primary: binding.primary, additional: [] };
+            if (type === 'additional')
+                return { primary: null, additional: binding.additional };
+            return binding;
+        }
+        async function getCurrentCharPrimaryLorebook() {
+            return (await getCharWorldbookNames('current')).primary;
+        }
+        // ═══ 聊天消息 ═══
+        function getChatArray() {
+            const api = ctx();
+            return Array.isArray(api?.chat) ? api.chat : [];
+        }
+        function getLastMessageId() {
+            return getChatArray().length - 1;
+        }
+        function mapChatMessage(msg, index, includeSwipes) {
+            const isUser = msg?.is_user === true;
+            const isSystem = msg?.is_system === true;
+            const swipeId = typeof msg?.swipe_id === 'number' ? msg.swipe_id : 0;
+            const base = {
+                message_id: index,
+                name: typeof msg?.name === 'string' ? msg.name : '',
+                role: isUser ? 'user' : isSystem ? 'system' : 'assistant',
+                is_user: isUser,
+                is_system: isSystem,
+                is_hidden: isSystem,
+                message: typeof msg?.mes === 'string' ? msg.mes : '',
+                data: (Array.isArray(msg?.variables) ? msg.variables[swipeId] : msg?.variables) ?? {},
+                extra: msg?.extra ?? {},
+            };
+            if (includeSwipes) {
+                base.swipe_id = swipeId;
+                base.swipes = Array.isArray(msg?.swipes) ? msg.swipes : [base.message];
+                base.swipes_data = Array.isArray(msg?.variables) ? msg.variables : [];
+                base.swipes_info = Array.isArray(msg?.swipe_info) ? msg.swipe_info : [];
+            }
+            return base;
+        }
+        function parseRange(range, lastId) {
+            if (range === undefined || range === null || range === '')
+                return [0, lastId];
+            const normalize = (value) => (value < 0 ? lastId + 1 + value : value);
+            if (typeof range === 'number') {
+                const idx = normalize(range);
+                return [idx, idx];
+            }
+            const text = String(range).replace(/\{\{lastMessageId\}\}/gi, String(lastId)).trim();
+            // 允许负数端点：匹配 "a-b"（a、b 可带负号）
+            const rangeMatch = text.match(/^(-?\d+)\s*-\s*(-?\d+)$/);
+            if (rangeMatch) {
+                return [normalize(Number(rangeMatch[1])), normalize(Number(rangeMatch[2]))];
+            }
+            const single = Number(text);
+            if (Number.isFinite(single)) {
+                const idx = normalize(single);
+                return [idx, idx];
+            }
+            return null;
+        }
+        async function getChatMessages(range, options = {}) {
+            const chatArray = getChatArray();
+            const lastId = chatArray.length - 1;
+            if (lastId < 0)
+                return [];
+            const parsed = parseRange(range, lastId);
+            if (!parsed) {
+                logWarn_ACU(`[NativeStBackend] getChatMessages: 无法解析 range "${String(range)}"，返回空数组`);
+                return [];
+            }
+            const [start, end] = parsed;
+            const from = Math.max(0, Math.min(start, end));
+            const to = Math.min(lastId, Math.max(start, end));
+            const includeSwipes = options.include_swipes === true;
+            const result = [];
+            for (let i = from; i <= to; i++) {
+                const mapped = mapChatMessage(chatArray[i], i, includeSwipes);
+                if (options.role && options.role !== 'all' && mapped.role !== options.role)
+                    continue;
+                if (options.hide_state === 'hidden' && !mapped.is_hidden)
+                    continue;
+                if (options.hide_state === 'unhidden' && mapped.is_hidden)
+                    continue;
+                result.push(mapped);
+            }
+            return result;
+        }
+        // ═══ 其他 ═══
+        async function triggerSlash(command) {
+            const api = ctx();
+            if (!api || typeof api.executeSlashCommandsWithOptions !== 'function') {
+                throw new Error('SillyTavern executeSlashCommandsWithOptions 接口不可用');
+            }
+            const result = await api.executeSlashCommandsWithOptions(command);
+            return typeof result?.pipe === 'string' ? result.pipe : '';
+        }
+        function getCharData(target = 'current') {
+            return resolveCharacter(target);
+        }
+        function isUsable() {
+            const api = ctx();
+            return !!(api
+                && typeof api.loadWorldInfo === 'function'
+                && typeof api.saveWorldInfo === 'function'
+                && typeof api.executeSlashCommandsWithOptions === 'function');
+        }
+        logDebug_ACU('[NativeStBackend] 原生 SillyTavern 后端已创建');
+        return {
+            getLorebooks,
+            getLorebookEntries,
+            setLorebookEntries,
+            createLorebookEntries,
+            deleteLorebookEntries,
+            getCharWorldbookNames,
+            getCharLorebooks,
+            getCurrentCharPrimaryLorebook,
+            getChatMessages,
+            getLastMessageId,
+            triggerSlash,
+            getCharData,
+            isUsable,
+            invalidateSettingsSnapshot,
+        };
+    }
+
+    /**
+     * shared/host-compat/tavern-helper-compat.ts — TavernHelper 兼容适配器
+     *
+     * 对外暴露代码库消费的旧版扁平方法面（getLorebookEntries 等 13 个方法），
+     * 内部逐方法按三级择优解析后端：
+     * - passthrough：宿主对象上存在同名函数（旧版酒馆助手 iframe 全量 API，
+     *   或新旧共用名如 getChatMessages/triggerSlash），直接透传——油猴模式行为零变化。
+     * - mapped：宿主对象只有新版改名 API（getWorldbook/replaceWorldbook 系），
+     *   包装参数与条目格式转换后调用。
+     * - native：宿主完全没有酒馆助手，落到 SillyTavern 原生后端。
+     *
+     * generateRaw 没有原生等价实现：两级不中则不挂载该方法，
+     * 保持"方法缺失"语义，让 isGenerateRawAvailable_ACU 等既有检查自然生效。
+     */
+    /** 最近一次构建的能力表，供初始化失败分支输出诊断 */
+    let lastCapabilities_ACU = null;
+    function getLastHostCapabilities_ACU() {
+        return lastCapabilities_ACU;
+    }
+    /** 生成人类可读的能力诊断文本（缺失项排前） */
+    function formatHostCapabilities_ACU(capabilities) {
+        if (!capabilities)
+            return '（能力表尚未生成）';
+        const missing = Object.entries(capabilities).filter(([, backend]) => backend === 'missing').map(([name]) => name);
+        const resolved = Object.entries(capabilities)
+            .filter(([, backend]) => backend !== 'missing')
+            .map(([name, backend]) => `${name}=${backend}`);
+        const parts = [];
+        if (missing.length > 0)
+            parts.push(`缺失: ${missing.join(', ')}`);
+        if (resolved.length > 0)
+            parts.push(`已解析: ${resolved.join(', ')}`);
+        return parts.join('；') || '（空能力表）';
+    }
+    function hasFn_ACU(obj, name) {
+        return !!obj && typeof obj[name] === 'function';
+    }
+    /** 把新版嵌套 partial patch 合并进新版完整条目（保持未指定字段不变） */
+    function mergeNewEntryPatch_ACU(entry, patch) {
+        const merged = { ...entry };
+        for (const [key, value] of Object.entries(patch)) {
+            if (key === 'strategy' || key === 'position' || key === 'recursion' || key === 'effect') {
+                const sub = { ...(entry?.[key] ?? {}), ...value };
+                if (key === 'strategy' && value?.keys_secondary) {
+                    sub.keys_secondary = { ...(entry?.strategy?.keys_secondary ?? {}), ...value.keys_secondary };
+                }
+                merged[key] = sub;
+            }
+            else {
+                merged[key] = value;
+            }
+        }
+        return merged;
+    }
+    /**
+     * 构建 TavernHelper 兼容适配器。
+     * @param rawTH 宿主环境探测到的原始 TavernHelper 对象（可能为 undefined）
+     * @param getStApi 返回 SillyTavern context 的闭包（原生后端使用）
+     */
+    function buildTavernHelperCompat_ACU(rawTH, getStApi) {
+        const native = createNativeStBackend_ACU(getStApi);
+        const nativeUsable = native.isUsable();
+        const capabilities = {};
+        // 先透传原始对象的全部属性（未在下方显式适配的方法保持原样）
+        const api = { ...(rawTH && typeof rawTH === 'object' ? rawTH : {}) };
+        /** 按 passthrough → mapped → native 择优挂载一个方法 */
+        function resolve(name, mappedImpl, nativeImpl) {
+            if (hasFn_ACU(rawTH, name)) {
+                api[name] = rawTH[name].bind(rawTH);
+                capabilities[name] = 'passthrough';
+                return;
+            }
+            if (mappedImpl) {
+                const impl = mappedImpl();
+                if (impl) {
+                    api[name] = impl;
+                    capabilities[name] = 'mapped';
+                    return;
+                }
+            }
+            if (nativeImpl && nativeUsable) {
+                api[name] = nativeImpl;
+                capabilities[name] = 'native';
+                return;
+            }
+            capabilities[name] = 'missing';
+            delete api[name];
+        }
+        // ═══ 世界书条目 CRUD ═══
+        resolve('getLorebookEntries', () => hasFn_ACU(rawTH, 'getWorldbook')
+            ? async (bookName) => {
+                const worldbook = await rawTH.getWorldbook(bookName);
+                return (Array.isArray(worldbook) ? worldbook : []).map((entry, index) => newToOldEntry_ACU(entry, index));
+            }
+            : null, (bookName) => native.getLorebookEntries(bookName));
+        resolve('setLorebookEntries', () => hasFn_ACU(rawTH, 'updateWorldbookWith')
+            ? async (bookName, entries) => {
+                if (!Array.isArray(entries) || entries.length === 0)
+                    return;
+                const patchByUid = new Map();
+                for (const patch of entries) {
+                    if (patch && patch.uid !== undefined && patch.uid !== null) {
+                        patchByUid.set(Number(patch.uid), oldPatchToNewPatch_ACU(patch));
+                    }
+                }
+                await rawTH.updateWorldbookWith(bookName, (worldbook) => worldbook.map(entry => {
+                    const patch = patchByUid.get(Number(entry?.uid));
+                    return patch ? mergeNewEntryPatch_ACU(entry, patch) : entry;
+                }));
+            }
+            : null, (bookName, entries) => native.setLorebookEntries(bookName, entries));
+        resolve('createLorebookEntries', () => hasFn_ACU(rawTH, 'createWorldbookEntries')
+            ? async (bookName, entries) => {
+                const payload = (Array.isArray(entries) ? entries : []).map(patch => oldPatchToNewPatch_ACU(patch ?? {}));
+                const result = await rawTH.createWorldbookEntries(bookName, payload);
+                const worldbook = Array.isArray(result?.worldbook) ? result.worldbook : [];
+                const newEntries = Array.isArray(result?.new_entries) ? result.new_entries : [];
+                return {
+                    entries: worldbook.map((entry, index) => newToOldEntry_ACU(entry, index)),
+                    new_uids: newEntries.map((entry) => Number(entry?.uid)).filter(Number.isFinite),
+                };
+            }
+            : null, (bookName, entries) => native.createLorebookEntries(bookName, entries));
+        resolve('deleteLorebookEntries', () => hasFn_ACU(rawTH, 'deleteWorldbookEntries')
+            ? async (bookName, uids) => {
+                const uidSet = new Set((Array.isArray(uids) ? uids : []).map(Number));
+                const result = await rawTH.deleteWorldbookEntries(bookName, (entry) => uidSet.has(Number(entry?.uid)));
+                const worldbook = Array.isArray(result?.worldbook) ? result.worldbook : [];
+                const deleted = Array.isArray(result?.deleted_entries) ? result.deleted_entries : [];
+                return {
+                    entries: worldbook.map((entry, index) => newToOldEntry_ACU(entry, index)),
+                    delete_occurred: deleted.length > 0,
+                };
+            }
+            : null, (bookName, uids) => native.deleteLorebookEntries(bookName, uids));
+        // ═══ 世界书列表与角色绑定 ═══
+        resolve('getLorebooks', () => hasFn_ACU(rawTH, 'getWorldbookNames')
+            ? () => rawTH.getWorldbookNames()
+            : null, () => native.getLorebooks());
+        resolve('getCurrentCharPrimaryLorebook', () => hasFn_ACU(rawTH, 'getCharWorldbookNames')
+            ? async () => {
+                const binding = await rawTH.getCharWorldbookNames('current');
+                return typeof binding?.primary === 'string' && binding.primary ? binding.primary : null;
+            }
+            : null, () => native.getCurrentCharPrimaryLorebook());
+        resolve('getCharLorebooks', () => hasFn_ACU(rawTH, 'getCharWorldbookNames')
+            ? async (options = {}) => {
+                const binding = await rawTH.getCharWorldbookNames(options?.name ?? 'current');
+                const primary = typeof binding?.primary === 'string' && binding.primary ? binding.primary : null;
+                const additional = Array.isArray(binding?.additional) ? binding.additional : [];
+                const type = options?.type ?? 'all';
+                if (type === 'primary')
+                    return { primary, additional: [] };
+                if (type === 'additional')
+                    return { primary: null, additional };
+                return { primary, additional };
+            }
+            : null, (options) => native.getCharLorebooks(options));
+        resolve('getCharWorldbookNames',
+        // 宿主只有旧版 getCharLorebooks 时反向映射为新版签名
+        () => hasFn_ACU(rawTH, 'getCharLorebooks')
+            ? async (characterName) => {
+                const options = characterName && characterName !== 'current' ? { name: characterName, type: 'all' } : { type: 'all' };
+                const binding = await rawTH.getCharLorebooks(options);
+                return {
+                    primary: typeof binding?.primary === 'string' && binding.primary ? binding.primary : null,
+                    additional: Array.isArray(binding?.additional) ? binding.additional : [],
+                };
+            }
+            : null, (characterName) => native.getCharWorldbookNames(characterName));
+        // ═══ 聊天 / Slash / 角色数据（新旧酒馆助手同名，直接透传或原生兜底） ═══
+        resolve('getChatMessages', null, (range, options) => native.getChatMessages(range, options));
+        resolve('getLastMessageId', null, () => native.getLastMessageId());
+        resolve('triggerSlash', null, (command) => native.triggerSlash(command));
+        resolve('getCharData', null, (target) => native.getCharData(target));
+        // generateRaw：原生 context 无等价实现，仅透传，缺失时保持缺失语义
+        resolve('generateRaw', null, null);
+        lastCapabilities_ACU = capabilities;
+        logDebug_ACU(`[HostCompat] TavernHelper 兼容适配器已构建：${formatHostCapabilities_ACU(capabilities)}`);
+        return { api, capabilities };
+    }
+
     async function fetchModelsAndConnect_ACU() {
         if (!$popupInstance_ACU ||
             !$customApiUrlInput_ACU ||
@@ -99618,7 +100501,11 @@ $CONTENT
         // TavernHelper/jQuery/toastr 同理：优先 iframe 自身，fallback 到 parent
         const iframeTH = typeof window.TavernHelper !== 'undefined' ? window.TavernHelper : undefined;
         const parentTH = typeof hostWin.TavernHelper !== 'undefined' ? hostWin.TavernHelper : undefined;
-        _set_TavernHelper_API_ACU(iframeTH || parentTH);
+        // 三级兼容适配：旧版扁平 API 透传 → 新版改名 API 映射 → SillyTavern 原生实现。
+        // 覆盖三种宿主形态：油猴脚本 iframe（旧版全量）、插件+新版酒馆助手（改名/部分导出）、
+        // 插件独立运行（无酒馆助手）。
+        const tavernHelperCompat = buildTavernHelperCompat_ACU(iframeTH || parentTH, () => stApi);
+        _set_TavernHelper_API_ACU(tavernHelperCompat.api);
         const iframe$ = typeof window.$ !== 'undefined' ? window.$ : undefined;
         const parent$ = typeof hostWin.$ !== 'undefined' ? hostWin.$ : undefined;
         _set_jQuery_API_ACU(iframe$ || parent$);
@@ -99633,10 +100520,25 @@ $CONTENT
             typeof TavernHelper_API_ACU.triggerSlash === 'function'));
         if (!toastr_API_ACU)
             logWarn_ACU('toastr_API_ACU is MISSING.');
-        if (coreApisAreReady_ACU)
+        if (coreApisAreReady_ACU) {
             logDebug_ACU('Core APIs successfully loaded/verified for AutoCardUpdater.');
-        else
-            logError_ACU('Failed to load one or more critical APIs for AutoCardUpdater.');
+        }
+        else {
+            // 逐项列出缺失能力（不依赖 Debug 开关，console.error 保证在运行日志中可见）
+            const missingParts = [];
+            if (!SillyTavern_API_ACU)
+                missingParts.push('SillyTavern API');
+            if (!jQuery_API_ACU)
+                missingParts.push('jQuery');
+            const th = TavernHelper_API_ACU;
+            for (const method of ['getChatMessages', 'getLastMessageId', 'getCurrentCharPrimaryLorebook', 'getLorebookEntries', 'triggerSlash']) {
+                if (!th || typeof th[method] !== 'function')
+                    missingParts.push(`TavernHelper.${method}`);
+            }
+            const diagnostics = `缺失项: [${missingParts.join(', ')}]；宿主能力: ${formatHostCapabilities_ACU(tavernHelperCompat.capabilities)}`;
+            logError_ACU(`Failed to load one or more critical APIs for AutoCardUpdater. ${diagnostics}`);
+            console.error(`[SP·数据库] 核心API加载失败。${diagnostics}`);
+        }
         return coreApisAreReady_ACU;
     }
     // [触发修复] GENERATION_ENDED 后 AI 楼层有界物化等待常量
@@ -104335,6 +105237,15 @@ $CONTENT
     }
 
     const CONTINUATION_SCHEMA_VERSION_ACU = 1;
+    /**
+     * 用户点「继续」即可从当前轮次恢复的停止原因。
+     * 这四类都是「环境或产出问题，任务本身还能走」：manual 是用户手停；state_invalid 是宿主正文
+     * 归属失败（如生成报错、楼层无法唯一归属）；host_input_unavailable 是酒馆输入框暂时不可用；
+     * generation_retry_exhausted 是自动重试用完——用户显式点继续等于手动追加一次重试。
+     * 不在集合内的保持不可继续：duration_reached / stage_limit_reached 是用户设定的上限（放行会
+     * 立刻再次触发停止），completed 是终态，其余枚举值当前无赋值点，按保守处理。
+     */
+    const CONTINUATION_RECOVERABLE_STOP_REASONS_ACU = ['manual', 'state_invalid', 'host_input_unavailable', 'generation_retry_exhausted'];
     class ContinuationValidationError_ACU extends Error {
         constructor(error) {
             super(error.message);
@@ -105170,7 +106081,7 @@ $CONTENT
     const REVISION_REASONS_ACU = ['initial', 'auto_next_stage', 'manual_replan'];
     const STOP_REASONS_ACU = ['manual', 'duration_reached', 'stage_limit_reached', 'outline_validation_failed', 'internal_ai_retry_exhausted', 'generation_retry_exhausted', 'host_input_unavailable', 'api_preset_missing', 'state_invalid', 'chat_changed', 'completed'];
     const ERROR_PHASES_ACU = ['load', 'persist', 'outline_prompt', 'outline_call', 'outline_parse', 'outline_validate', 'turn_prompt', 'turn_call', 'host_send', 'generation_evaluate', 'replan', 'agent_loop', 'agent_delegate', 'agent_persist'];
-    const ERROR_CODES_ACU = ['CONTINUATION_CONFIG_MISSING', 'CONTINUATION_CONFIG_NOT_INTEGER', 'CONTINUATION_CONFIG_OUT_OF_RANGE', 'CONTINUATION_STAGE_SIZE_INVALID', 'CONTINUATION_CUSTOM_RANGE_INVALID', 'CONTINUATION_ENVELOPE_INVALID', 'CONTINUATION_CHAT_UNAVAILABLE', 'CONTINUATION_CHAT_CHANGED', 'CONTINUATION_WRITE_GUARD_MISMATCH', 'CONTINUATION_PERSIST_FAILED', 'CONTINUATION_PROMPT_INVALID', 'CONTINUATION_PROMPT_EMPTY', 'CONTINUATION_API_PRESET_MISSING', 'CONTINUATION_MIGRATION_INVALID', 'CONTINUATION_OUTLINE_NOT_OBJECT', 'CONTINUATION_OUTLINE_UNKNOWN_FIELD', 'CONTINUATION_OUTLINE_FIELD_MISSING', 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'CONTINUATION_OUTLINE_STRING_EMPTY', 'CONTINUATION_OUTLINE_SCHEMA_VERSION_INVALID', 'CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE', 'CONTINUATION_OUTLINE_NODES_EMPTY', 'CONTINUATION_OUTLINE_NODE_ID_DUPLICATE', 'CONTINUATION_OUTLINE_TURN_ID_DUPLICATE', 'CONTINUATION_OUTLINE_SUGGESTED_TURNS_INVALID', 'CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH', 'CONTINUATION_OUTLINE_TOTAL_TURNS_MISMATCH', 'CONTINUATION_REPLAN_CONTEXT_INVALID', 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED', 'CONTINUATION_OUTLINE_JSON_INVALID', 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'CONTINUATION_OUTLINE_RETRY_EXHAUSTED', 'CONTINUATION_REVISION_FROZEN', 'CONTINUATION_TURN_INSTRUCTION_EMPTY', 'CONTINUATION_TURN_INSTRUCTION_RETRY_EXHAUSTED', 'CONTINUATION_INTERNAL_REQUEST_STALE', 'CONTINUATION_OPERATION_BUSY', 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY', 'CONTINUATION_TASK_NOT_FOUND', 'CONTINUATION_TASK_STATE_INVALID', 'CONTINUATION_HOST_INPUT_UNAVAILABLE', 'CONTINUATION_GENERATION_TAGS_MISSING', 'CONTINUATION_AGENT_PROTOCOL_INVALID', 'CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', 'CONTINUATION_AGENT_BLOCKED', 'CONTINUATION_AGENT_SUBAGENT_FAILED', 'CONTINUATION_AGENT_WRITE_REJECTED', 'CONTINUATION_AGENT_OUTLINE_REPLANNED', 'CONTINUATION_AGENT_SNAPSHOT_INVALID'];
+    const ERROR_CODES_ACU = ['CONTINUATION_CONFIG_MISSING', 'CONTINUATION_CONFIG_NOT_INTEGER', 'CONTINUATION_CONFIG_OUT_OF_RANGE', 'CONTINUATION_STAGE_SIZE_INVALID', 'CONTINUATION_CUSTOM_RANGE_INVALID', 'CONTINUATION_ENVELOPE_INVALID', 'CONTINUATION_CHAT_UNAVAILABLE', 'CONTINUATION_CHAT_CHANGED', 'CONTINUATION_WRITE_GUARD_MISMATCH', 'CONTINUATION_PERSIST_FAILED', 'CONTINUATION_PROMPT_INVALID', 'CONTINUATION_PROMPT_EMPTY', 'CONTINUATION_API_PRESET_MISSING', 'CONTINUATION_MIGRATION_INVALID', 'CONTINUATION_OUTLINE_NOT_OBJECT', 'CONTINUATION_OUTLINE_UNKNOWN_FIELD', 'CONTINUATION_OUTLINE_FIELD_MISSING', 'CONTINUATION_OUTLINE_FIELD_TYPE_INVALID', 'CONTINUATION_OUTLINE_STRING_EMPTY', 'CONTINUATION_OUTLINE_SCHEMA_VERSION_INVALID', 'CONTINUATION_OUTLINE_TOTAL_TURNS_OUT_OF_RANGE', 'CONTINUATION_OUTLINE_NODES_EMPTY', 'CONTINUATION_OUTLINE_NODE_ID_DUPLICATE', 'CONTINUATION_OUTLINE_TURN_ID_DUPLICATE', 'CONTINUATION_OUTLINE_SUGGESTED_TURNS_INVALID', 'CONTINUATION_OUTLINE_NODE_TURN_COUNT_MISMATCH', 'CONTINUATION_OUTLINE_TOTAL_TURNS_MISMATCH', 'CONTINUATION_REPLAN_CONTEXT_INVALID', 'CONTINUATION_REPLAN_COMPLETED_PREFIX_CHANGED', 'CONTINUATION_OUTLINE_JSON_INVALID', 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED', 'CONTINUATION_OUTLINE_RETRY_EXHAUSTED', 'CONTINUATION_REVISION_FROZEN', 'CONTINUATION_TURN_INSTRUCTION_EMPTY', 'CONTINUATION_TURN_INSTRUCTION_RETRY_EXHAUSTED', 'CONTINUATION_INTERNAL_REQUEST_STALE', 'CONTINUATION_OPERATION_BUSY', 'CONTINUATION_ORIGIN_INSTRUCTION_EMPTY', 'CONTINUATION_TASK_NOT_FOUND', 'CONTINUATION_TASK_STATE_INVALID', 'CONTINUATION_HOST_INPUT_UNAVAILABLE', 'CONTINUATION_GENERATION_TAGS_MISSING', 'CONTINUATION_GENERATION_FAILED', 'CONTINUATION_AGENT_PROTOCOL_INVALID', 'CONTINUATION_AGENT_ITERATIONS_EXHAUSTED', 'CONTINUATION_AGENT_BLOCKED', 'CONTINUATION_AGENT_SUBAGENT_FAILED', 'CONTINUATION_AGENT_WRITE_REJECTED', 'CONTINUATION_AGENT_OUTLINE_REPLANNED', 'CONTINUATION_AGENT_SNAPSHOT_INVALID'];
     const TIMELINE_KINDS_ACU = ['task_created', 'outline_ready', 'turn_sent', 'turn_completed', 'turn_retry', 'stage_completed', 'paused', 'stopped', 'failed'];
     function isRecord_ACU$6(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -105278,6 +106189,15 @@ $CONTENT
                 return numeric;
         }
         fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'settings.agentReadTokenBudget 必须是正整数或 1%-100% 百分比');
+    }
+    /**
+     * 校验一份独立的续写设置（信封之外的来源，如全局设置副本）。
+     * 复用信封同一套校验：含历史字段无感迁移与提示词版本强刷，旧格式副本读出来即是当前版本。
+     * @param raw 待校验的设置对象（会被就地迁移，调用方应传入深拷贝）
+     * @returns 校验通过的完整设置
+     */
+    function validateContinuationSettings_ACU(raw) {
+        return validateSettings_ACU(raw);
     }
     function validateSettings_ACU(raw) {
         if (!isRecord_ACU$6(raw))
@@ -105656,8 +106576,8 @@ $CONTENT
         return value.filter(isRecord_ACU$6).flatMap(rule => typeof rule.start === 'string' && typeof rule.end === 'string' ? [{ start: rule.start, end: rule.end }] : []);
     }
     /** One-way migration: retained settings only; prompt rotation fields are intentionally excluded. */
-    function buildLegacyContinuationMigration_ACU(legacyPlotSettings) {
-        const settings = buildDefaultContinuationSettings_ACU();
+    function buildLegacyContinuationMigration_ACU(legacyPlotSettings, baseSettings) {
+        const settings = baseSettings ?? buildDefaultContinuationSettings_ACU();
         if (!isRecord_ACU$6(legacyPlotSettings))
             return { settings, didMigrate: false };
         const loopSettings = isRecord_ACU$6(legacyPlotSettings.loopSettings) ? legacyPlotSettings.loopSettings : {};
@@ -105672,8 +106592,8 @@ $CONTENT
         return { settings, didMigrate: true };
     }
     /** Builds a first-floor candidate from the explicitly supplied legacy plot settings. */
-    function buildMigratedContinuationEnvelope_ACU(legacyPlotSettings) {
-        const migration = buildLegacyContinuationMigration_ACU(legacyPlotSettings);
+    function buildMigratedContinuationEnvelope_ACU(legacyPlotSettings, baseSettings) {
+        const migration = buildLegacyContinuationMigration_ACU(legacyPlotSettings, baseSettings);
         return {
             envelope: { schemaVersion: CONTINUATION_SCHEMA_VERSION_ACU, settings: migration.settings, activeTask: null },
             didMigrate: migration.didMigrate,
@@ -107117,6 +108037,8 @@ $CONTENT
                     result = { ...envelope, settings: input.settings };
                     return result;
                 }, { chatIdentity });
+                // 镜像到全局副本（尽力而为）：本聊天信封已落盘成功，全局写失败由回调内部处理，不上抛。
+                this.dependencies.onSettingsReplaced?.(input.settings);
                 return result;
             });
         }
@@ -107132,15 +108054,17 @@ $CONTENT
                     if (staleAwaitingTurn && this.dependencies.hasLiveHostClaim?.(chatIdentity)) {
                         fail_ACU$1('CONTINUATION_OPERATION_BUSY', '当前轮次正在等待宿主生成结果');
                     }
-                    if (task.pendingHostTurn?.status === 'exhausted')
-                        fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前轮次正文重试已耗尽');
                     if (task.status === 'awaiting_outline_review' || task.status === 'stopping_after_inflight' || task.status === 'abandoned' || task.status === 'completed' || task.status === 'failed') {
                         fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '当前任务不可继续');
                     }
-                    // 手动停止允许从当前进度恢复；其余停止原因（时长/阶段上限、重试耗尽等）仍不可继续。
-                    if (task.stopReason !== null && task.stopReason !== 'manual') {
+                    // 可恢复的停止（手停、正文归属失败、输入不可用、重试耗尽）允许从当前进度恢复；
+                    // 终局停止（时长/阶段上限、completed）仍不可继续——放行只会立刻再次触发停止。
+                    if (task.stopReason !== null && !CONTINUATION_RECOVERABLE_STOP_REASONS_ACU.includes(task.stopReason)) {
                         fail_ACU$1('CONTINUATION_TASK_STATE_INVALID', '已停止的任务不可继续');
                     }
+                    // exhausted 的等待轮是已作废的尝试（归属失败或重试耗尽时落下的）：用户显式继续即
+                    // 从同一轮次重新出发，清掉它重新准备指令；轮次游标未 confirm 过，不会跳轮或重复计数。
+                    const exhaustedTurn = task.pendingHostTurn?.status === 'exhausted';
                     // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）都可以进循环，由主 Agent 派工大纲子代理处理。
                     const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
                     if (stage && stage.status !== 'completed' && (stage.status !== 'running' || !getActiveRevision_ACU(stage).frozen)) {
@@ -107152,7 +108076,7 @@ $CONTENT
                         return started;
                     }
                     const deadlineAt = task.deadlineAt ?? (envelope.settings.totalDurationMinutes > 0 ? now + envelope.settings.totalDurationMinutes * 60000 : null);
-                    started = { ...envelope, activeTask: { ...task, status: 'running', runStartedAt: task.runStartedAt ?? now, deadlineAt, stopReason: null, lastError: null, updatedAt: now, ...(staleAwaitingTurn ? { pendingHostTurn: null } : {}) } };
+                    started = { ...envelope, activeTask: { ...task, status: 'running', runStartedAt: task.runStartedAt ?? now, deadlineAt, stopReason: null, lastError: null, updatedAt: now, ...(staleAwaitingTurn || exhaustedTurn ? { pendingHostTurn: null } : {}) } };
                     return started;
                 }, { chatIdentity });
                 const task = started.activeTask;
@@ -107263,8 +108187,30 @@ $CONTENT
             return this.pauseHostTurn_ACU(identity, 'CONTINUATION_TASK_STATE_INVALID', '宿主正文无法唯一归属当前轮次', 'state_invalid');
         }
         async rejectHostTurnForMissingTags(input) {
+            const error = createContinuationError_ACU('CONTINUATION_GENERATION_TAGS_MISSING', 'generation_evaluate', '宿主正文缺少必需标签', true, { messageIndex: input.messageIndex });
+            return this.rejectHostTurnAttempt_ACU(input.identity, error, input.messageIndex);
+        }
+        /**
+         * 宿主生成失败或未产出正文（GENERATION_ENDED 到达但没有可归属的新 AI 楼层，典型如
+         * 后端 API 报错）：与标签缺失同构地消耗一次重试额度并转 retry_ready，由桥按重试
+         * 延迟自动重发当前轮；额度耗尽落 generation_retry_exhausted（可手动继续恢复）。
+         * 没有楼层被写入宿主，重发不会产生重复正文。
+         */
+        async rejectHostTurnForFailedGeneration(identity) {
+            const error = createContinuationError_ACU('CONTINUATION_GENERATION_FAILED', 'generation_evaluate', '宿主生成失败或未产出正文，将自动重试当前轮次', true);
+            return this.rejectHostTurnAttempt_ACU(identity, error);
+        }
+        /**
+         * 登记一次失败的正文尝试（标签缺失 / 生成失败共用的事务核心）：
+         * 未达 generationRetryLimit 时 retryCount+1 并转 retry_ready（桥读到后自动重发）；
+         * 达到上限时落 generation_retry_exhausted + exhausted（可手动继续恢复）。
+         * @param identity 当前轮次尝试身份
+         * @param error 本次失败的错误对象（retryable=true，耗尽时改写为 false）
+         * @param messageIndex 失败正文的楼层号；生成未产出楼层时省略
+         */
+        async rejectHostTurnAttempt_ACU(identity, error, messageIndex) {
             const chatIdentity = this.requireChatIdentity_ACU();
-            if (input.identity.chatIdentity !== chatIdentity) {
+            if (identity.chatIdentity !== chatIdentity) {
                 throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文结果所属聊天已变化', false));
             }
             return this.withLease_ACU(async () => {
@@ -107273,16 +108219,16 @@ $CONTENT
                     const envelope = this.requireEnvelope_ACU(current);
                     const task = this.requireTask_ACU(envelope);
                     const pending = task.pendingHostTurn;
-                    if (task.status !== 'running' || !pending || pending.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, input.identity)) {
-                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '标签校验结果已不属于当前轮次', false));
+                    if (task.status !== 'running' || !pending || pending.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(task, identity)) {
+                        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文失败登记已不属于当前轮次', false));
                     }
                     const now = this.dependencies.now();
-                    const error = createContinuationError_ACU('CONTINUATION_GENERATION_TAGS_MISSING', 'generation_evaluate', '宿主正文缺少必需标签', true, { messageIndex: input.messageIndex });
+                    const timelineFields = { stageId: identity.stageId, revision: identity.revision, nodeId: identity.nodeId, turnId: identity.turnId, attemptId: identity.attemptId, ...(messageIndex !== undefined ? { messageIndex } : {}), errorCode: error.code };
                     if (pending.retryCount >= envelope.settings.generationRetryLimit) {
-                        result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: 'generation_retry_exhausted', lastError: { ...error, retryable: false }, pendingHostTurn: { ...pending, status: 'exhausted' }, timeline: [...task.timeline, this.timeline_ACU('failed', now, { stageId: input.identity.stageId, revision: input.identity.revision, nodeId: input.identity.nodeId, turnId: input.identity.turnId, attemptId: input.identity.attemptId, messageIndex: input.messageIndex, errorCode: error.code })] } };
+                        result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: 'generation_retry_exhausted', lastError: { ...error, retryable: false }, pendingHostTurn: { ...pending, status: 'exhausted' }, timeline: [...task.timeline, this.timeline_ACU('failed', now, timelineFields)] } };
                         return result;
                     }
-                    result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, lastError: error, pendingHostTurn: { ...pending, retryCount: pending.retryCount + 1, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, { stageId: input.identity.stageId, revision: input.identity.revision, nodeId: input.identity.nodeId, turnId: input.identity.turnId, attemptId: input.identity.attemptId, messageIndex: input.messageIndex, errorCode: error.code })] } };
+                    result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, lastError: error, pendingHostTurn: { ...pending, retryCount: pending.retryCount + 1, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, timelineFields)] } };
                     return result;
                 }, { chatIdentity });
                 return taskResult_ACU(result);
@@ -107755,12 +108701,16 @@ $CONTENT
         planningSummary_ACU(result) {
             return { attempts: result.attempts, apiPreset: result.apiPreset, requiresReview: result.requiresReview };
         }
+        /** 无信封聊天的初始设置：优先全局设置副本（由运行时装配），缺省内置默认。 */
+        fallbackSettings_ACU() {
+            return this.dependencies.buildFallbackSettings?.() ?? buildDefaultContinuationSettings_ACU();
+        }
         baseEnvelope_ACU() {
-            return this.dependencies.store.readPersisted() ?? { schemaVersion: 1, settings: buildDefaultContinuationSettings_ACU(), activeTask: null };
+            return this.dependencies.store.readPersisted() ?? { schemaVersion: 1, settings: this.fallbackSettings_ACU(), activeTask: null };
         }
         requireEnvelope_ACU(value) {
             if (!value)
-                return { schemaVersion: 1, settings: buildDefaultContinuationSettings_ACU(), activeTask: null };
+                return { schemaVersion: 1, settings: this.fallbackSettings_ACU(), activeTask: null };
             return value;
         }
         requireTask_ACU(envelope) {
@@ -111434,11 +112384,23 @@ $CONTENT
                 const boundSequence = snapshot.pending.capture.generationSeq;
                 if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence)
                     return;
-                const messageIndex = await this.resolveMessageIndex_ACU(eventMessageId, snapshot.pending.capture, chatIdentity);
-                if (messageIndex === null) {
+                const resolution = await this.resolveMessageIndex_ACU(eventMessageId, snapshot.pending.capture, chatIdentity);
+                if (resolution.kind === 'no_reply') {
+                    // 生成失败/未产出正文（典型如后端 API 报错）：没有楼层被写入，重发不会重复正文，
+                    // 走与标签缺失同构的自动重试链——消耗一次重试额度，延迟后自动重发当前轮。
+                    await this.dependencies.runtime.rejectHostTurnForFailedGeneration(claimedIdentity);
+                    const afterReject = this.dependencies.runtime.readPendingHostTurn();
+                    if (afterReject?.pending.status === 'retry_ready' && afterReject.pending.identity.attemptId === claimedIdentity.attemptId) {
+                        await this.retryCurrentHostTurn_ACU(snapshot.settings.retryDelaySeconds ?? 0);
+                    }
+                    return;
+                }
+                if (resolution.kind === 'unsafe') {
+                    // 归属不安全（多候选歧义/快照失效）：自动重试可能重复楼层，fail closed 交人工。
                     await this.dependencies.runtime.pauseForHostResultFailure(claimedIdentity);
                     return;
                 }
+                const messageIndex = resolution.messageIndex;
                 const message = this.dependencies.runtime.getChat()[messageIndex];
                 if (!message || !validateLoopTags_ACU(String(message.mes ?? ''), snapshot.settings.loopTags)) {
                     // The legacy evaluator's retry_delete decision applies only to the exact
@@ -111530,21 +112492,30 @@ $CONTENT
                 logAgentSession_ACU({ kind: 'run_failed', title: '自动续写已暂停', detail: `${message}\n可点击「继续当前轮次」从中断处恢复。`, ok: false });
             }
         }
+        /**
+         * 解析本轮宿主正文的楼层归属。
+         * - resolved：唯一候选，可安全确认。
+         * - no_reply：物化等待耗尽仍无任何候选——生成失败或未产出正文，可安全自动重试
+         *   （没有楼层被写入）。生成出错时宿主的 message_id 常为 undefined，非整数锚点
+         *   不短路：解析器各锚点分支自带整数守卫，会自然落到捕获边界候选扫描。
+         * - unsafe：多候选歧义 / 快照失效 / 聊天已切换——自动重试可能重复楼层，fail closed。
+         */
         async resolveMessageIndex_ACU(eventMessageId, capture, chatIdentity) {
-            if (!Number.isInteger(eventMessageId))
-                return null;
-            const intent = { eventMessageId: eventMessageId, chatKey: chatIdentity, isolationKey: '', capturedAt: capture.capturedAt, capturedChatLength: capture.capturedChatLength, capturedAiFloorCount: capture.capturedAiFloorCount, generationSeq: capture.generationSeq ?? undefined };
+            const anchor = Number.isInteger(eventMessageId) ? eventMessageId : Number.NaN;
+            const intent = { eventMessageId: anchor, chatKey: chatIdentity, isolationKey: '', capturedAt: capture.capturedAt, capturedChatLength: capture.capturedChatLength, capturedAiFloorCount: capture.capturedAiFloorCount, generationSeq: capture.generationSeq ?? undefined };
             for (let attempt = 0; attempt <= this.dependencies.materializationRetries; attempt += 1) {
                 if (this.dependencies.runtime.getChatIdentity() !== chatIdentity)
-                    return null;
+                    return { kind: 'unsafe' };
                 const result = resolveGeneratedAiMessageIndex_ACU({ liveChat: this.dependencies.runtime.getChat(), intent });
                 if (result.kind === 'resolved')
-                    return result.messageIndex;
-                if (result.kind !== 'pending_materialization' || attempt === this.dependencies.materializationRetries)
-                    return null;
+                    return { kind: 'resolved', messageIndex: result.messageIndex };
+                if (result.kind !== 'pending_materialization')
+                    return { kind: 'unsafe' };
+                if (attempt === this.dependencies.materializationRetries)
+                    return { kind: 'no_reply' };
                 await this.dependencies.wait(this.dependencies.materializationRetryDelayMs);
             }
-            return null;
+            return { kind: 'no_reply' };
         }
         async retryCurrentHostTurn_ACU(retryDelaySeconds) {
             await this.dependencies.wait(Math.max(0, retryDelaySeconds) * 1000);
@@ -111596,6 +112567,7 @@ $CONTENT
                 bindHostTurnGeneration: (identity, generationSeq) => orchestrator.bindHostTurnGeneration(identity, generationSeq),
                 confirmCurrentTurn: identity => orchestrator.confirmCurrentTurn(identity),
                 rejectHostTurnForMissingTags: input => orchestrator.rejectHostTurnForMissingTags(input),
+                rejectHostTurnForFailedGeneration: identity => orchestrator.rejectHostTurnForFailedGeneration(identity),
                 pauseForHostInputFailure: identity => orchestrator.pauseForHostInputFailure(identity),
                 pauseForHostResultFailure: identity => orchestrator.pauseForHostResultFailure(identity),
                 failHostTurnForStoppedGeneration: identity => orchestrator.failHostTurnForStoppedGeneration(identity),
@@ -111720,11 +112692,57 @@ $CONTENT
         return Object.prototype.hasOwnProperty.call(loopSettings, 'quickReplyContent')
             || Object.prototype.hasOwnProperty.call(loopSettings, 'currentPromptIndex');
     }
+    /** 全局设置副本在 settings_ACU 上的字段名。写入走 saveSettings_ACU 与其他全局配置同通道持久化。 */
+    const GLOBAL_CONTINUATION_SETTINGS_KEY_ACU = 'continuationGlobalSettings';
+    /**
+     * 读取全局续写设置副本。深拷贝后过与信封同一套校验（含历史字段迁移与提示词版本强刷），
+     * 缺失或损坏时返回 null，由调用方回落内置默认——坏副本绝不阻塞页面。
+     * @returns 校验通过的全局设置；无副本或副本非法时为 null
+     */
+    function readGlobalContinuationSettings_ACU() {
+        const raw = settings_ACU?.[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU];
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+            return null;
+        try {
+            return validateContinuationSettings_ACU(JSON.parse(JSON.stringify(raw)));
+        }
+        catch (error) {
+            logWarn_ACU('全局续写设置副本无效，回落内置默认:', error);
+            return null;
+        }
+    }
+    /**
+     * 把续写设置镜像写入全局副本并持久化。保存失败回滚内存态——本聊天信封已各自落盘成功，
+     * 全局镜像是尽力而为，失败只记警告不上抛。
+     * @param settings 刚保存到当前聊天信封的完整设置
+     */
+    function writeGlobalContinuationSettings_ACU(settings) {
+        const record = settings_ACU;
+        if (!record)
+            return;
+        const previous = record[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU];
+        record[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU] = JSON.parse(JSON.stringify(settings));
+        try {
+            if (!saveSettings_ACU().saved) {
+                record[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU] = previous;
+                logWarn_ACU('全局续写设置副本保存失败，已回滚内存态');
+            }
+        }
+        catch (error) {
+            record[GLOBAL_CONTINUATION_SETTINGS_KEY_ACU] = previous;
+            logWarn_ACU('全局续写设置副本保存异常，已回滚内存态:', error);
+        }
+    }
+    /** 无信封聊天的初始设置：全局副本优先，缺失或非法时用内置默认。 */
+    function buildInitialContinuationSettings_ACU() {
+        return readGlobalContinuationSettings_ACU() ?? buildDefaultContinuationSettings_ACU();
+    }
     async function migrateLegacySettings_ACU(store) {
         const existing = store.readPersisted();
         const legacyPlotSettings = settings_ACU?.plotSettings;
         if (!existing) {
-            const migration = buildMigratedContinuationEnvelope_ACU(legacyPlotSettings);
+            // legacy 迁移也以全局副本为基底：只有 loop 类字段来自旧剧情设置，其余跟随全局偏好。
+            const migration = buildMigratedContinuationEnvelope_ACU(legacyPlotSettings, buildInitialContinuationSettings_ACU());
             if (!migration.didMigrate)
                 return null;
             await store.replaceAtomically(migration.envelope);
@@ -111773,6 +112791,8 @@ $CONTENT
                 return buildResolvers_ACU(context.task, stage, revision, worldbook);
             },
             hasLiveHostClaim: chatIdentity => bridgeRef?.hasLiveClaim(chatIdentity) ?? false,
+            buildFallbackSettings: buildInitialContinuationSettings_ACU,
+            onSettingsReplaced: writeGlobalContinuationSettings_ACU,
         });
         const bridge = createSillyTavernContinuationHostBridge_ACU(orchestrator);
         bridgeRef = bridge;
@@ -112472,8 +113492,9 @@ $CONTENT
             }
         }
         else {
-            logError_ACU('ACU: Failed to initialize. Core APIs not available on DOM ready.');
-            console.error('数据库自动更新脚本初始化失败：核心API加载失败。');
+            const capabilityDiagnostics = formatHostCapabilities_ACU(getLastHostCapabilities_ACU());
+            logError_ACU(`ACU: Failed to initialize. Core APIs not available on DOM ready. 宿主能力: ${capabilityDiagnostics}`);
+            console.error(`数据库自动更新脚本初始化失败：核心API加载失败。宿主能力: ${capabilityDiagnostics}`);
         }
     }
 
@@ -152339,8 +153360,13 @@ Expected function or array of functions, received type ${typeof value}.`
             const notice = computed(() => {
                 if (props.awaitingHost)
                     return '当前轮次正在等待酒馆的正文生成结束，这期间不能重规划或重复发送。';
-                if (props.task?.stopReason && props.task.stopReason !== 'manual')
-                    return `任务已停止：${props.task.stopReason}。这类停止不能直接继续，请清空后重新规划。`;
+                if (props.task?.stopReason && props.task.stopReason !== 'manual') {
+                    // 可恢复停止（正文归属失败、输入不可用、重试耗尽）与终局停止（时长/阶段上限）
+                    // 的判定以 canContinue 为准——它与运行时 continueTask 的闸使用同一恢复集合。
+                    return props.canContinue
+                        ? `任务已停止：${props.task.stopReason}。可点击「继续」从当前轮次重试恢复。`
+                        : `任务已停止：${props.task.stopReason}。这类停止不能直接继续，请清空后重新规划。`;
+                }
                 if (props.task?.lastError)
                     return `上一次失败：${props.task.lastError.message}`;
                 return '';
@@ -152367,8 +153393,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-chat[data-v-95b99f34] { display: grid; gap: 10px;\n}\n.acu-v2-continuation-chat__status[data-v-95b99f34] { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-chat__badge[data-v-95b99f34] { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2);\n}\n.acu-v2-continuation-chat__badge--running[data-v-95b99f34] { background: color-mix(in srgb, var(--acu-primary, #5b8def) 20%, transparent); color: var(--acu-primary, #5b8def);\n}\n.acu-v2-continuation-chat__badge--failed[data-v-95b99f34] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-continuation-chat__status-item[data-v-95b99f34] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-chat__notice[data-v-95b99f34] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-chat__composer[data-v-95b99f34] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2);\n}\n.acu-v2-continuation-chat__input[data-v-95b99f34] { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-chat__input[data-v-95b99f34]:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-continuation-chat__composer-actions[data-v-95b99f34] { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-chat__hint[data-v-95b99f34] { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\r\n\r\n/* 手机窄屏：快捷键提示没有意义直接隐藏；按钮均分整行方便点按；\r\n   输入框字号提到 16px，避免 iOS Safari 聚焦时自动放大页面。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-chat__hint[data-v-95b99f34] { display: none;\n}\n.acu-v2-continuation-chat__composer-actions[data-v-95b99f34] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-chat__input[data-v-95b99f34] { font-size: 16px; min-height: 56px;\n}\n.acu-v2-continuation-chat__composer[data-v-95b99f34] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/ContinuationChat.vue#style-0-95b99f34");
-    var ContinuationChat_vue_vue_type_style_index_0_scoped_95b99f34_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-chat[data-v-d2e50a13] { display: grid; gap: 10px;\n}\n.acu-v2-continuation-chat__status[data-v-d2e50a13] { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-chat__badge[data-v-d2e50a13] { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2);\n}\n.acu-v2-continuation-chat__badge--running[data-v-d2e50a13] { background: color-mix(in srgb, var(--acu-primary, #5b8def) 20%, transparent); color: var(--acu-primary, #5b8def);\n}\n.acu-v2-continuation-chat__badge--failed[data-v-d2e50a13] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-continuation-chat__status-item[data-v-d2e50a13] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-chat__notice[data-v-d2e50a13] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-chat__composer[data-v-d2e50a13] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2);\n}\n.acu-v2-continuation-chat__input[data-v-d2e50a13] { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-chat__input[data-v-d2e50a13]:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-continuation-chat__composer-actions[data-v-d2e50a13] { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-chat__hint[data-v-d2e50a13] { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\r\n\r\n/* 手机窄屏：快捷键提示没有意义直接隐藏；按钮均分整行方便点按；\r\n   输入框字号提到 16px，避免 iOS Safari 聚焦时自动放大页面。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-chat__hint[data-v-d2e50a13] { display: none;\n}\n.acu-v2-continuation-chat__composer-actions[data-v-d2e50a13] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-chat__input[data-v-d2e50a13] { font-size: 16px; min-height: 56px;\n}\n.acu-v2-continuation-chat__composer[data-v-d2e50a13] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/ContinuationChat.vue#style-0-d2e50a13");
+    var ContinuationChat_vue_vue_type_style_index_0_scoped_d2e50a13_lang = null;
 
     const _hoisted_1$n = { class: "acu-v2-continuation-chat" };
     const _hoisted_2$l = { class: "acu-v2-continuation-chat__status" };
@@ -152505,7 +153531,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])])
 	]);
     }
-    var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-95b99f34"]]);
+    var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-d2e50a13"]]);
 
     function errorMessage_ACU$1(error) {
         if (error instanceof ContinuationValidationError_ACU)
@@ -153001,7 +154027,8 @@ Expected function or array of functions, received type ${typeof value}.`
         const toast = useToastStore();
         const runtime = getContinuationRuntime_ACU();
         const envelope = ref(null);
-        const fallbackSettings = buildDefaultContinuationSettings_ACU();
+        // 无信封聊天的展示兜底：全局设置副本优先，用户在新聊天里看到的就是自己保存过的偏好。
+        const fallbackSettings = buildInitialContinuationSettings_ACU();
         const busy = ref(false);
         const originInstruction = ref('');
         let initialization = null;
@@ -153067,10 +154094,11 @@ Expected function or array of functions, received type ${typeof value}.`
         const activeNode = computed(() => activeRevision.value?.outline.nodes[activeStage.value?.activeNodeIndex ?? -1] ?? null);
         const activeTurn = computed(() => activeNode.value?.turns[activeStage.value?.activeTurnIndex ?? -1] ?? null);
         // 无阶段（大纲待创建）与已完成阶段（下一阶段待继续）也可继续：由主 Agent 派工大纲子代理处理。
-        // 手动停止的任务允许从当前进度恢复；其余停止原因（时长/阶段上限等）不可恢复。
+        // 可恢复的停止（手停、正文归属失败、输入不可用、重试耗尽）允许从当前进度恢复；
+        // 终局停止（时长/阶段上限、completed）不可恢复。集合与 continueTask 的闸共用同一常量。
         const canContinue = computed(() => !!task.value
             && task.value.status === 'paused'
-            && (task.value.stopReason === null || task.value.stopReason === 'manual')
+            && (task.value.stopReason === null || CONTINUATION_RECOVERABLE_STOP_REASONS_ACU.includes(task.value.stopReason))
             && (!activeStage.value || ['running', 'completed'].includes(activeStage.value.status)));
         const isAwaitingHostResult = computed(() => task.value?.status === 'running' && task.value.pendingHostTurn?.status === 'awaiting_generation');
         const statusText = computed(() => task.value

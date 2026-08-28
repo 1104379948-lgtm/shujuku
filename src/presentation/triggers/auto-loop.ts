@@ -6,6 +6,7 @@
 
 import { showToastr_ACU } from '../theme/toast';
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
+import { TavernHelper_API_ACU } from '../../shared/host-api';
 import { loopState_ACU, settings_ACU } from '../../service/runtime/state-manager';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { clickSendButton_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
@@ -80,6 +81,11 @@ async function triggerDirectRegenerateForLoop_ACU(loopSettings: any) {
     loopState_ACU.awaitingReply = true;
     if ((window as any).TavernHelper?.triggerSlash) {
         await (window as any).TavernHelper.triggerSlash('/trigger await=true');
+        return;
+    }
+    // host-compat 适配层：无酒馆助手时 triggerSlash 由 SillyTavern 原生 slash 执行器兜底
+    if (typeof TavernHelper_API_ACU?.triggerSlash === 'function') {
+        await TavernHelper_API_ACU.triggerSlash('/trigger await=true');
         return;
     }
     if ((window as any).original_TavernHelper_generate) {
