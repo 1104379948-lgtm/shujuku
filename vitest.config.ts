@@ -55,10 +55,11 @@ export default defineConfig({
     include: ['tests/**/*.test.ts'],
     globals: true,
     testTimeout: 15000,
-    // 全量套件已超过 5000 个用例。默认并行 worker 会同时启动多份 Vite/Vue/jsdom/SQLite
-    // 运行时，峰值内存远高于单个测试本身。生产门禁优先稳定完成，而不是榨干本机资源。
-    maxWorkers: 1,
-    fileParallelism: false,
+    // 全量套件超过 5000 个用例、326 个文件。vitest 按文件隔离（forks 池），文件级并行
+    // 不会引入跨文件状态污染；8 个 worker 各自峰值按最重的 jsdom+SQLite 场景估 1-1.5GB，
+    // 总峰值约 8-12GB，兼顾速度与内存有界。内存受限的机器用 `--maxWorkers=1` 降级串行。
+    maxWorkers: 8,
+    fileParallelism: true,
     maxConcurrency: 1,
     typecheck: {
       tsconfig: './tsconfig.json',

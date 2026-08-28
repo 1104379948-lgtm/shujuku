@@ -336,9 +336,13 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
     const instruction = readText_ACU(payload.instruction);
     if (!instruction) failProtocol_ACU('finalize 动作必须提供非空 instruction');
     const rawConstraints = payload.constraints;
-    const constraints = isRecord_ACU(rawConstraints)
-      ? { current: readTextList_ACU(rawConstraints.current), retired: readTextList_ACU(rawConstraints.retired) }
-      : null;
+    let constraints: { add: string[]; retire: string[] } | null = null;
+    if (isRecord_ACU(rawConstraints)) {
+      // 兼容旧全量形态：current 视为「确保存在」（已存在的条目由事务层幂等跳过），retired 同 retire。
+      const add = [...new Set([...readTextList_ACU(rawConstraints.add), ...readTextList_ACU(rawConstraints.current)])];
+      const retire = [...new Set([...readTextList_ACU(rawConstraints.retire), ...readTextList_ACU(rawConstraints.retired)])];
+      if (add.length || retire.length) constraints = { add, retire };
+    }
     return { kind: 'finalize', thought, instruction, summary: readText_ACU(payload.summary), constraints };
   }
   if (action === 'block') {

@@ -1,11 +1,17 @@
 import { computed, ref } from 'vue';
 import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
 import { buildDefaultContinuationSettings_ACU } from '../../service/continuation/defaults';
-import { ContinuationValidationError_ACU, type ContinuationEnvelope_ACU, type ContinuationSettings_ACU, type ContinuationTask_ACU, type StageOutline_ACU } from '../../service/continuation/model';
+import { CONTINUATION_AGENT_PROMPT_KEYS_ACU, ContinuationValidationError_ACU, type ContinuationEnvelope_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationTask_ACU, type StageOutline_ACU } from '../../service/continuation/model';
 import type { ContinuationOrchestratorResult_ACU } from '../../service/continuation/continuation-orchestrator';
 import type { ContinuationPreparedTurnInstruction_ACU } from '../../service/continuation/stage-execution-engine';
-import { restoreContinuationPromptDefault_ACU, type ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template';
+import { restoreContinuationPromptDefault_ACU, validateContinuationPromptSegments_ACU, type ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template';
 import { useToastStore } from '../stores/toast-store';
+
+/** 提示词导入导出的文件结构：大纲组 + 五组 Agent 提示词，一次打包全部。 */
+export interface ContinuationPromptBundle_ACU {
+  outlinePrompt: ContinuationPromptSegment_ACU[];
+  agentPrompts: ContinuationSettings_ACU['agentPrompts'];
+}
 
 type ContinuationActionResult_ACU = ContinuationOrchestratorResult_ACU & { preparedTurn?: ContinuationPreparedTurnInstruction_ACU };
 type ContinuationRuntimeActionResult_ACU = ContinuationActionResult_ACU | ContinuationEnvelope_ACU;
@@ -190,6 +196,37 @@ export function useContinuationRuntime() {
     return restoreContinuationPromptDefault_ACU(settings, kind);
   }
 
+  /**
+   * 解析并校验导入的提示词 JSON 包。
+   * 结构：{ outlinePrompt: 段数组, agentPrompts: { main/maintainer/mainlinePlanner/beatPlanner/reviewer: 段数组 } }。
+   * 任何一组校验失败即整体拒绝，绝不产生半套导入。
+   * @param text 导入文件的原始文本
+   * @returns 校验通过的完整提示词包
+   */
+  function parsePromptBundle(text: string): ContinuationPromptBundle_ACU {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      throw new Error('导入文件不是合法的 JSON。');
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('提示词 JSON 必须是对象（含 outlinePrompt 与 agentPrompts）。');
+    const record = raw as Record<string, unknown>;
+    const agentRaw = record.agentPrompts;
+    if (!agentRaw || typeof agentRaw !== 'object' || Array.isArray(agentRaw)) throw new Error('提示词 JSON 缺少 agentPrompts 对象。');
+    try {
+      const outlinePrompt = validateContinuationPromptSegments_ACU(record.outlinePrompt, 'load');
+      const agentRecord = agentRaw as Record<string, unknown>;
+      const agentPrompts = {} as ContinuationSettings_ACU['agentPrompts'];
+      for (const key of CONTINUATION_AGENT_PROMPT_KEYS_ACU) {
+        agentPrompts[key] = validateContinuationPromptSegments_ACU(agentRecord[key], 'load');
+      }
+      return { outlinePrompt, agentPrompts };
+    } catch (error) {
+      throw new Error(`提示词校验失败：${errorMessage_ACU(error)}`);
+    }
+  }
+
   async function saveActiveOutline(outline: StageOutline_ACU): Promise<boolean> {
     return run_ACU(() => runtime.orchestrator.replaceActiveOutline({ outline }));
   }
@@ -218,6 +255,7 @@ export function useContinuationRuntime() {
 
   return {
     clearData,
+    parsePromptBundle,
     restorePromptDefault,
     saveActiveOutline,
     sendAgentMessage,

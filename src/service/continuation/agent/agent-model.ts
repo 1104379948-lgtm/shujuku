@@ -250,7 +250,8 @@ export interface AgentFinalizeAction_ACU {
   thought: string;
   instruction: string;
   summary: string;
-  constraints: { current: string[]; retired: string[] } | null;
+  /** 长期约束的增量登记：add 只写新增，retire 只写废除（id 或原文）。漏写既有条目不等于删除。 */
+  constraints: { add: string[]; retire: string[] } | null;
 }
 
 export interface AgentDelegateAction_ACU {

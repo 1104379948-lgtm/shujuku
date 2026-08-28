@@ -29,11 +29,13 @@ export const AGENT_PREFILLS_ACU = {
 
 /** 最终指导骨架，写进主 Agent 的协议规范段，约束 finalize 的 instruction 形态。 */
 export const AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU = [
-  '1. 承接：上一楼的结尾画面与遗留情绪，本轮从哪里接住',
-  '2. 五要素：目标 / 冲突 / 信息揭露 / 情绪节拍 / 主角行动',
-  '3. 伏笔与信息差操作：本轮是埋设、强化、误导还是回收，允许揭到哪一层',
-  '4. must_preserve 禁止清单：本轮绝对不能改变或提前揭穿的既有事实',
-  '5. 节拍切分提示：本轮拆成几个节拍，哪里必须停住',
+  '承接：上一楼结尾的画面与遗留情绪，本轮从哪里接住',
+  '本轮目标：要完成的核心事件（一个场景片段），冲突障碍是什么、主角做什么选择付什么代价',
+  '伏笔与信息差操作：本轮对哪条做埋设/强化/误导/回收，信息允许揭示到哪一层',
+  '硬事实（禁改）：本轮绝对不能改变或提前揭穿的既有事实',
+  '读者回报：本轮给读者的具体获得感（新信息/情绪释放/局势实质变化，至少其一）',
+  '收尾钩子：结尾停在哪个未决点（悬而未决/危机逼近/认知错位选其一），不许越界写到下一轮',
+  '风格（可省略）：视角、节奏、叙述基调等本轮需要的特殊风格要求',
 ].join('\n');
 
 const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
@@ -106,14 +108,14 @@ const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'system',
-    content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|delegate|edit_outline|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["种子资料地址"]}。互不依赖的派工放在同一次输出里即为并发。reads 是你替它准备的初始资料（地址体系同 read 工具）；它拿到后还能自己 read/search 补充，但种子给得准能帮它少跑几轮。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\naction = edit_outline：直接用工具微调当前大纲，不发 AI 调用、立即生效。附加字段 edits，数组，每项是下列之一：\n{"op":"set_turn_goal","turnId":"轮次ID","goal":"新目标句"}\n{"op":"set_node_goal","nodeId":"节点ID","goal":"新节点目标"}\n{"op":"insert_turn","nodeId":"节点ID","afterTurnId":"锚点轮次ID或null(插入节点开头)","goal":"新增轮目标"}\n{"op":"remove_turn","turnId":"轮次ID"}\n节点与轮次的 ID 见大纲状态行，完整列表用 read $OUTLINE_WINDOW 调阅。约束：只能动未完成的部分——已完成轮次不可改，当前正在执行的轮次可以改目标但不可删除；增删会改变总轮数，必须留在阶段规模范围内；一次最多 12 处。改几句目标、加减一两轮用它；整体走向要变才派 outline-architect。\n\naction = finalize：交付最终写作指导。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，约 200 字上限）、summary（一句话本轮要点）、可选 constraints（{"current":[...],"retired":[...]}，登记长期约束；current 必须列出全部仍然生效的约束，要废除的必须写进 retired，漏写不等于删除）。\ninstruction 必须覆盖这个骨架：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
+    content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|delegate|edit_outline|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["种子资料地址"]}。互不依赖的派工放在同一次输出里即为并发。reads 是你替它准备的初始资料（地址体系同 read 工具）；它拿到后还能自己 read/search 补充，但种子给得准能帮它少跑几轮。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\naction = edit_outline：直接用工具微调当前大纲，不发 AI 调用、立即生效。附加字段 edits，数组，每项是下列之一：\n{"op":"set_turn_goal","turnId":"轮次ID","goal":"新目标句"}\n{"op":"set_node_goal","nodeId":"节点ID","goal":"新节点目标"}\n{"op":"insert_turn","nodeId":"节点ID","afterTurnId":"锚点轮次ID或null(插入节点开头)","goal":"新增轮目标"}\n{"op":"remove_turn","turnId":"轮次ID"}\n节点与轮次的 ID 见大纲状态行，完整列表用 read $OUTLINE_WINDOW 调阅。约束：只能动未完成的部分——已完成轮次不可改，当前正在执行的轮次可以改目标但不可删除；增删会改变总轮数，必须留在阶段规模范围内；一次最多 12 处。改几句目标、加减一两轮用它；整体走向要变才派 outline-architect。\n\naction = finalize：交付最终写作指导。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，300-400 字为基准上限；正文模型单轮只输出约 1000-1500 字，指导必须让它在这个篇幅内完成本轮目标，不许塞进多个场景或多个转折）、summary（一句话本轮要点）、可选 constraints（{"add":["新增的长期约束"],"retire":["要废除条目的 id 或原文"]}，增量登记：add 只写本轮新增，retire 只写本轮废除，不需要重抄既有清单——漏写不等于删除，重抄已有条目也不会报错；retire 必须精确引用活跃条目的 id 或原文）。\ninstruction 按下列字段组织，每个字段一到两句、总量控制在上限内，无内容的字段直接省略：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
     enabled: true,
     deletable: false,
     pinned: true,
   },
   {
     role: 'system',
-    content: '【子代理使用规则】\n1. 大纲优先：大纲状态显示「还没有阶段大纲」或「阶段已全部完成」时，第一件事就是派工 outline-architect；真实剧情与大纲的偏差如果只需要改几句轮次目标或加减一两轮，用 edit_outline 工具直接改（零成本、立即生效）；整体走向需要重排才派 outline-architect 改写剩余部分。大纲派工串行执行且计入派工预算，edit_outline 不计。\n2. 结算维护类代理只在存在未结算真实历史时才需要派工；未结算范围为空时不要派。它的写入范围由职责固定（伏笔账本 + 信息差时间线），不需要你授权。\n3. 策划类代理按复杂度选择：普通推进一个主线策划够用；伏笔密集或信息差复杂时再加节拍策划；大转折或已出现冲突时再加连续性审查。\n4. 派工的 prompt 要写清「结算什么」「策划什么」或「大纲要怎么改」，以及不许做什么。不要把资料内容抄进 prompt——把地址写进 reads，运行时会把资料注入给它。\n5. 结果回来后先审核再采用：报告与正文或你调阅到的资料冲突、有明显缺漏时，带着具体修正意见重派，而不是照单全收。\n6. 一个代理最多派 2 次。重复派同一个代理只会得到重复结论时，就该收敛了。',
+    content: '【子代理使用规则】\n1. 大纲优先：大纲状态显示「还没有阶段大纲」或「阶段已全部完成」时，第一件事就是派工 outline-architect。大纲派工串行执行且计入派工预算，edit_outline 不计。\n2. 偏差处理三级阶梯：真实剧情与大纲出现偏差时按幅度分级——(a) 只是某轮目标措辞过时：edit_outline set_turn_goal 改那几句（零成本、立即生效）；(b) 结构小偏，需要加减一两轮或改节点目标：edit_outline insert_turn / remove_turn / set_node_goal；(c) 走向已实质偏离，后续多个节点不再成立：派工 outline-architect 改写剩余部分。禁止在大纲已明显失效时硬按旧轮目标 finalize。\n3. 结算维护类代理只在存在未结算真实历史时才需要派工；未结算范围为空时不要派。它的写入范围由职责固定（伏笔账本 + 信息差时间线），不需要你授权。派工结算时把上一轮的轮目标写进 prompt，让它对照真实正文评估达成度。\n4. 策划类代理按复杂度选择：普通推进一个主线策划够用；伏笔密集或信息差复杂时再加节拍策划；大转折或已出现冲突时再加连续性审查。\n5. 派工的 prompt 要写清「结算什么」「策划什么」或「大纲要怎么改」，以及不许做什么。不要把资料内容抄进 prompt——把地址写进 reads，运行时会把资料注入给它。\n6. 结果回来后先审核再采用：报告与正文或你调阅到的资料冲突、有明显缺漏时，带着具体修正意见重派，而不是照单全收。\n7. finalize 前核对角色状态：本轮指导涉及角色当前位置、持有物、关系或能力等关键事实时，从表格目录按地址调阅对应表格核对，不要凭大纲或记忆断言。\n8. 用户偏好沉淀：用户在会话里提出的长期风格或内容偏好（如「少写心理独白」「保持第一人称」），经你裁决后用 finalize 的 constraints.add 登记为长期约束，让后续每轮都遵守。\n9. 一个代理最多派 2 次。重复派同一个代理只会得到重复结论时，就该收敛了。',
     enabled: true,
     deletable: true,
   },
@@ -187,13 +189,13 @@ const MAINTAINER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'assistant',
-    content: '我的最终交付是一个 JSON 对象：\n{"summary":"一句话说明本次结算了什么","delta":{"expectedRevisions":{"hooks":当前版本号,"infoGap":当前版本号},"hooks":[{"action":"upsert|retire","id":"H001","summary":"伏笔内容","status":"planted|reinforced|misled|partially_paid|paid|abandoned","importance":"high|mid|low","plantedIndex":埋设楼层,"plannedPayoff":"计划怎么回收","reason":"retire 时必填"}],"infoGap":[{"action":"upsert|retire","id":"E001","topic":"信息主题","objectiveFact":"客观事实","readerKnown":"读者已知到哪一层","characterKnowledge":[{"name":"角色名","knows":"该角色知道什么"}],"revealStatus":"unrevealed|partial|revealed","revealIndex":揭示楼层或null,"reason":"retire 时必填"}],"constraintProposals":["建议主 Agent 登记的长期约束"]}}\n\n交付前资料不足时我不猜：先输出工具批次补充调阅——{"action":"read","reads":["地址"]} 或 {"action":"search","query":"关键词","scope":["story","modules"]}，一次输出可含多个工具对象，结果会回灌给我，拿到后再交契约 JSON。读取轮次有限，我优先 search 定位、再用窄地址精读；被门禁打回就按报告缩小目标。\n\n只写发生了变化的条目，没变化的不用重复列出。只改既有条目的某一两个字段时，用 {"action":"patch","id":"条目ID",只带要改的字段}——比如只改一句 summary 就只传 id 和 summary，其余字段保持原样；新增或整条重写才用 upsert。我只写职责固定给我的模块。expectedRevisions 可以省略，运行时会按我实际读到的版本校验；我若填了，就必须与注入资料里的「当前修订号」一致，填错会导致整份写入被拒。契约 JSON 之外我不输出任何文字。',
+    content: '我的最终交付是一个 JSON 对象：\n{"summary":"一句话说明本次结算了什么；任务里给出了轮目标时，附上达成度判定（达成/部分达成/偏离，偏离要写具体差在哪）","delta":{"expectedRevisions":{"hooks":当前版本号,"infoGap":当前版本号},"hooks":[{"action":"upsert|retire","id":"H001","summary":"伏笔内容","status":"planted|reinforced|misled|partially_paid|paid|abandoned","importance":"high|mid|low","plantedIndex":埋设楼层,"plannedPayoff":"计划怎么回收","reason":"retire 时必填"}],"infoGap":[{"action":"upsert|retire","id":"E001","topic":"信息主题","objectiveFact":"客观事实","readerKnown":"读者已知到哪一层","characterKnowledge":[{"name":"角色名","knows":"该角色知道什么"}],"revealStatus":"unrevealed|partial|revealed","revealIndex":揭示楼层或null,"reason":"retire 时必填"}],"constraintProposals":["建议主 Agent 登记的长期约束"]}}\n\n交付前资料不足时我不猜：先输出工具批次补充调阅——{"action":"read","reads":["地址"]} 或 {"action":"search","query":"关键词","scope":["story","modules"]}，一次输出可含多个工具对象，结果会回灌给我，拿到后再交契约 JSON。读取轮次有限，我优先 search 定位、再用窄地址精读；被门禁打回就按报告缩小目标。\n\n只写发生了变化的条目，没变化的不用重复列出。只改既有条目的某一两个字段时，用 {"action":"patch","id":"条目ID",只带要改的字段}——比如只改一句 summary 就只传 id 和 summary，其余字段保持原样；新增或整条重写才用 upsert。我只写职责固定给我的模块。expectedRevisions 可以省略，运行时会按我实际读到的版本校验；我若填了，就必须与注入资料里的「当前修订号」一致，填错会导致整份写入被拒。契约 JSON 之外我不输出任何文字。',
     enabled: true,
     deletable: true,
   },
   {
     role: 'user',
-    content: '【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：登记的每条事实都能在真实历史里找到出处；没有把计划写成事实；retire 都带了理由；未揭示条目的揭示楼层为空；若填了 expectedRevisions，它与注入资料里的「当前修订号」一致。\n\n请开始结算。资料不足先用工具调阅，足够就直接交付契约 JSON。',
+    content: '【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：登记的每条事实都能在真实历史里找到出处；没有把计划写成事实；retire 都带了理由；未揭示条目的揭示楼层为空；若填了 expectedRevisions，它与注入资料里的「当前修订号」一致；任务里给出了轮目标时，summary 里写明了达成度判定。\n\n请开始结算。资料不足先用工具调阅，足够就直接交付契约 JSON。',
     enabled: true,
     deletable: false,
     pinned: true,

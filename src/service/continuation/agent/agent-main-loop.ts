@@ -416,20 +416,28 @@ export class ContinuationAgentTurnPlanner_ACU {
 
         if (action.kind === 'finalize') {
           if (action.constraints) {
-            // 约束登记校验失败不终止本轮：把拒绝原因回灌，让主 Agent 在剩余迭代内修正登记，
-            // 与大纲工具编辑、子代理写集失败的处理同构。只有非校验类异常才上抛。
+            // 约束登记校验失败不终止本轮：把拒绝原因（含活跃约束清单回显）回灌，让主 Agent
+            // 在剩余迭代内修正登记，与大纲工具编辑、子代理写集失败的处理同构。只有非校验类异常才上抛。
+            // 最后一轮例外：此时回灌已无修正机会，登记降级为警告并照常交付，绝不让约束问题烧掉唯一的交付机会。
+            let constraintsApplied = true;
             try {
-              snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.current, action.constraints.retired, chat.length - 1);
+              snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.add, action.constraints.retire, chat.length - 1);
             } catch (error) {
               if (!(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_WRITE_REJECTED') throw error;
+              constraintsApplied = false;
               lastConstraintRejection = error.error.message;
-              ledger.outcomes.push({ agentName: 'finalize(约束登记)', ok: false, summary: '', detail: '', rejectedReason: `${error.error.message}。finalize 未被采纳，请修正 constraints 后重新交付` });
-              logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 约束登记被拒绝`, detail: error.error.message, ok: false });
-              await commitOutcomes(outcomesBefore);
-              continue;
+              if (iteration < budget.maxIterations) {
+                ledger.outcomes.push({ agentName: 'finalize(约束登记)', ok: false, summary: '', detail: '', rejectedReason: `${error.error.message}。finalize 未被采纳，请修正 constraints 后重新交付` });
+                logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 约束登记被拒绝`, detail: error.error.message, ok: false });
+                await commitOutcomes(outcomesBefore);
+                continue;
+              }
+              logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 约束登记被拒绝，已跳过登记并照常交付`, detail: error.error.message, ok: false });
             }
-            context.moduleSnapshot = snapshot;
-            await this.persistSnapshot_ACU(chat, snapshot);
+            if (constraintsApplied) {
+              context.moduleSnapshot = snapshot;
+              await this.persistSnapshot_ACU(chat, snapshot);
+            }
           }
           logAgentSession_ACU({ kind: 'finalize', title: '最终写作指导', detail: action.instruction });
           logAgentSession_ACU({ kind: 'run_completed', title: '本轮规划完成', detail: action.summary });

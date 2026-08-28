@@ -125,20 +125,38 @@ describe('Agent 写集事务', () => {
   });
 });
 
-describe('Agent 长期约束登记', () => {
-  it('漏写既有活跃约束判整份登记无效', () => {
-    expect(() => applyAgentConstraintRegistration_ACU(baseSnapshot_ACU(), ['新增红线'], [], 6)).toThrowError(/漏写不等于删除/);
+describe('Agent 长期约束登记（增量语义）', () => {
+  it('add 只追加新增条目，漏写既有条目不等于删除', () => {
+    const snapshot = baseSnapshot_ACU();
+    const applied = applyAgentConstraintRegistration_ACU(snapshot, ['新增红线'], [], 6);
+
+    expect(applied.constraints).toHaveLength(2);
+    expect(applied.constraints[0]).toBe(snapshot.constraints[0]);
+    expect(applied.constraints[1]).toMatchObject({ text: '新增红线', createdIndex: 6 });
+    expect(applied.revisions.constraints).toBe(2);
   });
 
-  it('显式 retired 才允许移除，且保留未变条目的原始身份', () => {
+  it('重复登记既有文本幂等跳过（含旧全量形态重抄整份清单），无变更时原样返回', () => {
     const snapshot = baseSnapshot_ACU();
-    const applied = applyAgentConstraintRegistration_ACU(snapshot, ['不得提前揭穿幕后', '主角不得使用禁咒'], [], 6);
+    expect(applyAgentConstraintRegistration_ACU(snapshot, ['不得提前揭穿幕后'], [], 6)).toBe(snapshot);
+    expect(applyAgentConstraintRegistration_ACU(snapshot, [], [], 6)).toBe(snapshot);
 
-    expect(applied.constraints[0]).toBe(snapshot.constraints[0]);
-    expect(applied.constraints[1]).toMatchObject({ text: '主角不得使用禁咒', createdIndex: 6 });
-    expect(applied.revisions.constraints).toBe(2);
+    const mixed = applyAgentConstraintRegistration_ACU(snapshot, ['不得提前揭穿幕后', '主角不得使用禁咒', '主角不得使用禁咒'], [], 6);
+    expect(mixed.constraints).toHaveLength(2);
+    expect(mixed.constraints[1]).toMatchObject({ text: '主角不得使用禁咒', createdIndex: 6 });
+    expect(mixed.revisions.constraints).toBe(2);
+  });
 
-    const removed = applyAgentConstraintRegistration_ACU(snapshot, [], ['不得提前揭穿幕后'], 6);
-    expect(removed.constraints).toHaveLength(0);
+  it('retire 按 id 或原文精确匹配移除，未命中即拒绝并回显活跃清单', () => {
+    const snapshot = baseSnapshot_ACU();
+    const removedByText = applyAgentConstraintRegistration_ACU(snapshot, [], ['不得提前揭穿幕后'], 6);
+    expect(removedByText.constraints).toHaveLength(0);
+    expect(removedByText.revisions.constraints).toBe(2);
+
+    const removedById = applyAgentConstraintRegistration_ACU(snapshot, [], ['C01-1'], 6);
+    expect(removedById.constraints).toHaveLength(0);
+
+    expect(() => applyAgentConstraintRegistration_ACU(snapshot, [], ['不存在的约束'], 6))
+      .toThrowError(/retire 的约束不存在.*C01-1：不得提前揭穿幕后/);
   });
 });

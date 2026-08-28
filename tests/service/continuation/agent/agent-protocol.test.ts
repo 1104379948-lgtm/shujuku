@@ -88,9 +88,17 @@ describe('主 Agent 动作解析', () => {
 
   it('finalize 必须给出 instruction，constraints 缺省为 null', () => {
     expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '本轮指导', summary: '要点' }, true)).toMatchObject({ kind: 'finalize', constraints: null });
-    expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '本轮指导', constraints: { current: ['红线一'], retired: [] } }, true))
-      .toMatchObject({ constraints: { current: ['红线一'], retired: [] } });
+    expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '本轮指导', constraints: { add: ['红线一'], retire: ['C01-1'] } }, true))
+      .toMatchObject({ constraints: { add: ['红线一'], retire: ['C01-1'] } });
     expect(() => parseAgentMainAction_ACU({ action: 'finalize' }, true)).toThrowError(/非空 instruction/);
+  });
+
+  it('finalize 的 constraints 兼容旧全量键：current 并入 add、retired 并入 retire，空对象归一为 null', () => {
+    expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '指导', constraints: { current: ['红线一', '红线二'], retired: ['旧约束'] } }, true))
+      .toMatchObject({ constraints: { add: ['红线一', '红线二'], retire: ['旧约束'] } });
+    expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '指导', constraints: { add: ['红线一'], current: ['红线一'] } }, true))
+      .toMatchObject({ constraints: { add: ['红线一'], retire: [] } });
+    expect(parseAgentMainAction_ACU({ action: 'finalize', instruction: '指导', constraints: {} }, true)).toMatchObject({ constraints: null });
   });
 
   it('edit_outline 按操作种类校验必填字段', () => {

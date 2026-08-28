@@ -15,6 +15,7 @@
     "verify": "bash scripts/verify-build.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:changed": "vitest run --changed",
     "test:watch": "vitest"
   },
   "devDependencies": {

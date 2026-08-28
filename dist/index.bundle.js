@@ -65904,13 +65904,59 @@ $CONTENT
         const content = await handleApiResponse_ACU(res, signal);
         return content ? content.trim() : null;
     }
+    /** tavern 模式请求的串行队列尾。/profile 是全局状态，并发切换会互相踩，必须串行「切换→发送→恢复」。 */
+    let tavernProfileCallTail_ACU = Promise.resolve();
+    /**
+     * 在活动 profile 切换保护下发送一次连接管理器请求，与填表链路（prompt-api-call.ts）行为对齐：
+     * 部分宿主后端依赖「当前活动 profile」侧效应，只传 profileId 不切换会落到当前渠道。
+     * @param profileId 目标连接预设 ID
+     * @param messages 消息序列
+     * @param maxTokens 最大输出 token
+     * @returns 宿主返回的原始响应
+     */
+    async function sendConnectionManagerRequestWithProfileSwitch_ACU(profileId, messages, maxTokens) {
+        const run = async () => {
+            const targetProfile = getConnectionManagerProfiles_ACU().find(profile => profile.id === profileId);
+            if (!targetProfile)
+                throw new Error(`无法找到 ID 为 "${profileId}" 的连接预设。`);
+            if (!targetProfile.api)
+                throw new Error(`预设 "${targetProfile.name || targetProfile.id}" 没有配置 API。`);
+            const targetProfileName = String(targetProfile.name || targetProfile.id);
+            const originalProfile = await triggerSlash_ACU('/profile');
+            const needSwitch = !!originalProfile && originalProfile !== targetProfileName;
+            try {
+                if (needSwitch) {
+                    await triggerSlash_ACU(`/profile await=true "${targetProfileName.replace(/"/g, '\\"')}"`);
+                }
+                return await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens);
+            }
+            finally {
+                if (needSwitch) {
+                    try {
+                        const current = await triggerSlash_ACU('/profile');
+                        if (current !== originalProfile) {
+                            await triggerSlash_ACU(`/profile await=true "${originalProfile.replace(/"/g, '\\"')}"`);
+                        }
+                    }
+                    catch (restoreError) {
+                        logWarn_ACU('恢复原酒馆连接预设失败:', restoreError);
+                    }
+                }
+            }
+        };
+        const result = tavernProfileCallTail_ACU.then(run, run);
+        tavernProfileCallTail_ACU = result.catch(() => undefined);
+        return result;
+    }
     async function callAIWithResolvedPreset_ACU(messages, resolved, signal, lifecycle) {
         if (!Array.isArray(messages) || messages.length === 0) {
             throw new Error('内部 AI 消息必须是非空数组。');
         }
         const maxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
         if (resolved.apiMode === 'tavern') {
-            const response = await sendConnectionManagerRequest_ACU(resolved.tavernProfile, messages, maxTokens);
+            if (!resolved.tavernProfile)
+                throw new Error('该预设为酒馆连接模式但未选择连接预设。');
+            const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
             assertNotAborted_ACU(signal);
             if (typeof response?.result?.choices?.[0]?.message?.content === 'string')
                 return response.result.choices[0].message.content.trim();
@@ -104410,11 +104456,13 @@ $CONTENT
     };
     /** 最终指导骨架，写进主 Agent 的协议规范段，约束 finalize 的 instruction 形态。 */
     const AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU = [
-        '1. 承接：上一楼的结尾画面与遗留情绪，本轮从哪里接住',
-        '2. 五要素：目标 / 冲突 / 信息揭露 / 情绪节拍 / 主角行动',
-        '3. 伏笔与信息差操作：本轮是埋设、强化、误导还是回收，允许揭到哪一层',
-        '4. must_preserve 禁止清单：本轮绝对不能改变或提前揭穿的既有事实',
-        '5. 节拍切分提示：本轮拆成几个节拍，哪里必须停住',
+        '承接：上一楼结尾的画面与遗留情绪，本轮从哪里接住',
+        '本轮目标：要完成的核心事件（一个场景片段），冲突障碍是什么、主角做什么选择付什么代价',
+        '伏笔与信息差操作：本轮对哪条做埋设/强化/误导/回收，信息允许揭示到哪一层',
+        '硬事实（禁改）：本轮绝对不能改变或提前揭穿的既有事实',
+        '读者回报：本轮给读者的具体获得感（新信息/情绪释放/局势实质变化，至少其一）',
+        '收尾钩子：结尾停在哪个未决点（悬而未决/危机逼近/认知错位选其一），不许越界写到下一轮',
+        '风格（可省略）：视角、节奏、叙述基调等本轮需要的特殊风格要求',
     ].join('\n');
     const MAIN_AGENT_PROMPT_ACU = [
         {
@@ -104486,14 +104534,14 @@ $CONTENT
         },
         {
             role: 'system',
-            content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|delegate|edit_outline|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["种子资料地址"]}。互不依赖的派工放在同一次输出里即为并发。reads 是你替它准备的初始资料（地址体系同 read 工具）；它拿到后还能自己 read/search 补充，但种子给得准能帮它少跑几轮。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\naction = edit_outline：直接用工具微调当前大纲，不发 AI 调用、立即生效。附加字段 edits，数组，每项是下列之一：\n{"op":"set_turn_goal","turnId":"轮次ID","goal":"新目标句"}\n{"op":"set_node_goal","nodeId":"节点ID","goal":"新节点目标"}\n{"op":"insert_turn","nodeId":"节点ID","afterTurnId":"锚点轮次ID或null(插入节点开头)","goal":"新增轮目标"}\n{"op":"remove_turn","turnId":"轮次ID"}\n节点与轮次的 ID 见大纲状态行，完整列表用 read $OUTLINE_WINDOW 调阅。约束：只能动未完成的部分——已完成轮次不可改，当前正在执行的轮次可以改目标但不可删除；增删会改变总轮数，必须留在阶段规模范围内；一次最多 12 处。改几句目标、加减一两轮用它；整体走向要变才派 outline-architect。\n\naction = finalize：交付最终写作指导。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，约 200 字上限）、summary（一句话本轮要点）、可选 constraints（{"current":[...],"retired":[...]}，登记长期约束；current 必须列出全部仍然生效的约束，要废除的必须写进 retired，漏写不等于删除）。\ninstruction 必须覆盖这个骨架：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
+            content: '【文本协议规范】\n你的每个动作用 JSON 对象表达，形如：\n{"thought":"一句话决策依据","action":"read|search|delegate|edit_outline|finalize|block", ...}\n你可以在 JSON 前用少量自然语言梳理思路（运行时会忽略这些文字），但动作本身必须完整出现在 JSON 对象里。\n\n【工具动作：read / search，可并发】\naction = read：按地址调阅资料。附加字段 reads，数组，元素是各目录里给出的读取地址（地址体系见「读取地址词汇表」）。\naction = search：跨域检索。附加字段 query（关键词或正则）、scope（["story","tables","modules","outline","worldbook"] 的子集，省略为全域）、可选 isRegex、maxResults。命中行会带上可直接复制进 read 的地址。\n并发规则：一次输出里可以写多个 read / search 对象，它们同批执行、结果一起回来——需要多份资料时务必合并成一个批次，不要一轮只读一份浪费迭代。工具对象不能与决策动作混在同一次输出：出现任何 read/search 时整次输出按工具批次处理，混入的决策会被忽略。\n工具结果回来后再输出下一个动作。批次被门禁打回时按报告里的修正协议缩小目标（更窄的楼层区间、行区间或按 ID 精读）重试，不要原样重发。\n\n【决策动作：一次输出只表达一个】\naction = delegate：并行派工。附加字段 delegations，数组，每项 {"agentName":"目录里的代理名","prompt":"给该代理的任务描述","reads":["种子资料地址"]}。互不依赖的派工放在同一次输出里即为并发。reads 是你替它准备的初始资料（地址体系同 read 工具）；它拿到后还能自己 read/search 补充，但种子给得准能帮它少跑几轮。\n大纲的创建、大幅改写、继续下一阶段走 delegate：派工 outline-architect，prompt 写清你对大纲的要求，不需要 reads。它会串行先于同波次其他派工执行，做完后你在下一次迭代的大纲状态里就能看到新大纲。\n\naction = edit_outline：直接用工具微调当前大纲，不发 AI 调用、立即生效。附加字段 edits，数组，每项是下列之一：\n{"op":"set_turn_goal","turnId":"轮次ID","goal":"新目标句"}\n{"op":"set_node_goal","nodeId":"节点ID","goal":"新节点目标"}\n{"op":"insert_turn","nodeId":"节点ID","afterTurnId":"锚点轮次ID或null(插入节点开头)","goal":"新增轮目标"}\n{"op":"remove_turn","turnId":"轮次ID"}\n节点与轮次的 ID 见大纲状态行，完整列表用 read $OUTLINE_WINDOW 调阅。约束：只能动未完成的部分——已完成轮次不可改，当前正在执行的轮次可以改目标但不可删除；增删会改变总轮数，必须留在阶段规模范围内；一次最多 12 处。改几句目标、加减一两轮用它；整体走向要变才派 outline-architect。\n\naction = finalize：交付最终写作指导。前提：大纲状态里必须有可执行的本轮目标——没有大纲或阶段已完成时 finalize 会被拒绝，必须先派工 outline-architect。附加字段 instruction（发给正文模型的指导正文，300-400 字为基准上限；正文模型单轮只输出约 1000-1500 字，指导必须让它在这个篇幅内完成本轮目标，不许塞进多个场景或多个转折）、summary（一句话本轮要点）、可选 constraints（{"add":["新增的长期约束"],"retire":["要废除条目的 id 或原文"]}，增量登记：add 只写本轮新增，retire 只写本轮废除，不需要重抄既有清单——漏写不等于删除，重抄已有条目也不会报错；retire 必须精确引用活跃条目的 id 或原文）。\ninstruction 按下列字段组织，每个字段一到两句、总量控制在上限内，无内容的字段直接省略：\n' + AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU + '\ninstruction 里禁止出现占位符名、代理名、模块名、读取地址、预算信息与任何内部过程。\n\naction = block：阻断本轮。附加字段 reason（阻断原因）与 unresolved（未解决问题列表）。只在关键资料缺失或存在无法裁决的硬事实冲突时使用。',
             enabled: true,
             deletable: false,
             pinned: true,
         },
         {
             role: 'system',
-            content: '【子代理使用规则】\n1. 大纲优先：大纲状态显示「还没有阶段大纲」或「阶段已全部完成」时，第一件事就是派工 outline-architect；真实剧情与大纲的偏差如果只需要改几句轮次目标或加减一两轮，用 edit_outline 工具直接改（零成本、立即生效）；整体走向需要重排才派 outline-architect 改写剩余部分。大纲派工串行执行且计入派工预算，edit_outline 不计。\n2. 结算维护类代理只在存在未结算真实历史时才需要派工；未结算范围为空时不要派。它的写入范围由职责固定（伏笔账本 + 信息差时间线），不需要你授权。\n3. 策划类代理按复杂度选择：普通推进一个主线策划够用；伏笔密集或信息差复杂时再加节拍策划；大转折或已出现冲突时再加连续性审查。\n4. 派工的 prompt 要写清「结算什么」「策划什么」或「大纲要怎么改」，以及不许做什么。不要把资料内容抄进 prompt——把地址写进 reads，运行时会把资料注入给它。\n5. 结果回来后先审核再采用：报告与正文或你调阅到的资料冲突、有明显缺漏时，带着具体修正意见重派，而不是照单全收。\n6. 一个代理最多派 2 次。重复派同一个代理只会得到重复结论时，就该收敛了。',
+            content: '【子代理使用规则】\n1. 大纲优先：大纲状态显示「还没有阶段大纲」或「阶段已全部完成」时，第一件事就是派工 outline-architect。大纲派工串行执行且计入派工预算，edit_outline 不计。\n2. 偏差处理三级阶梯：真实剧情与大纲出现偏差时按幅度分级——(a) 只是某轮目标措辞过时：edit_outline set_turn_goal 改那几句（零成本、立即生效）；(b) 结构小偏，需要加减一两轮或改节点目标：edit_outline insert_turn / remove_turn / set_node_goal；(c) 走向已实质偏离，后续多个节点不再成立：派工 outline-architect 改写剩余部分。禁止在大纲已明显失效时硬按旧轮目标 finalize。\n3. 结算维护类代理只在存在未结算真实历史时才需要派工；未结算范围为空时不要派。它的写入范围由职责固定（伏笔账本 + 信息差时间线），不需要你授权。派工结算时把上一轮的轮目标写进 prompt，让它对照真实正文评估达成度。\n4. 策划类代理按复杂度选择：普通推进一个主线策划够用；伏笔密集或信息差复杂时再加节拍策划；大转折或已出现冲突时再加连续性审查。\n5. 派工的 prompt 要写清「结算什么」「策划什么」或「大纲要怎么改」，以及不许做什么。不要把资料内容抄进 prompt——把地址写进 reads，运行时会把资料注入给它。\n6. 结果回来后先审核再采用：报告与正文或你调阅到的资料冲突、有明显缺漏时，带着具体修正意见重派，而不是照单全收。\n7. finalize 前核对角色状态：本轮指导涉及角色当前位置、持有物、关系或能力等关键事实时，从表格目录按地址调阅对应表格核对，不要凭大纲或记忆断言。\n8. 用户偏好沉淀：用户在会话里提出的长期风格或内容偏好（如「少写心理独白」「保持第一人称」），经你裁决后用 finalize 的 constraints.add 登记为长期约束，让后续每轮都遵守。\n9. 一个代理最多派 2 次。重复派同一个代理只会得到重复结论时，就该收敛了。',
             enabled: true,
             deletable: true,
         },
@@ -104566,13 +104614,13 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我的最终交付是一个 JSON 对象：\n{"summary":"一句话说明本次结算了什么","delta":{"expectedRevisions":{"hooks":当前版本号,"infoGap":当前版本号},"hooks":[{"action":"upsert|retire","id":"H001","summary":"伏笔内容","status":"planted|reinforced|misled|partially_paid|paid|abandoned","importance":"high|mid|low","plantedIndex":埋设楼层,"plannedPayoff":"计划怎么回收","reason":"retire 时必填"}],"infoGap":[{"action":"upsert|retire","id":"E001","topic":"信息主题","objectiveFact":"客观事实","readerKnown":"读者已知到哪一层","characterKnowledge":[{"name":"角色名","knows":"该角色知道什么"}],"revealStatus":"unrevealed|partial|revealed","revealIndex":揭示楼层或null,"reason":"retire 时必填"}],"constraintProposals":["建议主 Agent 登记的长期约束"]}}\n\n交付前资料不足时我不猜：先输出工具批次补充调阅——{"action":"read","reads":["地址"]} 或 {"action":"search","query":"关键词","scope":["story","modules"]}，一次输出可含多个工具对象，结果会回灌给我，拿到后再交契约 JSON。读取轮次有限，我优先 search 定位、再用窄地址精读；被门禁打回就按报告缩小目标。\n\n只写发生了变化的条目，没变化的不用重复列出。只改既有条目的某一两个字段时，用 {"action":"patch","id":"条目ID",只带要改的字段}——比如只改一句 summary 就只传 id 和 summary，其余字段保持原样；新增或整条重写才用 upsert。我只写职责固定给我的模块。expectedRevisions 可以省略，运行时会按我实际读到的版本校验；我若填了，就必须与注入资料里的「当前修订号」一致，填错会导致整份写入被拒。契约 JSON 之外我不输出任何文字。',
+            content: '我的最终交付是一个 JSON 对象：\n{"summary":"一句话说明本次结算了什么；任务里给出了轮目标时，附上达成度判定（达成/部分达成/偏离，偏离要写具体差在哪）","delta":{"expectedRevisions":{"hooks":当前版本号,"infoGap":当前版本号},"hooks":[{"action":"upsert|retire","id":"H001","summary":"伏笔内容","status":"planted|reinforced|misled|partially_paid|paid|abandoned","importance":"high|mid|low","plantedIndex":埋设楼层,"plannedPayoff":"计划怎么回收","reason":"retire 时必填"}],"infoGap":[{"action":"upsert|retire","id":"E001","topic":"信息主题","objectiveFact":"客观事实","readerKnown":"读者已知到哪一层","characterKnowledge":[{"name":"角色名","knows":"该角色知道什么"}],"revealStatus":"unrevealed|partial|revealed","revealIndex":揭示楼层或null,"reason":"retire 时必填"}],"constraintProposals":["建议主 Agent 登记的长期约束"]}}\n\n交付前资料不足时我不猜：先输出工具批次补充调阅——{"action":"read","reads":["地址"]} 或 {"action":"search","query":"关键词","scope":["story","modules"]}，一次输出可含多个工具对象，结果会回灌给我，拿到后再交契约 JSON。读取轮次有限，我优先 search 定位、再用窄地址精读；被门禁打回就按报告缩小目标。\n\n只写发生了变化的条目，没变化的不用重复列出。只改既有条目的某一两个字段时，用 {"action":"patch","id":"条目ID",只带要改的字段}——比如只改一句 summary 就只传 id 和 summary，其余字段保持原样；新增或整条重写才用 upsert。我只写职责固定给我的模块。expectedRevisions 可以省略，运行时会按我实际读到的版本校验；我若填了，就必须与注入资料里的「当前修订号」一致，填错会导致整份写入被拒。契约 JSON 之外我不输出任何文字。',
             enabled: true,
             deletable: true,
         },
         {
             role: 'user',
-            content: '【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：登记的每条事实都能在真实历史里找到出处；没有把计划写成事实；retire 都带了理由；未揭示条目的揭示楼层为空；若填了 expectedRevisions，它与注入资料里的「当前修订号」一致。\n\n请开始结算。资料不足先用工具调阅，足够就直接交付契约 JSON。',
+            content: '【注入资料】\n$AGENT_READ_MATERIALS\n\n【读取地址词汇表】（read/search 工具可用的地址体系）\n$AGENT_READ_CATALOG\n\n【本次任务】\n$AGENT_TASK\n\n【你的写入范围】\n$AGENT_WRITE_SCOPE\n\n【自检清单】提交前逐条确认：登记的每条事实都能在真实历史里找到出处；没有把计划写成事实；retire 都带了理由；未揭示条目的揭示楼层为空；若填了 expectedRevisions，它与注入资料里的「当前修订号」一致；任务里给出了轮目标时，summary 里写明了达成度判定。\n\n请开始结算。资料不足先用工具调阅，足够就直接交付契约 JSON。',
             enabled: true,
             deletable: false,
             pinned: true,
@@ -104775,13 +104823,13 @@ $CONTENT
         },
         {
             role: 'user',
-            content: '【大纲方法论与强约束】：\n1. 节奏与阶段分摊：严禁在前半卷或当前阶段将主线矛盾“一次性打穿”。早期阶段仅做铺垫或启动，中段必须让风险升级并出现反转/误导，只有高潮阶段才允许收束本卷目标，且必须保留更高层冲突。\n2. 冲突与障碍递进：每个节点的 goal 必须体现障碍的逐步升高。不要让主角应对同一层次的阻碍“换皮重复”；必须包含环境压力、目标置换或连锁反应。\n3. 情绪弧线与读者期待：注意情绪微弧线的建立，主角面对不利转折必须源于外部高压而非自身降智；压抑后必有加倍反击。明确指出本阶段要埋设、推进或收束哪些伏笔（Payoff），兑现读者期待。\n4. 动态信息差与悬念：在节点 goal 中设计局部信息揭露（需体现开局→中段→结尾的动态变化），并在阶段末留下跨阶段悬念（钩子）。\n5. 实体一致性白名单：参与实体只能从上下文已知角色或场景中选取，绝对禁止凭空自创、捏造新人物或核心组织。动作主体必须明确。\n6. 拒绝空泛与AI味：每个节点的目标必须包含具体的动作、实质性价值改变（地位/资源/情报/关系）。场景要求具备“行动、阻碍、悬念”三要素。禁止使用“大战一触即发”、“深化羁绊”等抽象判词，必须用具体事实填充。',
+            content: '【大纲方法论与强约束】：\n1. 节奏与阶段分摊：严禁在前半卷或当前阶段将主线矛盾“一次性打穿”。早期阶段仅做铺垫或启动，中段必须让风险升级并出现反转/误导，只有高潮阶段才允许收束本卷目标，且必须保留更高层冲突。\n2. 冲突与障碍递进：每个节点的 goal 必须体现障碍的逐步升高。不要让主角应对同一层次的阻碍“换皮重复”；必须包含环境压力、目标置换或连锁反应。\n3. 情绪弧线与伏笔操作显式化：注意情绪微弧线的建立，主角面对不利转折必须源于外部高压而非自身降智；压抑后必有加倍反击。涉及伏笔的轮目标要写明本轮做哪种操作（埋设/强化/误导/回收）及操作对象，不要只写“推进伏笔”这类模糊表述。\n4. 动态信息差与悬念：在节点与轮目标中设计局部信息揭露，写明本轮允许揭示到哪一层（需体现开局→中段→结尾的动态变化），并在阶段末留下跨阶段悬念（钩子）。\n5. 实体一致性白名单：参与实体只能从上下文已知角色或场景中选取，绝对禁止凭空自创、捏造新人物或核心组织。动作主体必须明确。\n6. 拒绝空泛与AI味：每个节点的目标必须包含具体的动作、实质性价值改变（地位/资源/情报/关系）。场景要求具备“行动、阻碍、悬念”三要素。禁止使用“大战一触即发”、“深化羁绊”等抽象判词，必须用具体事实填充。\n7. 轮承载量硬约束：正文模型每轮只输出约 1000-1500 字。每个 <turn> 只承载一个场景片段、至多两个情节节拍，写得下“一次冲突 + 一个变化 + 一个钩子”即为满载；严禁把多个场景、多次转折或跨地点的大事件塞进同一轮——装不下的内容拆成多轮。',
             enabled: true,
             deletable: true,
         },
         {
             role: 'assistant',
-            content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n2. 落实“行动、阻碍、悬念”三要素，确保冲突递进而非平庸重复；\n3. 设计明显的情绪曲线（压抑后必有释放），并维护清晰的信息差动态变化；\n4. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n5. 确保节点内容丰满，每一轮次的目标都具体到“发生了什么危机、做出了什么选择、揭示了什么信息”及“下一阶段悬念”，足以支撑详细正文。\n我会将这些原则落实到各个标签的内容中。',
+            content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n2. 落实“行动、阻碍、悬念”三要素，确保冲突递进而非平庸重复；\n3. 设计明显的情绪曲线（压抑后必有释放），涉及伏笔的轮目标写明操作种类与对象，信息揭露写明允许揭到哪一层；\n4. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n5. 尊重轮承载量：每轮只装一个场景片段、至多两个节拍（一次冲突 + 一个变化 + 一个钩子），大事件拆成多轮，绝不把正文模型 1000-1500 字写不完的内容塞进一轮；\n6. 确保每一轮次的目标都具体到“发生了什么危机、做出了什么选择、揭示了什么信息”，并在阶段末留下跨阶段悬念。\n我会将这些原则落实到各个标签的内容中。',
             enabled: true,
             deletable: true,
         },
@@ -104808,6 +104856,11 @@ $CONTENT
      * needMore 与读写授权退役。旧提示词描述的协议与运行时不再一致，必须强制刷新。
      */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU = 'spv1.9-continuation-agent-tools-v11';
+    /**
+     * 精简轮次版本：大纲轮承载量硬约束（单轮 1000-1500 字）、finalize 紧凑字段化骨架、
+     * 长期约束改增量登记（add/retire）。旧提示词描述的约束协议与运行时不再一致，必须强制刷新。
+     */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V12_ACU = 'spv2.0-continuation-lean-turns-v12';
     function clonePromptSegments_ACU(segments) {
         return segments.map(segment => ({ ...segment }));
     }
@@ -104849,7 +104902,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V12_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -105269,10 +105322,10 @@ $CONTENT
         let outlinePrompt = raw.outlinePrompt;
         let agentPrompts = raw.agentPrompts;
         let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU) {
+        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V12_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU;
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V12_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -108607,31 +108660,52 @@ $CONTENT
             },
         };
     }
+    /** 渲染当前活跃约束清单，用于拒绝回显，让主 Agent 看到可引用的 id 与原文后自我修正。 */
+    function renderActiveConstraintList_ACU(snapshot) {
+        if (!snapshot.constraints.length)
+            return '（当前没有任何活跃约束）';
+        return snapshot.constraints.map(item => `${item.id}：${item.text}`).join('；');
+    }
     /**
-     * 登记主 Agent 裁决后的长期约束。约束是全量列表语义，因此必须显式覆盖既有条目。
+     * 登记主 Agent 裁决后的长期约束。增量语义：add 只写新增文本，retire 只写要废除的
+     * 条目（按 id 或原文精确匹配）。漏写既有条目不等于删除；重复登记已有文本幂等跳过。
      * @param snapshot 当前快照
-     * @param current 本次生效的全部约束文本
-     * @param retired 本次废除的约束文本
+     * @param add 新增的约束文本
+     * @param retire 废除的约束（id 或原文）
      * @param settledIndex 登记时的水位楼层
-     * @returns 应用后的新快照，constraints 的 revision +1
+     * @returns 应用后的新快照；有实际变更时 constraints 的 revision +1，否则原样返回
      */
-    function applyAgentConstraintRegistration_ACU(snapshot, current, retired, settledIndex) {
-        const currentTexts = current.map(text => text.trim()).filter(Boolean);
-        const retiredTexts = new Set(retired.map(text => text.trim()).filter(Boolean));
-        const covered = new Set([...currentTexts, ...retiredTexts]);
-        // 漏写既有活跃约束不等于删除它；缺任何一条都判整份登记无效。
-        const missing = snapshot.constraints.filter(item => !covered.has(item.text)).map(item => item.text);
-        if (missing.length) {
-            reject_ACU('长期约束登记漏写了既有活跃条目；漏写不等于删除，删除必须显式列入 retired', { missing });
+    function applyAgentConstraintRegistration_ACU(snapshot, add, retire, settledIndex) {
+        const retireKeys = [...new Set(retire.map(text => text.trim()).filter(Boolean))];
+        const retiredIds = new Set();
+        for (const key of retireKeys) {
+            const matched = snapshot.constraints.find(item => item.id === key || item.text === key);
+            if (!matched) {
+                reject_ACU(`retire 的约束不存在：「${key}」。retire 必须精确引用活跃条目的 id 或原文。当前活跃约束：${renderActiveConstraintList_ACU(snapshot)}`, { retireKey: key, active: snapshot.constraints.map(item => ({ id: item.id, text: item.text })) });
+            }
+            retiredIds.add(matched.id);
         }
-        const existingByText = new Map(snapshot.constraints.map(item => [item.text, item]));
-        const constraints = currentTexts.map((text, order) => {
-            const previous = existingByText.get(text);
-            if (previous)
-                return previous;
-            return { id: `C${String(snapshot.revisions.constraints + 1).padStart(2, '0')}-${order + 1}`, text, reason: '主 Agent 本轮裁决登记', createdIndex: settledIndex };
-        });
-        return { ...snapshot, constraints, revisions: { ...snapshot.revisions, constraints: snapshot.revisions.constraints + 1 } };
+        const remaining = snapshot.constraints.filter(item => !retiredIds.has(item.id));
+        const existingTexts = new Set(remaining.map(item => item.text));
+        const addTexts = [];
+        for (const raw of add) {
+            const text = raw.trim();
+            // 重复登记既有文本（含旧全量形态重抄整份清单）幂等跳过，不再构成拒绝理由。
+            if (!text || existingTexts.has(text))
+                continue;
+            existingTexts.add(text);
+            addTexts.push(text);
+        }
+        if (!retiredIds.size && !addTexts.length)
+            return snapshot;
+        const nextRevision = snapshot.revisions.constraints + 1;
+        const added = addTexts.map((text, order) => ({
+            id: `C${String(nextRevision).padStart(2, '0')}-${order + 1}`,
+            text,
+            reason: '主 Agent 本轮裁决登记',
+            createdIndex: settledIndex,
+        }));
+        return { ...snapshot, constraints: [...remaining, ...added], revisions: { ...snapshot.revisions, constraints: nextRevision } };
     }
 
     /**
@@ -108976,9 +109050,14 @@ $CONTENT
             if (!instruction)
                 failProtocol_ACU('finalize 动作必须提供非空 instruction');
             const rawConstraints = payload.constraints;
-            const constraints = isRecord_ACU$3(rawConstraints)
-                ? { current: readTextList_ACU(rawConstraints.current), retired: readTextList_ACU(rawConstraints.retired) }
-                : null;
+            let constraints = null;
+            if (isRecord_ACU$3(rawConstraints)) {
+                // 兼容旧全量形态：current 视为「确保存在」（已存在的条目由事务层幂等跳过），retired 同 retire。
+                const add = [...new Set([...readTextList_ACU(rawConstraints.add), ...readTextList_ACU(rawConstraints.current)])];
+                const retire = [...new Set([...readTextList_ACU(rawConstraints.retire), ...readTextList_ACU(rawConstraints.retired)])];
+                if (add.length || retire.length)
+                    constraints = { add, retire };
+            }
             return { kind: 'finalize', thought, instruction, summary: readText_ACU(payload.summary), constraints };
         }
         if (action === 'block') {
@@ -110653,22 +110732,30 @@ $CONTENT
                     }
                     if (action.kind === 'finalize') {
                         if (action.constraints) {
-                            // 约束登记校验失败不终止本轮：把拒绝原因回灌，让主 Agent 在剩余迭代内修正登记，
-                            // 与大纲工具编辑、子代理写集失败的处理同构。只有非校验类异常才上抛。
+                            // 约束登记校验失败不终止本轮：把拒绝原因（含活跃约束清单回显）回灌，让主 Agent
+                            // 在剩余迭代内修正登记，与大纲工具编辑、子代理写集失败的处理同构。只有非校验类异常才上抛。
+                            // 最后一轮例外：此时回灌已无修正机会，登记降级为警告并照常交付，绝不让约束问题烧掉唯一的交付机会。
+                            let constraintsApplied = true;
                             try {
-                                snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.current, action.constraints.retired, chat.length - 1);
+                                snapshot = applyAgentConstraintRegistration_ACU(snapshot, action.constraints.add, action.constraints.retire, chat.length - 1);
                             }
                             catch (error) {
                                 if (!(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_WRITE_REJECTED')
                                     throw error;
+                                constraintsApplied = false;
                                 lastConstraintRejection = error.error.message;
-                                ledger.outcomes.push({ agentName: 'finalize(约束登记)', ok: false, summary: '', detail: '', rejectedReason: `${error.error.message}。finalize 未被采纳，请修正 constraints 后重新交付` });
-                                logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 约束登记被拒绝`, detail: error.error.message, ok: false });
-                                await commitOutcomes(outcomesBefore);
-                                continue;
+                                if (iteration < budget.maxIterations) {
+                                    ledger.outcomes.push({ agentName: 'finalize(约束登记)', ok: false, summary: '', detail: '', rejectedReason: `${error.error.message}。finalize 未被采纳，请修正 constraints 后重新交付` });
+                                    logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 约束登记被拒绝`, detail: error.error.message, ok: false });
+                                    await commitOutcomes(outcomesBefore);
+                                    continue;
+                                }
+                                logAgentSession_ACU({ kind: 'protocol_retry', title: `迭代 ${iteration} · 约束登记被拒绝，已跳过登记并照常交付`, detail: error.error.message, ok: false });
                             }
-                            context.moduleSnapshot = snapshot;
-                            await this.persistSnapshot_ACU(chat, snapshot);
+                            if (constraintsApplied) {
+                                context.moduleSnapshot = snapshot;
+                                await this.persistSnapshot_ACU(chat, snapshot);
+                            }
                         }
                         logAgentSession_ACU({ kind: 'finalize', title: '最终写作指导', detail: action.instruction });
                         logAgentSession_ACU({ kind: 'run_completed', title: '本轮规划完成', detail: action.summary });
@@ -150526,10 +150613,10 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_11$b = { class: "acu-agent-advanced__section-head" };
     const _hoisted_12$b = { class: "acu-agent-advanced__grid" };
     const _hoisted_13$9 = { class: "acu-agent-advanced__section" };
-    const _hoisted_14$8 = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_15$8 = { class: "acu-agent-advanced__prompt-scope" };
-    const _hoisted_16$8 = { class: "acu-agent-advanced__prompt-actions" };
-    const _hoisted_17$7 = { class: "acu-agent-advanced__prompt-head" };
+    const _hoisted_14$9 = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_15$9 = { class: "acu-agent-advanced__prompt-scope" };
+    const _hoisted_16$9 = { class: "acu-agent-advanced__prompt-actions" };
+    const _hoisted_17$8 = { class: "acu-agent-advanced__prompt-head" };
     const _hoisted_18$7 = { class: "acu-agent-advanced__prompt-head" };
     function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
@@ -150676,7 +150763,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				_: 1
 			}, 8, ["label", "hint"])])]),
 			createBaseVNode("section", _hoisted_13$9, [
-				createBaseVNode("header", _hoisted_14$8, [createBaseVNode("div", null, [
+				createBaseVNode("header", _hoisted_14$9, [createBaseVNode("div", null, [
 					createBaseVNode(
 						"h4",
 						null,
@@ -150693,12 +150780,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					),
 					createBaseVNode(
 						"p",
-						_hoisted_15$8,
+						_hoisted_15$9,
 						toDisplayString($setup.plotCopy.agentControl.prompts.scopeHint),
 						1
 						/* TEXT */
 					)
-				]), createBaseVNode("div", _hoisted_16$8, [createVNode($setup["AcuButton"], {
+				]), createBaseVNode("div", _hoisted_16$9, [createVNode($setup["AcuButton"], {
 					size: "sm",
 					disabled: !$setup.canSavePrompts,
 					onClick: $setup.savePromptsToCurrentWorldbook
@@ -150771,7 +150858,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					Fragment,
 					{ key: 1 },
 					[
-						createBaseVNode("div", _hoisted_17$7, [createBaseVNode(
+						createBaseVNode("div", _hoisted_17$8, [createBaseVNode(
 							"h5",
 							null,
 							toDisplayString($setup.plotCopy.agentControl.prompts.decisionTitle),
@@ -152010,13 +152097,13 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-session-feed__thought-text"
     };
-    const _hoisted_14$7 = ["onClick"];
-    const _hoisted_15$7 = {
+    const _hoisted_14$8 = ["onClick"];
+    const _hoisted_15$8 = {
 	key: 0,
 	class: "acu-v2-session-feed__spinner"
     };
-    const _hoisted_16$7 = { class: "acu-v2-session-feed__badge" };
-    const _hoisted_17$6 = { class: "acu-v2-session-feed__title" };
+    const _hoisted_16$8 = { class: "acu-v2-session-feed__badge" };
+    const _hoisted_17$7 = { class: "acu-v2-session-feed__title" };
     const _hoisted_18$6 = { class: "acu-v2-session-feed__time" };
     const _hoisted_19$6 = ["onClick"];
     const _hoisted_20$5 = {
@@ -152113,7 +152200,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										createBaseVNode(
 											"span",
 											{ class: normalizeClass(["acu-v2-session-feed__status", `acu-v2-session-feed__status--${entry.status}`]) },
-											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_15$7)) : entry.status === "failed" ? (openBlock(), createElementBlock(
+											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_15$8)) : entry.status === "failed" ? (openBlock(), createElementBlock(
 												Fragment,
 												{ key: 1 },
 												[createTextVNode("✕")],
@@ -152131,14 +152218,14 @@ Expected function or array of functions, received type ${typeof value}.`
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_16$7,
+											_hoisted_16$8,
 											toDisplayString($setup.kindLabel(entry)),
 											1
 											/* TEXT */
 										),
 										createBaseVNode(
 											"span",
-											_hoisted_17$6,
+											_hoisted_17$7,
 											toDisplayString(entry.title),
 											1
 											/* TEXT */
@@ -152160,7 +152247,7 @@ Expected function or array of functions, received type ${typeof value}.`
 											2
 											/* CLASS */
 										)) : createCommentVNode("v-if", true)
-									], 8, _hoisted_14$7),
+									], 8, _hoisted_14$8),
 									entry.detail && !$setup.isExpanded(entry) ? (openBlock(), createElementBlock("p", {
 										key: 0,
 										class: "acu-v2-session-feed__preview",
@@ -152602,13 +152689,13 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_14$6 = { class: "acu-v2-continuation-materials__meta" };
-    const _hoisted_15$6 = { class: "acu-v2-continuation-materials__list" };
-    const _hoisted_16$6 = {
+    const _hoisted_14$7 = { class: "acu-v2-continuation-materials__meta" };
+    const _hoisted_15$7 = { class: "acu-v2-continuation-materials__list" };
+    const _hoisted_16$7 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_17$5 = {
+    const _hoisted_17$6 = {
 	key: 1,
 	class: "acu-v2-continuation-materials__error"
     };
@@ -152760,11 +152847,11 @@ Expected function or array of functions, received type ${typeof value}.`
 								renderList(stage.revisions, (revision) => {
 									return openBlock(), createElementBlock("div", { key: revision.revision }, [createBaseVNode(
 										"p",
-										_hoisted_14$6,
+										_hoisted_14$7,
 										" revision " + toDisplayString(revision.revision) + " · " + toDisplayString(revision.reason) + " · " + toDisplayString(revision.frozen ? "已冻结" : "待确认") + " · " + toDisplayString(revision.outline.title),
 										1
 										/* TEXT */
-									), createBaseVNode("ol", _hoisted_15$6, [(openBlock(true), createElementBlock(
+									), createBaseVNode("ol", _hoisted_15$7, [(openBlock(true), createElementBlock(
 										Fragment,
 										null,
 										renderList(revision.outline.nodes, (node) => {
@@ -152829,7 +152916,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)),
 				$setup.materials.snapshot.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_16$6,
+					_hoisted_16$7,
 					" 结算水位：楼层 " + toDisplayString($setup.materials.snapshot.value.settledThroughIndex) + " · 伏笔 " + toDisplayString($setup.materials.snapshot.value.hooks.length) + " 条 · 信息差 " + toDisplayString($setup.materials.snapshot.value.infoGap.length) + " 条 · 长期约束 " + toDisplayString($setup.materials.snapshot.value.constraints.length) + " 条 · 修订号 " + toDisplayString($setup.materials.snapshot.value.revisions.hooks) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.infoGap) + "/" + toDisplayString($setup.materials.snapshot.value.revisions.constraints),
 					1
 					/* TEXT */
@@ -152841,7 +152928,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value", "onUpdate:modelValue"]),
 				$setup.materials.error.value ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_17$5,
+					_hoisted_17$6,
 					toDisplayString($setup.materials.error.value),
 					1
 					/* TEXT */
@@ -153085,6 +153172,40 @@ Expected function or array of functions, received type ${typeof value}.`
         function restorePromptDefault(settings, kind) {
             return restoreContinuationPromptDefault_ACU(settings, kind);
         }
+        /**
+         * 解析并校验导入的提示词 JSON 包。
+         * 结构：{ outlinePrompt: 段数组, agentPrompts: { main/maintainer/mainlinePlanner/beatPlanner/reviewer: 段数组 } }。
+         * 任何一组校验失败即整体拒绝，绝不产生半套导入。
+         * @param text 导入文件的原始文本
+         * @returns 校验通过的完整提示词包
+         */
+        function parsePromptBundle(text) {
+            let raw;
+            try {
+                raw = JSON.parse(text);
+            }
+            catch {
+                throw new Error('导入文件不是合法的 JSON。');
+            }
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+                throw new Error('提示词 JSON 必须是对象（含 outlinePrompt 与 agentPrompts）。');
+            const record = raw;
+            const agentRaw = record.agentPrompts;
+            if (!agentRaw || typeof agentRaw !== 'object' || Array.isArray(agentRaw))
+                throw new Error('提示词 JSON 缺少 agentPrompts 对象。');
+            try {
+                const outlinePrompt = validateContinuationPromptSegments_ACU(record.outlinePrompt, 'load');
+                const agentRecord = agentRaw;
+                const agentPrompts = {};
+                for (const key of CONTINUATION_AGENT_PROMPT_KEYS_ACU) {
+                    agentPrompts[key] = validateContinuationPromptSegments_ACU(agentRecord[key], 'load');
+                }
+                return { outlinePrompt, agentPrompts };
+            }
+            catch (error) {
+                throw new Error(`提示词校验失败：${errorMessage_ACU(error)}`);
+            }
+        }
         async function saveActiveOutline(outline) {
             return run_ACU(() => runtime.orchestrator.replaceActiveOutline({ outline }));
         }
@@ -153114,6 +153235,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         return {
             clearData,
+            parsePromptBundle,
             restorePromptDefault,
             saveActiveOutline,
             sendAgentMessage,
@@ -153262,6 +153384,8 @@ Expected function or array of functions, received type ${typeof value}.`
                     settingsDraft.value.apiPresetMode = 'current';
                     settingsDraft.value.fixedApiPresetName = '';
                 }
+                // 渠道选择与填表工作台一致：选择即保存，不等防抖窗口，避免用户离开页面时选择丢失。
+                saveSettingsImmediately();
             }
             const continuationRoleOptions = [
                 { value: 'system', label: 'SYSTEM' },
@@ -153300,6 +153424,15 @@ Expected function or array of functions, received type ${typeof value}.`
                 else {
                     settingsDraft.value.agentApiPresets[role] = { mode: 'current', presetName: '' };
                 }
+                saveSettingsImmediately();
+            }
+            /** 立即触发保存：先取消挂起的防抖计时器再保存，保证渠道类改动不受 800ms 窗口影响。 */
+            function saveSettingsImmediately() {
+                if (settingsSaveTimer !== undefined) {
+                    clearTimeout(settingsSaveTimer);
+                    settingsSaveTimer = undefined;
+                }
+                void saveSettingsNow();
             }
             function cloneSettings(settings) {
                 return {
@@ -153485,8 +153618,15 @@ Expected function or array of functions, received type ${typeof value}.`
                     return settingsDraft.value.outlinePrompt;
                 return settingsDraft.value.agentPrompts[key];
             }
-            function addPrompt(key) {
-                promptList(key)?.push({ role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true });
+            function addPrompt(key, position = 'bottom') {
+                const prompts = promptList(key);
+                if (!prompts)
+                    return;
+                const segment = { role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true };
+                if (position === 'top')
+                    prompts.unshift(segment);
+                else
+                    prompts.push(segment);
             }
             function deletePrompt(key, index) {
                 const prompts = promptList(key);
@@ -153512,6 +153652,53 @@ Expected function or array of functions, received type ${typeof value}.`
                     return;
                 settingsDraft.value = runtime.restorePromptDefault(settingsDraft.value, kind);
             }
+            const promptImportInput = ref(null);
+            const promptIoError = ref('');
+            const promptIoNotice = ref('');
+            /** 导出全部提示词（大纲组 + 五组 Agent）为 JSON 文件下载。 */
+            function exportPrompts() {
+                if (!settingsDraft.value)
+                    return;
+                promptIoError.value = '';
+                try {
+                    const source = cloneSettings(settingsDraft.value);
+                    const bundle = { version: 1, outlinePrompt: source.outlinePrompt, agentPrompts: source.agentPrompts };
+                    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const anchor = document.createElement('a');
+                    anchor.href = url;
+                    anchor.download = 'acu-continuation-prompts.json';
+                    document.body.appendChild(anchor);
+                    anchor.click();
+                    document.body.removeChild(anchor);
+                    URL.revokeObjectURL(url);
+                    promptIoNotice.value = '提示词 JSON 已导出。';
+                }
+                catch (error) {
+                    promptIoError.value = error instanceof Error ? error.message : '提示词导出失败。';
+                }
+            }
+            /** 导入提示词 JSON：逐组校验通过后整体写入草稿并立即保存，任何一组失败即整体拒绝。 */
+            async function onImportPromptsFile(event) {
+                const input = event.target;
+                const file = input.files?.[0];
+                // 允许连续选择同一个文件重复导入。
+                input.value = '';
+                if (!file || !settingsDraft.value)
+                    return;
+                promptIoError.value = '';
+                promptIoNotice.value = '';
+                try {
+                    const bundle = runtime.parsePromptBundle(await file.text());
+                    settingsDraft.value.outlinePrompt = bundle.outlinePrompt;
+                    settingsDraft.value.agentPrompts = bundle.agentPrompts;
+                    saveSettingsImmediately();
+                    promptIoNotice.value = '提示词 JSON 已导入并保存。';
+                }
+                catch (error) {
+                    promptIoError.value = error instanceof Error ? error.message : '提示词 JSON 读取失败。';
+                }
+            }
             /** 刷新页面依赖的全部数据源：API 预设列表必须在挂载与聊天切换时重新读取，否则预设下拉是空的。 */
             function refreshAll() {
                 apiStore.refreshFromSettings();
@@ -153527,8 +153714,12 @@ Expected function or array of functions, received type ${typeof value}.`
             onBeforeUnmount(() => {
                 if (countdownTimer !== undefined)
                     clearInterval(countdownTimer);
-                if (settingsSaveTimer !== undefined)
+                // 防抖窗口内离开页面时冲刷一次未落盘的改动，避免"改了像改了、重进没了"。
+                if (settingsSaveTimer !== undefined) {
                     clearTimeout(settingsSaveTimer);
+                    settingsSaveTimer = undefined;
+                    void saveSettingsNow();
+                }
             });
             watch(useChatChangedTick(), refreshAll);
             watch(runtime.settings, settings => {
@@ -153548,14 +153739,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, sendMessage, saveOutline, clearData, requiredInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
+            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, sendMessage, saveOutline, clearData, requiredInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-29ca59d4] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-29ca59d4] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-29ca59d4] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__error[data-v-29ca59d4] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-29ca59d4] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-29ca59d4] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-29ca59d4] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-29ca59d4] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-29ca59d4] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-29ca59d4] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-29ca59d4] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-29ca59d4] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-29ca59d4] > * { flex: 1 1 auto;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-29ca59d4");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_29ca59d4_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-f0019775] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-f0019775] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-f0019775] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-f0019775] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-f0019775] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-f0019775] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-f0019775] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-f0019775] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-f0019775] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-f0019775] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-f0019775] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-f0019775] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-f0019775] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-f0019775] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-f0019775] > * { flex: 1 1 auto;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-f0019775");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_f0019775_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-continuation-page" };
     const _hoisted_2$j = {
@@ -153573,12 +153764,25 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_8$9 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_9$8 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_10$8 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_8$9 = { class: "acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start" };
+    const _hoisted_9$8 = {
+	key: 0,
+	class: "acu-v2-continuation-page__error"
+    };
+    const _hoisted_10$8 = {
+	key: 1,
+	class: "acu-v2-continuation-page__meta"
+    };
     const _hoisted_11$8 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_12$8 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_13$6 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_14$6 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_15$6 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_16$6 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_17$5 = {
+	key: 2,
+	class: "acu-v2-continuation-page__error"
+    };
     function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$l, [
 		createVNode($setup["AcuPanel"], {
@@ -153646,7 +153850,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.acceptOutlineDraft
 				}, {
-					default: withCtx(() => [..._cache[50] || (_cache[50] = [createTextVNode(
+					default: withCtx(() => [..._cache[51] || (_cache[51] = [createTextVNode(
 						"确认大纲并继续",
 						-1
 						/* CACHED */
@@ -153688,7 +153892,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							default: withCtx(() => [withDirectives(createBaseVNode(
 								"select",
 								{ "onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => $setup.settingsDraft.stageSize = $event) },
-								[..._cache[51] || (_cache[51] = [
+								[..._cache[52] || (_cache[52] = [
 									createBaseVNode(
 										"option",
 										{ value: "short" },
@@ -153938,10 +154142,55 @@ Expected function or array of functions, received type ${typeof value}.`
 		$setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
 			key: 1,
 			title: "伪 Role 提示词",
-			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。"
+			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。修改后自动保存。"
 		}, {
 			default: withCtx(() => [
-				_cache[58] || (_cache[58] = createBaseVNode(
+				createBaseVNode("div", _hoisted_8$9, [
+					createVNode($setup["AcuButton"], { onClick: $setup.exportPrompts }, {
+						default: withCtx(() => [..._cache[53] || (_cache[53] = [createTextVNode(
+							"导出提示词 JSON",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}),
+					createVNode($setup["AcuButton"], { onClick: _cache[20] || (_cache[20] = ($event) => $setup.promptImportInput?.click()) }, {
+						default: withCtx(() => [..._cache[54] || (_cache[54] = [createTextVNode(
+							"导入提示词 JSON",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}),
+					createBaseVNode(
+						"input",
+						{
+							ref: "promptImportInput",
+							type: "file",
+							accept: ".json,application/json",
+							class: "acu-v2-continuation-page__file-input",
+							onChange: $setup.onImportPromptsFile
+						},
+						null,
+						544
+						/* NEED_HYDRATION, NEED_PATCH */
+					)
+				]),
+				$setup.promptIoError ? (openBlock(), createElementBlock(
+					"p",
+					_hoisted_9$8,
+					toDisplayString($setup.promptIoError),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true),
+				$setup.promptIoNotice ? (openBlock(), createElementBlock(
+					"p",
+					_hoisted_10$8,
+					toDisplayString($setup.promptIoNotice),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true),
+				_cache[61] || (_cache[61] = createBaseVNode(
 					"h3",
 					null,
 					"大纲子代理（outline-architect）提示词",
@@ -153954,27 +154203,27 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[20] || (_cache[20] = ($event) => $setup.addPrompt("outlinePrompt")),
-					onDelete: _cache[21] || (_cache[21] = (index) => $setup.deletePrompt("outlinePrompt", index)),
-					onMove: _cache[22] || (_cache[22] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
-					onUpdate: _cache[23] || (_cache[23] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
+					onAdd: _cache[21] || (_cache[21] = (position) => $setup.addPrompt("outlinePrompt", position)),
+					onDelete: _cache[22] || (_cache[22] = (index) => $setup.deletePrompt("outlinePrompt", index)),
+					onMove: _cache[23] || (_cache[23] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
+					onUpdate: _cache[24] || (_cache[24] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_8$9, [createVNode($setup["AcuButton"], { onClick: _cache[24] || (_cache[24] = ($event) => $setup.restorePrompt("outline")) }, {
-					default: withCtx(() => [..._cache[52] || (_cache[52] = [createTextVNode(
+				createBaseVNode("div", _hoisted_11$8, [createVNode($setup["AcuButton"], { onClick: _cache[25] || (_cache[25] = ($event) => $setup.restorePrompt("outline")) }, {
+					default: withCtx(() => [..._cache[55] || (_cache[55] = [createTextVNode(
 						"恢复大纲提示词默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[59] || (_cache[59] = createBaseVNode(
+				_cache[62] || (_cache[62] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$VALIDATION_ERRORS。",
 					-1
 					/* CACHED */
 				)),
-				_cache[60] || (_cache[60] = createBaseVNode(
+				_cache[63] || (_cache[63] = createBaseVNode(
 					"h3",
 					null,
 					"主 Agent 提示词",
@@ -153987,27 +154236,27 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[25] || (_cache[25] = ($event) => $setup.addPrompt("main")),
-					onDelete: _cache[26] || (_cache[26] = (index) => $setup.deletePrompt("main", index)),
-					onMove: _cache[27] || (_cache[27] = (index, delta) => $setup.movePrompt("main", index, delta)),
-					onUpdate: _cache[28] || (_cache[28] = (index, patch) => $setup.updatePrompt("main", index, patch))
+					onAdd: _cache[26] || (_cache[26] = (position) => $setup.addPrompt("main", position)),
+					onDelete: _cache[27] || (_cache[27] = (index) => $setup.deletePrompt("main", index)),
+					onMove: _cache[28] || (_cache[28] = (index, delta) => $setup.movePrompt("main", index, delta)),
+					onUpdate: _cache[29] || (_cache[29] = (index, patch) => $setup.updatePrompt("main", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_9$8, [createVNode($setup["AcuButton"], { onClick: _cache[29] || (_cache[29] = ($event) => $setup.restorePrompt("agent_main")) }, {
-					default: withCtx(() => [..._cache[53] || (_cache[53] = [createTextVNode(
+				createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuButton"], { onClick: _cache[30] || (_cache[30] = ($event) => $setup.restorePrompt("agent_main")) }, {
+					default: withCtx(() => [..._cache[56] || (_cache[56] = [createTextVNode(
 						"恢复主 Agent 默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[61] || (_cache[61] = createBaseVNode(
+				_cache[64] || (_cache[64] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。目录与状态占位符：$STORY_CATALOG（正文楼层目录，尾部若干楼带全文）、$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $STORY_TEXT、$OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。",
 					-1
 					/* CACHED */
 				)),
-				_cache[62] || (_cache[62] = createBaseVNode(
+				_cache[65] || (_cache[65] = createBaseVNode(
 					"h3",
 					null,
 					"伏笔与认知维护子代理提示词",
@@ -154020,20 +154269,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[30] || (_cache[30] = ($event) => $setup.addPrompt("maintainer")),
-					onDelete: _cache[31] || (_cache[31] = (index) => $setup.deletePrompt("maintainer", index)),
-					onMove: _cache[32] || (_cache[32] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
-					onUpdate: _cache[33] || (_cache[33] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
+					onAdd: _cache[31] || (_cache[31] = (position) => $setup.addPrompt("maintainer", position)),
+					onDelete: _cache[32] || (_cache[32] = (index) => $setup.deletePrompt("maintainer", index)),
+					onMove: _cache[33] || (_cache[33] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
+					onUpdate: _cache[34] || (_cache[34] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_10$8, [createVNode($setup["AcuButton"], { onClick: _cache[34] || (_cache[34] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
-					default: withCtx(() => [..._cache[54] || (_cache[54] = [createTextVNode(
+				createBaseVNode("div", _hoisted_13$6, [createVNode($setup["AcuButton"], { onClick: _cache[35] || (_cache[35] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
+					default: withCtx(() => [..._cache[57] || (_cache[57] = [createTextVNode(
 						"恢复维护子代理默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[63] || (_cache[63] = createBaseVNode(
+				_cache[66] || (_cache[66] = createBaseVNode(
 					"h3",
 					null,
 					"主线推进策划子代理提示词",
@@ -154046,20 +154295,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[35] || (_cache[35] = ($event) => $setup.addPrompt("mainlinePlanner")),
-					onDelete: _cache[36] || (_cache[36] = (index) => $setup.deletePrompt("mainlinePlanner", index)),
-					onMove: _cache[37] || (_cache[37] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
-					onUpdate: _cache[38] || (_cache[38] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
+					onAdd: _cache[36] || (_cache[36] = (position) => $setup.addPrompt("mainlinePlanner", position)),
+					onDelete: _cache[37] || (_cache[37] = (index) => $setup.deletePrompt("mainlinePlanner", index)),
+					onMove: _cache[38] || (_cache[38] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
+					onUpdate: _cache[39] || (_cache[39] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_11$8, [createVNode($setup["AcuButton"], { onClick: _cache[39] || (_cache[39] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
-					default: withCtx(() => [..._cache[55] || (_cache[55] = [createTextVNode(
+				createBaseVNode("div", _hoisted_14$6, [createVNode($setup["AcuButton"], { onClick: _cache[40] || (_cache[40] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
+					default: withCtx(() => [..._cache[58] || (_cache[58] = [createTextVNode(
 						"恢复主线策划默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[64] || (_cache[64] = createBaseVNode(
+				_cache[67] || (_cache[67] = createBaseVNode(
 					"h3",
 					null,
 					"伏笔与节拍策划子代理提示词",
@@ -154072,20 +154321,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[40] || (_cache[40] = ($event) => $setup.addPrompt("beatPlanner")),
-					onDelete: _cache[41] || (_cache[41] = (index) => $setup.deletePrompt("beatPlanner", index)),
-					onMove: _cache[42] || (_cache[42] = (index, delta) => $setup.movePrompt("beatPlanner", index, delta)),
-					onUpdate: _cache[43] || (_cache[43] = (index, patch) => $setup.updatePrompt("beatPlanner", index, patch))
+					onAdd: _cache[41] || (_cache[41] = (position) => $setup.addPrompt("beatPlanner", position)),
+					onDelete: _cache[42] || (_cache[42] = (index) => $setup.deletePrompt("beatPlanner", index)),
+					onMove: _cache[43] || (_cache[43] = (index, delta) => $setup.movePrompt("beatPlanner", index, delta)),
+					onUpdate: _cache[44] || (_cache[44] = (index, patch) => $setup.updatePrompt("beatPlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuButton"], { onClick: _cache[44] || (_cache[44] = ($event) => $setup.restorePrompt("agent_beat")) }, {
-					default: withCtx(() => [..._cache[56] || (_cache[56] = [createTextVNode(
+				createBaseVNode("div", _hoisted_15$6, [createVNode($setup["AcuButton"], { onClick: _cache[45] || (_cache[45] = ($event) => $setup.restorePrompt("agent_beat")) }, {
+					default: withCtx(() => [..._cache[59] || (_cache[59] = [createTextVNode(
 						"恢复节拍策划默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[65] || (_cache[65] = createBaseVNode(
+				_cache[68] || (_cache[68] = createBaseVNode(
 					"h3",
 					null,
 					"连续性审查子代理提示词",
@@ -154098,32 +154347,39 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[45] || (_cache[45] = ($event) => $setup.addPrompt("reviewer")),
-					onDelete: _cache[46] || (_cache[46] = (index) => $setup.deletePrompt("reviewer", index)),
-					onMove: _cache[47] || (_cache[47] = (index, delta) => $setup.movePrompt("reviewer", index, delta)),
-					onUpdate: _cache[48] || (_cache[48] = (index, patch) => $setup.updatePrompt("reviewer", index, patch))
+					onAdd: _cache[46] || (_cache[46] = (position) => $setup.addPrompt("reviewer", position)),
+					onDelete: _cache[47] || (_cache[47] = (index) => $setup.deletePrompt("reviewer", index)),
+					onMove: _cache[48] || (_cache[48] = (index, delta) => $setup.movePrompt("reviewer", index, delta)),
+					onUpdate: _cache[49] || (_cache[49] = (index, patch) => $setup.updatePrompt("reviewer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_13$6, [createVNode($setup["AcuButton"], { onClick: _cache[49] || (_cache[49] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
-					default: withCtx(() => [..._cache[57] || (_cache[57] = [createTextVNode(
+				createBaseVNode("div", _hoisted_16$6, [createVNode($setup["AcuButton"], { onClick: _cache[50] || (_cache[50] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
+					default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
 						"恢复审查子代理默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[66] || (_cache[66] = createBaseVNode(
+				_cache[69] || (_cache[69] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG（各资料目录）。",
 					-1
 					/* CACHED */
-				))
+				)),
+				$setup.settingsError ? (openBlock(), createElementBlock(
+					"p",
+					_hoisted_17$5,
+					toDisplayString($setup.settingsError),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true)
 			]),
 			_: 1
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-29ca59d4"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-f0019775"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

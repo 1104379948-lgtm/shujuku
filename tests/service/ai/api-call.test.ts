@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockIsGenerateRawAvailable, mockGenerateRaw, mockSendConnectionManager, mockGetHeaders, mockHandleApiResponse } = vi.hoisted(() => ({
+const { mockSettings, mockIsGenerateRawAvailable, mockGenerateRaw, mockSendConnectionManager, mockGetHeaders, mockHandleApiResponse, mockGetProfiles, mockTriggerSlash } = vi.hoisted(() => ({
   mockSettings: {
     apiMode: 'custom',
     apiConfig: { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 4096 },
@@ -18,6 +18,8 @@ const { mockSettings, mockIsGenerateRawAvailable, mockGenerateRaw, mockSendConne
   mockSendConnectionManager: vi.fn(),
   mockGetHeaders: vi.fn(() => ({ 'X-Custom': 'test' })),
   mockHandleApiResponse: vi.fn(),
+  mockGetProfiles: vi.fn(() => [] as any[]),
+  mockTriggerSlash: vi.fn(async () => ''),
 }));
 
 vi.mock('../../../src/service/ai/prompt-builder', () => ({
@@ -33,6 +35,8 @@ vi.mock('../../../src/data/gateways/ai-gateway', () => ({
   generateRaw_ACU: mockGenerateRaw,
   sendConnectionManagerRequest_ACU: mockSendConnectionManager,
   getHostRequestHeaders_ACU: mockGetHeaders,
+  getConnectionManagerProfiles_ACU: mockGetProfiles,
+  triggerSlash_ACU: mockTriggerSlash,
 }));
 
 vi.mock('../../../src/shared/utils', () => ({
@@ -62,6 +66,8 @@ beforeEach(() => {
   mockSettings.plotApiPreset = '';
   mockSettings.streamingEnabled = false;
   mockSettings.apiPresets = [];
+  mockGetProfiles.mockReturnValue([]);
+  mockTriggerSlash.mockResolvedValue('');
 });
 
 // ═══ getApiConfigByPreset_ACU ═══
@@ -540,6 +546,15 @@ describe('callAIWithResolvedPreset_ACU', () => {
 
   it('uses the supplied Tavern profile rather than current global settings', async () => {
     mockSettings.tavernProfile = 'global-profile';
+    mockGetProfiles.mockReturnValue([{ id: 'resolved-profile', name: '续写渠道', api: 'openai' }]);
+    // 有状态的 /profile 替身：查询返回当前活动名，切换命令更新它。
+    let activeProfile = '全局渠道';
+    mockTriggerSlash.mockImplementation(async (command: string) => {
+      if (command === '/profile') return activeProfile;
+      const matched = command.match(/^\/profile await=true "(.+)"$/);
+      if (matched) activeProfile = matched[1];
+      return '';
+    });
     mockSendConnectionManager.mockResolvedValue({ result: { choices: [{ message: { content: 'profile reply' } }] } });
 
     await expect(callAIWithResolvedPreset_ACU(
@@ -548,6 +563,27 @@ describe('callAIWithResolvedPreset_ACU', () => {
     )).resolves.toBe('profile reply');
 
     expect(mockSendConnectionManager).toHaveBeenCalledWith('resolved-profile', expect.any(Array), 17);
+    // 发送前切换到目标渠道，发送后恢复原渠道，与填表链路行为对齐。
+    const slashCommands = mockTriggerSlash.mock.calls.map(call => call[0]);
+    expect(slashCommands).toContain('/profile await=true "续写渠道"');
+    expect(activeProfile).toBe('全局渠道');
+    const switchOrder = mockTriggerSlash.mock.invocationCallOrder[slashCommands.indexOf('/profile await=true "续写渠道"')];
+    expect(switchOrder).toBeLessThan(mockSendConnectionManager.mock.invocationCallOrder[0]);
+  });
+
+  it('target profile already active: sends without switching, and missing profile fails fast', async () => {
+    mockGetProfiles.mockReturnValue([{ id: 'resolved-profile', name: '续写渠道', api: 'openai' }]);
+    mockTriggerSlash.mockResolvedValue('续写渠道');
+    mockSendConnectionManager.mockResolvedValue({ result: { choices: [{ message: { content: 'profile reply' } }] } });
+    const resolved = { apiMode: 'tavern' as const, apiConfig: { url: '', apiKey: '', model: '', useMainApi: false, max_tokens: 17, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: 'resolved-profile' };
+
+    await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'profile request' }], resolved)).resolves.toBe('profile reply');
+    expect(mockTriggerSlash.mock.calls.map(call => call[0]).filter(command => command.startsWith('/profile await=true'))).toHaveLength(0);
+
+    await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'profile request' }], { ...resolved, tavernProfile: 'ghost-profile' }))
+      .rejects.toThrow('无法找到 ID 为 "ghost-profile" 的连接预设');
+    await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'profile request' }], { ...resolved, tavernProfile: '' }))
+      .rejects.toThrow('未选择连接预设');
   });
 
   it('uses generateRaw only when the supplied resolved configuration selects the main API', async () => {

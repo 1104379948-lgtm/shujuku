@@ -125,33 +125,42 @@
       </AcuPanel>
     </AcuPanelGrid>
 
-    <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用段参与内部调用；占位符会按实际出现按需解析。">
+    <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用段参与内部调用；占位符会按实际出现按需解析。修改后自动保存。">
+      <div class="acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start">
+        <AcuButton @click="exportPrompts">导出提示词 JSON</AcuButton>
+        <AcuButton @click="promptImportInput?.click()">导入提示词 JSON</AcuButton>
+        <input ref="promptImportInput" type="file" accept=".json,application/json" class="acu-v2-continuation-page__file-input" @change="onImportPromptsFile" />
+      </div>
+      <p v-if="promptIoError" class="acu-v2-continuation-page__error">{{ promptIoError }}</p>
+      <p v-if="promptIoNotice" class="acu-v2-continuation-page__meta">{{ promptIoNotice }}</p>
+
       <h3>大纲子代理（outline-architect）提示词</h3>
-      <AcuPromptSegments :segments="settingsDraft.outlinePrompt" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('outlinePrompt')" @delete="index => deletePrompt('outlinePrompt', index)" @move="(index, delta) => movePrompt('outlinePrompt', index, delta)" @update="(index, patch) => updatePrompt('outlinePrompt', index, patch)" />
+      <AcuPromptSegments :segments="settingsDraft.outlinePrompt" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('outlinePrompt', position)" @delete="index => deletePrompt('outlinePrompt', index)" @move="(index, delta) => movePrompt('outlinePrompt', index, delta)" @update="(index, patch) => updatePrompt('outlinePrompt', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('outline')">恢复大纲提示词默认值</AcuButton></div>
       <p class="acu-v2-continuation-page__meta">大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$VALIDATION_ERRORS。</p>
 
       <h3>主 Agent 提示词</h3>
-      <AcuPromptSegments :segments="settingsDraft.agentPrompts.main" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('main')" @delete="index => deletePrompt('main', index)" @move="(index, delta) => movePrompt('main', index, delta)" @update="(index, patch) => updatePrompt('main', index, patch)" />
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.main" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('main', position)" @delete="index => deletePrompt('main', index)" @move="(index, delta) => movePrompt('main', index, delta)" @update="(index, patch) => updatePrompt('main', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_main')">恢复主 Agent 默认值</AcuButton></div>
       <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。目录与状态占位符：$STORY_CATALOG（正文楼层目录，尾部若干楼带全文）、$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $STORY_TEXT、$OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。</p>
 
       <h3>伏笔与认知维护子代理提示词</h3>
-      <AcuPromptSegments :segments="settingsDraft.agentPrompts.maintainer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('maintainer')" @delete="index => deletePrompt('maintainer', index)" @move="(index, delta) => movePrompt('maintainer', index, delta)" @update="(index, patch) => updatePrompt('maintainer', index, patch)" />
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.maintainer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('maintainer', position)" @delete="index => deletePrompt('maintainer', index)" @move="(index, delta) => movePrompt('maintainer', index, delta)" @update="(index, patch) => updatePrompt('maintainer', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_maintainer')">恢复维护子代理默认值</AcuButton></div>
 
       <h3>主线推进策划子代理提示词</h3>
-      <AcuPromptSegments :segments="settingsDraft.agentPrompts.mainlinePlanner" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('mainlinePlanner')" @delete="index => deletePrompt('mainlinePlanner', index)" @move="(index, delta) => movePrompt('mainlinePlanner', index, delta)" @update="(index, patch) => updatePrompt('mainlinePlanner', index, patch)" />
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.mainlinePlanner" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('mainlinePlanner', position)" @delete="index => deletePrompt('mainlinePlanner', index)" @move="(index, delta) => movePrompt('mainlinePlanner', index, delta)" @update="(index, patch) => updatePrompt('mainlinePlanner', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_mainline')">恢复主线策划默认值</AcuButton></div>
 
       <h3>伏笔与节拍策划子代理提示词</h3>
-      <AcuPromptSegments :segments="settingsDraft.agentPrompts.beatPlanner" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('beatPlanner')" @delete="index => deletePrompt('beatPlanner', index)" @move="(index, delta) => movePrompt('beatPlanner', index, delta)" @update="(index, patch) => updatePrompt('beatPlanner', index, patch)" />
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.beatPlanner" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('beatPlanner', position)" @delete="index => deletePrompt('beatPlanner', index)" @move="(index, delta) => movePrompt('beatPlanner', index, delta)" @update="(index, patch) => updatePrompt('beatPlanner', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_beat')">恢复节拍策划默认值</AcuButton></div>
 
       <h3>连续性审查子代理提示词</h3>
-      <AcuPromptSegments :segments="settingsDraft.agentPrompts.reviewer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="addPrompt('reviewer')" @delete="index => deletePrompt('reviewer', index)" @move="(index, delta) => movePrompt('reviewer', index, delta)" @update="(index, patch) => updatePrompt('reviewer', index, patch)" />
+      <AcuPromptSegments :segments="settingsDraft.agentPrompts.reviewer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('reviewer', position)" @delete="index => deletePrompt('reviewer', index)" @move="(index, delta) => movePrompt('reviewer', index, delta)" @update="(index, patch) => updatePrompt('reviewer', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_reviewer')">恢复审查子代理默认值</AcuButton></div>
       <p class="acu-v2-continuation-page__meta">子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG（各资料目录）。</p>
+      <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
     </AcuPanel>
   </section>
 </template>
@@ -222,6 +231,8 @@ function applyContinuationApiPreset(value: string): void {
     settingsDraft.value.apiPresetMode = 'current';
     settingsDraft.value.fixedApiPresetName = '';
   }
+  // 渠道选择与填表工作台一致：选择即保存，不等防抖窗口，避免用户离开页面时选择丢失。
+  saveSettingsImmediately();
 }
 
 const continuationRoleOptions = [
@@ -265,6 +276,16 @@ function applyAgentChannel(role: AgentChannelRole, value: string): void {
   } else {
     settingsDraft.value.agentApiPresets[role] = { mode: 'current', presetName: '' };
   }
+  saveSettingsImmediately();
+}
+
+/** 立即触发保存：先取消挂起的防抖计时器再保存，保证渠道类改动不受 800ms 窗口影响。 */
+function saveSettingsImmediately(): void {
+  if (settingsSaveTimer !== undefined) {
+    clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = undefined;
+  }
+  void saveSettingsNow();
 }
 
 function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings_ACU {
@@ -446,8 +467,12 @@ function promptList(key: PromptKey): ContinuationPromptSegment_ACU[] | null {
   return settingsDraft.value.agentPrompts[key];
 }
 
-function addPrompt(key: PromptKey): void {
-  promptList(key)?.push({ role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true });
+function addPrompt(key: PromptKey, position: 'top' | 'bottom' = 'bottom'): void {
+  const prompts = promptList(key);
+  if (!prompts) return;
+  const segment: ContinuationPromptSegment_ACU = { role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true };
+  if (position === 'top') prompts.unshift(segment);
+  else prompts.push(segment);
 }
 
 function deletePrompt(key: PromptKey, index: number): void {
@@ -474,6 +499,52 @@ function restorePrompt(kind: ContinuationPromptKind_ACU): void {
   settingsDraft.value = runtime.restorePromptDefault(settingsDraft.value, kind);
 }
 
+const promptImportInput = ref<HTMLInputElement | null>(null);
+const promptIoError = ref('');
+const promptIoNotice = ref('');
+
+/** 导出全部提示词（大纲组 + 五组 Agent）为 JSON 文件下载。 */
+function exportPrompts(): void {
+  if (!settingsDraft.value) return;
+  promptIoError.value = '';
+  try {
+    const source = cloneSettings(settingsDraft.value);
+    const bundle = { version: 1, outlinePrompt: source.outlinePrompt, agentPrompts: source.agentPrompts };
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'acu-continuation-prompts.json';
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    promptIoNotice.value = '提示词 JSON 已导出。';
+  } catch (error) {
+    promptIoError.value = error instanceof Error ? error.message : '提示词导出失败。';
+  }
+}
+
+/** 导入提示词 JSON：逐组校验通过后整体写入草稿并立即保存，任何一组失败即整体拒绝。 */
+async function onImportPromptsFile(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  // 允许连续选择同一个文件重复导入。
+  input.value = '';
+  if (!file || !settingsDraft.value) return;
+  promptIoError.value = '';
+  promptIoNotice.value = '';
+  try {
+    const bundle = runtime.parsePromptBundle(await file.text());
+    settingsDraft.value.outlinePrompt = bundle.outlinePrompt;
+    settingsDraft.value.agentPrompts = bundle.agentPrompts;
+    saveSettingsImmediately();
+    promptIoNotice.value = '提示词 JSON 已导入并保存。';
+  } catch (error) {
+    promptIoError.value = error instanceof Error ? error.message : '提示词 JSON 读取失败。';
+  }
+}
+
 /** 刷新页面依赖的全部数据源：API 预设列表必须在挂载与聊天切换时重新读取，否则预设下拉是空的。 */
 function refreshAll(): void {
   apiStore.refreshFromSettings();
@@ -489,7 +560,12 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   if (countdownTimer !== undefined) clearInterval(countdownTimer);
-  if (settingsSaveTimer !== undefined) clearTimeout(settingsSaveTimer);
+  // 防抖窗口内离开页面时冲刷一次未落盘的改动，避免"改了像改了、重进没了"。
+  if (settingsSaveTimer !== undefined) {
+    clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = undefined;
+    void saveSettingsNow();
+  }
 });
 watch(useChatChangedTick(), refreshAll);
 watch(runtime.settings, settings => {
@@ -512,6 +588,8 @@ watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevisio
 .acu-v2-continuation-page { min-height: 100%; padding: 20px; display: grid; gap: 18px; }
 .acu-v2-continuation-page__layout { align-items: start; }
 .acu-v2-continuation-page__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.acu-v2-continuation-page__actions--start { justify-content: flex-start; margin-top: 0; margin-bottom: 12px; }
+.acu-v2-continuation-page__file-input { display: none; }
 .acu-v2-continuation-page__error { color: var(--acu-danger, #d65b5b); white-space: pre-wrap; }
 .acu-v2-continuation-page__meta { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; }
 .acu-v2-continuation-page__settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }

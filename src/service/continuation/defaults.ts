@@ -29,13 +29,13 @@ const DEFAULT_OUTLINE_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '【大纲方法论与强约束】：\n1. 节奏与阶段分摊：严禁在前半卷或当前阶段将主线矛盾“一次性打穿”。早期阶段仅做铺垫或启动，中段必须让风险升级并出现反转/误导，只有高潮阶段才允许收束本卷目标，且必须保留更高层冲突。\n2. 冲突与障碍递进：每个节点的 goal 必须体现障碍的逐步升高。不要让主角应对同一层次的阻碍“换皮重复”；必须包含环境压力、目标置换或连锁反应。\n3. 情绪弧线与读者期待：注意情绪微弧线的建立，主角面对不利转折必须源于外部高压而非自身降智；压抑后必有加倍反击。明确指出本阶段要埋设、推进或收束哪些伏笔（Payoff），兑现读者期待。\n4. 动态信息差与悬念：在节点 goal 中设计局部信息揭露（需体现开局→中段→结尾的动态变化），并在阶段末留下跨阶段悬念（钩子）。\n5. 实体一致性白名单：参与实体只能从上下文已知角色或场景中选取，绝对禁止凭空自创、捏造新人物或核心组织。动作主体必须明确。\n6. 拒绝空泛与AI味：每个节点的目标必须包含具体的动作、实质性价值改变（地位/资源/情报/关系）。场景要求具备“行动、阻碍、悬念”三要素。禁止使用“大战一触即发”、“深化羁绊”等抽象判词，必须用具体事实填充。',
+    content: '【大纲方法论与强约束】：\n1. 节奏与阶段分摊：严禁在前半卷或当前阶段将主线矛盾“一次性打穿”。早期阶段仅做铺垫或启动，中段必须让风险升级并出现反转/误导，只有高潮阶段才允许收束本卷目标，且必须保留更高层冲突。\n2. 冲突与障碍递进：每个节点的 goal 必须体现障碍的逐步升高。不要让主角应对同一层次的阻碍“换皮重复”；必须包含环境压力、目标置换或连锁反应。\n3. 情绪弧线与伏笔操作显式化：注意情绪微弧线的建立，主角面对不利转折必须源于外部高压而非自身降智；压抑后必有加倍反击。涉及伏笔的轮目标要写明本轮做哪种操作（埋设/强化/误导/回收）及操作对象，不要只写“推进伏笔”这类模糊表述。\n4. 动态信息差与悬念：在节点与轮目标中设计局部信息揭露，写明本轮允许揭示到哪一层（需体现开局→中段→结尾的动态变化），并在阶段末留下跨阶段悬念（钩子）。\n5. 实体一致性白名单：参与实体只能从上下文已知角色或场景中选取，绝对禁止凭空自创、捏造新人物或核心组织。动作主体必须明确。\n6. 拒绝空泛与AI味：每个节点的目标必须包含具体的动作、实质性价值改变（地位/资源/情报/关系）。场景要求具备“行动、阻碍、悬念”三要素。禁止使用“大战一触即发”、“深化羁绊”等抽象判词，必须用具体事实填充。\n7. 轮承载量硬约束：正文模型每轮只输出约 1000-1500 字。每个 <turn> 只承载一个场景片段、至多两个情节节拍，写得下“一次冲突 + 一个变化 + 一个钩子”即为满载；严禁把多个场景、多次转折或跨地点的大事件塞进同一轮——装不下的内容拆成多轮。',
     enabled: true,
     deletable: true,
   },
   {
     role: 'assistant',
-    content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n2. 落实“行动、阻碍、悬念”三要素，确保冲突递进而非平庸重复；\n3. 设计明显的情绪曲线（压抑后必有释放），并维护清晰的信息差动态变化；\n4. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n5. 确保节点内容丰满，每一轮次的目标都具体到“发生了什么危机、做出了什么选择、揭示了什么信息”及“下一阶段悬念”，足以支撑详细正文。\n我会将这些原则落实到各个标签的内容中。',
+    content: '我已深入理解小说大纲的方法论。在规划每个节点（node）和轮次（turn）的目标时，我会：\n1. 严格控制节奏分摊，前半段主做铺垫与中点反转，保留底牌，不强行完结主线；\n2. 落实“行动、阻碍、悬念”三要素，确保冲突递进而非平庸重复；\n3. 设计明显的情绪曲线（压抑后必有释放），涉及伏笔的轮目标写明操作种类与对象，信息揭露写明允许揭到哪一层；\n4. 遵守实体白名单，严格从提供的上下文中调用角色与实体，绝不自创幻觉；\n5. 尊重轮承载量：每轮只装一个场景片段、至多两个节拍（一次冲突 + 一个变化 + 一个钩子），大事件拆成多轮，绝不把正文模型 1000-1500 字写不完的内容塞进一轮；\n6. 确保每一轮次的目标都具体到“发生了什么危机、做出了什么选择、揭示了什么信息”，并在阶段末留下跨阶段悬念。\n我会将这些原则落实到各个标签的内容中。',
     enabled: true,
     deletable: true,
   },
@@ -63,6 +63,11 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V10_ACU = 'spv1.8-continu
  * needMore 与读写授权退役。旧提示词描述的协议与运行时不再一致，必须强制刷新。
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU = 'spv1.9-continuation-agent-tools-v11';
+/**
+ * 精简轮次版本：大纲轮承载量硬约束（单轮 1000-1500 字）、finalize 紧凑字段化骨架、
+ * 长期约束改增量登记（add/retire）。旧提示词描述的约束协议与运行时不再一致，必须强制刷新。
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V12_ACU = 'spv2.0-continuation-lean-turns-v12';
 
 function clonePromptSegments_ACU(segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
   return segments.map(segment => ({ ...segment }));
@@ -108,7 +113,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V11_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V12_ACU,
   };
 }
 

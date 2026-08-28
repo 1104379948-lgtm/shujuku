@@ -463,7 +463,7 @@ describe('主 Agent 循环收敛', () => {
     expect(h.written).toHaveLength(0);
   });
 
-  it('finalize 携带约束登记时落盘长期约束', async () => {
+  it('finalize 携带约束登记时落盘长期约束（旧 current/retired 键兼容为增量）', async () => {
     const h = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"指导","constraints":{"current":["不得提前揭穿守门人"],"retired":[]}}'] });
     await h.planner.plan(h.request);
     expect(h.written).toHaveLength(1);
@@ -474,25 +474,55 @@ describe('主 Agent 循环收敛', () => {
     expect(h.written[0].snapshot.revisions.constraints).toBe(1);
   });
 
-  it('finalize 约束登记漏写既有条目时拒绝回灌，主 Agent 修正后同循环内交付', async () => {
+  it('增量登记漏写既有条目不再拒绝：add 只追加新增，既有条目原样保留', async () => {
+    const withConstraint = buildEmptyAgentModuleSnapshot_ACU();
+    withConstraint.constraints = [{ id: 'C01-1', text: '既有约束', reason: '早前登记', createdIndex: 1 }];
+    withConstraint.revisions.constraints = 1;
+    const h = harness_ACU({
+      snapshot: withConstraint,
+      mainReplies: ['{"action":"finalize","instruction":"指导","constraints":{"add":["新约束"],"retire":[]}}'],
+    });
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('指导');
+    expect(h.mainCalls).toHaveLength(1);
+    expect(h.written).toHaveLength(1);
+    expect(h.written[0].snapshot.constraints.map(item => item.text)).toEqual(['既有约束', '新约束']);
+  });
+
+  it('retire 未知条目时拒绝回灌并回显活跃清单，主 Agent 修正后同循环内交付', async () => {
     const withConstraint = buildEmptyAgentModuleSnapshot_ACU();
     withConstraint.constraints = [{ id: 'C01-1', text: '既有约束', reason: '早前登记', createdIndex: 1 }];
     withConstraint.revisions.constraints = 1;
     const h = harness_ACU({
       snapshot: withConstraint,
       mainReplies: [
-        '{"action":"finalize","instruction":"指导","constraints":{"current":["新约束"],"retired":[]}}',
-        '{"action":"finalize","instruction":"修正后交付","constraints":{"current":["既有约束","新约束"],"retired":[]}}',
+        '{"action":"finalize","instruction":"指导","constraints":{"add":[],"retire":["写错的约束"]}}',
+        '{"action":"finalize","instruction":"修正后交付","constraints":{"add":[],"retire":["C01-1"]}}',
       ],
     });
     const result = await h.planner.plan(h.request);
     expect(result.instruction).toBe('修正后交付');
-    // 第一次 finalize 被拒绝：漏写既有活跃条目不落盘，拒绝原因回灌。
     expect(h.written).toHaveLength(1);
-    expect(h.written[0].snapshot.constraints.map(item => item.text)).toEqual(['既有约束', '新约束']);
+    expect(h.written[0].snapshot.constraints).toHaveLength(0);
     const feedback = h.mainCalls[1].map(message => message.content).join('\n');
-    expect(feedback).toContain('漏写');
+    expect(feedback).toContain('retire 的约束不存在');
+    expect(feedback).toContain('C01-1：既有约束');
     expect(feedback).toContain('finalize 未被采纳');
+  });
+
+  it('最后一轮迭代约束登记被拒时降级为警告并照常交付，不再烧掉交付机会', async () => {
+    const withConstraint = buildEmptyAgentModuleSnapshot_ACU();
+    withConstraint.constraints = [{ id: 'C01-1', text: '既有约束', reason: '早前登记', createdIndex: 1 }];
+    withConstraint.revisions.constraints = 1;
+    const h = harness_ACU({
+      snapshot: withConstraint,
+      budget: { maxIterations: 1 },
+      mainReplies: ['{"action":"finalize","instruction":"终局交付","constraints":{"add":[],"retire":["写错的约束"]}}'],
+    });
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('终局交付');
+    // 登记被跳过：快照未落盘，既有约束原样保留。
+    expect(h.written).toHaveLength(0);
   });
 
   it('循环失败后再次运行从中断点恢复，已完成的派工结论保留不重做', async () => {

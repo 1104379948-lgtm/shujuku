@@ -212,33 +212,56 @@ export function applyAgentModuleDelta_ACU(
   };
 }
 
+/** 渲染当前活跃约束清单，用于拒绝回显，让主 Agent 看到可引用的 id 与原文后自我修正。 */
+function renderActiveConstraintList_ACU(snapshot: AgentModuleSnapshot_ACU): string {
+  if (!snapshot.constraints.length) return '（当前没有任何活跃约束）';
+  return snapshot.constraints.map(item => `${item.id}：${item.text}`).join('；');
+}
+
 /**
- * 登记主 Agent 裁决后的长期约束。约束是全量列表语义，因此必须显式覆盖既有条目。
+ * 登记主 Agent 裁决后的长期约束。增量语义：add 只写新增文本，retire 只写要废除的
+ * 条目（按 id 或原文精确匹配）。漏写既有条目不等于删除；重复登记已有文本幂等跳过。
  * @param snapshot 当前快照
- * @param current 本次生效的全部约束文本
- * @param retired 本次废除的约束文本
+ * @param add 新增的约束文本
+ * @param retire 废除的约束（id 或原文）
  * @param settledIndex 登记时的水位楼层
- * @returns 应用后的新快照，constraints 的 revision +1
+ * @returns 应用后的新快照；有实际变更时 constraints 的 revision +1，否则原样返回
  */
 export function applyAgentConstraintRegistration_ACU(
   snapshot: AgentModuleSnapshot_ACU,
-  current: readonly string[],
-  retired: readonly string[],
+  add: readonly string[],
+  retire: readonly string[],
   settledIndex: number,
 ): AgentModuleSnapshot_ACU {
-  const currentTexts = current.map(text => text.trim()).filter(Boolean);
-  const retiredTexts = new Set(retired.map(text => text.trim()).filter(Boolean));
-  const covered = new Set([...currentTexts, ...retiredTexts]);
-  // 漏写既有活跃约束不等于删除它；缺任何一条都判整份登记无效。
-  const missing = snapshot.constraints.filter(item => !covered.has(item.text)).map(item => item.text);
-  if (missing.length) {
-    reject_ACU('长期约束登记漏写了既有活跃条目；漏写不等于删除，删除必须显式列入 retired', { missing });
+  const retireKeys = [...new Set(retire.map(text => text.trim()).filter(Boolean))];
+  const retiredIds = new Set<string>();
+  for (const key of retireKeys) {
+    const matched = snapshot.constraints.find(item => item.id === key || item.text === key);
+    if (!matched) {
+      reject_ACU(
+        `retire 的约束不存在：「${key}」。retire 必须精确引用活跃条目的 id 或原文。当前活跃约束：${renderActiveConstraintList_ACU(snapshot)}`,
+        { retireKey: key, active: snapshot.constraints.map(item => ({ id: item.id, text: item.text })) },
+      );
+    }
+    retiredIds.add(matched.id);
   }
-  const existingByText = new Map(snapshot.constraints.map(item => [item.text, item]));
-  const constraints: AgentConstraintEntry_ACU[] = currentTexts.map((text, order) => {
-    const previous = existingByText.get(text);
-    if (previous) return previous;
-    return { id: `C${String(snapshot.revisions.constraints + 1).padStart(2, '0')}-${order + 1}`, text, reason: '主 Agent 本轮裁决登记', createdIndex: settledIndex };
-  });
-  return { ...snapshot, constraints, revisions: { ...snapshot.revisions, constraints: snapshot.revisions.constraints + 1 } };
+  const remaining = snapshot.constraints.filter(item => !retiredIds.has(item.id));
+  const existingTexts = new Set(remaining.map(item => item.text));
+  const addTexts: string[] = [];
+  for (const raw of add) {
+    const text = raw.trim();
+    // 重复登记既有文本（含旧全量形态重抄整份清单）幂等跳过，不再构成拒绝理由。
+    if (!text || existingTexts.has(text)) continue;
+    existingTexts.add(text);
+    addTexts.push(text);
+  }
+  if (!retiredIds.size && !addTexts.length) return snapshot;
+  const nextRevision = snapshot.revisions.constraints + 1;
+  const added: AgentConstraintEntry_ACU[] = addTexts.map((text, order) => ({
+    id: `C${String(nextRevision).padStart(2, '0')}-${order + 1}`,
+    text,
+    reason: '主 Agent 本轮裁决登记',
+    createdIndex: settledIndex,
+  }));
+  return { ...snapshot, constraints: [...remaining, ...added], revisions: { ...snapshot.revisions, constraints: nextRevision } };
 }

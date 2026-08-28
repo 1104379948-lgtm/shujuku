@@ -3,7 +3,7 @@
 
 import { handleApiResponse_ACU } from './prompt-builder';
 import { settings_ACU } from '../runtime/state-manager';
-import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
+import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { resolveApiConfigByPreset_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
 
@@ -319,6 +319,48 @@ export interface ResolvedPresetCallLifecycle_ACU {
     afterMainApiCall?: () => void;
 }
 
+/** tavern 模式请求的串行队列尾。/profile 是全局状态，并发切换会互相踩，必须串行「切换→发送→恢复」。 */
+let tavernProfileCallTail_ACU: Promise<unknown> = Promise.resolve();
+
+/**
+ * 在活动 profile 切换保护下发送一次连接管理器请求，与填表链路（prompt-api-call.ts）行为对齐：
+ * 部分宿主后端依赖「当前活动 profile」侧效应，只传 profileId 不切换会落到当前渠道。
+ * @param profileId 目标连接预设 ID
+ * @param messages 消息序列
+ * @param maxTokens 最大输出 token
+ * @returns 宿主返回的原始响应
+ */
+async function sendConnectionManagerRequestWithProfileSwitch_ACU(profileId: string, messages: any[], maxTokens: number): Promise<any> {
+    const run = async (): Promise<any> => {
+        const targetProfile = getConnectionManagerProfiles_ACU().find(profile => profile.id === profileId);
+        if (!targetProfile) throw new Error(`无法找到 ID 为 "${profileId}" 的连接预设。`);
+        if (!targetProfile.api) throw new Error(`预设 "${targetProfile.name || targetProfile.id}" 没有配置 API。`);
+        const targetProfileName = String(targetProfile.name || targetProfile.id);
+        const originalProfile = await triggerSlash_ACU('/profile');
+        const needSwitch = !!originalProfile && originalProfile !== targetProfileName;
+        try {
+            if (needSwitch) {
+                await triggerSlash_ACU(`/profile await=true "${targetProfileName.replace(/"/g, '\\"')}"`);
+            }
+            return await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens);
+        } finally {
+            if (needSwitch) {
+                try {
+                    const current = await triggerSlash_ACU('/profile');
+                    if (current !== originalProfile) {
+                        await triggerSlash_ACU(`/profile await=true "${originalProfile.replace(/"/g, '\\"')}"`);
+                    }
+                } catch (restoreError) {
+                    logWarn_ACU('恢复原酒馆连接预设失败:', restoreError);
+                }
+            }
+        }
+    };
+    const result = tavernProfileCallTail_ACU.then(run, run);
+    tavernProfileCallTail_ACU = result.catch((): undefined => undefined);
+    return result;
+}
+
 export async function callAIWithResolvedPreset_ACU(
     messages: any[],
     resolved: { apiMode: ApiPresetApiMode_ACU; apiConfig: ApiPresetApiConfig_ACU; tavernProfile: string },
@@ -330,7 +372,8 @@ export async function callAIWithResolvedPreset_ACU(
     }
     const maxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
     if (resolved.apiMode === 'tavern') {
-        const response = await sendConnectionManagerRequest_ACU(resolved.tavernProfile, messages, maxTokens);
+        if (!resolved.tavernProfile) throw new Error('该预设为酒馆连接模式但未选择连接预设。');
+        const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
         assertNotAborted_ACU(signal);
         if (typeof response?.result?.choices?.[0]?.message?.content === 'string') return response.result.choices[0].message.content.trim();
         if (typeof response?.content === 'string') return response.content.trim();
