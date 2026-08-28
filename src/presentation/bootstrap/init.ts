@@ -407,10 +407,11 @@ export   function mainInitialize_ACU() {
                 // 否则会误杀等待中的续写轮。判定复用自动填表的生成门控。
                 const allowLooseContinuationClaim = shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext);
                 if (continuationBridge?.claimsGenerationEnded(generationContext?.seq, allowLooseContinuationClaim)) {
-                  // The bridge owns this exact host generation and performs its own
-                  // bounded materialization/identity checks before any cursor change.
+                  // 桥只负责续写轮次的归属确认/循环标签校验/自动续下一轮，不再短路后续管线：
+                  // 填表与正文优化由下方常规意图派发按各自的判定独立触发（解耦，见 spv 讨论）。
+                  // 桥因标签缺失删楼重试时，常规管线的楼层解析（唯一候选 + 有界物化等待）与
+                  // evaluateNewMessageAction 的 resolved_message_not_ai 防御会自然跳过该楼。
                   void continuationBridge.onGenerationEnded(message_id, generationContext?.seq, allowLooseContinuationClaim);
-                  return;
                 }
                 // [触发修复] 原子捕获完整意图快照：事件参数只作为锚点，不承诺是 AI 数组下标。
                 // makeFirst 可能早于宿主把本轮 AI 回复追加进 chat，因此必须记录捕获时边界，

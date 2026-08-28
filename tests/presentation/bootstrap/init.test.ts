@@ -212,7 +212,7 @@ describe('mainInitialize_ACU continuation internal AI event isolation', () => {
 });
 
 describe('mainInitialize_ACU continuation host generation isolation', () => {
-  it('routes only a synchronously claimed host generation away from auto-update', () => {
+  it('claimed host generation runs the bridge and the normal auto-update pipeline in parallel', () => {
     const bridge = { onGenerationStarted: vi.fn(() => true), claimsGenerationEnded: vi.fn(() => true), onGenerationEnded: vi.fn() };
     m.continuationBridge = bridge;
     expect(reinitialize_ACU).not.toBeNull();
@@ -229,10 +229,11 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     // 生成结束侧的宽松认领沿用自动填表门控的判定结果：会产生正文楼层的生成才允许。
     expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, true);
     expect(bridge.onGenerationEnded).toHaveBeenCalledWith(42, m.gate.generationSeq, true);
-    // 门控函数会被当作纯判定读一次（用来算宽松认领开关），但认领成功后自动填表链路不再往下走：
-    // 判断依据是后续的 handleNewMessage 没被调用。
-    expect(m.autoUpdate).toHaveBeenCalledTimes(1);
-    expect(m.handleNewMessage).not.toHaveBeenCalled();
+    // 解耦语义：桥只管续写轮次的归属确认/标签校验/自动续轮，不再短路常规管线；
+    // 填表与正文优化按各自的时机独立触发。门控函数被读两次（宽松认领开关一次 + 派发门控一次），
+    // 且 handleNewMessage 照常收到完整意图快照。
+    expect(m.autoUpdate).toHaveBeenCalledTimes(2);
+    expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
   });
 
   it('leaves an unclaimed host generation on the normal auto-update path', () => {
