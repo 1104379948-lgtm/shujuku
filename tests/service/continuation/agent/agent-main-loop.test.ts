@@ -266,8 +266,8 @@ describe('主 Agent 会话记录', () => {
     const userIndex = findIndex_ACU(first, '这一轮别急着揭穿守门人');
     expect(first[userIndex].role).toBe('user');
     expect(first[userIndex].content.startsWith('【用户】')).toBe(true);
-    // 会话记录整体在运行时证据之后（锚点在尾部），用户消息在其内部按发生顺序排在换轮通告之前。
-    expect(userIndex).toBeGreaterThan(findIndex_ACU(first, '本轮预算状态'));
+    // 运行时证据整体在会话记录之后（每迭代必变的部分放尾部保前缀稳定），用户消息在会话内部按发生顺序排在换轮通告之前。
+    expect(userIndex).toBeLessThan(findIndex_ACU(first, '本轮预算状态'));
     expect(userIndex).toBeLessThan(findIndex_ACU(first, '开始新的一轮规划'));
   });
 
@@ -437,7 +437,7 @@ describe('预算渲染', () => {
 });
 
 describe('主 Agent 提示词装配', () => {
-  it('小说正文在前、运行时证据居中、自己的会话记录在锚点位置，预填充收尾', async () => {
+  it('小说正文在前、自己的会话记录在锚点位置、每迭代必变的运行时证据殿后，预填充收尾', async () => {
     const h = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"本轮指导"}'] });
     await h.planner.plan(h.request);
 
@@ -447,9 +447,9 @@ describe('主 Agent 提示词装配', () => {
     const historyIndex = findIndex_ACU(messages, '开始新的一轮规划');
     expect(messages[0].role).toBe('system');
     expect(storyIndex).toBeGreaterThan(0);
-    expect(runtimeIndex).toBeGreaterThan(storyIndex);
-    // 会话记录是唯一按迭代增长的部分，放在最后才能让前面的前缀在迭代间保持稳定。
-    expect(historyIndex).toBeGreaterThan(runtimeIndex);
+    expect(historyIndex).toBeGreaterThan(storyIndex);
+    // 运行时证据（$BUDGET 等）每次迭代都变，放在会话记录之后，前缀（规则组+目录+历史）才能在迭代间字节级稳定。
+    expect(runtimeIndex).toBeGreaterThan(historyIndex);
     expect(lastMessage_ACU(messages).role).toBe('assistant');
     expect(lastMessage_ACU(messages).content.endsWith('"thought": "')).toBe(true);
     expect(messages.some(message => message.content.includes('$HISTORY_ANCHOR'))).toBe(false);

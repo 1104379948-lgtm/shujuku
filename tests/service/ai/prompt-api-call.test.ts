@@ -131,6 +131,7 @@ vi.stubGlobal('fetch', mockFetch);
 
 import {
   callCustomOpenAI_ACU,
+  extractAiUsageMetadata_ACU,
   handleApiResponse_ACU,
   RetryableAiResponseError_ACU,
 } from '../../../src/service/ai/prompt-builder/prompt-api-call';
@@ -224,6 +225,60 @@ describe('handleApiResponse_ACU', () => {
     const result = await handleApiResponse_ACU(mockResponse);
     expect(result).toBe('你好');
     expect(mockReader.releaseLock).toHaveBeenCalled();
+  });
+
+  it('非流式模式：响应带 usage 时经回调回传（含 cached_tokens）', async () => {
+    mockSettings.streamingEnabled = false;
+    const onUsage = vi.fn();
+    const mockResponse = {
+      json: vi.fn().mockResolvedValue({
+        choices: [{ message: { content: '回复' } }],
+        usage: { prompt_tokens: 14271, completion_tokens: 756, prompt_tokens_details: { cached_tokens: 12800 } },
+      }),
+    };
+    const result = await handleApiResponse_ACU(mockResponse, null, onUsage);
+    expect(result).toBe('回复');
+    expect(onUsage).toHaveBeenCalledWith({ promptTokens: 14271, completionTokens: 756, cachedTokens: 12800 });
+  });
+
+  it('流式模式：流末尾的 usage chunk（choices 为空）被捕获并回传，不影响正文拼接', async () => {
+    mockSettings.streamingEnabled = true;
+    const onUsage = vi.fn();
+    const encoder = new TextEncoder();
+    const chunks = [
+      encoder.encode('data: {"choices":[{"delta":{"content":"你好"}}]}\n\n'),
+      encoder.encode('data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":96}}}\n\n'),
+      encoder.encode('data: [DONE]\n\n'),
+    ];
+    let chunkIndex = 0;
+    const mockReader = {
+      read: vi.fn(async () => (chunkIndex < chunks.length ? { done: false, value: chunks[chunkIndex++] } : { done: true, value: undefined })),
+      releaseLock: vi.fn(),
+    };
+    const result = await handleApiResponse_ACU({ body: { getReader: () => mockReader } }, null, onUsage);
+    expect(result).toBe('你好');
+    expect(onUsage).toHaveBeenCalledWith({ promptTokens: 100, completionTokens: 8, cachedTokens: 96 });
+  });
+
+  it('响应不带 usage 时回调不触发', async () => {
+    mockSettings.streamingEnabled = false;
+    const onUsage = vi.fn();
+    const mockResponse = { json: vi.fn().mockResolvedValue({ choices: [{ message: { content: '回复' } }] }) };
+    await handleApiResponse_ACU(mockResponse, null, onUsage);
+    expect(onUsage).not.toHaveBeenCalled();
+  });
+});
+
+describe('extractAiUsageMetadata_ACU', () => {
+  it('解析 OpenAI 兼容 usage：缺 prompt_tokens_details 时缓存计 0', () => {
+    expect(extractAiUsageMetadata_ACU({ prompt_tokens: 10, completion_tokens: 5 })).toEqual({ promptTokens: 10, completionTokens: 5, cachedTokens: 0 });
+  });
+
+  it('非法输入（null/非对象/全零计数）返回 null', () => {
+    expect(extractAiUsageMetadata_ACU(null)).toBeNull();
+    expect(extractAiUsageMetadata_ACU('usage')).toBeNull();
+    expect(extractAiUsageMetadata_ACU({})).toBeNull();
+    expect(extractAiUsageMetadata_ACU({ prompt_tokens: -1, completion_tokens: 'x' })).toBeNull();
   });
 });
 

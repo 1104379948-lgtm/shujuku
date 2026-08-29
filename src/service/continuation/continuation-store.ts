@@ -1,6 +1,6 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU } from './defaults';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
@@ -186,7 +186,9 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   // 直接丢掉并补新键的默认值，保留旧值反而会把用户配过的比例误当成新语义使用。
   if (Object.prototype.hasOwnProperty.call(raw, 'downtimeTurnRatio')) delete raw.downtimeTurnRatio;
   if (!Object.prototype.hasOwnProperty.call(raw, 'maxConsecutivePressureTurns')) raw.maxConsecutivePressureTurns = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU;
-  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+  // 缓存前缀优化（V16）之前的信封没有该开关；缺失即默认开启，与新建默认一致。
+  if (!Object.prototype.hasOwnProperty.call(raw, 'promptCacheEnabled')) raw.promptCacheEnabled = true;
+  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
   requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
   if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
   const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
@@ -198,10 +200,10 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   let outlinePrompt = raw.outlinePrompt;
   let agentPrompts = raw.agentPrompts;
   let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU) {
+  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU;
   }
   
   return {
@@ -214,6 +216,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
     contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
     apiPresetMode: raw.apiPresetMode as ContinuationSettings_ACU['apiPresetMode'], fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
+    promptCacheEnabled: requireBoolean_ACU(raw.promptCacheEnabled, 'settings.promptCacheEnabled'),
     agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),
     outlinePrompt: validateContinuationPromptSegments_ACU(outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'), agentPrompts: validateAgentPrompts_ACU(agentPrompts),
     promptForceDefaultVersion,

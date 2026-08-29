@@ -14,7 +14,7 @@
 
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
-import { callContinuationInternalAi_ACU } from '../internal-ai-call';
+import { callContinuationInternalAi_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
 import { effectiveAgentApiPresetMode_ACU, resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import {
@@ -96,6 +96,7 @@ export interface ContinuationAgentTurnPlannerDependencies_ACU {
     preset: ContinuationResolvedApiPreset_ACU,
     identity: ContinuationInternalAiRequestIdentity_ACU,
     signal?: AbortSignal | null,
+    options?: ContinuationInternalAiCallOptions_ACU,
   ) => Promise<string | null>;
   subagentRuntime: AgentSubagentRuntime_ACU;
   readChat: () => any[];
@@ -399,7 +400,11 @@ export class ContinuationAgentTurnPlanner_ACU {
         const round = await this.callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig);
         totalAttempts += round.attempts;
         const action = round.action;
-        logAgentSession_ACU({ kind: 'thought', title: `迭代 ${iteration} · ${describeAgentActionLabel_ACU(action)}`, detail: action.thought });
+        logAgentSession_ACU({
+          kind: 'thought',
+          title: `迭代 ${iteration} · ${describeAgentActionLabel_ACU(action)}${round.usage ? ` · ${formatAgentUsageLabel_ACU(round.usage)}` : ''}`,
+          detail: action.thought,
+        });
         const outcomesBefore = ledger.outcomes.length;
 
         if (action.kind === 'tools') {
@@ -576,6 +581,13 @@ export class ContinuationAgentTurnPlanner_ACU {
   ) {
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
     let lastReason = '';
+    // 每次调用的用量由回调覆盖写入：协议重试时展示的是最终被采纳那次调用的用量。
+    let callUsage: AiUsageMetadata_ACU | null = null;
+    const callOptions: ContinuationInternalAiCallOptions_ACU = {
+      promptCacheEnabled: request.settings.promptCacheEnabled,
+      cacheScope: 'agent-main',
+      onUsage: usage => { callUsage = usage; },
+    };
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       const base = request.createInternalRequestIdentity(attempt);
@@ -585,7 +597,9 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
       const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig);
       const messages = this.spliceHistory_ACU(rendered, session.history());
-      const raw = await this.dependencies.callInternalAi(messages, preset, identity, request.signal);
+      // 显式擦除上一次尝试的用量，防止回调未触发时把旧值当成本次调用的用量。
+      callUsage = null as AiUsageMetadata_ACU | null;
+      const raw = await this.dependencies.callInternalAi(messages, preset, identity, request.signal, callOptions);
       if (!request.isInternalRequestCurrent(base)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 结果已失效', false));
       }
@@ -599,7 +613,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         }
         session.record([{ kind: 'agent', text: rawText || '(空输出)', digest: describeAgentActionLabel_ACU(action), turnKey: session.turnKey }]);
         await session.flush();
-        return { action, attempts: attempt + 1 };
+        return { action, attempts: attempt + 1, usage: callUsage };
       } catch (error) {
         lastReason = compactAgentProtocolError_ACU(error);
         // 被拒绝的原文也要留在会话里：模型必须看到自己上一次到底写了什么才能真正修正。
@@ -915,12 +929,13 @@ export class ContinuationAgentTurnPlanner_ACU {
     for (const delegation of accepted) {
       runningEntries.set(delegation, logAgentSession_ACU({ kind: 'delegation', agentName: delegation.agentName, title: `${delegation.agentName} 执行中`, detail: delegation.prompt, status: 'running' }));
     }
-    const settleOutcome = (delegation: AgentDelegation_ACU, outcome: AgentDelegationOutcome_ACU): void => {
+    const settleOutcome = (delegation: AgentDelegation_ACU, outcome: AgentDelegationOutcome_ACU, usage?: AiUsageMetadata_ACU | null): void => {
       ledger.outcomes.push(outcome);
       const entryId = runningEntries.get(delegation);
       if (entryId === undefined) return;
+      const usageSuffix = usage ? ` · ${formatAgentUsageLabel_ACU(usage)}` : '';
       updateAgentSession_ACU(entryId, {
-        title: outcome.ok ? `${outcome.agentName} 完成` : `${outcome.agentName} 未采用`,
+        title: `${outcome.agentName} ${outcome.ok ? '完成' : '未采用'}${usageSuffix}`,
         detail: outcome.ok ? [outcome.summary, outcome.detail].filter(Boolean).join('\n') : outcome.rejectedReason,
         ok: outcome.ok,
       });
@@ -976,9 +991,9 @@ export class ContinuationAgentTurnPlanner_ACU {
               result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : '',
             ].filter(Boolean).join('\n'),
             rejectedReason: '',
-          });
+          }, result.usage);
         } catch (error) {
-          settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
+          settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) }, result.usage);
         }
         continue;
       }
@@ -998,9 +1013,9 @@ export class ContinuationAgentTurnPlanner_ACU {
               result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : '',
             ].filter(Boolean).join('\n'),
             rejectedReason: '',
-          });
+          }, result.usage);
         } catch (error) {
-          settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.arc.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
+          settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.arc.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) }, result.usage);
         }
         continue;
       }
@@ -1011,7 +1026,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           summary: result.planner.summary,
           detail: describePlannerOutcome_ACU(result.planner.summary, result.planner.recommendation, result.planner.mustPreserve, result.planner.risks),
           rejectedReason: '',
-        });
+        }, result.usage);
         continue;
       }
       if (result.reviewer) {
@@ -1021,10 +1036,10 @@ export class ContinuationAgentTurnPlanner_ACU {
           summary: `判词 ${result.reviewer.verdict}`,
           detail: [`判词：${result.reviewer.verdict}`, result.reviewer.reason ? `依据：${result.reviewer.reason}` : '', result.reviewer.fixes.length ? `修正项：${result.reviewer.fixes.join('；')}` : ''].filter(Boolean).join('\n'),
           rejectedReason: '',
-        });
+        }, result.usage);
         continue;
       }
-      settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' });
+      settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' }, result.usage);
     }
 
     if (snapshotChanged) {

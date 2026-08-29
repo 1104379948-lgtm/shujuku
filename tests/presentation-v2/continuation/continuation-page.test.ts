@@ -117,7 +117,7 @@ function setSettings(): void {
     contextTurnCount: 3, storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
     agentReadTokenBudget: '30%', agentReadFallbackTokens: 6000,
     contextExtractRules: [], contextExcludeRules: [],
-    apiPresetMode: 'current', fixedApiPresetName: '',
+    apiPresetMode: 'current', fixedApiPresetName: '', promptCacheEnabled: true,
     agentApiPresets: {
       main: { mode: 'inherit', presetName: '' },
       outline: { mode: 'inherit', presetName: '' },

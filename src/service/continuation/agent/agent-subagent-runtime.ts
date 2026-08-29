@@ -13,7 +13,7 @@
  */
 
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
-import { callContinuationInternalAi_ACU } from '../internal-ai-call';
+import { callContinuationInternalAi_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
 import { resolveContinuationApiPreset_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import {
@@ -81,6 +81,8 @@ export interface AgentSubagentRunResult_ACU {
   expandedReads: string[];
   /** 渲染读集材料那一刻的模块修订号。主循环用它做写入并发校验，不依赖子代理自报。 */
   readRevisions: AgentModuleRevisions_ACU;
+  /** 本次派工全部 AI 调用的累计 token 用量；网关不回传 usage 时为 null。 */
+  usage: AiUsageMetadata_ACU | null;
 }
 
 export interface AgentSubagentRunInput_ACU {
@@ -100,6 +102,7 @@ export interface AgentSubagentRuntimeDependencies_ACU {
     preset: ContinuationResolvedApiPreset_ACU,
     identity: ContinuationInternalAiRequestIdentity_ACU,
     signal?: AbortSignal | null,
+    options?: ContinuationInternalAiCallOptions_ACU,
   ) => Promise<string | null>;
   resolveApiPreset: typeof resolveContinuationApiPreset_ACU;
 }
@@ -234,6 +237,22 @@ export class AgentSubagentRuntime_ACU {
     let protocolRejections = 0;
     let attempt = 0;
     let lastReason = '';
+    // 本次派工的累计用量。派工间并发（Promise.all）但每次 run 各持有自己的局部累计，无共享状态。
+    let usageTotal: AiUsageMetadata_ACU | null = null;
+    const callOptions: ContinuationInternalAiCallOptions_ACU = {
+      promptCacheEnabled: input.settings.promptCacheEnabled,
+      // 每个子代理的提示词前缀不同，独立缓存命名空间避免互相挤占路由。
+      cacheScope: `sub-${definition.name}`,
+      onUsage: usage => {
+        usageTotal = usageTotal
+          ? {
+            promptTokens: usageTotal.promptTokens + usage.promptTokens,
+            completionTokens: usageTotal.completionTokens + usage.completionTokens,
+            cachedTokens: usageTotal.cachedTokens + usage.cachedTokens,
+          }
+          : { ...usage };
+      },
+    };
     // 调用总数上界 = 首轮 + 工具轮 + 协议重试 + 工具轮用尽后的最后通牒轮。到界仍未交付即失败。
     const maxCalls = 1 + maxToolRounds + retries + 1;
 
@@ -243,7 +262,7 @@ export class AgentSubagentRuntime_ACU {
       if (!input.isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理请求已失效', false));
       }
-      const raw = await this.dependencies.callInternalAi([...rendered.messages, ...transcript], input.preset, identity, input.signal);
+      const raw = await this.dependencies.callInternalAi([...rendered.messages, ...transcript], input.preset, identity, input.signal, callOptions);
       if (!input.isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理结果已失效', false));
       }
@@ -276,6 +295,7 @@ export class AgentSubagentRuntime_ACU {
           attempts: attempt,
           expandedReads: [...expandedReads],
           readRevisions,
+          usage: usageTotal,
         };
       } catch (error) {
         lastReason = compactAgentProtocolError_ACU(error);

@@ -222,6 +222,12 @@ export interface ContinuationSettings_ACU {
   contextExcludeRules: ContinuationRulePair_ACU[];
   apiPresetMode: 'current' | 'fixed';
   fixedApiPresetName: string;
+  /**
+   * 为内部 AI 请求（主 Agent / 子代理 / 大纲）注入 prompt_cache_key 并解析响应里的缓存
+   * usage 统计。key 只含稳定因子（聊天身份 + 调用方 scope），不随迭代变化。
+   * 个别网关会拒收未知请求体字段，此时关掉该开关即可回到原始请求体。
+   */
+  promptCacheEnabled: boolean;
   agentApiPresets: ContinuationAgentApiPresets_ACU;
   outlinePrompt: ContinuationPromptSegment_ACU[];
   agentPrompts: ContinuationAgentPrompts_ACU;

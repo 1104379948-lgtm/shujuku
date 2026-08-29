@@ -64,7 +64,13 @@ describe('ContinuationOutlinePlanner_ACU', () => {
     expect(result.outline.nodes).toHaveLength(1);
     expect(result.outline.nodes[0]).toMatchObject({ id: 'node-fresh-1', suggestedTurns: 6 });
     expect(result.outline.nodes[0].turns.map(turn => turn.id)).toEqual(['turn-fresh-2', 'turn-fresh-3', 'turn-fresh-4', 'turn-fresh-5', 'turn-fresh-6', 'turn-fresh-7']);
-    expect(callInternalAi).toHaveBeenCalledWith([{ role: 'user', content: '推进剧情 ' }], expect.any(Object), expect.objectContaining({ source: 'outline', requestId: 'outline-0' }));
+    expect(callInternalAi).toHaveBeenCalledWith(
+      [{ role: 'user', content: '推进剧情 ' }],
+      expect.any(Object),
+      expect.objectContaining({ source: 'outline', requestId: 'outline-0' }),
+      undefined,
+      expect.objectContaining({ cacheScope: 'outline', promptCacheEnabled: true }),
+    );
     expect(resolveApiPreset).toHaveBeenCalledTimes(1);
   });
 

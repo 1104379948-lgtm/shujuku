@@ -349,11 +349,35 @@ export class RetryableAiResponseError_ACU extends Error {
 
   // ═══ 流式/非流式响应处理 ═══
 
-  async function streamToText_ACU(response: any, signal: AbortSignal | null = null) {
+  /** 一次 AI 调用的 token 用量。cachedTokens 是命中厂商 prompt 缓存的输入 token 数（含在 promptTokens 内）。 */
+  export interface AiUsageMetadata_ACU {
+    promptTokens: number;
+    completionTokens: number;
+    cachedTokens: number;
+  }
+
+  /**
+   * 从 OpenAI 兼容响应的 usage 字段提取统一的用量结构。
+   * @param raw 响应里的 usage 对象（chat completions 形态）
+   * @returns 统一用量；raw 不含任何有效计数时返回 null
+   */
+  export function extractAiUsageMetadata_ACU(raw: any): AiUsageMetadata_ACU | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const toCount = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0);
+    const promptTokens = toCount(raw.prompt_tokens);
+    const completionTokens = toCount(raw.completion_tokens);
+    const cachedTokens = toCount(raw.prompt_tokens_details?.cached_tokens);
+    if (!promptTokens && !completionTokens && !cachedTokens) return null;
+    return { promptTokens, completionTokens, cachedTokens };
+  }
+
+  async function streamToText_ACU(response: any, signal: AbortSignal | null = null, onUsage?: (usage: AiUsageMetadata_ACU) => void) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let fullContent = '';
     let buffer = '';
+    // usage 出现在流末尾的独立 chunk（choices 为空数组），需开启 stream_options.include_usage 才会下发。
+    let capturedUsage: AiUsageMetadata_ACU | null = null;
 
     try {
         while (true) {
@@ -379,6 +403,8 @@ export class RetryableAiResponseError_ACU extends Error {
                         if (content) {
                             fullContent += content;
                         }
+                        const usage = extractAiUsageMetadata_ACU(json?.usage);
+                        if (usage) capturedUsage = usage;
                     } catch (e) {
                         // 忽略解析错误
                     }
@@ -389,12 +415,19 @@ export class RetryableAiResponseError_ACU extends Error {
         reader.releaseLock();
     }
 
+    if (capturedUsage && onUsage) {
+        try { onUsage(capturedUsage); } catch { /* 用量回调异常不允许影响响应主流程。 */ }
+    }
     return fullContent;
   }
 
-  async function parseNonStreamResponse_ACU(response: any) {
+  async function parseNonStreamResponse_ACU(response: any, onUsage?: (usage: AiUsageMetadata_ACU) => void) {
     try {
         const data = await response.json();
+        const usage = extractAiUsageMetadata_ACU(data?.usage);
+        if (usage && onUsage) {
+            try { onUsage(usage); } catch { /* 用量回调异常不允许影响响应主流程。 */ }
+        }
         if (data?.choices?.[0]?.message?.content) {
             return data.choices[0].message.content;
         }
@@ -412,10 +445,10 @@ export class RetryableAiResponseError_ACU extends Error {
     }
   }
 
-  export async function handleApiResponse_ACU(response: any, signal: AbortSignal | null = null) {
+  export async function handleApiResponse_ACU(response: any, signal: AbortSignal | null = null, onUsage?: (usage: AiUsageMetadata_ACU) => void) {
     if (settings_ACU.streamingEnabled) {
-        return await streamToText_ACU(response, signal);
+        return await streamToText_ACU(response, signal, onUsage);
     } else {
-        return await parseNonStreamResponse_ACU(response);
+        return await parseNonStreamResponse_ACU(response, onUsage);
     }
   }

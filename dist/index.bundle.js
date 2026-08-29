@@ -65207,12 +65207,29 @@ $CONTENT
             }
         }
     }
-    // ═══ 流式/非流式响应处理 ═══
-    async function streamToText_ACU(response, signal = null) {
+    /**
+     * 从 OpenAI 兼容响应的 usage 字段提取统一的用量结构。
+     * @param raw 响应里的 usage 对象（chat completions 形态）
+     * @returns 统一用量；raw 不含任何有效计数时返回 null
+     */
+    function extractAiUsageMetadata_ACU(raw) {
+        if (!raw || typeof raw !== 'object')
+            return null;
+        const toCount = (value) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0);
+        const promptTokens = toCount(raw.prompt_tokens);
+        const completionTokens = toCount(raw.completion_tokens);
+        const cachedTokens = toCount(raw.prompt_tokens_details?.cached_tokens);
+        if (!promptTokens && !completionTokens && !cachedTokens)
+            return null;
+        return { promptTokens, completionTokens, cachedTokens };
+    }
+    async function streamToText_ACU(response, signal = null, onUsage) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let fullContent = '';
         let buffer = '';
+        // usage 出现在流末尾的独立 chunk（choices 为空数组），需开启 stream_options.include_usage 才会下发。
+        let capturedUsage = null;
         try {
             while (true) {
                 if (signal?.aborted) {
@@ -65235,6 +65252,9 @@ $CONTENT
                             if (content) {
                                 fullContent += content;
                             }
+                            const usage = extractAiUsageMetadata_ACU(json?.usage);
+                            if (usage)
+                                capturedUsage = usage;
                         }
                         catch (e) {
                             // 忽略解析错误
@@ -65246,11 +65266,24 @@ $CONTENT
         finally {
             reader.releaseLock();
         }
+        if (capturedUsage && onUsage) {
+            try {
+                onUsage(capturedUsage);
+            }
+            catch { /* 用量回调异常不允许影响响应主流程。 */ }
+        }
         return fullContent;
     }
-    async function parseNonStreamResponse_ACU(response) {
+    async function parseNonStreamResponse_ACU(response, onUsage) {
         try {
             const data = await response.json();
+            const usage = extractAiUsageMetadata_ACU(data?.usage);
+            if (usage && onUsage) {
+                try {
+                    onUsage(usage);
+                }
+                catch { /* 用量回调异常不允许影响响应主流程。 */ }
+            }
             if (data?.choices?.[0]?.message?.content) {
                 return data.choices[0].message.content;
             }
@@ -65268,12 +65301,12 @@ $CONTENT
             return null;
         }
     }
-    async function handleApiResponse_ACU(response, signal = null) {
+    async function handleApiResponse_ACU(response, signal = null, onUsage) {
         if (settings_ACU.streamingEnabled) {
-            return await streamToText_ACU(response, signal);
+            return await streamToText_ACU(response, signal, onUsage);
         }
         else {
-            return await parseNonStreamResponse_ACU(response);
+            return await parseNonStreamResponse_ACU(response, onUsage);
         }
     }
 
@@ -65753,6 +65786,25 @@ $CONTENT
                 headers = headers ? `${headers}\n${extra}` : extra;
             }
         }
+        // 追加缓存相关字段走 custom_include_body（宿主会把这段 YAML 合并进上游请求体）。
+        // 用户自配的 bodyParams 可能是 JSON 流式写法（{ 或 [ 开头），逐行追加键会产生非法 YAML，
+        // 此时跳过注入，绝不破坏用户既有配置。
+        const streaming = settings_ACU.streamingEnabled || false;
+        const userBodyParams = String(effectiveApiConfig.bodyParams || '');
+        const extraIncludeLines = [];
+        if (opts.promptCacheKey && /^[A-Za-z0-9_-]+$/.test(opts.promptCacheKey)) {
+            extraIncludeLines.push(`prompt_cache_key: ${opts.promptCacheKey}`);
+        }
+        if (opts.includeStreamUsage && streaming) {
+            extraIncludeLines.push('stream_options: {"include_usage": true}');
+        }
+        const userBodyIsFlowStyle = /^[{[]/.test(userBodyParams.trim());
+        if (extraIncludeLines.length && userBodyIsFlowStyle) {
+            logDebug_ACU('[buildCustomApiRequestBody] bodyParams 为 JSON 流式写法，跳过 prompt_cache_key/stream_options 注入');
+        }
+        const includeBody = extraIncludeLines.length && !userBodyIsFlowStyle
+            ? [userBodyParams.trim(), ...extraIncludeLines].filter(Boolean).join('\n')
+            : userBodyParams;
         const body = {
             // 统一将 messages 的 role 归一为小写（system / user / assistant）。
             //
@@ -65778,7 +65830,7 @@ $CONTENT
             max_tokens: maxTokens,
             temperature,
             top_p: topP,
-            stream: settings_ACU.streamingEnabled || false,
+            stream: streaming,
             chat_completion_source: 'custom',
             group_names: [],
             include_reasoning: false,
@@ -65790,7 +65842,7 @@ $CONTENT
             proxy_password: '',
             custom_url: effectiveApiConfig.url,
             custom_include_headers: headers,
-            custom_include_body: effectiveApiConfig.bodyParams || '',
+            custom_include_body: includeBody,
             custom_exclude_body: normalizeExcludeBodyParamsForSillyTavern_ACU(effectiveApiConfig.excludeBodyParams),
         };
         return body;
@@ -66024,16 +66076,28 @@ $CONTENT
         tavernProfileCallTail_ACU = result.catch(() => undefined);
         return result;
     }
-    async function callAIWithResolvedPreset_ACU(messages, resolved, signal, lifecycle) {
+    async function callAIWithResolvedPreset_ACU(messages, resolved, signal, lifecycle, extras) {
         if (!Array.isArray(messages) || messages.length === 0) {
             throw new Error('内部 AI 消息必须是非空数组。');
         }
+        const reportUsage = (raw) => {
+            if (!lifecycle?.onUsage)
+                return;
+            const usage = extractAiUsageMetadata_ACU(raw);
+            if (!usage)
+                return;
+            try {
+                lifecycle.onUsage(usage);
+            }
+            catch { /* 用量回调异常不允许影响调用主流程。 */ }
+        };
         const maxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
         if (resolved.apiMode === 'tavern') {
             if (!resolved.tavernProfile)
                 throw new Error('该预设为酒馆连接模式但未选择连接预设。');
             const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
             assertNotAborted_ACU(signal);
+            reportUsage(response?.result?.usage);
             if (typeof response?.result?.choices?.[0]?.message?.content === 'string')
                 return response.result.choices[0].message.content.trim();
             if (typeof response?.content === 'string')
@@ -66062,12 +66126,18 @@ $CONTENT
         const response = await fetch('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-            body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, { maxTokens, stripModelPrefix: false })),
+            body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
+                maxTokens,
+                stripModelPrefix: false,
+                promptCacheKey: extras?.promptCacheKey,
+                // usage 回调在场时才请求流式 usage chunk：不改变没有订阅方时的请求体。
+                includeStreamUsage: !!lifecycle?.onUsage,
+            })),
             signal: signal || undefined,
         });
         if (!response.ok)
             throw new Error(`API 请求失败: ${response.status}`);
-        const content = await handleApiResponse_ACU(response, signal);
+        const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage);
         return typeof content === 'string' && content.trim() ? content.trim() : null;
     }
     /**
@@ -75403,6 +75473,28 @@ $CONTENT
         return estimate;
     }
 
+    /**
+     * service/vector/summary-vector-row-fingerprint.ts — 纪要行内容指纹的单一来源
+     *
+     * 所有行指纹必须经由这里计算，避免多处内联公式漂移。
+     * 输入字段顺序与 join 分隔符不得变更：指纹参与增量归档的行复用判定
+     * 与查询时的实时纪要表对账，公式漂移会导致全量行 mismatch（检索被永久 fail-closed）
+     * 或复用判定失效（改行不重新 embedding）。
+     *
+     * 独立成模块的原因：archive-service 与 storage-service 都需要此公式，
+     * 而两者已存在 archive → storage 的单向依赖，公式放任一侧都会成环。
+     */
+    function buildSummaryRowFingerprint_ACU(source) {
+        return hashUserInput_ACU([
+            source.rowId,
+            source.timeSpan,
+            source.location,
+            source.summary,
+            source.indexCode,
+            source.vectorSourceText,
+        ].join('\n'));
+    }
+
     const DEFAULT_SHARD_CHUNK_LIMIT_ACU = 128;
     const SUMMARY_VECTOR_INDEX_PACK_CHUNK_LIMIT_ACU = 64;
     // 第一版保守止血：不再按 retention 删除历史快照，避免回退到旧楼层时找不到外置文件。
@@ -75746,7 +75838,9 @@ $CONTENT
                 rowId: row.rowId,
                 rowOrder: row.rowOrder,
                 summaryKey: row.rowKey,
-                sourceFingerprint: row.sourceFingerprint || hashUserInput_ACU([row.rowId, row.rowOrder, row.timeSpan, row.location, row.summary, row.indexCode, row.vectorSourceText].join('\n')),
+                // 兜底仅对无指纹的 legacy 行触发；必须用权威公式（不含 rowOrder），
+                // 与 archive-service 的行指纹保持同一来源，防止公式漂移造成对账永久 mismatch。
+                sourceFingerprint: row.sourceFingerprint || buildSummaryRowFingerprint_ACU(row),
                 indexCode: row.indexCode,
                 chunkIds: [...row.chunkIds],
                 shardIds,
@@ -92570,20 +92664,8 @@ $CONTENT
         const source = `${summaryKey}:${rowId}:${indexCode}`;
         return `summary-row:${hashUserInput_ACU(source)}`;
     }
-    /**
-     * 单一指纹公式：所有行指纹必须经由这里计算，避免三处内联公式漂移。
-     * 输入字段顺序与 join 分隔符与历史实现逐字符一致（T1，零行为变化）。
-     */
-    function buildSummaryRowFingerprint_ACU(source) {
-        return hashUserInput_ACU([
-            source.rowId,
-            source.timeSpan,
-            source.location,
-            source.summary,
-            source.indexCode,
-            source.vectorSourceText,
-        ].join('\n'));
-    }
+    // 单一指纹公式已抽至 summary-vector-row-fingerprint.ts（storage-service 也需引用，
+    // 留在本文件会与既有 archive → storage 依赖成环）。
     function buildPreparedRowFingerprint_ACU(row) {
         return buildSummaryRowFingerprint_ACU(row);
     }
@@ -92802,6 +92884,9 @@ $CONTENT
                 summary: prepared.summary,
                 indexCode: prepared.indexCode,
                 vectorSourceText: prepared.vectorSourceText,
+                // 复用前提是现存内容重算指纹 === prepared.sourceFingerprint（上方判等），
+                // 落盘指纹供查询时与实时纪要表对账（filterRowsByLiveSummaryTable_ACU）。
+                sourceFingerprint: prepared.sourceFingerprint,
                 chunkIds,
             });
             chunks.forEach((chunk) => reusableChunks.push({ ...chunk }));
@@ -92881,6 +92966,9 @@ $CONTENT
             summary: row.summary,
             indexCode: row.indexCode,
             vectorSourceText: row.vectorSourceText,
+            // 落盘指纹供查询时与实时纪要表对账（filterRowsByLiveSummaryTable_ACU）；
+            // 缺失时对账退化为纯 rowKey 比对，"只改概要文本"的编辑会注入旧文本。
+            sourceFingerprint: row.sourceFingerprint,
             chunkIds: rowChunkIds.get(row.rowKey) || [],
         }))
             .filter((row) => row.chunkIds.length > 0);
@@ -105951,9 +106039,13 @@ $CONTENT
      * service/continuation/agent/agent-defaults.ts — Agent 各请求的伪 role + 预填充提示词
      *
      * 装配约定（各部分的相对位置是刻意的）：
-     * 伪 role 规则组 → 目录与状态（正文楼层目录 + 大纲状态 + 各资料目录，不注入资料正文）→
-     * 主 Agent 自己的会话记录（$HISTORY_ANCHOR，含它历次调阅到的资料）→ 尾部预填充。
-     * 会话记录放在最后，因为它是唯一按迭代增长的部分；把它放尾部才能让前缀在迭代间保持稳定。
+     * 伪 role 规则组 → 正文楼层目录（$STORY_CATALOG，同一轮内稳定）→
+     * 主 Agent 自己的会话记录（$HISTORY_ANCHOR，含它历次调阅到的资料，只在尾部追加）→
+     * 本回合运行时数据（$BUDGET 等每次迭代必变的状态）→ 尾部预填充。
+     * 排序原则是「按变化频率从低到高」：厂商的 prompt 缓存按字节级前缀命中，
+     * 每迭代必变的运行时数据一旦排在会话记录之前，历史里调阅到的大量资料就永远进不了缓存前缀。
+     * 因此运行时数据必须放在历史之后——前缀（规则组 + 目录 + 全部历史）在迭代间保持字节级稳定，
+     * 每次迭代只有尾部的运行时数据段需要重新计算。
      *
      * 资料获取模型：骨架只给目录和状态，正文/表格/模块/世界书/纪要都由 Agent 自己用
      * read / search 工具按地址调阅，结果落在会话记录里跨迭代保留。
@@ -106033,7 +106125,7 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我收到的上下文分三层，越往后越新：\n1. 正文楼层目录：每楼一行（楼层号、字数、开头摘要、读取地址），尾部最近几楼直接带全文。目录尾部已注入全文的楼层不要再用 read 调阅——那是白烧读取额度。更早的剧情已压缩成纪要，从世界书目录的纪要概要段按 AM 码区间调阅。\n2. 本回合运行时数据：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、读取地址词汇表、预算状态。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n3. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果。我调阅过的资料就留在这里，跨迭代有效，不必重读；标着「内容已过期」的旧调阅说明资料后来变了，需要时按地址重读最新版。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。',
+            content: '我收到的上下文分三层：\n1. 正文楼层目录：每楼一行（楼层号、字数、开头摘要、读取地址），尾部最近几楼直接带全文。目录尾部已注入全文的楼层不要再用 read 调阅——那是白烧读取额度。更早的剧情已压缩成纪要，从世界书目录的纪要概要段按 AM 码区间调阅。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果。我调阅过的资料就留在这里，跨迭代有效，不必重读；标着「内容已过期」的旧调阅说明资料后来变了，需要时按地址重读最新版。\n3. 本回合运行时数据（排在会话记录之后、我的输出之前）：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、读取地址词汇表、预算状态。这一层每次迭代都刷新为最新值——它反映我此前动作（派工、结算、大纲编辑）造成的最新状态，比会话记录里的旧陈述更新。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。',
             enabled: true,
             deletable: true,
         },
@@ -106077,13 +106169,6 @@ $CONTENT
         },
         {
             role: 'system',
-            content: '【本回合运行时数据】\n以下是系统提供的目录与状态，不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。这里没有任何资料正文——需要内容就按地址 read，需要定位就 search。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET',
-            enabled: true,
-            deletable: false,
-            pinned: true,
-        },
-        {
-            role: 'system',
             content: '【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。已经调阅到的资料就在这里，不要重复调阅；已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。',
             enabled: true,
             deletable: true,
@@ -106091,6 +106176,15 @@ $CONTENT
         {
             role: 'system',
             content: AGENT_HISTORY_ANCHOR_TOKEN_ACU,
+            enabled: true,
+            deletable: false,
+            pinned: true,
+        },
+        // 运行时数据放在会话记录之后：这一段（尤其 $BUDGET）每次迭代都变，若排在历史之前，
+        // 厂商按字节级前缀命中的 prompt 缓存会在此处断开，历史里调阅到的大量资料永远进不了缓存。
+        {
+            role: 'system',
+            content: '【本回合运行时数据】\n以上会话记录到此为止。以下是系统在本次迭代刷新的目录与状态——它们反映你此前动作造成的最新结果，比会话记录里的旧陈述更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。这里没有任何资料正文——需要内容就按地址 read，需要定位就 search。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET',
             enabled: true,
             deletable: false,
             pinned: true,
@@ -106473,6 +106567,12 @@ $CONTENT
      */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU = 'spv2.3-continuation-stage-tempo-v15';
     /**
+     * 缓存前缀布局版本：主 Agent 提示词把每次迭代必变的【本回合运行时数据】段（$BUDGET 等）
+     * 从会话历史锚点之前移到之后，让「规则组 + 正文目录 + 会话历史」成为字节级稳定的前缀，
+     * 命中厂商的 prompt 缓存。旧提示词的段排布会让缓存在运行时数据段处断开，必须强制刷新。
+     */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU = 'spv2.4-continuation-cache-prefix-v16';
+    /**
      * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
      * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
      */
@@ -106518,10 +106618,11 @@ $CONTENT
             contextExcludeRules: [],
             apiPresetMode: 'current',
             fixedApiPresetName: '',
+            promptCacheEnabled: true,
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -107130,7 +107231,10 @@ $CONTENT
             delete raw.downtimeTurnRatio;
         if (!Object.prototype.hasOwnProperty.call(raw, 'maxConsecutivePressureTurns'))
             raw.maxConsecutivePressureTurns = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU;
-        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+        // 缓存前缀优化（V16）之前的信封没有该开关；缺失即默认开启，与新建默认一致。
+        if (!Object.prototype.hasOwnProperty.call(raw, 'promptCacheEnabled'))
+            raw.promptCacheEnabled = true;
+        const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
         requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
         if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize))
             fail_ACU$2('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
@@ -107145,10 +107249,10 @@ $CONTENT
         let outlinePrompt = raw.outlinePrompt;
         let agentPrompts = raw.agentPrompts;
         let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU) {
+        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU;
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -107160,6 +107264,7 @@ $CONTENT
             storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
             contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
             apiPresetMode: raw.apiPresetMode, fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
+            promptCacheEnabled: requireBoolean_ACU(raw.promptCacheEnabled, 'settings.promptCacheEnabled'),
             agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),
             outlinePrompt: validateContinuationPromptSegments_ACU(outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'), agentPrompts: validateAgentPrompts_ACU(agentPrompts),
             promptForceDefaultVersion,
@@ -107507,17 +107612,47 @@ $CONTENT
     }
 
     /**
+     * fnv-1a 32 位哈希（十六进制）。缓存 key 只需要稳定与低碰撞，不需要密码学强度；
+     * chatIdentity 可能含中文与路径分隔符，哈希后得到纯 [0-9a-f] 串，满足请求体注入通道的字符白名单。
+     */
+    function fnv1aHex_ACU(input) {
+        let hash = 0x811c9dc5;
+        for (let index = 0; index < input.length; index += 1) {
+            hash ^= input.charCodeAt(index);
+            hash = Math.imul(hash, 0x01000193);
+        }
+        return (hash >>> 0).toString(16).padStart(8, '0');
+    }
+    /**
+     * 组装本次调用的 prompt_cache_key。只含稳定因子（聊天身份哈希 + 调用方 scope），
+     * 不含任何随迭代/轮次变化的内容——key 每轮都变会让跨轮缓存命中归零。
+     */
+    function buildPromptCacheKey_ACU(identity, scope) {
+        const safeScope = scope.replace(/[^A-Za-z0-9_-]/g, '-');
+        return `acu-cont-${fnv1aHex_ACU(identity.chatIdentity)}-${safeScope}`;
+    }
+    /**
+     * 把一次调用的用量渲染成会话流条目里的紧凑标签，如「输入 15.0k · ⚡缓存 14.2k · 输出 0.8k」。
+     * ⚡ 是缓存命中数（含在输入内）；恒常显示，命中为 0 时用户能直接看到未命中。
+     */
+    function formatAgentUsageLabel_ACU(usage) {
+        const compact = (value) => (value < 1000 ? String(value) : `${(value / 1000).toFixed(1)}k`);
+        return `输入 ${compact(usage.promptTokens)} · ⚡缓存 ${compact(usage.cachedTokens)} · 输出 ${compact(usage.completionTokens)}`;
+    }
+    /**
      * Executes one continuation-owned internal request with explicit provenance.
      * It never writes host input or continuation state; callers must gate returned
      * text again before scheduling a later side effect.
      */
-    async function callContinuationInternalAi_ACU(messages, preset, identity, signal) {
+    async function callContinuationInternalAi_ACU(messages, preset, identity, signal, options) {
         beginContinuationInternalAiRequest_ACU(identity);
+        const cacheEnabled = options?.promptCacheEnabled === true;
         try {
             return await callAIWithResolvedPreset_ACU(messages, preset, signal, {
                 beforeMainApiCall: () => beginContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
                 afterMainApiCall: () => endContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
-            });
+                ...(cacheEnabled && options?.onUsage ? { onUsage: options.onUsage } : {}),
+            }, cacheEnabled ? { promptCacheKey: buildPromptCacheKey_ACU(identity, options?.cacheScope || identity.source) } : undefined);
         }
         finally {
             // A bound host lifecycle remains registered until its matching ended event.
@@ -107831,7 +107966,10 @@ $CONTENT
                     if (attempt > 0 && lastError)
                         resolvers.$VALIDATION_ERRORS = () => compactValidationError_ACU(lastError);
                     const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
-                    const raw = await this.dependencies.callInternalAi(rendered.messages, preset, identity);
+                    const raw = await this.dependencies.callInternalAi(rendered.messages, preset, identity, undefined, {
+                        promptCacheEnabled: request.settings.promptCacheEnabled,
+                        cacheScope: 'outline',
+                    });
                     if (!isCurrent(identity)) {
                         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
                     }
@@ -112698,6 +112836,22 @@ $CONTENT
             let protocolRejections = 0;
             let attempt = 0;
             let lastReason = '';
+            // 本次派工的累计用量。派工间并发（Promise.all）但每次 run 各持有自己的局部累计，无共享状态。
+            let usageTotal = null;
+            const callOptions = {
+                promptCacheEnabled: input.settings.promptCacheEnabled,
+                // 每个子代理的提示词前缀不同，独立缓存命名空间避免互相挤占路由。
+                cacheScope: `sub-${definition.name}`,
+                onUsage: usage => {
+                    usageTotal = usageTotal
+                        ? {
+                            promptTokens: usageTotal.promptTokens + usage.promptTokens,
+                            completionTokens: usageTotal.completionTokens + usage.completionTokens,
+                            cachedTokens: usageTotal.cachedTokens + usage.cachedTokens,
+                        }
+                        : { ...usage };
+                },
+            };
             // 调用总数上界 = 首轮 + 工具轮 + 协议重试 + 工具轮用尽后的最后通牒轮。到界仍未交付即失败。
             const maxCalls = 1 + maxToolRounds + retries + 1;
             for (let call = 0; call < maxCalls; call += 1) {
@@ -112706,7 +112860,7 @@ $CONTENT
                 if (!input.isCurrent(identity)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理请求已失效', false));
                 }
-                const raw = await this.dependencies.callInternalAi([...rendered.messages, ...transcript], input.preset, identity, input.signal);
+                const raw = await this.dependencies.callInternalAi([...rendered.messages, ...transcript], input.preset, identity, input.signal, callOptions);
                 if (!input.isCurrent(identity)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理结果已失效', false));
                 }
@@ -112737,6 +112891,7 @@ $CONTENT
                         attempts: attempt,
                         expandedReads: [...expandedReads],
                         readRevisions,
+                        usage: usageTotal,
                     };
                 }
                 catch (error) {
@@ -113067,7 +113222,11 @@ $CONTENT
                     const round = await this.callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig);
                     totalAttempts += round.attempts;
                     const action = round.action;
-                    logAgentSession_ACU({ kind: 'thought', title: `迭代 ${iteration} · ${describeAgentActionLabel_ACU(action)}`, detail: action.thought });
+                    logAgentSession_ACU({
+                        kind: 'thought',
+                        title: `迭代 ${iteration} · ${describeAgentActionLabel_ACU(action)}${round.usage ? ` · ${formatAgentUsageLabel_ACU(round.usage)}` : ''}`,
+                        detail: action.thought,
+                    });
                     const outcomesBefore = ledger.outcomes.length;
                     if (action.kind === 'tools') {
                         await this.runToolBatch_ACU(action.calls, session, context, toolUsage, gateConfig, budget, counter, measureContextTokens, iteration);
@@ -113219,6 +113378,13 @@ $CONTENT
         async callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig) {
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
             let lastReason = '';
+            // 每次调用的用量由回调覆盖写入：协议重试时展示的是最终被采纳那次调用的用量。
+            let callUsage = null;
+            const callOptions = {
+                promptCacheEnabled: request.settings.promptCacheEnabled,
+                cacheScope: 'agent-main',
+                onUsage: usage => { callUsage = usage; },
+            };
             for (let attempt = 0; attempt <= retries; attempt += 1) {
                 const base = request.createInternalRequestIdentity(attempt);
                 const identity = { ...base, source: 'agent_main' };
@@ -113227,7 +113393,9 @@ $CONTENT
                 }
                 const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig);
                 const messages = this.spliceHistory_ACU(rendered, session.history());
-                const raw = await this.dependencies.callInternalAi(messages, preset, identity, request.signal);
+                // 显式擦除上一次尝试的用量，防止回调未触发时把旧值当成本次调用的用量。
+                callUsage = null;
+                const raw = await this.dependencies.callInternalAi(messages, preset, identity, request.signal, callOptions);
                 if (!request.isInternalRequestCurrent(base)) {
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '主 Agent 结果已失效', false));
                 }
@@ -113241,7 +113409,7 @@ $CONTENT
                     }
                     session.record([{ kind: 'agent', text: rawText || '(空输出)', digest: describeAgentActionLabel_ACU(action), turnKey: session.turnKey }]);
                     await session.flush();
-                    return { action, attempts: attempt + 1 };
+                    return { action, attempts: attempt + 1, usage: callUsage };
                 }
                 catch (error) {
                     lastReason = compactAgentProtocolError_ACU(error);
@@ -113523,13 +113691,14 @@ $CONTENT
             for (const delegation of accepted) {
                 runningEntries.set(delegation, logAgentSession_ACU({ kind: 'delegation', agentName: delegation.agentName, title: `${delegation.agentName} 执行中`, detail: delegation.prompt, status: 'running' }));
             }
-            const settleOutcome = (delegation, outcome) => {
+            const settleOutcome = (delegation, outcome, usage) => {
                 ledger.outcomes.push(outcome);
                 const entryId = runningEntries.get(delegation);
                 if (entryId === undefined)
                     return;
+                const usageSuffix = usage ? ` · ${formatAgentUsageLabel_ACU(usage)}` : '';
                 updateAgentSession_ACU(entryId, {
-                    title: outcome.ok ? `${outcome.agentName} 完成` : `${outcome.agentName} 未采用`,
+                    title: `${outcome.agentName} ${outcome.ok ? '完成' : '未采用'}${usageSuffix}`,
                     detail: outcome.ok ? [outcome.summary, outcome.detail].filter(Boolean).join('\n') : outcome.rejectedReason,
                     ok: outcome.ok,
                 });
@@ -113586,10 +113755,10 @@ $CONTENT
                                 result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : '',
                             ].filter(Boolean).join('\n'),
                             rejectedReason: '',
-                        });
+                        }, result.usage);
                     }
                     catch (error) {
-                        settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
+                        settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) }, result.usage);
                     }
                     continue;
                 }
@@ -113612,10 +113781,10 @@ $CONTENT
                                 result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : '',
                             ].filter(Boolean).join('\n'),
                             rejectedReason: '',
-                        });
+                        }, result.usage);
                     }
                     catch (error) {
-                        settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.arc.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) });
+                        settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.arc.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) }, result.usage);
                     }
                     continue;
                 }
@@ -113626,7 +113795,7 @@ $CONTENT
                         summary: result.planner.summary,
                         detail: describePlannerOutcome_ACU(result.planner.summary, result.planner.recommendation, result.planner.mustPreserve, result.planner.risks),
                         rejectedReason: '',
-                    });
+                    }, result.usage);
                     continue;
                 }
                 if (result.reviewer) {
@@ -113636,10 +113805,10 @@ $CONTENT
                         summary: `判词 ${result.reviewer.verdict}`,
                         detail: [`判词：${result.reviewer.verdict}`, result.reviewer.reason ? `依据：${result.reviewer.reason}` : '', result.reviewer.fixes.length ? `修正项：${result.reviewer.fixes.join('；')}` : ''].filter(Boolean).join('\n'),
                         rejectedReason: '',
-                    });
+                    }, result.usage);
                     continue;
                 }
-                settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' });
+                settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '', rejectedReason: '子代理没有返回可用输出' }, result.usage);
             }
             if (snapshotChanged) {
                 context.moduleSnapshot = nextSnapshot;
@@ -156326,8 +156495,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-6d20bd54] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-6d20bd54] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-6d20bd54] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-6d20bd54] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-6d20bd54] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-6d20bd54] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-6d20bd54] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-6d20bd54] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-6d20bd54] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-6d20bd54] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-6d20bd54] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-6d20bd54] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-6d20bd54] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-6d20bd54] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-6d20bd54] > * { flex: 1 1 auto;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-6d20bd54");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_6d20bd54_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-b6bfe8a6] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-b6bfe8a6] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-b6bfe8a6] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-b6bfe8a6] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-b6bfe8a6] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-b6bfe8a6] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-b6bfe8a6] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-b6bfe8a6] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-b6bfe8a6] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-b6bfe8a6] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-b6bfe8a6] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-b6bfe8a6] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-b6bfe8a6] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-b6bfe8a6] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-b6bfe8a6] > * { flex: 1 1 auto;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-b6bfe8a6");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_b6bfe8a6_lang = null;
 
     const _hoisted_1$l = { class: "acu-v2-continuation-page" };
     const _hoisted_2$j = {
@@ -156432,7 +156601,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.acceptOutlineDraft
 				}, {
-					default: withCtx(() => [..._cache[57] || (_cache[57] = [createTextVNode(
+					default: withCtx(() => [..._cache[58] || (_cache[58] = [createTextVNode(
 						"确认大纲并继续",
 						-1
 						/* CACHED */
@@ -156474,7 +156643,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							default: withCtx(() => [withDirectives(createBaseVNode(
 								"select",
 								{ "onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => $setup.settingsDraft.stageSize = $event) },
-								[..._cache[58] || (_cache[58] = [
+								[..._cache[59] || (_cache[59] = [
 									createBaseVNode(
 										"option",
 										{ value: "short" },
@@ -156701,15 +156870,19 @@ Expected function or array of functions, received type ${typeof value}.`
 						modelValue: $setup.settingsDraft.outlinePreview,
 						"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.outlinePreview = $event),
 						label: "大纲产出后先预览再执行"
+					}, null, 8, ["modelValue"]), createVNode($setup["AcuCheckbox"], {
+						modelValue: $setup.settingsDraft.promptCacheEnabled,
+						"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.promptCacheEnabled = $event),
+						label: "缓存优化：为内部 AI 请求注入 prompt_cache_key 并统计缓存命中（个别网关不支持时可关闭）"
 					}, null, 8, ["modelValue"])]),
 					createVNode($setup["AcuRulePairList"], {
 						modelValue: $setup.settingsDraft.contextExtractRules,
-						"onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
+						"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.contextExtractRules = $event),
 						label: "上下文提取规则"
 					}, null, 8, ["modelValue"]),
 					createVNode($setup["AcuRulePairList"], {
 						modelValue: $setup.settingsDraft.contextExcludeRules,
-						"onUpdate:modelValue": _cache[20] || (_cache[20] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
+						"onUpdate:modelValue": _cache[21] || (_cache[21] = ($event) => $setup.settingsDraft.contextExcludeRules = $event),
 						label: "上下文排除规则"
 					}, null, 8, ["modelValue"]),
 					$setup.settingsError ? (openBlock(), createElementBlock(
@@ -156739,15 +156912,15 @@ Expected function or array of functions, received type ${typeof value}.`
 			default: withCtx(() => [
 				createBaseVNode("div", _hoisted_8$9, [
 					createVNode($setup["AcuButton"], { onClick: $setup.exportPrompts }, {
-						default: withCtx(() => [..._cache[59] || (_cache[59] = [createTextVNode(
+						default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
 							"导出提示词 JSON",
 							-1
 							/* CACHED */
 						)])]),
 						_: 1
 					}),
-					createVNode($setup["AcuButton"], { onClick: _cache[21] || (_cache[21] = ($event) => $setup.promptImportInput?.click()) }, {
-						default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
+					createVNode($setup["AcuButton"], { onClick: _cache[22] || (_cache[22] = ($event) => $setup.promptImportInput?.click()) }, {
+						default: withCtx(() => [..._cache[61] || (_cache[61] = [createTextVNode(
 							"导入提示词 JSON",
 							-1
 							/* CACHED */
@@ -156782,7 +156955,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				_cache[68] || (_cache[68] = createBaseVNode(
+				_cache[69] || (_cache[69] = createBaseVNode(
 					"h3",
 					null,
 					"大纲子代理（outline-architect）提示词",
@@ -156795,27 +156968,27 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[22] || (_cache[22] = (position) => $setup.addPrompt("outlinePrompt", position)),
-					onDelete: _cache[23] || (_cache[23] = (index) => $setup.deletePrompt("outlinePrompt", index)),
-					onMove: _cache[24] || (_cache[24] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
-					onUpdate: _cache[25] || (_cache[25] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
+					onAdd: _cache[23] || (_cache[23] = (position) => $setup.addPrompt("outlinePrompt", position)),
+					onDelete: _cache[24] || (_cache[24] = (index) => $setup.deletePrompt("outlinePrompt", index)),
+					onMove: _cache[25] || (_cache[25] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
+					onUpdate: _cache[26] || (_cache[26] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_11$8, [createVNode($setup["AcuButton"], { onClick: _cache[26] || (_cache[26] = ($event) => $setup.restorePrompt("outline")) }, {
-					default: withCtx(() => [..._cache[61] || (_cache[61] = [createTextVNode(
+				createBaseVNode("div", _hoisted_11$8, [createVNode($setup["AcuButton"], { onClick: _cache[27] || (_cache[27] = ($event) => $setup.restorePrompt("outline")) }, {
+					default: withCtx(() => [..._cache[62] || (_cache[62] = [createTextVNode(
 						"恢复大纲提示词默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[69] || (_cache[69] = createBaseVNode(
+				_cache[70] || (_cache[70] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$PACING_CONTEXT（跨阶段节奏状态：上一阶段形态与已连续高压轮数）、$VALIDATION_ERRORS。",
 					-1
 					/* CACHED */
 				)),
-				_cache[70] || (_cache[70] = createBaseVNode(
+				_cache[71] || (_cache[71] = createBaseVNode(
 					"h3",
 					null,
 					"主 Agent 提示词",
@@ -156828,27 +157001,27 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[27] || (_cache[27] = (position) => $setup.addPrompt("main", position)),
-					onDelete: _cache[28] || (_cache[28] = (index) => $setup.deletePrompt("main", index)),
-					onMove: _cache[29] || (_cache[29] = (index, delta) => $setup.movePrompt("main", index, delta)),
-					onUpdate: _cache[30] || (_cache[30] = (index, patch) => $setup.updatePrompt("main", index, patch))
+					onAdd: _cache[28] || (_cache[28] = (position) => $setup.addPrompt("main", position)),
+					onDelete: _cache[29] || (_cache[29] = (index) => $setup.deletePrompt("main", index)),
+					onMove: _cache[30] || (_cache[30] = (index, delta) => $setup.movePrompt("main", index, delta)),
+					onUpdate: _cache[31] || (_cache[31] = (index, patch) => $setup.updatePrompt("main", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuButton"], { onClick: _cache[31] || (_cache[31] = ($event) => $setup.restorePrompt("agent_main")) }, {
-					default: withCtx(() => [..._cache[62] || (_cache[62] = [createTextVNode(
+				createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuButton"], { onClick: _cache[32] || (_cache[32] = ($event) => $setup.restorePrompt("agent_main")) }, {
+					default: withCtx(() => [..._cache[63] || (_cache[63] = [createTextVNode(
 						"恢复主 Agent 默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[71] || (_cache[71] = createBaseVNode(
+				_cache[72] || (_cache[72] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。目录与状态占位符：$STORY_CATALOG（正文楼层目录，尾部若干楼带全文）、$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$CURRENT_TURN_PACING（本轮节奏与写作约束）、$STORY_ARC_STATE（总纲状态）、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $STORY_TEXT、$OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。",
 					-1
 					/* CACHED */
 				)),
-				_cache[72] || (_cache[72] = createBaseVNode(
+				_cache[73] || (_cache[73] = createBaseVNode(
 					"h3",
 					null,
 					"故事总纲子代理（arc-architect）提示词",
@@ -156861,20 +157034,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[32] || (_cache[32] = (position) => $setup.addPrompt("arcArchitect", position)),
-					onDelete: _cache[33] || (_cache[33] = (index) => $setup.deletePrompt("arcArchitect", index)),
-					onMove: _cache[34] || (_cache[34] = (index, delta) => $setup.movePrompt("arcArchitect", index, delta)),
-					onUpdate: _cache[35] || (_cache[35] = (index, patch) => $setup.updatePrompt("arcArchitect", index, patch))
+					onAdd: _cache[33] || (_cache[33] = (position) => $setup.addPrompt("arcArchitect", position)),
+					onDelete: _cache[34] || (_cache[34] = (index) => $setup.deletePrompt("arcArchitect", index)),
+					onMove: _cache[35] || (_cache[35] = (index, delta) => $setup.movePrompt("arcArchitect", index, delta)),
+					onUpdate: _cache[36] || (_cache[36] = (index, patch) => $setup.updatePrompt("arcArchitect", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_13$6, [createVNode($setup["AcuButton"], { onClick: _cache[36] || (_cache[36] = ($event) => $setup.restorePrompt("agent_arc")) }, {
-					default: withCtx(() => [..._cache[63] || (_cache[63] = [createTextVNode(
+				createBaseVNode("div", _hoisted_13$6, [createVNode($setup["AcuButton"], { onClick: _cache[37] || (_cache[37] = ($event) => $setup.restorePrompt("agent_arc")) }, {
+					default: withCtx(() => [..._cache[64] || (_cache[64] = [createTextVNode(
 						"恢复总纲子代理默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[73] || (_cache[73] = createBaseVNode(
+				_cache[74] || (_cache[74] = createBaseVNode(
 					"h3",
 					null,
 					"伏笔与认知维护子代理提示词",
@@ -156887,20 +157060,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[37] || (_cache[37] = (position) => $setup.addPrompt("maintainer", position)),
-					onDelete: _cache[38] || (_cache[38] = (index) => $setup.deletePrompt("maintainer", index)),
-					onMove: _cache[39] || (_cache[39] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
-					onUpdate: _cache[40] || (_cache[40] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
+					onAdd: _cache[38] || (_cache[38] = (position) => $setup.addPrompt("maintainer", position)),
+					onDelete: _cache[39] || (_cache[39] = (index) => $setup.deletePrompt("maintainer", index)),
+					onMove: _cache[40] || (_cache[40] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
+					onUpdate: _cache[41] || (_cache[41] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_14$6, [createVNode($setup["AcuButton"], { onClick: _cache[41] || (_cache[41] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
-					default: withCtx(() => [..._cache[64] || (_cache[64] = [createTextVNode(
+				createBaseVNode("div", _hoisted_14$6, [createVNode($setup["AcuButton"], { onClick: _cache[42] || (_cache[42] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
+					default: withCtx(() => [..._cache[65] || (_cache[65] = [createTextVNode(
 						"恢复维护子代理默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[74] || (_cache[74] = createBaseVNode(
+				_cache[75] || (_cache[75] = createBaseVNode(
 					"h3",
 					null,
 					"主线推进策划子代理提示词",
@@ -156913,20 +157086,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[42] || (_cache[42] = (position) => $setup.addPrompt("mainlinePlanner", position)),
-					onDelete: _cache[43] || (_cache[43] = (index) => $setup.deletePrompt("mainlinePlanner", index)),
-					onMove: _cache[44] || (_cache[44] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
-					onUpdate: _cache[45] || (_cache[45] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
+					onAdd: _cache[43] || (_cache[43] = (position) => $setup.addPrompt("mainlinePlanner", position)),
+					onDelete: _cache[44] || (_cache[44] = (index) => $setup.deletePrompt("mainlinePlanner", index)),
+					onMove: _cache[45] || (_cache[45] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
+					onUpdate: _cache[46] || (_cache[46] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_15$6, [createVNode($setup["AcuButton"], { onClick: _cache[46] || (_cache[46] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
-					default: withCtx(() => [..._cache[65] || (_cache[65] = [createTextVNode(
+				createBaseVNode("div", _hoisted_15$6, [createVNode($setup["AcuButton"], { onClick: _cache[47] || (_cache[47] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
+					default: withCtx(() => [..._cache[66] || (_cache[66] = [createTextVNode(
 						"恢复主线策划默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[75] || (_cache[75] = createBaseVNode(
+				_cache[76] || (_cache[76] = createBaseVNode(
 					"h3",
 					null,
 					"伏笔与节拍策划子代理提示词",
@@ -156939,20 +157112,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[47] || (_cache[47] = (position) => $setup.addPrompt("beatPlanner", position)),
-					onDelete: _cache[48] || (_cache[48] = (index) => $setup.deletePrompt("beatPlanner", index)),
-					onMove: _cache[49] || (_cache[49] = (index, delta) => $setup.movePrompt("beatPlanner", index, delta)),
-					onUpdate: _cache[50] || (_cache[50] = (index, patch) => $setup.updatePrompt("beatPlanner", index, patch))
+					onAdd: _cache[48] || (_cache[48] = (position) => $setup.addPrompt("beatPlanner", position)),
+					onDelete: _cache[49] || (_cache[49] = (index) => $setup.deletePrompt("beatPlanner", index)),
+					onMove: _cache[50] || (_cache[50] = (index, delta) => $setup.movePrompt("beatPlanner", index, delta)),
+					onUpdate: _cache[51] || (_cache[51] = (index, patch) => $setup.updatePrompt("beatPlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_16$6, [createVNode($setup["AcuButton"], { onClick: _cache[51] || (_cache[51] = ($event) => $setup.restorePrompt("agent_beat")) }, {
-					default: withCtx(() => [..._cache[66] || (_cache[66] = [createTextVNode(
+				createBaseVNode("div", _hoisted_16$6, [createVNode($setup["AcuButton"], { onClick: _cache[52] || (_cache[52] = ($event) => $setup.restorePrompt("agent_beat")) }, {
+					default: withCtx(() => [..._cache[67] || (_cache[67] = [createTextVNode(
 						"恢复节拍策划默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[76] || (_cache[76] = createBaseVNode(
+				_cache[77] || (_cache[77] = createBaseVNode(
 					"h3",
 					null,
 					"连续性审查子代理提示词",
@@ -156965,20 +157138,20 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-slot": false,
 					"show-enabled": true,
 					"allow-move": true,
-					onAdd: _cache[52] || (_cache[52] = (position) => $setup.addPrompt("reviewer", position)),
-					onDelete: _cache[53] || (_cache[53] = (index) => $setup.deletePrompt("reviewer", index)),
-					onMove: _cache[54] || (_cache[54] = (index, delta) => $setup.movePrompt("reviewer", index, delta)),
-					onUpdate: _cache[55] || (_cache[55] = (index, patch) => $setup.updatePrompt("reviewer", index, patch))
+					onAdd: _cache[53] || (_cache[53] = (position) => $setup.addPrompt("reviewer", position)),
+					onDelete: _cache[54] || (_cache[54] = (index) => $setup.deletePrompt("reviewer", index)),
+					onMove: _cache[55] || (_cache[55] = (index, delta) => $setup.movePrompt("reviewer", index, delta)),
+					onUpdate: _cache[56] || (_cache[56] = (index, patch) => $setup.updatePrompt("reviewer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_17$5, [createVNode($setup["AcuButton"], { onClick: _cache[56] || (_cache[56] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
-					default: withCtx(() => [..._cache[67] || (_cache[67] = [createTextVNode(
+				createBaseVNode("div", _hoisted_17$5, [createVNode($setup["AcuButton"], { onClick: _cache[57] || (_cache[57] = ($event) => $setup.restorePrompt("agent_reviewer")) }, {
+					default: withCtx(() => [..._cache[68] || (_cache[68] = [createTextVNode(
 						"恢复审查子代理默认值",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
 				})]),
-				_cache[77] || (_cache[77] = createBaseVNode(
+				_cache[78] || (_cache[78] = createBaseVNode(
 					"p",
 					{ class: "acu-v2-continuation-page__meta" },
 					"子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG（各资料目录）。",
@@ -156997,7 +157170,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-6d20bd54"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-b6bfe8a6"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

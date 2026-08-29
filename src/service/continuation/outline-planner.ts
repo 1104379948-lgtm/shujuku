@@ -1,4 +1,4 @@
-import { callContinuationInternalAi_ACU } from './internal-ai-call';
+import { callContinuationInternalAi_ACU, type ContinuationInternalAiCallOptions_ACU } from './internal-ai-call';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from './defaults';
 import { resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from './api-preset';
 import { describeStageTempo_ACU, listStageOutlineTurns_ACU, validateReplannedStageOutline_ACU, resolveContinuationTurnRange_ACU, validateStageOutline_ACU, validateStageOutlinePacing_ACU, type StageOutlinePacingContext_ACU } from './outline-schema';
@@ -39,7 +39,7 @@ export interface ContinuationOutlinePlanningResult_ACU {
 
 export interface ContinuationOutlinePlannerDependencies_ACU {
   resolveApiPreset: typeof resolveContinuationAgentApiPreset_ACU;
-  callInternalAi: (messages: Array<{ role: string; content: string }>, preset: ContinuationResolvedApiPreset_ACU, identity: ContinuationInternalAiRequestIdentity_ACU) => Promise<string | null>;
+  callInternalAi: (messages: Array<{ role: string; content: string }>, preset: ContinuationResolvedApiPreset_ACU, identity: ContinuationInternalAiRequestIdentity_ACU, signal?: AbortSignal | null, options?: ContinuationInternalAiCallOptions_ACU) => Promise<string | null>;
 }
 
 const defaultDependencies_ACU: ContinuationOutlinePlannerDependencies_ACU = {
@@ -168,7 +168,10 @@ export class ContinuationOutlinePlanner_ACU {
         resolvers.$PACING_CONTEXT = () => renderContinuationPacingContext_ACU(pacingContext, request.settings.maxConsecutivePressureTurns);
         if (attempt > 0 && lastError) resolvers.$VALIDATION_ERRORS = () => compactValidationError_ACU(lastError!);
         const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
-        const raw = await this.dependencies.callInternalAi(rendered.messages, preset, identity);
+        const raw = await this.dependencies.callInternalAi(rendered.messages, preset, identity, undefined, {
+          promptCacheEnabled: request.settings.promptCacheEnabled,
+          cacheScope: 'outline',
+        });
         if (!isCurrent(identity)) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
         }

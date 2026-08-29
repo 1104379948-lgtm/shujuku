@@ -120,6 +120,7 @@
         </div>
         <div class="acu-v2-continuation-page__toggles">
           <AcuCheckbox v-model="settingsDraft.outlinePreview" label="大纲产出后先预览再执行" />
+          <AcuCheckbox v-model="settingsDraft.promptCacheEnabled" label="缓存优化：为内部 AI 请求注入 prompt_cache_key 并统计缓存命中（个别网关不支持时可关闭）" />
         </div>
         <AcuRulePairList v-model="settingsDraft.contextExtractRules" label="上下文提取规则" />
         <AcuRulePairList v-model="settingsDraft.contextExcludeRules" label="上下文排除规则" />

@@ -167,7 +167,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: stale }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.3-continuation-stage-tempo-v15');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.4-continuation-cache-prefix-v16');
     expect(loaded.settings.agentPrompts.arcArchitect[0].content).toContain('故事总纲子代理');
     expect(loaded.settings.outlinePrompt.some(segment => segment.content.includes('<stage_tempo>'))).toBe(true);
     expect(loaded.settings.agentPrompts.main[0].content).not.toBe('用户改过的旧提示词');

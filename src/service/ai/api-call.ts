@@ -1,7 +1,8 @@
 // service/ai/api-call.ts — AI 调用编排（剧情推进用）
 // 从 04_shared_helpers.js 迁入
 
-import { handleApiResponse_ACU } from './prompt-builder';
+import { handleApiResponse_ACU, extractAiUsageMetadata_ACU, type AiUsageMetadata_ACU } from './prompt-builder';
+export type { AiUsageMetadata_ACU };
 import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
@@ -22,7 +23,16 @@ function normalizeExcludeBodyParamsForSillyTavern_ACU(raw: any): string {
 export function buildCustomApiRequestBody_ACU(
   messages: any[],
   effectiveApiConfig: any,
-  overrides?: { maxTokens?: number; temperature?: number; topP?: number; stripModelPrefix?: boolean }
+  overrides?: {
+    maxTokens?: number;
+    temperature?: number;
+    topP?: number;
+    stripModelPrefix?: boolean;
+    /** 注入上游请求体的 prompt_cache_key（OpenAI 兼容缓存路由）。仅允许 [A-Za-z0-9_-]，防止破坏 YAML 注入通道。 */
+    promptCacheKey?: string;
+    /** 流式请求时注入 stream_options.include_usage，让流末尾下发 usage 统计 chunk。非流式请求忽略。 */
+    includeStreamUsage?: boolean;
+  }
 ): Record<string, any> {
   const opts = overrides || {};
   const model = opts.stripModelPrefix !== false
@@ -41,6 +51,26 @@ export function buildCustomApiRequestBody_ACU(
       headers = headers ? `${headers}\n${extra}` : extra;
     }
   }
+
+  // 追加缓存相关字段走 custom_include_body（宿主会把这段 YAML 合并进上游请求体）。
+  // 用户自配的 bodyParams 可能是 JSON 流式写法（{ 或 [ 开头），逐行追加键会产生非法 YAML，
+  // 此时跳过注入，绝不破坏用户既有配置。
+  const streaming = settings_ACU.streamingEnabled || false;
+  const userBodyParams = String(effectiveApiConfig.bodyParams || '');
+  const extraIncludeLines: string[] = [];
+  if (opts.promptCacheKey && /^[A-Za-z0-9_-]+$/.test(opts.promptCacheKey)) {
+    extraIncludeLines.push(`prompt_cache_key: ${opts.promptCacheKey}`);
+  }
+  if (opts.includeStreamUsage && streaming) {
+    extraIncludeLines.push('stream_options: {"include_usage": true}');
+  }
+  const userBodyIsFlowStyle = /^[{[]/.test(userBodyParams.trim());
+  if (extraIncludeLines.length && userBodyIsFlowStyle) {
+    logDebug_ACU('[buildCustomApiRequestBody] bodyParams 为 JSON 流式写法，跳过 prompt_cache_key/stream_options 注入');
+  }
+  const includeBody = extraIncludeLines.length && !userBodyIsFlowStyle
+    ? [userBodyParams.trim(), ...extraIncludeLines].filter(Boolean).join('\n')
+    : userBodyParams;
 
   const body: Record<string, any> = {
     // 统一将 messages 的 role 归一为小写（system / user / assistant）。
@@ -69,7 +99,7 @@ export function buildCustomApiRequestBody_ACU(
     max_tokens: maxTokens,
     temperature,
     top_p: topP,
-    stream: settings_ACU.streamingEnabled || false,
+    stream: streaming,
     chat_completion_source: 'custom',
     group_names: [],
     include_reasoning: false,
@@ -81,7 +111,7 @@ export function buildCustomApiRequestBody_ACU(
     proxy_password: '',
     custom_url: effectiveApiConfig.url,
     custom_include_headers: headers,
-    custom_include_body: effectiveApiConfig.bodyParams || '',
+    custom_include_body: includeBody,
     custom_exclude_body: normalizeExcludeBodyParamsForSillyTavern_ACU(effectiveApiConfig.excludeBodyParams),
   };
 
@@ -317,6 +347,14 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
 export interface ResolvedPresetCallLifecycle_ACU {
     beforeMainApiCall?: () => void;
     afterMainApiCall?: () => void;
+    /** 响应带回 token 用量时回调（custom 路径解析响应体，tavern 路径机会性解析；useMainApi 路径无用量来源）。 */
+    onUsage?: (usage: AiUsageMetadata_ACU) => void;
+}
+
+/** callAIWithResolvedPreset_ACU 的请求体附加项。仅 custom（chat-completions）路径生效。 */
+export interface ResolvedPresetCallExtras_ACU {
+    /** OpenAI 兼容缓存路由 key。稳定的 key 让同一会话的请求落到同一缓存命名空间。 */
+    promptCacheKey?: string;
 }
 
 /** tavern 模式请求的串行队列尾。/profile 是全局状态，并发切换会互相踩，必须串行「切换→发送→恢复」。 */
@@ -366,15 +404,23 @@ export async function callAIWithResolvedPreset_ACU(
     resolved: { apiMode: ApiPresetApiMode_ACU; apiConfig: ApiPresetApiConfig_ACU; tavernProfile: string },
     signal?: AbortSignal | null,
     lifecycle?: ResolvedPresetCallLifecycle_ACU,
+    extras?: ResolvedPresetCallExtras_ACU,
 ): Promise<string | null> {
     if (!Array.isArray(messages) || messages.length === 0) {
         throw new Error('内部 AI 消息必须是非空数组。');
     }
+    const reportUsage = (raw: unknown): void => {
+        if (!lifecycle?.onUsage) return;
+        const usage = extractAiUsageMetadata_ACU(raw);
+        if (!usage) return;
+        try { lifecycle.onUsage(usage); } catch { /* 用量回调异常不允许影响调用主流程。 */ }
+    };
     const maxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
     if (resolved.apiMode === 'tavern') {
         if (!resolved.tavernProfile) throw new Error('该预设为酒馆连接模式但未选择连接预设。');
         const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
         assertNotAborted_ACU(signal);
+        reportUsage(response?.result?.usage);
         if (typeof response?.result?.choices?.[0]?.message?.content === 'string') return response.result.choices[0].message.content.trim();
         if (typeof response?.content === 'string') return response.content.trim();
         return null;
@@ -400,11 +446,17 @@ export async function callAIWithResolvedPreset_ACU(
     const response = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, { maxTokens, stripModelPrefix: false })),
+        body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
+            maxTokens,
+            stripModelPrefix: false,
+            promptCacheKey: extras?.promptCacheKey,
+            // usage 回调在场时才请求流式 usage chunk：不改变没有订阅方时的请求体。
+            includeStreamUsage: !!lifecycle?.onUsage,
+        })),
         signal: signal || undefined,
     });
     if (!response.ok) throw new Error(`API 请求失败: ${response.status}`);
-    const content = await handleApiResponse_ACU(response, signal);
+    const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage);
     return typeof content === 'string' && content.trim() ? content.trim() : null;
 }
 

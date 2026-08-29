@@ -99,6 +99,12 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V14_ACU = 'spv2.2-continu
  * 决定疏密、跨阶段连续高压上限兜底。旧提示词写死了「连续高压不超过三轮」，必须强制刷新。
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU = 'spv2.3-continuation-stage-tempo-v15';
+/**
+ * 缓存前缀布局版本：主 Agent 提示词把每次迭代必变的【本回合运行时数据】段（$BUDGET 等）
+ * 从会话历史锚点之前移到之后，让「规则组 + 正文目录 + 会话历史」成为字节级稳定的前缀，
+ * 命中厂商的 prompt 缓存。旧提示词的段排布会让缓存在运行时数据段处断开，必须强制刷新。
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU = 'spv2.4-continuation-cache-prefix-v16';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -151,10 +157,11 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     contextExcludeRules: [],
     apiPresetMode: 'current',
     fixedApiPresetName: '',
+    promptCacheEnabled: true,
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU,
   };
 }
 
