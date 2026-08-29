@@ -42,6 +42,7 @@ import {
 } from './summary-vector-index-storage-service';
 import { hashUserInput_ACU, isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { normalizeSummaryVectorIndexScope_ACU, serializeSummaryVectorIndexScope_ACU } from '../../shared/summary-vector-index-scope';
+import { buildSummaryRowFingerprint_ACU } from './summary-vector-row-fingerprint';
 
 type SummaryVectorIndexArchiveMode_ACU = 'append' | 'sync';
 
@@ -310,28 +311,8 @@ function buildStableSummaryRowKey_ACU(summaryKey: string, rowId: string, indexCo
     return `summary-row:${hashUserInput_ACU(source)}`;
 }
 
-/**
- * 单一指纹公式：所有行指纹必须经由这里计算，避免三处内联公式漂移。
- * 输入字段顺序与 join 分隔符与历史实现逐字符一致（T1，零行为变化）。
- */
-function buildSummaryRowFingerprint_ACU(source: {
-    rowId: string;
-    timeSpan: string;
-    location: string;
-    summary: string;
-    indexCode: string;
-    vectorSourceText: string;
-}): string {
-    return hashUserInput_ACU([
-        source.rowId,
-        source.timeSpan,
-        source.location,
-        source.summary,
-        source.indexCode,
-        source.vectorSourceText,
-    ].join('\n'));
-}
-
+// 单一指纹公式已抽至 summary-vector-row-fingerprint.ts（storage-service 也需引用，
+// 留在本文件会与既有 archive → storage 依赖成环）。
 function buildPreparedRowFingerprint_ACU(row: SummaryVectorArchivePreparedRow_ACU): string {
     return buildSummaryRowFingerprint_ACU(row);
 }
@@ -579,6 +560,9 @@ function buildExistingReusableRows_ACU(
             summary: prepared.summary,
             indexCode: prepared.indexCode,
             vectorSourceText: prepared.vectorSourceText,
+            // 复用前提是现存内容重算指纹 === prepared.sourceFingerprint（上方判等），
+            // 落盘指纹供查询时与实时纪要表对账（filterRowsByLiveSummaryTable_ACU）。
+            sourceFingerprint: prepared.sourceFingerprint,
             chunkIds,
         });
         chunks.forEach((chunk) => reusableChunks.push({ ...chunk }));
@@ -675,6 +659,9 @@ async function buildChunksWithEmbeddings_ACU(
             summary: row.summary,
             indexCode: row.indexCode,
             vectorSourceText: row.vectorSourceText,
+            // 落盘指纹供查询时与实时纪要表对账（filterRowsByLiveSummaryTable_ACU）；
+            // 缺失时对账退化为纯 rowKey 比对，"只改概要文本"的编辑会注入旧文本。
+            sourceFingerprint: row.sourceFingerprint,
             chunkIds: rowChunkIds.get(row.rowKey) || [],
         }))
         .filter((row) => row.chunkIds.length > 0);

@@ -67,6 +67,7 @@ import {
 } from './summary-vector-index-types';
 import { getAllSummaryVectorIndexSnapshotLayers_ACU } from './summary-vector-index-state-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU } from './vector-memory-config';
+import { buildSummaryRowFingerprint_ACU } from './summary-vector-row-fingerprint';
 
 const DEFAULT_SHARD_CHUNK_LIMIT_ACU = 128;
 const SUMMARY_VECTOR_INDEX_PACK_CHUNK_LIMIT_ACU = 64;
@@ -580,7 +581,9 @@ function buildRowIndex_ACU(indexId: string, rows: ChatSummaryVectorIndexRow_ACU[
             rowId: row.rowId,
             rowOrder: row.rowOrder,
             summaryKey: row.rowKey,
-            sourceFingerprint: row.sourceFingerprint || hashUserInput_ACU([row.rowId, row.rowOrder, row.timeSpan, row.location, row.summary, row.indexCode, row.vectorSourceText].join('\n')),
+            // 兜底仅对无指纹的 legacy 行触发；必须用权威公式（不含 rowOrder），
+            // 与 archive-service 的行指纹保持同一来源，防止公式漂移造成对账永久 mismatch。
+            sourceFingerprint: row.sourceFingerprint || buildSummaryRowFingerprint_ACU(row),
             indexCode: row.indexCode,
             chunkIds: [...row.chunkIds],
             shardIds,

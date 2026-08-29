@@ -236,6 +236,11 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     const firstPersistOptions = mockPersistSummaryVectorIndexSnapshot.mock.calls[0][0];
     expect(firstPersistOptions.rows).toHaveLength(1);
     expect(firstPersistOptions.previousManifest).toBeNull();
+    // 全新 embedding 路径产出的行必须带内容指纹（查询时实时对账的前提）。
+    firstPersistOptions.rows.forEach((row: any) => {
+      expect(typeof row.sourceFingerprint).toBe('string');
+      expect(row.sourceFingerprint.length).toBeGreaterThan(0);
+    });
 
     mockCurrentJsonTableDataRef.value = {
       sheet_summary: {
@@ -258,6 +263,11 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     expect(secondPersistOptions.previousManifest?.indexId).toBe('idx-1');
     expect(secondPersistOptions.parentIndexIds).toEqual(['idx-1']);
     expect(secondPersistOptions.snapshotRevision).toBe(1);
+    // 第二次归档含复用行（行 1 未变化）与新 embedding 行（行 2），两条路径都必须带指纹。
+    secondPersistOptions.rows.forEach((row: any) => {
+      expect(typeof row.sourceFingerprint).toBe('string');
+      expect(row.sourceFingerprint.length).toBeGreaterThan(0);
+    });
   });
 
   it('清理空纪要表时沿用当前 active isolation，而不是重新推导其他 scope', async () => {

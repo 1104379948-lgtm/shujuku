@@ -91,7 +91,10 @@ vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => 
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () => ({
   findSummaryTable_ACU: () => h.summaryTable,
-  buildPreparedRows_ACU: () => h.preparedRows,
+  // 真实契约返回 { rows, skippedRowCount, error }；此前 mock 直接返回数组导致
+  // buildLiveSummaryVectorRows_ACU 取 prepared.rows 恒为 undefined → live 表恒空 →
+  // 只要 summaryTable 非 null 就恒判 stale，对账分支从未被真实测试。
+  buildPreparedRows_ACU: () => ({ rows: h.preparedRows, skippedRowCount: 0, error: '' }),
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
   loadSummaryVectorIndexChunksFromManifest_ACU: (...a: any[]) => h.loadChunks(...a),
@@ -306,6 +309,39 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
       reason: 'runtime_stale_rows_rebuild_required',
     });
     expect(h.enqueueFlush).not.toHaveBeenCalled();
+  });
+
+  it('rowKey 集合相同但某行内容指纹不同（只改概要文本）时 fail-closed 拒绝注入旧文本', async () => {
+    // 修复前该场景被静默放行：索引行不带 sourceFingerprint，对账退化为纯 rowKey 比对。
+    h.rows = h.rows.map((row: any) => ({ ...row, sourceFingerprint: `fp-${row.rowKey}` }));
+    h.summaryTable = { summaryKey: 'summary-source', table: {} };
+    h.preparedRows = h.rows.map((row: any) => ({
+      rowKey: row.rowKey,
+      sourceFingerprint: row.rowKey === 'dense' ? 'fp-dense-edited' : row.sourceFingerprint,
+    }));
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'fingerprint-mismatch' });
+
+    expect(result).toMatchObject({
+      success: false,
+      skipped: true,
+      reason: 'runtime_stale_rows_rebuild_required',
+    });
+    expect(h.createEmbeddings).not.toHaveBeenCalled();
+  });
+
+  it('rowKey 集合与内容指纹全部一致时对账通过，正常召回注入', async () => {
+    h.rows = h.rows.map((row: any) => ({ ...row, sourceFingerprint: `fp-${row.rowKey}` }));
+    h.summaryTable = { summaryKey: 'summary-source', table: {} };
+    h.preparedRows = h.rows.map((row: any) => ({
+      rowKey: row.rowKey,
+      sourceFingerprint: row.sourceFingerprint,
+    }));
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find secret relic', source: 'fingerprint-match' });
+
+    expect(result).toMatchObject({ success: true });
+    expect(createdContent_ACU()).toContain('dense summary');
   });
 
   it('P3：同一次发送经两个钩子（source 不同）触发时，8s 窗口内第二次被去重', async () => {
