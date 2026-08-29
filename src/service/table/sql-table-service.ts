@@ -43,16 +43,20 @@ import { isSqlActiveTemplateSheet_ACU, projectSqlActiveTemplateData_ACU } from '
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_ACU, PhysicalTableNameCollisionError_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
-import { getRuntimeEffectiveSchema_ACU, getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
+import { buildColumnNameMap, getRuntimeEffectiveSchema_ACU, getSheetColumnProjection_ACU, parseDDLColumnInfos_ACU } from '../../shared/ddl-utils';
 import { rebindSqlMutationTableReferences_ACU, rebindSqlMutationColumnsByTarget_ACU, decodeSqlIdentifier_ACU } from '../../shared/sql-mutation-table-rebind';
 import { buildSheetTableAliasMap_ACU, buildSheetColumnAliasMap_ACU } from '../../shared/sql-read-resolver';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { extractBusinessKeyColumns_ACU } from '../template/template-data-preflight';
+import { getTableLockIdentitiesForSheet_ACU } from '../runtime/helpers-table-lock';
+import { buildLockRevertPlanForSheet_ACU, formatLockRevertSummary_ACU, type LockRevertItem_ACU } from './table-lock-enforcement';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
   workingData?: TableDataObject_ACU;
   changes?: number;
   operations?: TableMutationOperationV2_ACU[];
+  /** SQL 模式锁定保护回滚的目标清单（空数组/缺省 = 无回滚）。 */
+  revertedByLocks?: LockRevertItem_ACU[];
 }
 
 export interface SqlSheetBatchBuildResult_ACU {
@@ -504,11 +508,12 @@ export function captureSqlTableApplyScope_ACU(options: {
     : projectedWithRows.skippedSheets;
   if (skippedSheets.length > 0) {
     // 脱敏诊断：只记录 sheetKey / 显示名 / 空列序号，不记录数据行、DDL 或聊天正文。
-    logWarn_ACU(`[SqlTableService] 模板存在非首列空业务表头的表，SQL 填表中将休眠跳过: ${
+    // 术语（S3-7）：这是「结构跳过」而非「休眠」——不产生 hide 记录、不进休眠清单，修正表头即自动恢复。
+    logWarn_ACU(`[SqlTableService] 模板存在非首列空业务表头的表，SQL 填表中将结构跳过（不产生休眠记录）: ${
       skippedSheets
         .map(skip => `${skip.sheetKey}(${skip.name}) 空列[${skip.emptyHeaderIndexes.join(',')}]`)
         .join('；')
-    }。修正表头后可在下次请求恢复参与。`);
+    }。修正表头后可在下次请求自动恢复参与。`);
   }
 
   // 物理表名冲突检查在投影后执行：被判定为不存在的无效表不阻塞有效表；
@@ -2124,6 +2129,67 @@ export class SqlTableService implements ITableStorageProvider {
 // 快照级 SQL 应用（用于 grouped unified commit）
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * SQL 执行后的锁定差异回滚：对比执行前后快照，锁定目标被改则生成补偿 SQL，
+ * 在同一引擎会话内执行并返回补偿语句（调用方必须把它们追加进持久化语句集，
+ * 否则 storage frame V2 冷回放重放原始 SQL 时锁定目标会再次被改）。
+ */
+function enforceTableLocksAfterSqlApply_ACU(
+  engine: SqliteEngine,
+  syncBridge: SyncBridge,
+  beforeData: TableDataObject_ACU,
+  interimData: TableDataObject_ACU,
+  modifiedKeys: readonly string[],
+): { workingData: TableDataObject_ACU; statements: string[]; reverted: LockRevertItem_ACU[] } {
+  const allStatements: string[] = [];
+  const allReverted: LockRevertItem_ACU[] = [];
+  let physicalNames: ReadonlyMap<string, string> | null = null;
+
+  for (const sheetKey of modifiedKeys) {
+    const beforeSheet = (beforeData as any)?.[sheetKey];
+    const beforeContent = beforeSheet?.content;
+    if (!Array.isArray(beforeContent) || !Array.isArray(beforeContent[0])) continue;
+    // 身份锁按执行前快照解析：legacy 索引锁在此处按前像内容完成惰性迁移。
+    const identities = getTableLockIdentitiesForSheet_ACU(sheetKey, beforeContent);
+    if (!identities.hasAny) continue;
+
+    if (!physicalNames) physicalNames = resolvePhysicalTableNames_ACU(beforeData);
+    const physicalTableName = physicalNames.get(sheetKey);
+    if (!physicalTableName) {
+      logWarn_ACU(`[SqlTableService] 锁定回滚跳过表 ${sheetKey}：无法解析物理表名。`);
+      continue;
+    }
+    // 列映射用执行前快照的 effective DDL 重算（与 hydrate 使用同一函数同一输入），
+    // 被 DROP 的锁定列也能取到物理列名与声明类型。
+    const resolvedDdl = resolveEffectiveDDL(beforeSheet, beforeSheet.uid || sheetKey, physicalTableName);
+    const { chineseToSql } = buildColumnNameMap(resolvedDdl.effectiveDDL);
+    const physicalColTypes = new Map<string, string | null>(
+      parseDDLColumnInfos_ACU(resolvedDdl.effectiveDDL).map(info => [info.sqlName, info.declaredType]),
+    );
+    const afterContent = (interimData as any)?.[sheetKey]?.content;
+    const plan = buildLockRevertPlanForSheet_ACU({
+      sheetKey,
+      displayTableName: String(beforeSheet.name || sheetKey),
+      physicalTableName,
+      beforeContent,
+      afterContent: Array.isArray(afterContent) ? afterContent : null,
+      identities,
+      displayToPhysicalCol: chineseToSql,
+      physicalColTypes,
+    });
+    allStatements.push(...plan.statements);
+    allReverted.push(...plan.reverted);
+  }
+
+  if (allStatements.length === 0) {
+    return { workingData: interimData, statements: [], reverted: [] };
+  }
+  engine.runBatch(allStatements);
+  const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(beforeData), { strict: true });
+  logWarn_ACU(`[SqlTableService] ${formatLockRevertSummary_ACU(allReverted)}`);
+  return { workingData, statements: allStatements, reverted: allReverted };
+}
+
 export async function applyParameterizedSqlMutationToTableDataSnapshot_ACU(
   sql: string,
   params: (string | number | null)[] | undefined,
@@ -2204,10 +2270,23 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
     }).filter(Boolean);
     engine.runBatch(statements);
 
-    const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy), { strict: true });
+    const interimData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy), { strict: true });
     const modifiedTableNames = extractTableNamesFromStatements(statements);
-    const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(workingData, modifiedTableNames);
-    const operationBuild = buildSqlSheetBatchOperations_ACU(statements, workingData, {
+    const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(interimData, modifiedTableNames);
+    // 锁定差异回滚：前像用调用方传入的 tableData（snapshotCopy 在 rebind/物化中可能
+    // 被写入 row_id 预留），补偿语句必须与原始语句一起持久化以保证冷回放一致。
+    const lockEnforcement = enforceTableLocksAfterSqlApply_ACU(
+      engine,
+      syncBridge,
+      JSON.parse(JSON.stringify(tableData || {})) as TableDataObject_ACU,
+      interimData,
+      modifiedKeys,
+    );
+    const workingData = lockEnforcement.workingData;
+    const persistedStatements = lockEnforcement.statements.length > 0
+      ? [...statements, ...lockEnforcement.statements]
+      : statements;
+    const operationBuild = buildSqlSheetBatchOperations_ACU(persistedStatements, workingData, {
       fallbackTargetSheetKeys: operationOptions.targetSheetKeys,
       allowSingleTargetFallback: operationOptions.allowSingleTargetFallback === true,
       keepLegacyForUnclassified: true,
@@ -2215,13 +2294,14 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
     });
 
 
-    logDebug_ACU(`[SqlTableService] 快照 SQL 执行成功: ${statements.length} 条语句, modifiedKeys=${modifiedKeys.join(',')}`);
+    logDebug_ACU(`[SqlTableService] 快照 SQL 执行成功: ${statements.length} 条语句, modifiedKeys=${modifiedKeys.join(',')}${lockEnforcement.reverted.length > 0 ? `, 锁定回滚 ${lockEnforcement.reverted.length} 处` : ''}`);
     return {
       success: true,
       modifiedKeys,
       appliedEdits: statements.length,
       workingData,
       operations: operationBuild.operations,
+      ...(lockEnforcement.reverted.length > 0 ? { revertedByLocks: lockEnforcement.reverted } : {}),
     };
   } catch (e: any) {
     const errMsg = e?.message || String(e);

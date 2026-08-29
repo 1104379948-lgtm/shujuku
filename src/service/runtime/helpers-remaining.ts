@@ -27,6 +27,8 @@ export {
 // ═══ 表格锁定与索引 ═══
 export {
     getTableLocksForSheet_ACU,
+    getTableLockIdentitiesForSheet_ACU,
+    makeCellLockKey_ACU,
     saveTableLocksForSheet_ACU,
     deleteTableLocksForSheet_ACU,
     toggleRowLock_ACU,

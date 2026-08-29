@@ -50,7 +50,9 @@ export async function applyTemplateAssistantDraftToVisualizer_ACU(result: Templa
     _acuVisState.deletedSheetKeys = Array.from(nextDeletedKeys);
 
     (result.compileResult.lockChanges || []).forEach((change) => {
-        const currentLockState = getTableLocksForSheet_ACU(change.sheetKey);
+        // lockChanges 的索引指向已应用的 candidate 结构（上方 tempData 已替换）。
+        const changeContent = (_acuVisState.tempData as any)?.[change.sheetKey]?.content;
+        const currentLockState = getTableLocksForSheet_ACU(change.sheetKey, changeContent);
         (change.rows || []).forEach((item) => {
             if (item.locked) currentLockState.rows.add(item.rowIndex);
             else currentLockState.rows.delete(item.rowIndex);
@@ -64,7 +66,7 @@ export async function applyTemplateAssistantDraftToVisualizer_ACU(result: Templa
             if (item.locked) currentLockState.cells.add(key);
             else currentLockState.cells.delete(key);
         });
-        saveTableLocksForSheet_ACU(change.sheetKey, currentLockState);
+        saveTableLocksForSheet_ACU(change.sheetKey, currentLockState, changeContent);
         if (typeof change.specialIndexLocked === 'boolean') {
             setSpecialIndexLockEnabled_ACU(change.sheetKey, change.specialIndexLocked);
         }

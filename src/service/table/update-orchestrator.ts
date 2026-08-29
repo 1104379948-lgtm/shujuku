@@ -34,6 +34,7 @@ import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
+import { showUiSurfaceToast_ACU } from '../../shared/ui-surface-registry';
 import { createLorebookReadContext_ACU, type LorebookReadContext_ACU } from '../worldbook/read-context';
 
 import { applyTableDelta_ACU, isDeltaTagData_ACU } from './table-delta';
@@ -817,6 +818,27 @@ async function loadV2ReplayMergeBase_ACU(
 }
 
 
+/** 空基底退化提示的节流窗口：同一次手动补齐会按批次多次命中，30 秒内只提示一次。 */
+const EMPTY_BASE_FALLBACK_TOAST_THROTTLE_MS_ACU = 30_000;
+let lastEmptyBaseFallbackToastAt_ACU = 0;
+
+/**
+ * S2-3：有界填表在目标楼层前找不到任何可回放表格基底时，会从空指导表/模板结构起底填表。
+ * 该退化语义上是安全的（避免把边界后的未来状态喂给本批次），但必须让用户知道
+ * 「本次填表不含任何历史数据」，否则会误以为历史数据参与了填表。提示绝不抛错，且做节流去重。
+ */
+function notifyBoundedEmptyBaseFallback_ACU(batchNumber: number): void {
+    try {
+        const now = Date.now();
+        if (now - lastEmptyBaseFallbackToastAt_ACU < EMPTY_BASE_FALLBACK_TOAST_THROTTLE_MS_ACU) return;
+        lastEmptyBaseFallbackToastAt_ACU = now;
+        showUiSurfaceToast_ACU({
+            kind: 'info',
+            text: `目标楼层之前没有可用的表格历史基底，本次填表（批次 ${batchNumber} 起）将从空白模板结构开始，不包含任何历史表格数据。`,
+        });
+    } catch (_) {}
+}
+
 function buildGuideOrTemplateMergeBase_ACU(batchNumber: number): { data: Record<string, any> | null; error: string | null } {
     const batchIsoKey = getCurrentIsolationKey_ACU();
     const sheetGuideForBatch = getChatSheetGuideDataForIsolationKey_ACU(batchIsoKey);
@@ -853,6 +875,7 @@ export async function buildBatchMergeBase_ACU(
             // 否则会把目标范围之后的未来表格状态带回 prompt。只有非 SQLite 且未命中 V2 replay
             // 的旧路径才允许沿用 runtime fallback，以保留连续 bucket 的既有行为。
             if (isSqliteMode() || v2ReplayResult.attempted) {
+                notifyBoundedEmptyBaseFallback_ACU(batchNumber);
                 return buildGuideOrTemplateMergeBase_ACU(batchNumber);
             }
         }
@@ -875,6 +898,7 @@ export async function buildBatchMergeBase_ACU(
         // 指定了历史边界时，若当前聊天是 V2 但边界前没有可重放 checkpoint，不能退回“最新运行时快照”，
         // 否则会把目标楼之后的表格数据喂给本批次；此时应按空指导表/模板从零开始。
         if (!isSqliteMode() && v2ReplayResult.attempted && hasBoundedScope) {
+            notifyBoundedEmptyBaseFallback_ACU(batchNumber);
             return buildGuideOrTemplateMergeBase_ACU(batchNumber);
         }
 

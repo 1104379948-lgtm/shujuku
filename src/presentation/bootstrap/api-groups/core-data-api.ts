@@ -71,7 +71,7 @@ export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function
                         }
                     } else {
                         logDebug_ACU('[importTableAsJson] 已按运行时恢复模式导入表格数据，未写入聊天持久化。');
-                        (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
+                        (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.({ persisted: false });
                     }
 
                     return true;

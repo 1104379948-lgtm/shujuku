@@ -157,7 +157,8 @@ import {
       const dataHeaders = headers.slice(1);
       const rows = sheet.content.slice(1);
       const sheetKey = _acuVisState.currentSheetKey;
-      const lockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey) : { rows: new Set(), cols: new Set(), cells: new Set() };
+      // 传入编辑器工作副本 content：未保存的新增行也能按身份正确解析锁定索引。
+      const lockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey, sheet.content) : { rows: new Set(), cols: new Set(), cells: new Set() };
       const isSummaryTable = isSummaryOrOutlineTable_ACU(sheet.name);
       const specialIndexCol = (isSummaryTable ? getSummaryIndexColumnIndex_ACU(sheet) : -1);
       const specialIndexLocked = (isSummaryTable && sheetKey) ? isSpecialIndexLockEnabled_ACU(sheetKey) : false;
@@ -276,7 +277,7 @@ import {
           e.stopPropagation();
           const rIdx = parseInt(jQuery_API_ACU(this).data('idx'));
           if (!sheetKey || Number.isNaN(rIdx)) return;
-          toggleRowLock_ACU(sheetKey, rIdx);
+          toggleRowLock_ACU(sheetKey, rIdx, sheet.content);
           renderVisualizerDataMode_ACU($container, sheet);
       });
 
@@ -286,7 +287,7 @@ import {
           e.stopPropagation();
           const cIdx = parseInt(jQuery_API_ACU(this).data('col'));
           if (!sheetKey || Number.isNaN(cIdx)) return;
-          toggleColLock_ACU(sheetKey, cIdx);
+          toggleColLock_ACU(sheetKey, cIdx, sheet.content);
           renderVisualizerDataMode_ACU($container, sheet);
       });
 
@@ -297,7 +298,7 @@ import {
           const rIdx = parseInt(jQuery_API_ACU(this).data('row'));
           const cIdx = parseInt(jQuery_API_ACU(this).data('col'));
           if (!sheetKey || Number.isNaN(rIdx) || Number.isNaN(cIdx)) return;
-          toggleCellLock_ACU(sheetKey, rIdx, cIdx);
+          toggleCellLock_ACU(sheetKey, rIdx, cIdx, sheet.content);
           renderVisualizerDataMode_ACU($container, sheet);
       });
 

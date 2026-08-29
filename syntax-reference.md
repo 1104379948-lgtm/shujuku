@@ -339,7 +339,7 @@ await API.deleteRow({ tableName: '背包物品表', rowIndex: 1 });
 
 | 选项 | 作用 |
 |------|------|
-| `skipChatSave` / `skipSave` / `isImportMode` | 只改运行时/内存视图，不写回聊天记录；谨慎使用 |
+| `skipChatSave` / `skipSave` / `isImportMode` | 只改运行时/内存视图，**不写回聊天记录**。重开聊天或触发冷回放后这些改动会丢失，必须随后跟一次不带该选项的落盘写入才会持久化。开启时表格更新回调收到的第二参数为 `{ persisted: false }`（见「监听表格变化」） |
 | `skipNotify` / `silent` / `isSilent` / `suppressNotify` | 写完后不通知 UI 刷新 |
 
 #### 2.2 SQLite 模式：raw SQL 写入
@@ -404,7 +404,7 @@ raw SQL 写入选项：
 | `targetSheetKeys` / `sheetKeys` / `targetSheets` | 指定写入涉及的 sheet，用于锁粒度和保存范围；不传会尝试从 SQL 表名推断 |
 | `updateGroupKeys` / `groupKeys` | 手动指定本次保存的 update group；一般前端业务不要传 |
 | `trackingSheetKeys` / `trackingKeys` | 手动指定 AI 填表追踪表；**普通前端写入不要传** |
-| `skipChatSave` / `skipSave` / `isImportMode` | 不写回聊天记录；通常不要开 |
+| `skipChatSave` / `skipSave` / `isImportMode` | 不写回聊天记录；通常不要开。开了就是纯内存改动，冷回放后丢失，且回调会收到 `{ persisted: false }` |
 | `skipNotify` / `silent` / `isSilent` / `suppressNotify` | 不触发 UI 通知 |
 
 > ⚠️ raw SQL 写入默认**不会**把表标记为“本楼 AI 已填表”。`targetSheetKeys` 只代表锁和保存范围，不等于 AI 填表进度。
@@ -415,8 +415,11 @@ raw SQL 写入选项：
 
 ```js
 // 每次任何表格被更新（填表、手动编辑、外部 updateCell 等）都会回调
-window.AutoCardUpdaterAPI.registerTableUpdateCallback(() => {
-  console.log('[我的脚本] 检测到表格变化，重新渲染 UI...');
+// 参数 1：最新表格数据；参数 2：元信息 { persisted: boolean }
+//   persisted === false 表示这次更新只改了内存运行时（skipChatSave 写入、运行时恢复导入等），
+//   尚未写入聊天记录——重开聊天后会丢失，不要把它当成已落盘状态缓存。
+window.AutoCardUpdaterAPI.registerTableUpdateCallback((data, meta) => {
+  console.log('[我的脚本] 检测到表格变化，persisted =', meta?.persisted);
   // 这里做你自己的事，比如刷新某个卡片组件
 });
 
@@ -469,9 +472,9 @@ await window.AutoCardUpdaterAPI.refreshDataAndWorldbook();
 - `getSpecialIndexLockEnabled/setSpecialIndexLockEnabled(sheetKey, enabled)`
 
 #### 回调（callback）
-- `registerTableUpdateCallback(fn)` / `unregisterTableUpdateCallback(fn)`
+- `registerTableUpdateCallback(fn)` / `unregisterTableUpdateCallback(fn)`；`fn(data, meta)`，`meta.persisted === false` 表示该次更新未写入聊天持久化
 - `registerTableFillStartCallback(fn)`
-- `_notifyTableUpdate()` / `_notifyTableFillStart()`（内部用）
+- `_notifyTableUpdate(meta?)` / `_notifyTableFillStart()`（内部用）
 
 #### 设置与配置（settings-config）
 - `openVisualizer()` / `openSettings()` / `manualUpdate()`
@@ -551,6 +554,22 @@ await API.insertRow('背包物品表', { 名称: '新手剑', 数量: 1, 类型:
 6. **"数据隔离标签切换后，我之前的 rowIndex 还能用吗？"** — 不能。隔离切换后表格内容可能整体换了，rowIndex 不稳定。最佳做法是：**每次操作前先按业务字段重新定位**；SQLite 模式可用 `querySql()` / `queryTableRows()`，原生模式用 `findRowByColumn()`。
 7. **"我传英文表名/列名为什么有时候不认？"** — 只有一种场景：**纯原生模式 + 从未进入过 SQLite 模式**。这种情况下 `NameMapper` 从未构建，所有英文名都没被注册。解决办法：(a) 给表配上 DDL（带中文注释），在 SQLite 模式下加载过一次，mapper 就建好了；(b) 或者就用中文名——原生模式下中文永远可用。
 8. **"列名既有英文又可能被大小写混淆吗？"** — `NameMapper` 在 `translateSql` 里做**长名称优先的字符串替换**，列名大小写敏感（因为 DDL 里的英文名就是小写）。传入的英文列名必须和 DDL 里一字不差（比如 DDL 写 `quantity` 就要传 `quantity`，传 `Quantity` 会当成未知列原样保留，然后在 SQL 执行时报错）。
+
+### 八、表格数据语义与术语
+
+**楼层共享与 swipe**：表格数据挂在 AI 楼层（消息）上，按楼层共享——同一楼层的所有 swipe 分支共享同一份表格历史。swipe 到另一个剧情分支**不会**切换表格状态：在 A 分支里填的表，swipe 到 B 分支后依然生效。如果你依赖回调或轮询读取表格数据，不要假设 swipe 会带来表格变化。
+
+**休眠体系术语**（三个相关但不同的概念）：
+
+| 术语 | 触发方式 | 数据去向 | 恢复方式 |
+|------|----------|----------|----------|
+| **表级休眠**（休眠表） | 切换表格模板时，新模板不含的表整表休眠 | 写入 hide 记录随聊天持久化，跟随 checkpoint 迁移 | 切回含该表的模板自动唤醒，或在「数据管理 → 休眠数据」手动唤醒 |
+| **列级休眠**（休眠列） | 切换模板时，新模板不含的列保留为尾部休眠列 | 数据保留在表内，不参与填表、不出现在可见列投影 | 模板再次包含该列时自动唤醒，或在「休眠数据」面板唤醒 |
+| **结构跳过** | 表存在非首列空业务表头（结构不完整） | **不产生休眠记录**，仅在 SQL 填表中暂不参与 | 修正表头后下次请求自动恢复参与 |
+
+结构跳过不是休眠：它不写任何持久化标记、不进休眠清单，只是该表结构暂时无法安全参与 SQL 填表。
+
+**模板标签上的偏离标记**：表格模板面板中，「当前生效模板与预设库内容不同」表示内存运行时模板与库中同名预设内容不一致；「聊天快照内容已偏离库中同名预设」（或下拉项标注「内容已偏离库预设」）表示当前聊天的模板快照在保存后被修改过（或库中预设被更新/删除过），名称相同不代表内容相同——以标记为准判断内容是否一致。
 
 ---
 

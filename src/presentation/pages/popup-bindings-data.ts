@@ -677,17 +677,30 @@ export async function bindDataEvents_ACU(): Promise<void> {
                 const name = normalizeTemplatePresetSelectionValue_ACU(jQuery_API_ACU(this).val());
                 const displayName = name || '默认预设';
                 showToastr_ACU('info', `正在切换全局模板预设：${displayName}...`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
-                const result = await applyTemplatePresetToCurrent_ACU(name, {
+                // S1-3：inherit_global 聊天下全局切换经协调器，破坏性 blockers 需确认重试，
+                // saved:false（fail-closed，全局未变）必须按失败处理。
+                const result = await applyChatTemplateWithDestructiveConfirmation_ACU(destructiveChangeConfirmed => applyTemplatePresetToCurrent_ACU(name, {
                     source: 'ui_global_select',
                     updateGlobal: true,
                     save: true,
                     persistChatScope: false,
-                });
-                if (result) {
+                    destructiveChangeConfirmed,
+                }));
+                if (result && (!(typeof result === 'object' && 'saved' in result) || result.saved !== false)) {
                     refreshPresetUIAfterSwitch_ACU({ templateGlobalSelectName: name, keepTemplateGlobalValue: false });
-                    showToastr_ACU('success', `全局模板预设已切换：${displayName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+                    const warning = typeof result === 'object' && 'postCommitWarning' in result && typeof result.postCommitWarning === 'string'
+                        ? result.postCommitWarning
+                        : '';
+                    if (warning) {
+                        showToastr_ACU('warning', warning, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                    } else {
+                        showToastr_ACU('success', `全局模板预设已切换：${displayName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
+                    }
                 } else {
-                    showToastr_ACU('error', `全局模板预设切换失败：${displayName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                    const error = result && typeof result === 'object' && 'error' in result && typeof result.error === 'string' && result.error
+                        ? result.error
+                        : `全局模板预设切换失败：${displayName}`;
+                    showToastr_ACU('error', error, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
                     refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: false });
                 }
             });
@@ -750,8 +763,11 @@ export async function bindDataEvents_ACU(): Promise<void> {
                     save: true,
                     persistChatScope: false,
                 });
-                if (!applied) {
-                    showToastr_ACU('error', '保存后切换全局模板预设失败。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                if (!applied || (typeof applied === 'object' && 'saved' in applied && applied.saved === false)) {
+                    const error = applied && typeof applied === 'object' && 'error' in applied && typeof applied.error === 'string' && applied.error
+                        ? applied.error
+                        : '保存后切换全局模板预设失败。';
+                    showToastr_ACU('error', error, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
                     return;
                 }
                 showToastr_ACU('success', `已保存全局模板预设：${finalName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
@@ -785,8 +801,11 @@ export async function bindDataEvents_ACU(): Promise<void> {
                     save: true,
                     persistChatScope: false,
                 });
-                if (!applied) {
-                    showToastr_ACU('error', '另存为后切换全局模板预设失败。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                if (!applied || (typeof applied === 'object' && 'saved' in applied && applied.saved === false)) {
+                    const error = applied && typeof applied === 'object' && 'error' in applied && typeof applied.error === 'string' && applied.error
+                        ? applied.error
+                        : '另存为后切换全局模板预设失败。';
+                    showToastr_ACU('error', error, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
                     return;
                 }
                 showToastr_ACU('success', `已另存为全局模板预设：${finalName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
@@ -884,8 +903,11 @@ export async function bindDataEvents_ACU(): Promise<void> {
                     save: true,
                     persistChatScope: false,
                 });
-                if (!applied) {
-                    showToastr_ACU('error', '保存到全局后切换全局模板预设失败。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                if (!applied || (typeof applied === 'object' && 'saved' in applied && applied.saved === false)) {
+                    const error = applied && typeof applied === 'object' && 'error' in applied && typeof applied.error === 'string' && applied.error
+                        ? applied.error
+                        : '保存到全局后切换全局模板预设失败。';
+                    showToastr_ACU('error', error, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
                     return;
                 }
                 refreshPresetUIAfterSwitch_ACU({ templateGlobalSelectName: finalName, keepTemplateGlobalValue: false });

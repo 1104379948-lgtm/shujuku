@@ -4577,6 +4577,25 @@ $CONTENT
     function getLastMessageIndex_ACU() {
         return Math.max(0, getChatLength_ACU() - 1);
     }
+    /** 插件保存成功后的监听回调（如删楼守卫的保管库同步）。 */
+    const postChatSaveListeners_ACU = [];
+    /**
+     * 注册插件聊天保存成功后的回调。
+     * 回调同步执行，异常被吞掉并记录，不影响保存契约本身。
+     */
+    function registerPostChatSaveListener_ACU(listener) {
+        postChatSaveListeners_ACU.push(listener);
+    }
+    function notifyPostChatSaveListeners_ACU() {
+        for (const listener of postChatSaveListeners_ACU) {
+            try {
+                listener();
+            }
+            catch (error) {
+                logWarn_ACU('[ChatGateway] post-save 监听回调异常:', error?.message || error);
+            }
+        }
+    }
     /**
      * 触发聊天保存到宿主平台
      * 内置存在性检查，saveChat 不可用时静默跳过
@@ -4587,6 +4606,7 @@ $CONTENT
             return;
         }
         await SillyTavern_API_ACU.saveChat();
+        notifyPostChatSaveListeners_ACU();
     }
     /**
      * 执行必须真实提交到宿主的聊天保存。
@@ -4597,6 +4617,7 @@ $CONTENT
             throw new Error('宿主 saveChat 不可用，无法提交破坏性聊天数据变更。');
         }
         await SillyTavern_API_ACU.saveChat();
+        notifyPostChatSaveListeners_ACU();
     }
     // ═══ 宿主动作 ═══
     /**
@@ -35209,9 +35230,10 @@ $CONTENT
         if (hiddenCanonical.includes('row_id'))
             throw new Error('row_id 不允许隐藏。');
         // DDL 与 content[0] 列数不一致时无法按下标推出物理列名，只能退化为按表头名判定隐藏。
-        // 这不是错误：模板范围投影会在「模板列少于运行时列」时构造这种形态。
+        // 这不是错误：模板范围投影会在「模板列少于运行时列」时构造这种形态；
+        // native 模式（无 DDL）的隐藏列本就以表头名为身份（S0-3），属契约行为，静默处理。
         const canMapByIndex = ddlColumns.length === headers.length;
-        if (hidden.length > 0 && !canMapByIndex) {
+        if (hidden.length > 0 && !canMapByIndex && ddlColumns.length > 0) {
             logWarn_ACU('[SheetProjection] DDL 与 content[0] 列数不一致，隐藏列按表头名匹配。');
         }
         const physicalNames = canMapByIndex
@@ -37445,7 +37467,7 @@ $CONTENT
         }
     }
 
-    function deepClone_ACU$5(value) {
+    function deepClone_ACU$7(value) {
         return JSON.parse(JSON.stringify(value));
     }
     const P1_COLUMN_CONSTRAINT_TOKENS_ACU = new Set(['AS', 'CHECK', 'COLLATE', 'CONSTRAINT', 'DEFAULT', 'FOREIGN', 'GENERATED', 'NOT', 'PRIMARY', 'REFERENCES', 'UNIQUE']);
@@ -37633,7 +37655,7 @@ $CONTENT
                 return sourceIndex === undefined || row[sourceIndex] == null ? null : String(row[sourceIndex]);
             }));
         }
-        return { ...deepClone_ACU$5(currentSheet), uid: target.uid, content, sourceData: { ...currentSheet.sourceData, ddl: target.ddl } };
+        return { ...deepClone_ACU$7(currentSheet), uid: target.uid, content, sourceData: { ...currentSheet.sourceData, ddl: target.ddl } };
     }
     /**
      * Builds the only schema operation accepted by the P1 reader. Writer use stays
@@ -37827,7 +37849,7 @@ $CONTENT
         if (verifyDryRun && canonicalJson_ACU$1(operation.dryRun) !== canonicalJson_ACU$1(actualDryRun))
             throw new Error('schema migration V2 dryRun 与实际逐行转换不一致。');
         const sourceData = { ...currentSheet.sourceData, ddl: operation.targetSchema.ddl };
-        return { sheet: { ...deepClone_ACU$5(currentSheet), uid: operation.targetSchema.uid, content, sourceData }, dryRun: actualDryRun };
+        return { sheet: { ...deepClone_ACU$7(currentSheet), uid: operation.targetSchema.uid, content, sourceData }, dryRun: actualDryRun };
     }
     /**
      * P2 reader/preflight constructor. Production writers remain frozen: this
@@ -37872,7 +37894,7 @@ $CONTENT
             if (operation.beforeSchemaDigest !== beforeDigest || operation.targetSchemaDigest !== targetDigest) {
                 throw new Error(`schema migration descriptor digest 不匹配: sheetKey=${operation.sheetKey}`);
             }
-            const candidate = deepClone_ACU$5(currentState);
+            const candidate = deepClone_ACU$7(currentState);
             candidate[operation.sheetKey] = buildMigratedSheet_ACU(currentSheet, operation.targetSchema);
             await hydrateTableDataStrict_ACU(candidate);
             return candidate;
@@ -37884,7 +37906,7 @@ $CONTENT
         if (operation.beforeSchemaDigest !== beforeDigest || operation.targetSchemaDigest !== targetDigest) {
             throw new Error(`schema migration descriptor digest 不匹配: sheetKey=${operation.sheetKey}`);
         }
-        const candidate = deepClone_ACU$5(currentState);
+        const candidate = deepClone_ACU$7(currentState);
         candidate[operation.sheetKey] = buildMigratedSheetV2_ACU(currentSheet, operation).sheet;
         await hydrateTableDataStrict_ACU(candidate);
         return candidate;
@@ -40193,6 +40215,42 @@ $CONTENT
     function encodeRuntimeRevisionSnapshot_ACU(snapshot) {
         return `runtime-v1:${JSON.stringify(snapshot)}`;
     }
+    /**
+     * 解析 captureRuntimeRevisionSnapshotForScope_ACU 产出的版本快照。
+     * 非 runtime-v1 格式（哨兵字符串、旧调用方传入的任意值）返回 null——
+     * 调用方对不可解析的基线不做冲突校验，保持向后兼容。
+     */
+    function parseRuntimeRevisionSnapshot_ACU(revision) {
+        if (typeof revision !== 'string' || !revision.startsWith('runtime-v1:'))
+            return null;
+        try {
+            const parsed = JSON.parse(revision.slice('runtime-v1:'.length));
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+                return null;
+            const sheets = {};
+            if (parsed.sheets && typeof parsed.sheets === 'object' && !Array.isArray(parsed.sheets)) {
+                for (const [sheetKey, value] of Object.entries(parsed.sheets)) {
+                    const revisionValue = Number(value);
+                    if (Number.isFinite(revisionValue))
+                        sheets[sheetKey] = revisionValue;
+                }
+            }
+            const globalValue = Number(parsed.global);
+            const allRevisionValue = Number(parsed.allRevision);
+            if (!Number.isFinite(globalValue) || !Number.isFinite(allRevisionValue))
+                return null;
+            return {
+                scopeKey: String(parsed.scopeKey || ''),
+                all: parsed.all === true,
+                global: globalValue,
+                allRevision: allRevisionValue,
+                sheets,
+            };
+        }
+        catch {
+            return null;
+        }
+    }
     function captureRuntimeRevisionSnapshotForScope_ACU(scopeKey, writeSet) {
         const state = getRuntimeRevisionState_ACU(scopeKey);
         const normalized = normalizeTableWriteSet_ACU(writeSet);
@@ -40258,7 +40316,7 @@ $CONTENT
         const normalized = String(value || fallback).trim();
         return normalized || fallback;
     }
-    function deepClone_ACU$4(value) {
+    function deepClone_ACU$6(value) {
         return value == null ? value : JSON.parse(JSON.stringify(value));
     }
     function buildTableMaintenanceScopeKey_ACU(parts) {
@@ -40419,6 +40477,9 @@ $CONTENT
         const transactionId = generateTransactionId_ACU();
         const runtimeScopeKey = getRuntimeScopeKey_ACU({ chatKey, isolationKey });
         const baseRevision = options.baseRevision ?? captureRuntimeRevisionSnapshotForScope_ACU(runtimeScopeKey, writeSet);
+        // 事务内多次 runCommit 会推进自身版本；每次成功提交后刷新有效基线，
+        // 使后续 assertFresh 只检测外部并发写入而不被自己的 bump 误判。
+        let effectiveBaseRevision = baseRevision;
         try {
             const ctx = {
                 transactionId,
@@ -40428,7 +40489,46 @@ $CONTENT
                 baseRevision,
                 writeSet,
                 assertFresh: (reason) => {
-                    void reason;
+                    const base = parseRuntimeRevisionSnapshot_ACU(effectiveBaseRevision);
+                    // 不可解析的基线（哨兵字符串/旧调用方）没有可比对的版本信息，跳过校验。
+                    if (!base)
+                        return;
+                    const label = reason || 'unspecified';
+                    if (base.scopeKey && base.scopeKey !== runtimeScopeKey) {
+                        throw new Error(`runtime revision conflict: ${label}: 基线快照属于其他聊天作用域（base=${base.scopeKey}, current=${runtimeScopeKey}），已拒绝陈旧提交。`);
+                    }
+                    const state = getRuntimeRevisionState_ACU(runtimeScopeKey);
+                    if (writeSet.some(unit => unit.kind === 'all')) {
+                        // all 写入会覆盖全部表：基线也是 all 捕获时，任何期间写入（global 变化）都构成冲突。
+                        if (base.all && base.global !== state.global) {
+                            throw new Error(`runtime revision conflict: ${label}: 全表基线已过期（base global=${base.global}, current global=${state.global}），请重新读取当前表格后重试。`);
+                        }
+                        // 基线是具体表捕获：只校验基线覆盖到的表；其余表无基线信息，无从校验。
+                        if (!base.all) {
+                            for (const [sheetKey, sheetRevision] of Object.entries(base.sheets)) {
+                                const baseEffective = Math.max(sheetRevision, base.allRevision);
+                                const currentEffective = Math.max(state.sheets.get(sheetKey) || 0, state.allRevision);
+                                if (baseEffective !== currentEffective) {
+                                    throw new Error(`runtime revision conflict: ${label}: sheetKey=${sheetKey} 基线已过期（base=${baseEffective}, current=${currentEffective}），请重新读取当前表格后重试。`);
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    for (const unit of writeSet) {
+                        const sheetKey = getConflictSheetKey_ACU(unit);
+                        if (!sheetKey)
+                            continue;
+                        // 基线未覆盖该表（例如模板路径用 all 捕获、提交时才确定具体表）：
+                        // 无逐表版本可比，保持放行——这是模板切回场景的既有语义（误杀修复）。
+                        if (!(sheetKey in base.sheets))
+                            continue;
+                        const baseEffective = Math.max(base.sheets[sheetKey], base.allRevision);
+                        const currentEffective = Math.max(state.sheets.get(sheetKey) || 0, state.allRevision);
+                        if (baseEffective !== currentEffective) {
+                            throw new Error(`runtime revision conflict: ${label}: sheetKey=${sheetKey} 基线已过期（base=${baseEffective}, current=${currentEffective}），请重新读取当前表格后重试。`);
+                        }
+                    }
                 },
                 runCommit: async (commitTask, revisionWriteSet) => {
                     const releaseCommit = await acquireWrite_ACU(buildTableCommitScopeKey_ACU({ chatKey, isolationKey }));
@@ -40436,6 +40536,7 @@ $CONTENT
                         const result = await commitTask();
                         const resolvedRevisionWriteSet = typeof revisionWriteSet === 'function' ? revisionWriteSet(result) : revisionWriteSet;
                         bumpRuntimeRevision_ACU(runtimeScopeKey, normalizeRevisionBumpWriteSet_ACU(resolvedRevisionWriteSet, writeSet));
+                        effectiveBaseRevision = captureRuntimeRevisionSnapshotForScope_ACU(runtimeScopeKey, writeSet);
                         return result;
                     }
                     finally {
@@ -40445,7 +40546,7 @@ $CONTENT
             };
             const workingData = options.workingDataMode === 'none'
                 ? null
-                : deepClone_ACU$4(options.initialData !== undefined ? options.initialData : currentJsonTableData_ACU);
+                : deepClone_ACU$6(options.initialData !== undefined ? options.initialData : currentJsonTableData_ACU);
             return await task(ctx, workingData);
         }
         finally {
@@ -40681,7 +40782,7 @@ $CONTENT
     function patchInvalidatesReplayAliasContext_ACU(patch) {
         return patch.kind === 'sheet_replace' || patch.kind === 'meta_update';
     }
-    function deepClone_ACU$3(value) {
+    function deepClone_ACU$5(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function isReplayableV2TagData_ACU(tagData) {
@@ -40857,7 +40958,8 @@ $CONTENT
                     lastTimelineAfterSeq: timeline.afterSeq,
                 };
                 if (kind === 'sheet_hide' && checkpoint.data && typeof checkpoint.data === 'object' && !Array.isArray(checkpoint.data)) {
-                    entry.restoreSourceData = deepClone_ACU$3(checkpoint.data);
+                    entry.restoreSourceData = deepClone_ACU$5(checkpoint.data);
+                    attachHideProvenance_ACU(entry, checkpoint);
                 }
                 statusBySheetKey[sheetKey] = entry;
             }
@@ -40881,6 +40983,21 @@ $CONTENT
         indeterminateSheetKeys.sort();
         neverSeenSheetKeys.sort();
         return { statusBySheetKey, activeSheetKeys, hiddenSheetKeys, indeterminateSheetKeys, neverSeenSheetKeys };
+    }
+    /**
+     * 从 hide checkpoint 上附带休眠溯源信息（S3-4 休眠可见性）：
+     * createdAt（休眠时间）与可选的 hideSourcePresetName（休眠前活跃预设名，S3-4 起前向记录）。
+     * 两者均为展示性字段，缺失时不填充、不报错——历史 checkpoint 天然没有它们。
+     */
+    function attachHideProvenance_ACU(entry, checkpoint) {
+        const createdAt = checkpoint.createdAt;
+        if (typeof createdAt === 'number' && Number.isFinite(createdAt)) {
+            entry.lastTimelineCreatedAt = createdAt;
+        }
+        const sourcePresetName = checkpoint.hideSourcePresetName;
+        if (typeof sourcePresetName === 'string' && sourcePresetName.trim().length > 0) {
+            entry.hideSourcePresetName = sourcePresetName;
+        }
     }
     /** replay 的回放基底：最后一个 full checkpoint 所在帧在 frameRefs 中的下标（无则 -1）。 */
     function findLastFullCheckpointFrameIndex_ACU(frameRefs) {
@@ -40929,7 +41046,8 @@ $CONTENT
                     lastTimelineAfterSeq: timeline.afterSeq,
                 };
                 if (checkpoint.data && typeof checkpoint.data === 'object' && !Array.isArray(checkpoint.data)) {
-                    entry.restoreSourceData = deepClone_ACU$3(checkpoint.data);
+                    entry.restoreSourceData = deepClone_ACU$5(checkpoint.data);
+                    attachHideProvenance_ACU(entry, checkpoint);
                 }
                 statusBySheetKey[sheetKey] = entry;
             }
@@ -41033,7 +41151,7 @@ $CONTENT
         const snapshot = sanitizeTemplateSnapshotForChat_ACU(effectiveTemplate || null);
         if (!snapshot?.templateObj)
             return null;
-        const headerOnly = stripSeedRowsFromTemplate_ACU(deepClone_ACU$3(snapshot.templateObj));
+        const headerOnly = stripSeedRowsFromTemplate_ACU(deepClone_ACU$5(snapshot.templateObj));
         if (!headerOnly || typeof headerOnly !== 'object' || Array.isArray(headerOnly))
             return null;
         if (!Object.keys(headerOnly).some(key => key.startsWith('sheet_')))
@@ -41080,7 +41198,7 @@ $CONTENT
     }
     function replaceState_ACU(state, next) {
         Object.keys(state).forEach(key => delete state[key]);
-        Object.assign(state, deepClone_ACU$3(next));
+        Object.assign(state, deepClone_ACU$5(next));
     }
     /**
      * Repairs ordering metadata of a legacy timeline shard for this replay only.
@@ -41269,7 +41387,7 @@ $CONTENT
             .filter(Boolean);
     }
     function normalizeReplayState_ACU(state, context) {
-        const candidate = deepClone_ACU$3(state);
+        const candidate = deepClone_ACU$5(state);
         const normalization = normalizeCanonicalTableRows_ACU(candidate);
         const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
         if (canonicalIssues.length > 0) {
@@ -41290,7 +41408,7 @@ $CONTENT
      * must keep using normalizeReplayState_ACU so new writes stay strict.
      */
     function normalizeHistoricalReplayState_ACU(state, context) {
-        const candidate = deepClone_ACU$3(state);
+        const candidate = deepClone_ACU$5(state);
         const identity = restoreLegacyRowIdentity_ACU(candidate);
         // A repair that loses a row or a business cell is an implementation defect,
         // not a data defect. Fail loudly instead of persisting a lossy candidate.
@@ -41347,7 +41465,7 @@ $CONTENT
         // is a legacy format trait, not a duplicate, and leaving it here would send
         // the whole checkpoint down the strict reject path below.
         restoreLegacyRowIdentity_ACU(state);
-        const probe = deepClone_ACU$3(state);
+        const probe = deepClone_ACU$5(state);
         const normalization = normalizeCanonicalTableRows_ACU(probe);
         const nonDuplicateErrors = normalization.errors.filter(issue => issue.reason !== 'duplicate_row_id');
         if (normalization.removedRows.length > 0 || nonDuplicateErrors.length > 0) {
@@ -41447,7 +41565,7 @@ $CONTENT
     }
     function getExportedSqlReplayRuntimeState_ACU(runtime, state, options = {}) {
         if (!runtime.loaded)
-            return deepClone_ACU$3(state);
+            return deepClone_ACU$5(state);
         const mate = (state.mate || { type: 'acu', version: 1 });
         const next = options.legacyDuplicateRowIds
             ? runtime.syncBridge.exportSpv79LegacyDuplicateRowIdHistory(mate)
@@ -41481,7 +41599,7 @@ $CONTENT
         // materializeSqlRuntimeToState_ACU 在 JS 路径的提交前统一执行）。
         return runtime?.loaded
             ? getExportedSqlReplayRuntimeState_ACU(runtime, state, options)
-            : deepClone_ACU$3(state);
+            : deepClone_ACU$5(state);
     }
     async function applySheetCheckpointsForReplay_ACU(state, checkpoints, runtime, metrics, context) {
         if (checkpoints.length === 0)
@@ -41492,7 +41610,7 @@ $CONTENT
             metrics.aliasInvalidateCount += checkpoints.length;
         // sheet checkpoint 属 JS 语义：离开 SQL 段先 materialize（导出并 dispose）。
         await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
-        const candidate = deepClone_ACU$3(state);
+        const candidate = deepClone_ACU$5(state);
         for (const checkpoint of checkpoints) {
             if (checkpoint.timeline?.kind === 'sheet_hide') {
                 // hide：从 active replay state 移除该表的可见性（数据仍留存于 checkpoint.data 供后续 reveal）。
@@ -41500,7 +41618,7 @@ $CONTENT
             }
             else {
                 // introduction / rebase / reveal：用 checkpoint.data 整表写入 replay state。
-                candidate[checkpoint.sheetKey] = deepClone_ACU$3(checkpoint.data);
+                candidate[checkpoint.sheetKey] = deepClone_ACU$5(checkpoint.data);
             }
         }
         replaceState_ACU(state, candidate);
@@ -41701,7 +41819,7 @@ $CONTENT
     }
     function applyTablePatchLegacyDuplicateRowIds_ACU(state, patch, toleranceReport) {
         if (patch.kind === 'sheet_replace') {
-            state[patch.sheetKey] = deepClone_ACU$3(patch.sheet);
+            state[patch.sheetKey] = deepClone_ACU$5(patch.sheet);
             return;
         }
         const sheet = state[patch.sheetKey];
@@ -41716,7 +41834,7 @@ $CONTENT
             if (!rowId)
                 throw new Error(`[V2 Replay] legacy row_upsert 缺少 row_id：sheetKey=${patch.sheetKey}。`);
             const rowIndex = sheet.content.findIndex((row, index) => index > 0 && Array.isArray(row) && String(row[0] ?? '').trim() === rowId);
-            const row = deepClone_ACU$3(patch.cells);
+            const row = deepClone_ACU$5(patch.cells);
             if (row.length > 0)
                 row[0] = rowId;
             if (rowIndex >= 0)
@@ -41744,7 +41862,7 @@ $CONTENT
         else {
             assertMetaUpdateDoesNotChangeDdl_ACU(patch);
         }
-        const meta = deepClone_ACU$3(patch.meta || {});
+        const meta = deepClone_ACU$5(patch.meta || {});
         if (meta.name !== undefined)
             sheet.name = meta.name;
         if (meta.orderNo !== undefined)
@@ -41758,7 +41876,7 @@ $CONTENT
     }
     function applyTablePatchV2_ACU(state, patch) {
         if (patch.kind === 'sheet_replace') {
-            state[patch.sheetKey] = deepClone_ACU$3(patch.sheet);
+            state[patch.sheetKey] = deepClone_ACU$5(patch.sheet);
             return;
         }
         const sheet = state[patch.sheetKey];
@@ -41776,7 +41894,7 @@ $CONTENT
             if (!Array.isArray(patch.cells)) {
                 throw new Error(`[V2 Replay] row_upsert cells 必须是数组：sheetKey=${patch.sheetKey}。`);
             }
-            const nextCells = deepClone_ACU$3(patch.cells);
+            const nextCells = deepClone_ACU$5(patch.cells);
             const header = sheet.content[0];
             if (isEmptyCanonicalRowId_ACU(nextCells[0])) {
                 const targetRowId = String(patch.rowId ?? '').trim();
@@ -41836,7 +41954,7 @@ $CONTENT
             return;
         }
         if (patch.kind === 'meta_update') {
-            const meta = deepClone_ACU$3(patch.meta || {});
+            const meta = deepClone_ACU$5(patch.meta || {});
             assertMetaUpdateDoesNotChangeDdl_ACU(patch);
             const sourceData = meta.sourceData;
             if (meta.name !== undefined)
@@ -41940,11 +42058,11 @@ $CONTENT
                 allowTemplateFallback: true,
             });
             if (Array.isArray(seedRows) && seedRows.length > 0)
-                sheet.seedRows = deepClone_ACU$3(seedRows);
+                sheet.seedRows = deepClone_ACU$5(seedRows);
         }
         if (!Array.isArray(seedRows) || seedRows.length === 0)
             return;
-        const headerRow = Array.isArray(sheet.content[0]) ? deepClone_ACU$3(sheet.content[0]) : ['row_id'];
+        const headerRow = Array.isArray(sheet.content[0]) ? deepClone_ACU$5(sheet.content[0]) : ['row_id'];
         // 与实时 DSL 路径保持同一身份契约：只有明确的 seedRows 新行能在物化时补 row_id。
         sheet.content = [headerRow, ...ensureStableRowIdsForSeedRows_ACU(seedRows)];
     }
@@ -42034,7 +42152,7 @@ $CONTENT
                 // JS-native 提交：先退出 SQL 段（materialize + dispose），再以 JS state 提交全量替换。
                 if (effectiveRuntime)
                     await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
-                const candidate = deepClone_ACU$3(operation.data);
+                const candidate = deepClone_ACU$5(operation.data);
                 if (options.legacyDuplicateRowIds) {
                     // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize；由上层 finally dispose。
                 }
@@ -42068,7 +42186,7 @@ $CONTENT
                 if (effectiveRuntime)
                     await materializeSqlRuntimeToState_ACU(effectiveRuntime, state, { ...options, metrics });
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state, options);
-                candidate[operation.sheetKey] = deepClone_ACU$3(operation.sheet);
+                candidate[operation.sheetKey] = deepClone_ACU$5(operation.sheet);
                 if (options.legacyDuplicateRowIds) {
                     // SPv7.9 过渡回放逐项保留旧状态，不做历史 normalize。
                 }
@@ -42133,9 +42251,9 @@ $CONTENT
         const transitionRef = transitionCandidate && (!checkpointRef || checkpointRef.messageIndex <= transitionCandidate.checkpoint.cutoff.messageIndex)
             ? transitionCandidate : null;
         const summary = transitionRef
-            ? deepClone_ACU$3(transitionRef.checkpoint.scheduleSummary || {})
+            ? deepClone_ACU$5(transitionRef.checkpoint.scheduleSummary || {})
             : (checkpointRef?.frame.checkpoint
-                ? deepClone_ACU$3(checkpointRef.frame.checkpoint.scheduleSummary || {})
+                ? deepClone_ACU$5(checkpointRef.frame.checkpoint.scheduleSummary || {})
                 : {});
         if (!transitionRef && checkpointRef?.frame.checkpoint) {
             applyEventToScheduleSummary_ACU(summary, checkpointRef.frame.checkpoint.event, checkpointRef.aiFloor);
@@ -42151,7 +42269,7 @@ $CONTENT
                 : [];
             const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
             for (const sheetCheckpoint of checkpoints.filter(checkpoint => checkpoint.timeline === undefined)) {
-                summary[sheetCheckpoint.sheetKey] = deepClone_ACU$3(sheetCheckpoint.scheduleSummary || {});
+                summary[sheetCheckpoint.sheetKey] = deepClone_ACU$5(sheetCheckpoint.scheduleSummary || {});
                 applyEventToScheduleSummary_ACU(summary, sheetCheckpoint.event, ref.aiFloor);
             }
             const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
@@ -42159,7 +42277,7 @@ $CONTENT
             const applyDueIntroductions = (nextSeq) => {
                 const due = pendingIntroductions.filter(checkpoint => checkpoint.timeline.afterSeq < nextSeq);
                 for (const checkpoint of due) {
-                    summary[checkpoint.sheetKey] = deepClone_ACU$3(checkpoint.scheduleSummary || {});
+                    summary[checkpoint.sheetKey] = deepClone_ACU$5(checkpoint.scheduleSummary || {});
                     applyEventToScheduleSummary_ACU(summary, checkpoint.event, ref.aiFloor);
                     pendingIntroductions.splice(pendingIntroductions.indexOf(checkpoint), 1);
                 }
@@ -42203,7 +42321,7 @@ $CONTENT
             // base on its own and needs no template baseline or user confirmation.
             const replacementAnchor = findLastUsableReplacementAnchor_ACU(frameRefs);
             if (replacementAnchor) {
-                state = deepClone_ACU$3(replacementAnchor.data);
+                state = deepClone_ACU$5(replacementAnchor.data);
                 normalizeLegacyDuplicateCheckpointState_ACU(state);
                 baseKind = 'replacement_anchor';
                 replayStartMessageIndex = replacementAnchor.messageIndex;
@@ -42230,7 +42348,7 @@ $CONTENT
         }
         else {
             const checkpoint = checkpointRef.frame.checkpoint;
-            state = deepClone_ACU$3(checkpoint.data);
+            state = deepClone_ACU$5(checkpoint.data);
             normalizeLegacyDuplicateCheckpointState_ACU(state);
             replayStartMessageIndex = checkpointRef.messageIndex;
             if (options.updateRuntimeState !== false)
@@ -42374,8 +42492,8 @@ $CONTENT
                                         if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
                                             // 补锚是 JS 语义（模板 header-only 快照），先退出 SQL 段再合并。
                                             await materializeSqlRuntimeToState_ACU(runtime, state);
-                                            const candidate = deepClone_ACU$3(state);
-                                            candidate[operation.sheetKey] = deepClone_ACU$3(templateSheet);
+                                            const candidate = deepClone_ACU$5(state);
+                                            candidate[operation.sheetKey] = deepClone_ACU$5(templateSheet);
                                             normalizeHistoricalReplayState_ACU(candidate, 'temporary sheet anchor');
                                             replaceState_ACU(state, candidate);
                                             if (aliasContext.enabled)
@@ -42417,7 +42535,7 @@ $CONTENT
                                 else if (metrics)
                                     metrics.aliasInvalidateCount += 1;
                             }
-                            const candidate = deepClone_ACU$3(state);
+                            const candidate = deepClone_ACU$5(state);
                             // 兼容旧版 derived patch log；新 V2 不再写 patches。
                             for (const patch of entry.patches || []) {
                                 applyTablePatchV2_ACU(candidate, patch);
@@ -42455,7 +42573,7 @@ $CONTENT
                     const snapshotBaseKind = baseKind;
                     const snapshotRepairs = compatibilityRepairs.length > 0 ? [...compatibilityRepairs] : undefined;
                     capturedBoundaries.set(ref.messageIndex, {
-                        data: deepClone_ACU$3(state),
+                        data: deepClone_ACU$5(state),
                         baseKind: snapshotBaseKind,
                         metrics: { ...metrics },
                         capturedBoundary: ref.messageIndex,
@@ -42579,7 +42697,7 @@ $CONTENT
             && !captureMode
             && validateV2ReplayEvidenceFresh_ACU(evidence, chat, isolationKey, { maxMessageIndex: options.maxMessageIndex }, currentHeadRevisionDigest);
         if (evidence && evidenceReusable) {
-            const data = deepClone_ACU$3(evidence.data);
+            const data = deepClone_ACU$5(evidence.data);
             // 复用命中同样上报 span：命中路径直接 return，若不上报则「整轮冷回放被跳过」
             // 在生产中完全不可观测，无法验证快路径是否真的生效，也无法回答收益问题。
             const reuseMetrics = createReplayMetrics_ACU();
@@ -42635,7 +42753,7 @@ $CONTENT
                         replayShareCount: 1,
                     });
                     return {
-                        data: deepClone_ACU$3(shared.data),
+                        data: deepClone_ACU$5(shared.data),
                         baseKind: shared.baseKind,
                         metrics: sharedMetrics,
                     };
@@ -42717,7 +42835,7 @@ $CONTENT
                 && result.baseKind === 'full_checkpoint'
                 && !result.compatibilityRepairs?.length
                 && !result.requiresCheckpointConvergence) {
-                evidence.data = deepClone_ACU$3(result.data);
+                evidence.data = deepClone_ACU$5(result.data);
                 evidence.chatIdentity = chat;
                 evidence.isolationKey = isolationKey;
                 evidence.maxMessageIndex = options.maxMessageIndex;
@@ -42915,7 +43033,7 @@ $CONTENT
         const preferredKeys = headerOnlyTemplate
             ? Object.keys(headerOnlyTemplate).filter(key => key.startsWith('sheet_'))
             : null;
-        const state = deepClone_ACU$3(checkpoint.data);
+        const state = deepClone_ACU$5(checkpoint.data);
         const mergeIdentities = (stage) => {
             const merge = mergeLegacySheetIdentities_ACU(state, preferredKeys);
             if (merge.remaps.length === 0)
@@ -42932,7 +43050,7 @@ $CONTENT
             const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
             // 根帧自身的 checkpoint 已作为 base；其余未排序单表快照遵循现有 replay 的帧首语义。
             for (const sheetCheckpoint of checkpoints.filter(item => item.timeline === undefined)) {
-                state[sheetCheckpoint.sheetKey] = deepClone_ACU$3(sheetCheckpoint.data);
+                state[sheetCheckpoint.sheetKey] = deepClone_ACU$5(sheetCheckpoint.data);
             }
             mergeIdentities(`sheet checkpoints@${ref.messageIndex}`);
             const entries = getLegacyTolerantOrderedEntries_ACU(ref.frame, toleranceReport);
@@ -42943,7 +43061,7 @@ $CONTENT
                     if (sheetCheckpoint.timeline?.kind === 'sheet_hide')
                         delete state[sheetCheckpoint.sheetKey];
                     else
-                        state[sheetCheckpoint.sheetKey] = deepClone_ACU$3(sheetCheckpoint.data);
+                        state[sheetCheckpoint.sheetKey] = deepClone_ACU$5(sheetCheckpoint.data);
                     pendingTimelineCheckpoints.splice(pendingTimelineCheckpoints.indexOf(sheetCheckpoint), 1);
                 }
                 if (due.length > 0)
@@ -43045,7 +43163,7 @@ $CONTENT
             const previousIdentity = target.TavernDB_ACU_Identity;
             try {
                 const isolatedData = previousIsolatedData && typeof previousIsolatedData === 'object' && !Array.isArray(previousIsolatedData)
-                    ? deepClone_ACU$3(previousIsolatedData)
+                    ? deepClone_ACU$5(previousIsolatedData)
                     : {};
                 const tagData = isolatedData[isolationKey] && typeof isolatedData[isolationKey] === 'object' && !Array.isArray(isolatedData[isolationKey])
                     ? isolatedData[isolationKey]
@@ -43054,7 +43172,7 @@ $CONTENT
                     version: 1,
                     kind: 'compat_replay_transition',
                     createdAt: Date.now(),
-                    data: deepClone_ACU$3(data),
+                    data: deepClone_ACU$5(data),
                     cutoff: tolerant.cutoff,
                     ...(scheduleSummary === undefined ? {} : { scheduleSummary }),
                     tolerances,
@@ -43132,7 +43250,7 @@ $CONTENT
         }
     }
 
-    function deepClone_ACU$2(value) {
+    function deepClone_ACU$4(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function formatIssues_ACU(issues) {
@@ -43155,12 +43273,12 @@ $CONTENT
             kind: 'full',
             createdAt: options.createdAt,
             reason: options.reason,
-            data: deepClone_ACU$2(options.data),
-            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$2(options.scheduleSummary) } : {}),
-            ...(options.event ? { event: deepClone_ACU$2(options.event) } : {}),
-            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$2(options.manualRefillProgress) } : {}),
-            ...(options.migrationProvenance ? { migrationProvenance: deepClone_ACU$2(options.migrationProvenance) } : {}),
-            ...(options.fallbackProvenance ? { fallbackProvenance: deepClone_ACU$2(options.fallbackProvenance) } : {}),
+            data: deepClone_ACU$4(options.data),
+            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$4(options.scheduleSummary) } : {}),
+            ...(options.event ? { event: deepClone_ACU$4(options.event) } : {}),
+            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$4(options.manualRefillProgress) } : {}),
+            ...(options.migrationProvenance ? { migrationProvenance: deepClone_ACU$4(options.migrationProvenance) } : {}),
+            ...(options.fallbackProvenance ? { fallbackProvenance: deepClone_ACU$4(options.fallbackProvenance) } : {}),
         };
         return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
     }
@@ -43170,10 +43288,10 @@ $CONTENT
             createdAt: options.createdAt,
             reason: options.reason,
             sheetKey: options.sheetKey,
-            data: deepClone_ACU$2(options.data),
-            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$2(options.scheduleSummary) } : {}),
-            ...(options.event ? { event: deepClone_ACU$2(options.event) } : {}),
-            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$2(options.manualRefillProgress) } : {}),
+            data: deepClone_ACU$4(options.data),
+            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$4(options.scheduleSummary) } : {}),
+            ...(options.event ? { event: deepClone_ACU$4(options.event) } : {}),
+            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$4(options.manualRefillProgress) } : {}),
             ...(options.baseRevision !== undefined ? { baseRevision: options.baseRevision } : {}),
         };
         return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
@@ -44047,6 +44165,1338 @@ $CONTENT
         return { ok: true, action: 'finalized' };
     }
 
+    /**
+     * service/template/template-row-id-normalizer.ts — 外部模板 row_id 结构规范化纯函数
+     *
+     * 职责：在外部模板进入系统（游戏初始化重置、聊天模板协调、模板预设导入）之前，
+     * 把每张 Sheet 的表头与行结构规范化为 canonical 形态（首列 row_id）。
+     *
+     * 边界：本模块是纯函数，不读取聊天、不写存储、不触发 UI 或事务。
+     * 不可无损证明的输入（错位 row_id、重复身份表头、非法行、DDL 歧义）返回 blocker，
+     * 不做猜测性修复。
+     */
+    function isRecordValue_ACU(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function cloneValue_ACU$3(value) {
+        return value === undefined ? value : JSON.parse(JSON.stringify(value));
+    }
+    function canonicalHeader_ACU(value) {
+        return canonicalizeDisplayName_ACU(value);
+    }
+    const ROW_ID_ALIASES_ACU = new Set(['id', 'rowid', 'row_id', '行号']);
+    function isRowIdHeader_ACU(value) {
+        return canonicalHeader_ACU(value) === 'row_id';
+    }
+    function isRowIdAliasHeader_ACU(value) {
+        return ROW_ID_ALIASES_ACU.has(canonicalHeader_ACU(value));
+    }
+    function sheetLabel_ACU(sheet, sheetKey) {
+        return `表「${String(sheet?.name ?? '') || sheetKey}」(${sheetKey})`;
+    }
+    function issue_ACU$1(code, sheetKey, sheetName, message, rowIndex, columnIndex) {
+        return { code, sheetKey, sheetName, message, rowIndex, columnIndex };
+    }
+    function blankAudit_ACU$1(sheetKey, sheetName) {
+        return {
+            sheetKey, sheetName,
+            headerAction: 'unchanged',
+            contentRowsUpdated: 0,
+            seedRowsUpdated: 0,
+            generatedRowIdCount: 0,
+            ddlUpdated: false,
+            deduplicatedSeedRows: [],
+        };
+    }
+    /**
+     * 在同一张表内共享 content 与 seedRows 的身份空间，避免两个行池各自分配出重复 ID。
+     * 已经存在相同非空身份时保持原样，由后续 canonical 校验拒绝，不在规范化器里猜测重映射。
+     * 传入 sharedReserved 时在既有保留区上继续分配，保证跨池不冲突。
+     */
+    function normalizeRowIdsForRows_ACU(rows, assignStableRowIds, audit, sharedReserved) {
+        if (!assignStableRowIds)
+            return;
+        const reserved = sharedReserved || createStableRowIdReservation_ACU(rows);
+        for (const row of rows) {
+            if (!Array.isArray(row) || row.length === 0)
+                continue;
+            const raw = row[0];
+            const rowId = raw === null || raw === undefined ? '' : String(raw).trim();
+            if (rowId)
+                reserved.add(rowId);
+        }
+        for (const row of rows) {
+            if (!Array.isArray(row) || row.length === 0)
+                continue;
+            const raw = row[0];
+            const rowId = raw === null || raw === undefined ? '' : String(raw).trim();
+            if (!rowId) {
+                row[0] = allocateStableRowId_ACU(reserved);
+                audit.generatedRowIdCount += 1;
+            }
+            else
+                row[0] = rowId;
+        }
+    }
+    /**
+     * canonical 行比较：row_id 使用既有 trim 规则比较；其余列逐列严格相等（===），
+     * 不做未经证明的业务字段 trim、大小写折叠或 null/空串互换；行宽不一致不判定相同。
+     */
+    function canonicalRowsEqual_ACU(contentRow, seedRow) {
+        if (contentRow.length !== seedRow.length)
+            return false;
+        for (let index = 0; index < contentRow.length; index += 1) {
+            if (index === 0) {
+                // row_id 列：按既有 trim 规则规范化比较（与 rejectDuplicateRowIds_ACU 一致）
+                if (String(contentRow[0] ?? '').trim() !== String(seedRow[0] ?? '').trim())
+                    return false;
+                continue;
+            }
+            if (contentRow[index] !== seedRow[index])
+                return false;
+        }
+        return true;
+    }
+    /**
+     * 跨来源完全重复去重（content 优先，仅处理深拷贝候选）：
+     * 在跨池重复 blocker 生成之前，删除与 content 行完全相同（规范 row_id 相同 + 完整行逐列相同）
+     * 的 seedRows 行。只修改候选 seedRows，不修改 content；输入对象由调用方深拷贝保证不受影响。
+     *
+     * 返回删除的行数；被删除行的 row_id 与对应 content 行索引记录进 audit.deduplicatedSeedRows。
+     */
+    function deduplicateIdenticalCrossSourceSeedRows_ACU(contentRows, seedRows, sheetKey, sheetName, audit, blockers) {
+        // 同池结构错误由既有校验先行阻断；此处假定行均为合法数组（调用方保证）。
+        const contentById = new Map();
+        for (let index = 0; index < contentRows.length; index += 1) {
+            const row = contentRows[index];
+            if (!Array.isArray(row) || row.length === 0)
+                continue;
+            const rowId = String(row[0] ?? '').trim();
+            if (!rowId)
+                continue;
+            // content 内部重复由 rejectDuplicateRowIds_ACU 处理；索引仅记录首个，不覆盖。
+            if (!contentById.has(rowId))
+                contentById.set(rowId, { row, index });
+        }
+        const retained = [];
+        let removed = 0;
+        for (const seedRow of seedRows) {
+            if (!Array.isArray(seedRow) || seedRow.length === 0) {
+                retained.push(seedRow);
+                continue;
+            }
+            const seedRowId = String(seedRow[0] ?? '').trim();
+            const matched = seedRowId ? contentById.get(seedRowId) : undefined;
+            if (matched && canonicalRowsEqual_ACU(matched.row, seedRow)) {
+                removed += 1;
+                audit.deduplicatedSeedRows.push({ rowId: seedRowId, contentRowIndex: matched.index });
+                continue;
+            }
+            retained.push(seedRow);
+        }
+        if (removed > 0) {
+            seedRows.length = 0;
+            for (const row of retained)
+                seedRows.push(row);
+            audit.seedRowsUpdated += removed;
+        }
+        return removed;
+    }
+    function rejectDuplicateRowIds_ACU(rows, source, sheetKey, sheetName, seen, blockers) {
+        for (let index = 0; index < rows.length; index += 1) {
+            const row = rows[index];
+            if (!Array.isArray(row))
+                continue;
+            const rowId = String(row[0] ?? '').trim();
+            if (!rowId)
+                continue;
+            if (seen.has(rowId)) {
+                blockers.push(issue_ACU$1('duplicate_row_id', sheetKey, sheetName, `${sheetLabel_ACU({ name: sheetName }, sheetKey)} 的 ${source} 第 ${index + 1} 行 row_id「${rowId}」重复，不能安全重写身份。`, index + 1));
+                continue;
+            }
+            seen.add(rowId);
+        }
+    }
+    /**
+     * 插入 row_id 列时，验证原业务行宽度并同步右移。
+     * 行宽超过原表头时 fail-loud；不足时按仓库既有 canonical 契约补 null。
+     */
+    function insertRowIdColumnForRows_ACU(rows, businessWidth, sheetKey, sheetName, blockers, audit) {
+        for (let index = 0; index < rows.length; index += 1) {
+            const row = rows[index];
+            if (!Array.isArray(row)) {
+                blockers.push(issue_ACU$1('invalid_content_row', sheetKey, sheetName, `${sheetLabel_ACU({ name: sheetName }, sheetKey)} 第 ${index + 1} 行不是数组，无法自动插入 row_id。`, index + 1));
+                continue;
+            }
+            if (row.length > businessWidth) {
+                blockers.push(issue_ACU$1('row_width_mismatch', sheetKey, sheetName, `${sheetLabel_ACU({ name: sheetName }, sheetKey)} 第 ${index + 1} 行宽度为 ${row.length}，超过原表头 ${businessWidth} 列，无法安全插入 row_id。`, index + 1));
+                continue;
+            }
+            while (row.length < businessWidth)
+                row.push(null);
+            row.unshift('');
+            audit.contentRowsUpdated += 1;
+        }
+    }
+    /**
+     * 规范单张 Sheet 的 row_id 结构。
+     */
+    function normalizeSheetRowId_ACU(sheetKey, sheet, options, blockers, audits) {
+        const sheetName = String(sheet?.name ?? '');
+        const label = sheetLabel_ACU(sheet, sheetKey);
+        const audit = blankAudit_ACU$1(sheetKey, sheetName);
+        if (!isRecordValue_ACU(sheet)) {
+            blockers.push(issue_ACU$1('invalid_sheet', sheetKey, sheetName, `${label} 不是对象，无法规范化。`));
+            return;
+        }
+        const content = sheet.content;
+        if (!Array.isArray(content) || content.length === 0) {
+            blockers.push(issue_ACU$1('missing_content', sheetKey, sheetName, `${label} 缺少 content 表头行。`));
+            return;
+        }
+        const header = content[0];
+        if (!Array.isArray(header)) {
+            blockers.push(issue_ACU$1('invalid_header', sheetKey, sheetName, `${label} 表头不是数组。`));
+            return;
+        }
+        if (header.length === 0) {
+            blockers.push(issue_ACU$1('empty_header', sheetKey, sheetName, `${label} 表头为空。`));
+            return;
+        }
+        // 可视化编辑器使用 content[0][0] === null/undefined 表示不可编辑的 row_id 占位，
+        // 与 sql-identifier-mapper.ts 的首列 null/undefined row_id 身份契约一致（仅限首列）。
+        const firstIsRowIdPlaceholder = header[0] === null || header[0] === undefined;
+        // 占位本身就是身份列，不能进入“缺失身份列”的扫描/插入语义。
+        const firstIsRowId = isRowIdHeader_ACU(header[0]);
+        const firstIsAlias = !firstIsRowId && !firstIsRowIdPlaceholder && isRowIdAliasHeader_ACU(header[0]);
+        let misplacedIndex = -1;
+        let duplicateHeaderIndex = -1;
+        if (!firstIsRowId && !firstIsAlias && !firstIsRowIdPlaceholder) {
+            for (let index = 1; index < header.length; index += 1) {
+                if (isRowIdHeader_ACU(header[index])) {
+                    misplacedIndex = index;
+                    break;
+                }
+                if (duplicateHeaderIndex < 0 && isRowIdAliasHeader_ACU(header[index])) {
+                    duplicateHeaderIndex = index;
+                }
+            }
+        }
+        if (misplacedIndex >= 0) {
+            blockers.push(issue_ACU$1('misplaced_row_id', sheetKey, sheetName, `${label} 的 row_id 位于第 ${misplacedIndex + 1} 列；自动移动可能改变数据列语义，请手动调整模板列顺序。`, undefined, misplacedIndex));
+            return;
+        }
+        if (duplicateHeaderIndex >= 0) {
+            blockers.push(issue_ACU$1('duplicate_row_id_header', sheetKey, sheetName, `${label} 第 ${duplicateHeaderIndex + 1} 列也是身份列（id/rowid/行号）；不能自动决定哪一列保留，请手动调整模板列顺序。`, undefined, duplicateHeaderIndex));
+            return;
+        }
+        const businessWidth = header.length;
+        for (let index = 1; index < content.length; index += 1) {
+            if (!Array.isArray(content[index])) {
+                blockers.push(issue_ACU$1('invalid_content_row', sheetKey, sheetName, `${label} 第 ${index + 1} 行不是数组，无法自动修复。`, index + 1));
+                return;
+            }
+        }
+        const seedRows = sheet.seedRows;
+        if (seedRows !== undefined && !Array.isArray(seedRows)) {
+            blockers.push(issue_ACU$1('invalid_seed_rows', sheetKey, sheetName, `${label} 的 seedRows 不是数组。`));
+            return;
+        }
+        if (Array.isArray(seedRows)) {
+            for (let index = 0; index < seedRows.length; index += 1) {
+                if (!Array.isArray(seedRows[index])) {
+                    blockers.push(issue_ACU$1('invalid_seed_row', sheetKey, sheetName, `${label} 的 seedRows 第 ${index + 1} 行不是数组。`, index + 1));
+                    return;
+                }
+            }
+        }
+        let changed = false;
+        if (firstIsRowIdPlaceholder) {
+            // 占位规范化：原地替换为文本 row_id，不增加列、不移动业务列、不改数据行。
+            header[0] = 'row_id';
+            audit.headerAction = 'renamed';
+            changed = true;
+        }
+        else if (firstIsAlias) {
+            header[0] = 'row_id';
+            audit.headerAction = 'renamed';
+            changed = true;
+        }
+        else if (!firstIsRowId) {
+            header.unshift('row_id');
+            audit.headerAction = 'inserted';
+            changed = true;
+            insertRowIdColumnForRows_ACU(content.slice(1), businessWidth, sheetKey, sheetName, blockers, audit);
+            if (Array.isArray(seedRows)) {
+                const seedAudit = blankAudit_ACU$1(sheetKey, sheetName);
+                insertRowIdColumnForRows_ACU(seedRows, businessWidth, sheetKey, sheetName, blockers, seedAudit);
+                audit.seedRowsUpdated = seedAudit.contentRowsUpdated;
+            }
+        }
+        // content 与 seedRows 必须共享同一身份空间，避免两个行池各自从 1 分配出重复 ID。
+        const sharedReserved = options.assignStableRowIds !== false
+            ? createStableRowIdReservation_ACU([...content.slice(1), ...(Array.isArray(seedRows) ? seedRows : [])])
+            : undefined;
+        normalizeRowIdsForRows_ACU(content.slice(1), options.assignStableRowIds !== false, audit, sharedReserved);
+        if (Array.isArray(seedRows)) {
+            normalizeRowIdsForRows_ACU(seedRows, options.assignStableRowIds !== false, audit, sharedReserved);
+        }
+        // 跨来源完全重复去重（content 优先）：必须在跨池重复 blocker 生成之前完成。
+        // 只处理深拷贝候选，删除与 content 完全相同的 seedRows 副本，更新审计。
+        if (options.deduplicateIdenticalCrossSourceRows === true && Array.isArray(seedRows) && seedRows.length > 0) {
+            deduplicateIdenticalCrossSourceSeedRows_ACU(content.slice(1), seedRows, sheetKey, sheetName, audit, blockers);
+        }
+        const rowIds = new Set();
+        rejectDuplicateRowIds_ACU(content.slice(1), 'content', sheetKey, sheetName, rowIds, blockers);
+        if (Array.isArray(seedRows)) {
+            rejectDuplicateRowIds_ACU(seedRows, 'seedRows', sheetKey, sheetName, options.rejectCrossSourceDuplicateRowIds === false ? new Set() : rowIds, blockers);
+        }
+        if (options.syncDdl && sheet.sourceData && typeof sheet.sourceData === 'object') {
+            const ddl = String(sheet.sourceData.ddl || '').trim();
+            if (ddl) {
+                const columns = parseDDLColumnInfos_ACU(ddl);
+                const firstColumn = columns[0];
+                if (audit.headerAction !== 'inserted') {
+                    if (options.validateExistingDdl === false) {
+                        audits.push(audit);
+                        return;
+                    }
+                    if (!firstColumn || firstColumn.sqlName.toLowerCase() !== 'row_id'
+                        || firstColumn.declaredType !== 'INTEGER' || !firstColumn.isPrimaryKey) {
+                        blockers.push(issue_ACU$1('invalid_ddl', sheetKey, sheetName, `${label} 的 DDL 缺少首列 row_id INTEGER PRIMARY KEY，无法安全规范化。`));
+                        return;
+                    }
+                }
+                else if (firstColumn && firstColumn.sqlName.toLowerCase() === 'row_id'
+                    && firstColumn.declaredType === 'INTEGER' && firstColumn.isPrimaryKey) {
+                    // 已有合法身份列，保持不变。
+                }
+                else if (firstColumn && firstColumn.sqlName.toLowerCase() !== 'row_id'
+                    && !columns.some(column => column.sqlName.toLowerCase() === 'row_id')) {
+                    if (columns.length === businessWidth) {
+                        try {
+                            sheet.sourceData.ddl = injectRowIdPrimaryKeyColumn_ACU(ddl);
+                            audit.ddlUpdated = true;
+                            changed = true;
+                        }
+                        catch (error) {
+                            blockers.push(issue_ACU$1('invalid_ddl', sheetKey, sheetName, `${label} 无法在 DDL 中注入 row_id：${error instanceof Error ? error.message : String(error)}`));
+                            return;
+                        }
+                    }
+                    else {
+                        blockers.push(issue_ACU$1('ambiguous_ddl', sheetKey, sheetName, `${label} 的 DDL 列数（${columns.length}）与原业务表头（${businessWidth}）不一致，无法证明应注入 row_id。`));
+                        return;
+                    }
+                }
+                else {
+                    blockers.push(issue_ACU$1('invalid_ddl', sheetKey, sheetName, `${label} 的 DDL 中 row_id 不是首列 INTEGER PRIMARY KEY，无法安全规范化。`));
+                    return;
+                }
+                const validation = validateDDLTextAgainstHeaders_ACU(String(sheet.sourceData.ddl || ''), content[0]);
+                if (!validation.valid) {
+                    blockers.push(issue_ACU$1('ambiguous_ddl', sheetKey, sheetName, `${label} DDL 校验失败：${validation.message}`));
+                    return;
+                }
+            }
+        }
+        audits.push(audit);
+    }
+    /**
+     * 对外入口：深拷贝输入并规范化所有 sheet_* 的 row_id 结构。
+     * 输入对象不被修改；任何 blocker 都代表本次调用不产生可提交候选。
+     */
+    function normalizeTemplateRowIds_ACU(templateData, options = {}) {
+        const input = templateData;
+        if (!isRecordValue_ACU(input)) {
+            return { templateData, changed: false, audits: [], blockers: [issue_ACU$1('invalid_template', '', '', '模板必须是对象。')] };
+        }
+        const template = cloneValue_ACU$3(input);
+        const blockers = [];
+        const audits = [];
+        let changed = false;
+        for (const [key, value] of Object.entries(template)) {
+            if (!key.startsWith('sheet_'))
+                continue;
+            if (!isRecordValue_ACU(value)) {
+                blockers.push(issue_ACU$1('invalid_sheet', key, String(value?.name ?? ''), `表「${key}」不是对象，无法规范化。`));
+                continue;
+            }
+            const before = JSON.stringify(value);
+            normalizeSheetRowId_ACU(key, value, options, blockers, audits);
+            if (JSON.stringify(value) !== before)
+                changed = true;
+        }
+        return {
+            templateData: template,
+            changed: blockers.length === 0 && changed,
+            audits: blockers.length > 0 ? [] : audits,
+            blockers,
+        };
+    }
+
+    /**
+     * Builds a read-only V2 change plan. Runtime writes, guide persistence and locking remain
+     * owned by commitCurrentFloorTemplateChanges_ACU; this function deliberately has no I/O.
+     */
+    async function reconcileChatTemplate_ACU(input) {
+        const baselineData = clone_ACU$7(input.baselineData);
+        const rawTemplateData = clone_ACU$7(input.templateData);
+        const blockers = [];
+        const deletedSheetKeys = [];
+        const hiddenSheetKeys = [];
+        const audit = [];
+        const normalization = normalizeTemplateRowIds_ACU(rawTemplateData, {
+            syncDdl: input.storageMode !== 'native',
+            rejectCrossSourceDuplicateRowIds: false,
+            validateExistingDdl: false,
+        });
+        if (normalization.blockers.length > 0) {
+            return emptyPlan_ACU(baselineData, audit, normalization.blockers.map(item => item.message));
+        }
+        const templateData = normalization.templateData;
+        if (input.storageMode !== 'native') {
+            // SQLite 模式下，已有数据的聊天表可能没有持久化 DDL（运行时依赖 fallback）。
+            // 协调层是唯一没有接入缺失 DDL fallback 的入口，导致空 DDL 被解析为零列、
+            // 与含 row_id 的表头必然不等，所有匹配表都被误判为“DDL 与表头列数不一致”。
+            // 在进入表身份匹配与 schema 协调前，为 baseline 与规范化后的 template 补齐
+            // 缺失 DDL（仅缺失/全空白，绝不覆盖非空 DDL），使后续逻辑看到同一份合法契约。
+            const baselineFallback = applyMissingDdlFallback_ACU(baselineData, '当前聊天基线');
+            if (baselineFallback.blockers.length > 0) {
+                return emptyPlan_ACU(baselineData, audit, baselineFallback.blockers);
+            }
+            const templateFallback = applyMissingDdlFallback_ACU(templateData, '目标模板');
+            if (templateFallback.blockers.length > 0) {
+                return emptyPlan_ACU(baselineData, audit, templateFallback.blockers);
+            }
+        }
+        const candidateData = stripRuntimeSeedRows_ACU(baselineData);
+        candidateData.mate = clone_ACU$7(templateData.mate || baselineData.mate);
+        for (const [key, sheet] of listSheets_ACU(baselineData)) {
+            try {
+                validateBaselineSheetRows_ACU(sheet);
+            }
+            catch (error) {
+                blockers.push(`当前聊天表「${sheet.name || key}」历史数据无效：${error?.message || String(error)}`);
+            }
+        }
+        const baselineByName = indexSheetsByName_ACU(baselineData, '当前聊天', blockers);
+        const templateByName = indexSheetsByName_ACU(templateData, '导入模板', blockers);
+        validateTableAliasDeclarations_ACU(baselineData, '当前聊天', blockers);
+        validateTableAliasDeclarations_ACU(templateData, '导入模板', blockers);
+        if (blockers.length > 0)
+            return emptyPlan_ACU(baselineData, audit, blockers);
+        const matchedKeys = new Set();
+        const rebaseKeys = new Set();
+        const revealKeys = new Set();
+        // 被任一模板表按当前名精确匹配占用的 baseline key：别名认回必须跳过这些表，
+        // 否则「模板同时含新旧两个名字」会因迭代顺序产生歧义匹配或误报重复。
+        const nameClaimedBaselineKeys = new Set();
+        for (const [canonicalName] of templateByName) {
+            const claimed = baselineByName.get(canonicalName);
+            if (claimed)
+                nameClaimedBaselineKeys.add(claimed.key);
+        }
+        for (const [canonicalName, templateEntry] of templateByName) {
+            const matchedByName = baselineByName.get(canonicalName);
+            const occupiedByKey = baselineData[templateEntry.key];
+            if (matchedByName && occupiedByKey && matchedByName.key !== templateEntry.key) {
+                blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」的名称匹配当前聊天 key「${matchedByName.key}」，但模板 key「${templateEntry.key}」已被表「${occupiedByKey.name || templateEntry.key}」占用，无法唯一协调。`);
+                continue;
+            }
+            let previous = matchedByName;
+            if (!previous) {
+                const aliasMatches = findExplicitTableAliasMatches_ACU(templateEntry.sheet, baselineData, nameClaimedBaselineKeys);
+                if (aliasMatches.length > 1) {
+                    blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」的显式历史别名同时匹配多张当前聊天表，无法唯一协调。`);
+                    continue;
+                }
+                previous = aliasMatches[0];
+            }
+            if (!previous) {
+                const introducedKey = buildStableSheetKeyCandidate_ACU(templateEntry.sheet.name);
+                if (!introducedKey) {
+                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」缺少可用于派生 key 的有效显示名。`);
+                    continue;
+                }
+                // 生命周期感知：派生 key 在历史中曾存在（hidden / indeterminate / active）时，
+                // 这不是"新增表"。协调层显式消费唯一生命周期事实，不再靠 baseline 缺席猜测。
+                const lifecycleEntry = input.lifecycle?.statusBySheetKey?.[introducedKey];
+                if (lifecycleEntry) {
+                    if (lifecycleEntry.status === 'hidden') {
+                        // hidden → 显式 reveal：恢复历史 key（稳定 sheetKey），数据由 persist 层
+                        // resolveRevealSource_ACU 恢复"离开时最新状态"。协调层只带模板结构，不伪装 introduction。
+                        const revealed = asIntroducedSheet_ACU(templateEntry.sheet, introducedKey);
+                        candidateData[introducedKey] = revealed;
+                        audit.push({ sheetKey: introducedKey, resolvedSheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(revealed).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, revealed.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+                        revealKeys.add(introducedKey);
+                        continue;
+                    }
+                    if (lifecycleEntry.status === 'indeterminate') {
+                        blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 的历史生命周期无法判定（indeterminate），已阻止模板提交。请先在数据管理中检查并恢复 V2 历史。`);
+                        continue;
+                    }
+                    // status === 'active' 但基线不含该表：这里刻意不 fail-closed。
+                    //
+                    // 「是否仍活跃」的权威来源只有 replay 后的 active state，不是 lifecycle 派生结论；
+                    // lifecycle 是历史 timeline 归并，遇到无 full-checkpoint 基底（replacement_anchor /
+                    // temporary baseline）等场景仍可能与同一时点的基线不一致。在协调层按这个非权威结论
+                    // 拒绝，会把「模板重新包含一张历史痕迹表」变成用户无法自救的死局：重新读取表格不会
+                    // 改变任何历史事实，错误必然复现。
+                    //
+                    // 因此这里按 introduction 继续，真正的覆盖风险由提交层用权威事实判定：
+                    // storage-frame-v2-persist.ts 的 activeHas → active_introduction_conflict（活数据保护），
+                    // introductionHistoryEvidence_ACU → reveal / indeterminate（历史存在则唤醒而非覆盖）。
+                    // never_seen 同样落到 introduction。
+                }
+                const occupiedByIntroducedKey = candidateData[introducedKey];
+                if (occupiedByIntroducedKey) {
+                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」派生 key「${introducedKey}」与当前表「${occupiedByIntroducedKey.name || introducedKey}」冲突；两张不同名称的表不能共享同一 key。`);
+                    continue;
+                }
+                try {
+                    const introduced = asIntroducedSheet_ACU(templateEntry.sheet, introducedKey);
+                    candidateData[introducedKey] = introduced;
+                    audit.push({ sheetKey: introducedKey, resolvedSheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, introduced.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+                }
+                catch (error) {
+                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 无法引入：${error?.message || String(error)}`);
+                }
+                continue;
+            }
+            if (matchedKeys.has(previous.key)) {
+                blockers.push(`导入模板中的多个表同时匹配当前聊天表「${previous.sheet.name || previous.key}」（key=${previous.key}），无法唯一协调。`);
+                continue;
+            }
+            matchedKeys.add(previous.key);
+            try {
+                const reconciled = reconcileMatchedSheet_ACU(previous.sheet, templateEntry.sheet, previous.key, templateEntry.key, input.storageMode === 'native' ? 'native' : 'sqlite');
+                candidateData[previous.key] = reconciled.sheet;
+                if (reconciled.changed)
+                    rebaseKeys.add(previous.key);
+                audit.push(reconciled.audit);
+            }
+            catch (error) {
+                blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」无法协调（baselineKey=${previous.key} → templateKey=${templateEntry.key}）：${error?.message || String(error)}`);
+            }
+        }
+        for (const [key, sheet] of listSheets_ACU(baselineData)) {
+            if (matchedKeys.has(key))
+                continue;
+            // 目标模板缺失的既有表：默认隐藏保留（语义1），仅在显式硬删除时才进 deletedSheetKeys。
+            if (input.hardDeleteMissingSheets === true) {
+                if (!input.destructiveChangeConfirmed)
+                    blockers.push(`删除表「${sheet.name || key}」需要显式确认。`);
+                deletedSheetKeys.push(key);
+                delete candidateData[key];
+                audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
+            }
+            else {
+                // 生命周期感知：目标表历史生命周期无法判定时，隐藏操作也属于"不知道它在哪"，
+                // 不能静默隐藏（可能误伤 indeterminate 历史）。fail-closed 阻止提交。
+                const lifecycleEntry = input.lifecycle?.statusBySheetKey?.[key];
+                if (lifecycleEntry?.status === 'indeterminate') {
+                    blockers.push(`表「${sheet.name || key}」(${key}) 的历史生命周期无法判定（indeterminate），已阻止隐藏操作。请先在数据管理中检查并恢复 V2 历史。`);
+                    continue;
+                }
+                hiddenSheetKeys.push(key);
+                delete candidateData[key];
+                audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: [], hiddenColumns: headers_ACU(sheet).slice(1), physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
+            }
+        }
+        if (blockers.length > 0)
+            return emptyPlan_ACU(baselineData, audit, blockers);
+        // checkpoint.data 就是协调器算好的目标全量；结构变更统一表达为数据边界上的 per-sheet checkpoint。
+        const sheetChanges = [];
+        for (const [key, sheet] of listSheets_ACU(candidateData)) {
+            if (revealKeys.has(key)) {
+                sheetChanges.push({ kind: 'reveal', sheetKey: key, sheetData: sheet });
+                audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'reveal' });
+            }
+            else if (!baselineData[key]) {
+                sheetChanges.push({ kind: 'introduction', sheetKey: key, sheetData: sheet });
+                audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'introduction' });
+            }
+            else if (rebaseKeys.has(key)) {
+                sheetChanges.push({ kind: 'rebase', sheetKey: key, sheetData: sheet });
+                audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'rebase' });
+            }
+        }
+        // 隐藏表：产出 hide change（sheetData 携带 baseline 结构，persist 层据此定位并保留数据）。
+        for (const key of hiddenSheetKeys) {
+            sheetChanges.push({ kind: 'hide', sheetKey: key, sheetData: clone_ACU$7(baselineData[key]) });
+            audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'hide' });
+        }
+        candidateData.mate = clone_ACU$7(candidateData.mate);
+        if (input.storageMode !== 'native') {
+            for (const [key, sheet] of listSheets_ACU(candidateData)) {
+                try {
+                    const validation = validateDDLTextAgainstHeaders_ACU(String(sheet.sourceData?.ddl || ''), headers_ACU(sheet));
+                    if (validation.valid)
+                        continue;
+                    return emptyPlan_ACU(baselineData, audit, [
+                        `完整 replay candidate DDL/表头预检失败: ${key}: ${validation.message}`,
+                    ]);
+                }
+                catch (error) {
+                    return emptyPlan_ACU(baselineData, audit, [
+                        `完整 replay candidate DDL/表头预检失败: ${key}: ${error?.message || String(error)}`,
+                    ]);
+                }
+            }
+        }
+        // 列投影预检双模式执行（S0-3）：native 的 hiddenPhysicalColumns 以表头名为身份，
+        // 与 SQLite 的 physical 名一样必须能被 getSheetColumnProjection_ACU 解析。
+        // 非法隐藏集在协调期变 blocker（fail-closed），而不是留到运行时投影抛错。
+        for (const [key, sheet] of listSheets_ACU(candidateData)) {
+            try {
+                getSheetColumnProjection_ACU(sheet);
+            }
+            catch (error) {
+                return emptyPlan_ACU(baselineData, audit, [
+                    `完整 replay candidate 列投影预检失败: ${key}: ${error?.message || String(error)}`,
+                ]);
+            }
+        }
+        if (input.storageMode !== 'native') {
+            try {
+                // 运行时协调路径：与 template-state-reset.ts（initGameSession）同为运行时注入/协调，
+                // 非法显式 DDL 允许降级为 fallback schema（:242 已存在 native 门禁，此处只作用于 sqlite）。
+                // 持久化契约校验（storage-frame-v2-persist.ts:3190）保持严格，不在此处放宽。
+                await hydrateTableDataStrict_ACU(candidateData, { allowRuntimeDdlFallback: true });
+            }
+            catch (error) {
+                return emptyPlan_ACU(baselineData, audit, [
+                    `完整 replay candidate SQLite hydrate 失败: ${error?.message || String(error)}`,
+                ]);
+            }
+        }
+        for (const key of deletedSheetKeys)
+            audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'delete' });
+        return { candidateData, sheetChanges, deletedSheetKeys, hiddenSheetKeys, audit, blockers: [] };
+    }
+    function stripRuntimeSeedRows_ACU(data) {
+        const clone = clone_ACU$7(data);
+        for (const [, sheet] of listSheets_ACU(clone))
+            delete sheet.seedRows;
+        return clone;
+    }
+    function emptyPlan_ACU(candidateData, audit, blockers) {
+        return {
+            candidateData: stripRuntimeSeedRows_ACU(candidateData),
+            sheetChanges: [],
+            deletedSheetKeys: [],
+            hiddenSheetKeys: [],
+            audit: audit.map(item => ({ ...item, operations: [] })),
+            blockers,
+        };
+    }
+    function clone_ACU$7(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function listSheets_ACU(data) {
+        return Object.keys(data || {}).filter(key => key.startsWith('sheet_'))
+            .map(key => [key, data[key]])
+            .filter(([, sheet]) => !!sheet && typeof sheet === 'object' && !Array.isArray(sheet));
+    }
+    function indexSheetsByName_ACU(data, label, blockers) {
+        const entries = new Map();
+        for (const [key, sheet] of listSheets_ACU(data)) {
+            const canonicalName = canonicalizeDisplayName_ACU(sheet.name);
+            if (!canonicalName) {
+                blockers.push(`${label}存在空表名：${key}。`);
+                continue;
+            }
+            const existing = entries.get(canonicalName);
+            if (existing) {
+                blockers.push(`${label}表名规范化重复：「${existing.sheet.name}」与「${sheet.name}」。`);
+                continue;
+            }
+            entries.set(canonicalName, { key, sheet });
+        }
+        return entries;
+    }
+    /**
+     * tableAliases 是显式身份声明。它可以和同表的当前名称重合，但不能被另一张
+     * 表的当前名称或历史别名占用；否则后续 SQL/AI 路由会扩大写入目标。
+     */
+    function validateTableAliasDeclarations_ACU(data, label, blockers) {
+        const ownerByIdentity = new Map();
+        for (const entry of listSheets_ACU(data).map(([key, sheet]) => ({ key, sheet }))) {
+            const identities = [entry.sheet.name, ...getExplicitTableAliases_ACU(entry.sheet)];
+            for (const identity of identities) {
+                const canonical = canonicalizeDisplayName_ACU(identity);
+                if (!canonical)
+                    continue;
+                const owner = ownerByIdentity.get(canonical);
+                if (!owner) {
+                    ownerByIdentity.set(canonical, entry);
+                    continue;
+                }
+                if (owner.key !== entry.key) {
+                    blockers.push(`${label}表别名规范化重复：「${owner.sheet.name || owner.key}」与「${entry.sheet.name || entry.key}」都声明了「${String(identity).trim()}」。`);
+                }
+            }
+        }
+    }
+    function getExplicitTableAliases_ACU(sheet) {
+        const raw = sheet.sourceData?.tableAliases;
+        if (!Array.isArray(raw))
+            return [];
+        return raw.map(value => String(value ?? '').trim()).filter(Boolean);
+    }
+    /**
+     * 双向显式身份交集匹配（S1-5）：模板身份集（当前名 + 声明别名）与 baseline 身份集
+     * （当前名 + 累积别名）有交集即认回。覆盖两个方向：
+     * - 模板改名并声明旧名别名（既有语义，矩阵③b）；
+     * - 用户在可视化编辑器改了聊天表名（renameSheet 自动累积旧名别名），模板仍用原名。
+     * 仍是显式声明驱动：任何一侧都没有记录过的名字不猜。
+     *
+     * excludedBaselineKeys：已被其他模板表按当前名精确匹配占用的 baseline 表不参与
+     * 别名认回——模板同时含新旧两个名字时，旧名表应走 introduction 而不是歧义匹配。
+     * （名↔名交集在这里不可能命中：精确名匹配已在调用方先行查找并落空。）
+     */
+    function findExplicitTableAliasMatches_ACU(template, baselineData, excludedBaselineKeys) {
+        const identities = new Set([
+            canonicalizeDisplayName_ACU(template.name),
+            ...getExplicitTableAliases_ACU(template).map(canonicalizeDisplayName_ACU),
+        ].filter(Boolean));
+        if (identities.size === 0)
+            return [];
+        return listSheets_ACU(baselineData)
+            .map(([key, sheet]) => ({ key, sheet }))
+            .filter(entry => !excludedBaselineKeys.has(entry.key))
+            .filter(entry => {
+            const baselineIdentities = [entry.sheet.name, ...getExplicitTableAliases_ACU(entry.sheet)]
+                .map(canonicalizeDisplayName_ACU);
+            return baselineIdentities.some(identity => identities.has(identity));
+        });
+    }
+    function accumulateTableAliases_ACU(sheet, before, template) {
+        if (!sheet.sourceData || typeof sheet.sourceData !== 'object')
+            sheet.sourceData = {};
+        const currentName = canonicalizeDisplayName_ACU(sheet.name);
+        const aliases = [
+            ...getExplicitTableAliases_ACU(before),
+            ...getExplicitTableAliases_ACU(template),
+            before.name,
+        ];
+        const seen = new Set();
+        const normalized = aliases.filter(alias => {
+            const canonical = canonicalizeDisplayName_ACU(alias);
+            if (!canonical || canonical === currentName || seen.has(canonical))
+                return false;
+            seen.add(canonical);
+            return true;
+        });
+        if (normalized.length > 0)
+            sheet.sourceData.tableAliases = normalized;
+        else
+            delete sheet.sourceData.tableAliases;
+    }
+    /**
+     * SQLite 协调输入的缺失 DDL fallback（方案 A）。
+     * 只处理缺失或全空白 DDL 的 Sheet；非空 DDL 保持原值，绝不覆盖。
+     * 只在调用方传入的克隆对象上运行，不修改外部输入。
+     */
+    function applyMissingDdlFallback_ACU(data, sourceLabel) {
+        const blockers = [];
+        for (const [key, sheet] of listSheets_ACU(data)) {
+            if (!sheet || typeof sheet !== 'object')
+                continue;
+            const rawDdl = sheet.sourceData?.ddl;
+            const hasNonEmptyDdl = typeof rawDdl === 'string' && rawDdl.trim().length > 0;
+            if (hasNonEmptyDdl)
+                continue;
+            if (!sheet.sourceData || typeof sheet.sourceData !== 'object') {
+                sheet.sourceData = {};
+            }
+            try {
+                const tableName = sheet.uid || key;
+                sheet.sourceData.ddl = generateDDL(sheet, tableName);
+                const headers = Array.isArray(sheet.content?.[0])
+                    ? sheet.content[0].map((value) => String(value ?? ''))
+                    : [];
+                const validation = validateDDLTextAgainstHeaders_ACU(sheet.sourceData.ddl, headers);
+                if (!validation.valid) {
+                    blockers.push(`${sourceLabel} 表「${sheet.name || key}」（${key}）生成的 fallback DDL 校验失败：${validation.message}`);
+                }
+            }
+            catch (error) {
+                blockers.push(`${sourceLabel} 表「${sheet.name || key}」（${key}）缺失 DDL fallback 失败：${error?.message || String(error)}`);
+            }
+        }
+        return { blockers };
+    }
+    function headers_ACU(sheet) {
+        const headers = sheet?.content?.[0];
+        if (!Array.isArray(headers) || headers[0] !== 'row_id')
+            throw new Error('缺少 row_id 首列表头。');
+        return headers.map(value => String(value ?? ''));
+    }
+    /**
+     * 新增表的引入形态按“模板是否自带数据”分流：
+     * - 自带数据：作者已定义初始格式，原样保留数据行，引入时即落盘建表。
+     * - 不带数据：保持 header-only 空壳，保留“首次填表前可自由修改表结构”的能力。
+     * 两种形态都要求 uid 等于 key，且 seedRows 不随 sheet 落盘（数据已在 content 中）。
+     */
+    function asIntroducedSheet_ACU(sheet, sheetKey) {
+        const clone = clone_ACU$7(sheet);
+        clone.uid = sheetKey;
+        const headers = headers_ACU(clone);
+        const templateRows = Array.isArray(clone.content) ? clone.content.slice(1) : [];
+        const seedRows = Array.isArray(clone.seedRows) ? clone.seedRows : [];
+        // content 数据行优先；仅 seedRows 提供数据时也视为“自带数据”。
+        const dataRows = templateRows.length > 0 ? templateRows : seedRows;
+        clone.content = dataRows.length > 0
+            ? [headers, ...assignMissingRowIds_ACU(dataRows.map(row => normalizeIntroducedRow_ACU(row, headers.length, sheetKey)))]
+            : [headers];
+        delete clone.seedRows;
+        if (dataRows.length > 0)
+            validateBaselineSheetRows_ACU(clone);
+        return clone;
+    }
+    /**
+     * 模板作者通常不手写 row_id，首列多为空。引入前按现有稳定分配器补齐缺失 row_id，
+     * 已显式给出的 row_id 一律保留原值，绝不重写。
+     */
+    function assignMissingRowIds_ACU(rows) {
+        const reserved = createStableRowIdReservation_ACU(rows);
+        for (const row of rows) {
+            const rowId = row[0] === null || row[0] === undefined ? '' : String(row[0]).trim();
+            row[0] = rowId || allocateStableRowId_ACU(reserved);
+        }
+        return rows;
+    }
+    /**
+     * 模板行末尾省略单元格是常见写法，按表头宽度补 null 即可。
+     * 但行宽超过表头说明模板结构本身不一致，必须 fail-loud，不能静默截断丢数据。
+     */
+    function normalizeIntroducedRow_ACU(row, headerWidth, sheetKey) {
+        const cells = (Array.isArray(row) ? row : [row]).map(cell => (cell === null || cell === undefined ? '' : String(cell)));
+        if (cells.length > headerWidth) {
+            throw new Error(`模板数据行宽度为 ${cells.length}，超过表头 ${headerWidth} 列（${sheetKey}）。`);
+        }
+        while (cells.length < headerWidth)
+            cells.push('');
+        return cells;
+    }
+    function validateBaselineSheetRows_ACU(sheet) {
+        const headers = headers_ACU(sheet);
+        const rowIds = new Set();
+        for (let index = 1; index < sheet.content.length; index += 1) {
+            const row = sheet.content[index];
+            if (!Array.isArray(row))
+                throw new Error(`第 ${index + 1} 行不是数组。`);
+            if (row.length !== headers.length)
+                throw new Error(`第 ${index + 1} 行宽度为 ${row.length}，应为 ${headers.length}。`);
+            const rowId = String(row[0] ?? '').trim();
+            if (!rowId)
+                throw new Error(`第 ${index + 1} 行 row_id 为空。`);
+            if (rowIds.has(rowId))
+                throw new Error(`row_id 重复：${rowId}。`);
+            rowIds.add(rowId);
+        }
+    }
+    /**
+     * reveal 恢复数据与当前模板结构的列级再协调（S1-4）。
+     *
+     * reveal 的数据由 persist 层从历史恢复（"离开时最新状态"），协调层只产出模板结构壳；
+     * 若休眠期间模板演进（加列/减列/改名），恢复数据的列集会落后于当前模板。本函数在
+     * checkpoint 落盘前把恢复数据 rebase 到模板列集上：匹配列继承数据、模板新增列按契约
+     * 填充（sqlite 按 DDL DEFAULT/NOT NULL，native 恒 null）、模板缺失列进入尾部隐藏列
+     * （列级休眠，数据不删）。语义与 matched 表切模板的列级协调完全一致
+     * （同一实现 reconcileMatchedSheet_ACU，双模式同一契约）。
+     *
+     * fail-loud：恢复数据行畸形（row_id 空/重复/行宽不一致）、DDL 无法回退或解析、
+     * 协调结果投影不合法时直接抛错，由 persist 层事务回滚兜底，绝不落盘半协调数据。
+     */
+    function reconcileRevealedSheetWithTemplate_ACU(restoredSheet, templateSheet, sheetKey, contract) {
+        const restored = clone_ACU$7(restoredSheet);
+        const template = clone_ACU$7(templateSheet);
+        try {
+            validateBaselineSheetRows_ACU(restored);
+        }
+        catch (error) {
+            throw new Error(`reveal 恢复数据不合法（${sheetKey}）：${error?.message || String(error)}`);
+        }
+        if (contract === 'sqlite') {
+            // 旧历史 hide checkpoint 可能没有持久化 DDL（运行时依赖 fallback）。
+            // 与顶层协调器对 baseline/template 的处理一致：仅补缺失/全空白 DDL，绝不覆盖非空 DDL。
+            for (const [label, sheet] of [['reveal 恢复数据', restored], ['reveal 目标模板结构', template]]) {
+                const fallback = applyMissingDdlFallback_ACU({ [sheetKey]: sheet }, label);
+                if (fallback.blockers.length > 0)
+                    throw new Error(fallback.blockers.join('；'));
+            }
+        }
+        const reconciled = reconcileMatchedSheet_ACU(restored, template, sheetKey, sheetKey, contract);
+        // 协调结果必须能被投影层解析（隐藏集合法）；sqlite 下 DDL 与表头必须严格一致。
+        getSheetColumnProjection_ACU(reconciled.sheet);
+        if (contract === 'sqlite') {
+            const validation = validateDDLTextAgainstHeaders_ACU(String(reconciled.sheet.sourceData?.ddl || ''), headers_ACU(reconciled.sheet));
+            if (!validation.valid) {
+                throw new Error(`reveal 再协调结果 DDL 校验失败（${sheetKey}）：${validation.message}`);
+            }
+        }
+        return { sheet: reconciled.sheet, audit: reconciled.audit, changed: reconciled.changed };
+    }
+    /**
+     * matched 表的统一列级协调（S0-3+S3-1：单函数双契约）。
+     *
+     * 列身份（canonical 显示名）、匹配链（canonical → 同 key physical 复用 → columnAliases）、
+     * 列级休眠（未匹配旧列保留为尾部隐藏列，数据不删；零数据表同走休眠，S1-6，
+     * 撞名旧列因零单元格而无损丢弃、audit 记 deletedColumns）、行迁移、别名累积与
+     * audit 双模式共享；存储差异收敛为四个契约分支：
+     * - 列条目构造：sqlite 从 DDL 取 physical 列名；native 的 physical 就是表头字符串，
+     *   不解析、不校验 DDL（native 路径不得解析或 hydrate SQLite DDL）。
+     * - 同 key physical 复用匹配：仅 sqlite（native 无独立于表头的物理身份可复用）。
+     * - 新列填充：sqlite 按 DDL DEFAULT/NOT NULL 决定；native 恒 null。
+     * - 物化收尾：sqlite 重建含保留列的 DDL 并沁用旧物理名；native 不生成 DDL
+     *   （保留模板 sourceData.ddl 原值），hiddenPhysicalColumns 以表头名落地——
+     *   投影层（getSheetColumnProjection_ACU）在无匹配 DDL 时按表头名解析隐藏列。
+     *
+     * 隐藏列尾部不变式：迁移后 content 头恒为 [...目标表头, ...隐藏表头]。
+     * DSL 填表的可见列索引与物理列索引的一致性依赖此不变式（双模式同一契约）。
+     */
+    function reconcileMatchedSheet_ACU(before, template, sheetKey, templateSheetKey, contract) {
+        const sqlite = contract === 'sqlite';
+        const beforeHeaders = headers_ACU(before);
+        const targetHeaders = headers_ACU(template);
+        const beforeColumns = sqlite ? parseDDLColumnInfos_ACU(String(before.sourceData?.ddl || '')) : [];
+        const targetColumns = sqlite ? parseDDLColumnInfos_ACU(String(template.sourceData?.ddl || '')) : [];
+        if (sqlite && (beforeColumns.length !== beforeHeaders.length || targetColumns.length !== targetHeaders.length))
+            throw new Error('DDL 与表头列数不一致。');
+        const beforeEntries = beforeHeaders.slice(1).map((name, index) => ({
+            canonical: canonicalizeDisplayName_ACU(name), index: index + 1, physical: sqlite ? beforeColumns[index + 1].sqlName : name, header: name,
+        }));
+        const targetEntries = targetHeaders.slice(1).map((name, index) => ({
+            canonical: canonicalizeDisplayName_ACU(name), index: index + 1, physical: sqlite ? targetColumns[index + 1].sqlName : name, header: name, column: sqlite ? targetColumns[index + 1] : null,
+        }));
+        const beforeByCanonical = new Map(beforeEntries.map(column => [column.canonical, column]));
+        const targetByCanonical = new Map(targetEntries.map(column => [column.canonical, column]));
+        if (beforeByCanonical.size !== beforeHeaders.length - 1 || targetByCanonical.size !== targetHeaders.length - 1
+            || (!sqlite && (beforeEntries.some(entry => !entry.canonical) || targetEntries.some(entry => !entry.canonical)))) {
+            throw new Error(`表「${before.name || sheetKey}」(${sheetKey}) → 模板表「${template.name || templateSheetKey}」(${templateSheetKey}) 存在空列或规范化重复列。`);
+        }
+        const beforeByPhysical = new Map(beforeEntries.map(column => [column.physical.toLowerCase(), column]));
+        const targetByPhysical = new Map(targetEntries.map(column => [column.physical.toLowerCase(), column]));
+        if (beforeByPhysical.size !== beforeEntries.length || targetByPhysical.size !== targetEntries.length)
+            throw new Error(`表「${before.name || sheetKey}」(${sheetKey}) → 模板表「${template.name || templateSheetKey}」(${templateSheetKey}) ${sqlite ? 'DDL 存在重复 physical column' : '存在大小写不敏感的重复表头'}。`);
+        // === 零数据表语义（S1-6：统一走列级休眠，撞名列无损丢弃）===
+        // 逐表判定：before.content.length > 1 才认为有数据行。零数据表不再走整表覆盖特例
+        //（原计划 3.1/3.2 的覆盖语义已删除）：sheet key 在 introduction 时按表名派生，
+        // 与模板作者键几乎恒不相等，key 无法区分「用户结构演化」与「预设替换」；而覆盖
+        // 会把用户刚建好还没填数据的自定义列静默丢弃。统一休眠后，零数据表与有数据表
+        // 语义一致：未匹配旧列进尾部隐藏列，模板再含该列时唤醒。覆盖特例原本要防的
+        // 两个问题由下述机制承接：2.3 撞名阻断 → 零数据撞名列无损丢弃（见 hiddenEntries
+        // 撞名分流）；幽灵隐藏项投影残留 → 零数据容错读取 + live 过滤（见 previousHidden）。
+        const hasBaselineRows = before.content.length > 1;
+        const matchedBeforeCanonical = new Set();
+        const matchedTargetCanonical = new Set();
+        const targetSourceByCanonical = new Map();
+        const mappings = [];
+        const inheritedColumns = [];
+        for (const [canonicalName, target] of targetByCanonical) {
+            const source = beforeByCanonical.get(canonicalName);
+            if (!source)
+                continue;
+            matchedBeforeCanonical.add(source.canonical);
+            matchedTargetCanonical.add(target.canonical);
+            targetSourceByCanonical.set(target.canonical, source);
+            inheritedColumns.push(target.header);
+            if (source.physical !== target.physical)
+                mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
+        }
+        // 同一稳定 Sheet key 下，physical column 才是持久化数据身份；表头只是可变显示名。
+        // 不同 key 的导入模板仍禁止依赖 physical 同名推断，以免把无关字段重新解释为旧数据。
+        // native 无独立于表头的物理身份（physical=表头），canonical 匹配已覆盖，跳过。
+        if (sqlite && sheetKey === templateSheetKey) {
+            for (const target of targetEntries) {
+                if (matchedTargetCanonical.has(target.canonical))
+                    continue;
+                const source = beforeByPhysical.get(target.physical.toLowerCase());
+                if (!source || matchedBeforeCanonical.has(source.canonical))
+                    continue;
+                matchedBeforeCanonical.add(source.canonical);
+                matchedTargetCanonical.add(target.canonical);
+                targetSourceByCanonical.set(target.canonical, source);
+                inheritedColumns.push(target.header);
+                if (source.physical !== target.physical) {
+                    mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
+                }
+            }
+        }
+        // 列改名后 canonical 不再相等，靠 columnAliases 的历史显示名声明认回同一列，
+        // 使数据继续继承。这是显式声明驱动，不做启发式推断：
+        // 一个别名必须唯一命中一个未匹配的旧列，否则宁可不继承，也不把无关字段混进来。
+        const aliasCanonicalToPhysical = buildColumnAliasIndex_ACU(before, template);
+        for (const target of targetEntries) {
+            if (matchedTargetCanonical.has(target.canonical))
+                continue;
+            const aliasCanonicals = aliasCanonicalToPhysical.get(target.physical.toLowerCase());
+            if (!aliasCanonicals)
+                continue;
+            const candidates = [...new Set(aliasCanonicals)]
+                .map(alias => beforeByCanonical.get(alias))
+                .filter((entry) => !!entry && !matchedBeforeCanonical.has(entry.canonical));
+            const unique = [...new Map(candidates.map(entry => [entry.canonical, entry])).values()];
+            if (unique.length !== 1)
+                continue;
+            const source = unique[0];
+            matchedBeforeCanonical.add(source.canonical);
+            matchedTargetCanonical.add(target.canonical);
+            targetSourceByCanonical.set(target.canonical, source);
+            inheritedColumns.push(target.header);
+            if (source.physical !== target.physical) {
+                mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
+            }
+        }
+        // native 反向别名匹配：native 的 physical 随显示名变化（physical=表头），改名后
+        // 别名链累积在旧列的当前表头键下，正向索引（按目标表头查）必然落空，需反查——
+        // 旧列自身的 columnAliases 中包含目标显示名时认回同一列。仍是显式声明驱动：
+        // 必须唯一命中一个未匹配旧列，否则不继承。sqlite 不需要此分支：物理列名跨改名
+        // 稳定，正向键恒命中。
+        if (!sqlite) {
+            const beforeAliasMap = before.sourceData?.columnAliases;
+            for (const target of targetEntries) {
+                if (matchedTargetCanonical.has(target.canonical))
+                    continue;
+                if (!beforeAliasMap || typeof beforeAliasMap !== 'object' || Array.isArray(beforeAliasMap))
+                    break;
+                const candidates = beforeEntries.filter(entry => {
+                    if (matchedBeforeCanonical.has(entry.canonical))
+                        return false;
+                    const aliases = beforeAliasMap[entry.physical];
+                    if (!Array.isArray(aliases))
+                        return false;
+                    return aliases.some(alias => canonicalizeDisplayName_ACU(alias) === target.canonical);
+                });
+                if (candidates.length !== 1)
+                    continue;
+                const source = candidates[0];
+                matchedBeforeCanonical.add(source.canonical);
+                matchedTargetCanonical.add(target.canonical);
+                targetSourceByCanonical.set(target.canonical, source);
+                inheritedColumns.push(target.header);
+                if (source.physical !== target.physical) {
+                    mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
+                }
+            }
+        }
+        let hiddenEntries = beforeEntries.filter(column => !matchedBeforeCanonical.has(column.canonical));
+        const addedColumns = targetEntries.filter(column => !matchedTargetCanonical.has(column.canonical)).map(column => column.header);
+        const hiddenPhysicalNames = new Set(hiddenEntries.map(column => column.physical.toLowerCase()));
+        const reusedPhysicalNames = targetEntries
+            .filter(column => !matchedTargetCanonical.has(column.canonical) && hiddenPhysicalNames.has(column.physical.toLowerCase()))
+            .map(column => column.physical);
+        const droppedColumns = [];
+        if (reusedPhysicalNames.length > 0) {
+            if (hasBaselineRows) {
+                // 真实原因（sqlite）：隐藏旧列与目标可见列产生重复列名 DDL，SQLite 建表必然失败。
+                // native 下 physical=表头，canonical 相等即匹配，此冲突理论上不可达，仍 fail-loud 兜底。
+                // 列出 key 对、冲突 physical 名、两侧显示名与 baseline 行数，便于定位。
+                const conflictDetails = reusedPhysicalNames.map(physical => {
+                    const hidden = hiddenEntries.find(entry => entry.physical.toLowerCase() === physical.toLowerCase());
+                    const target = targetEntries.find(entry => entry.physical.toLowerCase() === physical.toLowerCase());
+                    return `physical=${physical}（休眠列「${hidden?.header}」→ 目标列「${target?.header}」）`;
+                }).join('；');
+                throw new Error(`表「${before.name || sheetKey}」(${sheetKey}) → 模板表「${template.name || templateSheetKey}」(${templateSheetKey})：休眠列与目标可见列存在同名 physical column${sqlite ? '，产出重复列名 DDL，SQLite 建表会失败' : ''}。冲突：${conflictDetails}。baseline 行数=${before.content.length - 1}。`);
+            }
+            // 零数据表的撞名分流（S1-6，承接计划 2.3）：旧表无任何单元格，丢弃撞名旧列
+            // 不损失数据；保留则必然产出重复列名 DDL 而阻断切换。audit 以 deletedColumns
+            // 如实记录，非撞名的未匹配旧列仍进休眠。
+            const collidingPhysical = new Set(reusedPhysicalNames.map(name => name.toLowerCase()));
+            droppedColumns.push(...hiddenEntries.filter(entry => collidingPhysical.has(entry.physical.toLowerCase())).map(entry => entry.header));
+            hiddenEntries = hiddenEntries.filter(entry => !collidingPhysical.has(entry.physical.toLowerCase()));
+        }
+        const hiddenColumns = hiddenEntries.map(column => column.header);
+        // 新列填充决策（替代 fills 静态契约）：
+        // sqlite——可解析 literal DEFAULT → 该值；NOT NULL 无 DEFAULT → 空串；nullable → null。
+        // native——无 DDL 契约，恒 null。
+        const fillAudit = [];
+        const fillByTargetCanonical = new Map();
+        for (const target of targetEntries) {
+            if (matchedTargetCanonical.has(target.canonical))
+                continue;
+            let value = null;
+            let kind = 'null';
+            if (sqlite) {
+                const literal = parseDDLSafeDefaultLiteral_ACU(target.column.defaultExpression);
+                if (literal) {
+                    value = literalToCellValue_ACU(literal);
+                    kind = 'literal_default';
+                }
+                else if (target.column.isNotNull) {
+                    value = '';
+                    kind = 'empty_not_null';
+                }
+            }
+            fillByTargetCanonical.set(target.canonical, value);
+            fillAudit.push({ physicalName: target.physical, kind, literal: value });
+        }
+        const sheet = clone_ACU$7(template);
+        sheet.uid = before.uid;
+        const retainedHiddenHeaders = hiddenEntries.map(entry => entry.header);
+        // 迁移后数据行（纯 JS 直通，替代契约驱动迁移）：匹配列原值直通，新列取填充值，隐藏列原值保留。
+        const migratedRows = [];
+        for (let rowIndex = 1; rowIndex < before.content.length; rowIndex += 1) {
+            const beforeRow = before.content[rowIndex];
+            const targetRow = [beforeRow[0] ?? null];
+            for (const target of targetEntries) {
+                const source = targetSourceByCanonical.get(target.canonical);
+                if (source)
+                    targetRow.push(beforeRow[source.index] ?? null);
+                else
+                    targetRow.push(fillByTargetCanonical.get(target.canonical) ?? null);
+            }
+            for (const hidden of hiddenEntries)
+                targetRow.push(beforeRow[hidden.index] ?? null);
+            migratedRows.push(targetRow);
+        }
+        const nextHeaders = [...targetHeaders, ...retainedHiddenHeaders];
+        // 数据归属规则：
+        // - 旧表已有数据 → 以旧表为主，忽略模板自带数据（避免覆盖用户/AI 写过的内容）。
+        // - 旧表无数据且模板自带数据 → 采用模板数据（作者定义的初始格式必须落地），
+        //   与「是否首楼、是否首次初始化」无关。
+        // - 两边都无数据 → 表头空表。
+        const templateRows = Array.isArray(template.content) ? template.content.slice(1) : [];
+        const useTemplateRows = migratedRows.length === 0 && templateRows.length > 0;
+        const adoptedRows = useTemplateRows
+            ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, retainedHiddenHeaders.length)
+            : migratedRows;
+        sheet.content = [nextHeaders, ...adoptedRows];
+        sheet.sourceData = clone_ACU$7(template.sourceData || {});
+        // 物化收尾契约分支：sqlite 重建 DDL 并沁用旧物理名；native 不生成/不解析 DDL，
+        // 保留模板 sourceData.ddl 原值（结构变更后旧 DDL 与新表头列数必然不一致，
+        // 投影层会退回按表头名解析隐藏列——这正是 native 隐藏集的身份契约）。
+        let activePhysicalNames;
+        let retainedHiddenPhysicalNames;
+        if (sqlite) {
+            const retainedHiddenColumns = hiddenEntries.map(entry => beforeColumns[entry.index]);
+            // 列身份由 canonical 显示名决定，物理列名一旦确立就不再随模板 DDL 文本变动。
+            // 若采用模板的物理名，同一显示名会在切模板时被改名（如 last_round_time → prev_scene_time），
+            // 而历史 log 里的 SQL 仍按旧物理名书写，回放时必然撞 "has no column named ..."。
+            const effectiveTargetColumns = targetColumns.map((column, index) => {
+                if (index === 0)
+                    return column;
+                const target = targetEntries[index - 1];
+                const source = target ? targetSourceByCanonical.get(target.canonical) : undefined;
+                if (!source || source.physical === column.sqlName)
+                    return column;
+                return renamePhysicalColumn_ACU(column, source.physical);
+            });
+            sheet.sourceData.ddl = buildRetainedColumnDDL_ACU(before, template, effectiveTargetColumns, targetHeaders, retainedHiddenColumns, retainedHiddenHeaders);
+            activePhysicalNames = effectiveTargetColumns.map(column => column.sqlName);
+            retainedHiddenPhysicalNames = retainedHiddenColumns.map(column => column.sqlName);
+        }
+        else {
+            activePhysicalNames = [...targetHeaders];
+            retainedHiddenPhysicalNames = retainedHiddenHeaders;
+        }
+        const activePhysical = new Set(activePhysicalNames.map(name => name.toLowerCase()));
+        // 有数据表：投影 fail-loud 校验 baseline 隐藏集一致性（幽灵项属数据损坏，必须暴露）。
+        // 零数据表：容错读取（S1-6）——幽灵隐藏项不指向任何单元格，丢弃无损；
+        // 下方 candidatePhysical live 过滤会把不在候选结构中的项清掉，不残留幽灵投影。
+        const previousHidden = hasBaselineRows
+            ? getSheetColumnProjection_ACU(before).hiddenPhysicalColumns
+            : (Array.isArray(before.sourceData?.hiddenPhysicalColumns) ? before.sourceData.hiddenPhysicalColumns : [])
+                .map(value => String(value ?? '').trim())
+                .filter(Boolean);
+        const candidatePhysical = new Map([...activePhysicalNames, ...retainedHiddenPhysicalNames].map(name => [name.toLowerCase(), name]));
+        const hiddenPhysicalColumns = [...previousHidden, ...retainedHiddenPhysicalNames]
+            .filter(name => !activePhysical.has(name.toLowerCase()) && candidatePhysical.has(name.toLowerCase()))
+            .filter((name, index, values) => values.findIndex(value => value.toLowerCase() === name.toLowerCase()) === index)
+            .map(name => candidatePhysical.get(name.toLowerCase()));
+        if (previousHidden.length > 0 || hiddenPhysicalColumns.length > 0)
+            sheet.sourceData.hiddenPhysicalColumns = hiddenPhysicalColumns;
+        else
+            delete sheet.sourceData.hiddenPhysicalColumns;
+        // 记下本次发生的显示名变更，使后续切换仍能顺着别名链认回同一列。
+        // 键取该列改名后的存活 physical：sqlite 物理列名跨改名稳定（沁用旧名），
+        // native 的 physical 就是新表头（旧表头键已死，挂在其下的别名会被 live 过滤丢弃）。
+        const renamedColumns = targetEntries
+            .map(target => {
+            const source = targetSourceByCanonical.get(target.canonical);
+            if (!source || source.canonical === target.canonical)
+                return null;
+            const physicalName = sqlite ? source.physical : target.physical;
+            return { physicalName, previousHeader: source.header, nextHeader: target.header };
+        })
+            .filter((entry) => !!entry);
+        accumulateColumnAliases_ACU(sheet, before, template, renamedColumns, new Set(candidatePhysical.keys()));
+        accumulateTableAliases_ACU(sheet, before, template);
+        delete sheet.seedRows;
+        const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
+        const beforeProjection = clone_ACU$7(before);
+        delete beforeProjection.seedRows;
+        const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
+        return { sheet, changed, meta, audit: { sheetKey, resolvedSheetKey: sheetKey, match: 'matched', baselineSheetKey: sheetKey, templateSheetKey, baselineName: before.name,
+                templateName: template.name, canonicalName: canonicalizeDisplayName_ACU(before.name), inheritedColumns, addedColumns, deletedColumns: droppedColumns, hiddenColumns,
+                physicalColumnMappings: mappings, fills: fillAudit,
+                affectedRowCount: before.content.length - 1, metadataChanged: !!meta, metadataChangedFields: meta ? Object.keys(meta) : [], destructiveChangeConfirmed: false, operations: [] } };
+    }
+    /**
+     * 把列定义的物理列名换成已存在的名字，保留类型、约束与 DEFAULT 不变。
+     * 只替换 normalizedDefinition 开头的标识符（解析保证它以列名起头），
+     * 不做全文替换，避免误伤 DEFAULT 字面量或约束中的同名片段。
+     */
+    function renamePhysicalColumn_ACU(column, nextSqlName) {
+        const definition = column.normalizedDefinition;
+        const remainder = definition.slice(column.sqlName.length);
+        if (!definition.startsWith(column.sqlName)) {
+            throw new Error(`无法重绑定物理列名：列定义未以列名起头（${column.sqlName}）。`);
+        }
+        return { ...column, sqlName: nextSqlName, normalizedDefinition: `${nextSqlName}${remainder}` };
+    }
+    /**
+     * 把模板自带数据行整形成当前目标结构：按目标列数对齐，为保留的隐藏列补 null，
+     * 并为缺失的 row_id 分配稳定值（模板作者通常不写 row_id，首列常为 null）。
+     * 行宽超过目标可见列时 fail-loud，不静默截断丢数据。
+     */
+    function adoptTemplateRowsForMatchedSheet_ACU(templateRows, visibleColumnCount, hiddenColumnCount) {
+        const rows = templateRows.map(row => {
+            const cells = (Array.isArray(row) ? row : [row])
+                .map(cell => (cell === null || cell === undefined ? null : String(cell)));
+            // cells[0] 是 row_id，其后是可见列。
+            const expected = visibleColumnCount + 1;
+            if (cells.length > expected) {
+                throw new Error(`模板数据行宽度为 ${cells.length}，超过目标可见列 ${expected} 列。`);
+            }
+            while (cells.length < expected)
+                cells.push(null);
+            // 隐藏列在新数据下无值。
+            for (let index = 0; index < hiddenColumnCount; index += 1)
+                cells.push(null);
+            return cells;
+        });
+        const reserved = createStableRowIdReservation_ACU(rows);
+        for (const row of rows) {
+            const rowId = row[0] === null ? '' : String(row[0]).trim();
+            row[0] = rowId || allocateStableRowId_ACU(reserved);
+        }
+        return rows;
+    }
+    /**
+     * 汇总旧表与模板声明的 columnAliases，得到 physical column name(lowercase) → canonical 历史显示名列表。
+     * 两侧都参与：模板作者可声明“新列对应哪个旧名”，旧表则携带历史累积的别名。
+     */
+    function buildColumnAliasIndex_ACU(before, template) {
+        const index = new Map();
+        const absorb = (sheet) => {
+            const raw = sheet.sourceData?.columnAliases;
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+                return;
+            for (const [physicalName, aliases] of Object.entries(raw)) {
+                const key = String(physicalName || '').trim().toLowerCase();
+                if (!key || !Array.isArray(aliases))
+                    continue;
+                const canonicals = aliases
+                    .map(alias => canonicalizeDisplayName_ACU(alias))
+                    .filter(Boolean);
+                if (canonicals.length === 0)
+                    continue;
+                index.set(key, [...(index.get(key) || []), ...canonicals]);
+            }
+        };
+        absorb(before);
+        absorb(template);
+        return index;
+    }
+    /**
+     * 累积列别名：已确认同一身份但显示名变了的列，把旧显示名记入该物理列的别名。
+     * 仅保留当前 DDL 中仍存在的物理列，避免别名无限膨胀。
+     */
+    function accumulateColumnAliases_ACU(sheet, before, template, renamed, livePhysicalNames) {
+        const merged = new Map();
+        const absorb = (source) => {
+            const raw = source.sourceData?.columnAliases;
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+                return;
+            for (const [physicalName, aliases] of Object.entries(raw)) {
+                const key = String(physicalName || '').trim();
+                if (!key || !Array.isArray(aliases))
+                    continue;
+                merged.set(key, [
+                    ...(merged.get(key) || []),
+                    ...aliases.map(alias => String(alias || '')).filter(Boolean),
+                ]);
+            }
+        };
+        absorb(before);
+        absorb(template);
+        for (const entry of renamed) {
+            merged.set(entry.physicalName, [
+                ...(merged.get(entry.physicalName) || []),
+                entry.previousHeader,
+                entry.nextHeader,
+            ]);
+        }
+        const normalized = {};
+        for (const [physicalName, aliases] of merged) {
+            if (!livePhysicalNames.has(physicalName.toLowerCase()))
+                continue;
+            // 保留该物理列用过的全部历史显示名（含变更前后两侧），别名链才不会在
+            // 「A→B 之后再 B→A」这类往复改名中断开。当前显示名一并留下是有意的：
+            // 它是下一次协调时 before 侧的名字，必须能被查到。
+            const unique = [...new Set(aliases.map(alias => alias.trim()).filter(Boolean))];
+            if (unique.length > 0)
+                normalized[physicalName] = unique;
+        }
+        if (Object.keys(normalized).length > 0)
+            sheet.sourceData.columnAliases = normalized;
+        else
+            delete sheet.sourceData.columnAliases;
+    }
+    function buildRetainedColumnDDL_ACU(before, template, targetColumns, targetHeaders, retainedColumns, retainedHeaders) {
+        const templateDDL = String(template.sourceData?.ddl || '');
+        const tableName = parseDDLTableName(templateDDL);
+        if (!tableName)
+            throw new Error('模板 DDL 缺少可解析的物理表名。');
+        const allColumns = [...targetColumns, ...retainedColumns];
+        const definitions = allColumns.map((column, index) => {
+            const header = index < targetColumns.length ? targetHeaders[index] : retainedHeaders[index - targetColumns.length];
+            const comment = header && header !== column.sqlName ? ` -- ${header}` : '';
+            return { definition: column.normalizedDefinition, comment };
+        });
+        const constraints = Array.from(new Set([
+            ...parseDDLTableConstraints_ACU(String(before.sourceData?.ddl || '')),
+            ...parseDDLTableConstraints_ACU(templateDDL),
+        ]));
+        const suffix = parseDDLTableSuffix_ACU(templateDDL);
+        const entries = [...definitions, ...constraints.map(definition => ({ definition, comment: '' }))];
+        return `CREATE TABLE ${tableName} (\n${entries.map((entry, index) => `  ${entry.definition}${index < entries.length - 1 ? ',' : ''}${entry.comment}`).join('\n')}\n)${suffix ? ` ${suffix}` : ''};`;
+    }
+    function buildPersistentMetadataUpdate_ACU(before, template) {
+        const beforeSourceData = clone_ACU$7(before.sourceData || {});
+        const targetSourceData = clone_ACU$7(template.sourceData || {});
+        delete beforeSourceData.ddl;
+        delete targetSourceData.ddl;
+        const removedSourceDataKeys = Object.keys(beforeSourceData).filter(key => !Object.prototype.hasOwnProperty.call(targetSourceData, key));
+        const sourceDataDelta = Object.fromEntries(Object.entries(targetSourceData).filter(([key, value]) => !sameValue_ACU(beforeSourceData[key], value)));
+        const meta = {};
+        if (before.name !== template.name)
+            meta.name = template.name;
+        if (before.orderNo !== template.orderNo)
+            meta.orderNo = template.orderNo;
+        if (Object.keys(sourceDataDelta).length > 0 || removedSourceDataKeys.length > 0)
+            meta.sourceData = clone_ACU$7(targetSourceData);
+        if (!sameValue_ACU(before.updateConfig, template.updateConfig))
+            meta.updateConfig = clone_ACU$7(template.updateConfig);
+        if (!sameValue_ACU(before.exportConfig, template.exportConfig))
+            meta.exportConfig = clone_ACU$7(template.exportConfig);
+        return Object.keys(meta).length > 0 ? meta : undefined;
+    }
+    function sameValue_ACU(left, right) {
+        return JSON.stringify(left) === JSON.stringify(right);
+    }
+    function literalToCellValue_ACU(literal) {
+        if (literal.kind === 'null')
+            return null;
+        if (literal.kind === 'boolean')
+            return literal.value ? '1' : '0';
+        return String(literal.value);
+    }
+
     function assertTemplateCommitChatContext_ACU(expectedChat, options) {
         if (options.signal?.aborted)
             throw new Error('模板提交已取消。');
@@ -44101,7 +45551,7 @@ $CONTENT
             singleOperationRatio: singleOperationRatioPercent / 100,
         };
     }
-    function deepClone_ACU$1(value) {
+    function deepClone_ACU$3(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function generateEntryId_ACU() {
@@ -44218,7 +45668,7 @@ $CONTENT
         });
     }
     function projectReplayComparableData_ACU(data) {
-        const projected = deepClone_ACU$1(data);
+        const projected = deepClone_ACU$3(data);
         for (const [key, value] of Object.entries(projected)) {
             if (!key.startsWith('sheet_') || !isObjectRecord_ACU$2(value))
                 continue;
@@ -44335,7 +45785,7 @@ $CONTENT
         return details;
     }
     async function verifyTemporaryBaselineUpgrade_ACU(replayData, operations, afterData) {
-        const expected = deepClone_ACU$1(replayData);
+        const expected = deepClone_ACU$3(replayData);
         for (const operation of operations)
             await applyTableOperationV2_ACU(expected, operation);
         return getTableDataFingerprint_ACU(projectReplayComparableData_ACU(expected))
@@ -44432,7 +45882,7 @@ $CONTENT
                 return { error: `V2 收敛锚点缺少目标表 ${repair.sheetKey} 的模板数据，已拒绝自动收敛。` };
             }
             const sheetData = sheet;
-            bySheetKey.set(repair.sheetKey, deepClone_ACU$1(sheetData));
+            bySheetKey.set(repair.sheetKey, deepClone_ACU$3(sheetData));
         }
         return { bySheetKey };
     }
@@ -44551,6 +46001,34 @@ $CONTENT
             return `#${index}(${checkpoint?.reason ?? 'unknown'})`;
         }).join('、');
         return `V2 ${context} 违反单根不变量：同一隔离键下存在 ${indices.length} 个 full checkpoint（${detail}），回放只认最后一个，多余基线会使之前增量失效。`;
+    }
+    /**
+     * S2-4：初始化（reason:'init'）full checkpoint 的统一写入口。
+     *
+     * 之前 template-state-reset 在调用方手工拼装 storageFrame 直接赋给消息，
+     * frame 协议散落且没有单根断言。此入口把「frame 拼装 + 单根不变量校验」收敛到
+     * persist 层：写入后若同一隔离键下存在多个 full checkpoint，立即抛错（调用方
+     * 的事务快照回滚会撤销本次赋值），不允许半写状态落盘。
+     *
+     * 注意：只负责写 frame，不改 TavernDB_ACU_Identity、不保存聊天——这些仍由
+     * 调用方在其事务语义内完成。目标楼同一消息上其他隔离键的数据原样保留。
+     */
+    function writeInitFullCheckpointFrameV2_ACU(options) {
+        const { chat, targetIndex, isolationKey, checkpoint } = options;
+        const target = Array.isArray(chat) ? chat[targetIndex] : undefined;
+        if (!target || target.is_user) {
+            throw new Error(`初始化 checkpoint 写入目标无效：楼层 #${targetIndex} 不存在或不是 AI 楼层。`);
+        }
+        if (checkpoint?.kind !== 'full' || checkpoint.reason !== 'init') {
+            throw new Error(`初始化 checkpoint 写入口只接受 reason:'init' 的 full checkpoint（收到 kind=${checkpoint?.kind}, reason=${checkpoint?.reason}）。`);
+        }
+        target.TavernDB_ACU_IsolatedData = {
+            ...(target.TavernDB_ACU_IsolatedData || {}),
+            [isolationKey]: { _acu_storage_version: 2, storageFrame: { version: 2, checkpoint, logEntries: [] } },
+        };
+        const violation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'init_reset');
+        if (violation)
+            throw new Error(violation);
     }
     function findLatestFullCheckpoint_ACU(chat, isolationKey) {
         if (!Array.isArray(chat) || chat.length === 0)
@@ -44690,29 +46168,29 @@ $CONTENT
     }
     function clonePersistAfterData_ACU(options, requiresFullSnapshot) {
         if (requiresFullSnapshot)
-            return deepClone_ACU$1(options.afterData);
+            return deepClone_ACU$3(options.afterData);
         const sheetKeys = collectScopedAfterDataSheetKeys_ACU(options);
         if (sheetKeys === null)
-            return deepClone_ACU$1(options.afterData);
+            return deepClone_ACU$3(options.afterData);
         const projected = {};
         if (Object.prototype.hasOwnProperty.call(options.afterData, 'mate')) {
-            projected.mate = deepClone_ACU$1(options.afterData.mate);
+            projected.mate = deepClone_ACU$3(options.afterData.mate);
         }
         sheetKeys.forEach(sheetKey => {
             if (Object.prototype.hasOwnProperty.call(options.afterData, sheetKey)) {
-                projected[sheetKey] = deepClone_ACU$1(options.afterData[sheetKey]);
+                projected[sheetKey] = deepClone_ACU$3(options.afterData[sheetKey]);
             }
         });
         return projected;
     }
     function normalizeOperations_ACU(operations, afterData, source, allowImportDataReplaceFallback) {
         if (Array.isArray(operations) && operations.length > 0) {
-            return deepClone_ACU$1(operations);
+            return deepClone_ACU$3(operations);
         }
         if (source === 'import' && allowImportDataReplaceFallback) {
             return [{
                     kind: 'data_replace',
-                    data: deepClone_ACU$1(afterData),
+                    data: deepClone_ACU$3(afterData),
                     reason: 'import',
                 }];
         }
@@ -44929,7 +46407,7 @@ $CONTENT
     function classifyTemplateCommitStorageStateAfterDeletedSheets_ACU(chat, isolationKey, deletedSheetKeys) {
         if (deletedSheetKeys.length === 0)
             return classifyTemplateCommitStorageState_ACU(chat, isolationKey);
-        const simulatedChat = deepClone_ACU$1(chat);
+        const simulatedChat = deepClone_ACU$3(chat);
         for (const message of simulatedChat) {
             if (message && !message.is_user)
                 purgeSheetKeysFromMessage_ACU(message, deletedSheetKeys);
@@ -45017,9 +46495,9 @@ $CONTENT
                     return { ok: false, demoted: false, reason: 'template_only_root 帧结构异常，拒绝降级，零写入。' };
                 }
                 const sourceFrame = tagData.storageFrame;
-                const backupFrame = deepClone_ACU$1(sourceFrame);
+                const backupFrame = deepClone_ACU$3(sourceFrame);
                 // 构造候选聊天：移除该 frame 的 checkpoint / perSheetCheckpoints / headRevision。
-                const candidateChat = deepClone_ACU$1(chat);
+                const candidateChat = deepClone_ACU$3(chat);
                 const candidateContainer = readIsolatedDataContainer_ACU(candidateChat[rootIndex]) || {};
                 // 写 recoveryBackup 必须放在「整条移除」判空之前：正常路径 frame 降级为
                 // {version:2, logEntries:[]} 标准空帧（tagData 保留，backup 随 tagData 落盘）；
@@ -45575,7 +47053,7 @@ $CONTENT
             if (isObjectRecord_ACU$2(timeline) && timeline.kind === 'sheet_hide' && isObjectRecord_ACU$2(data)) {
                 return {
                     status: 'resolved',
-                    sheetData: deepClone_ACU$1(data),
+                    sheetData: deepClone_ACU$3(data),
                     sourceKind: 'current_sheet_checkpoint',
                     messageIndex: maxMessageIndex,
                 };
@@ -45605,7 +47083,7 @@ $CONTENT
                 if (isObjectRecord_ACU$2(candidate)) {
                     return {
                         status: 'resolved',
-                        sheetData: deepClone_ACU$1(candidate),
+                        sheetData: deepClone_ACU$3(candidate),
                         sourceKind: 'bounded_replay',
                         messageIndex: boundary,
                     };
@@ -45618,7 +47096,7 @@ $CONTENT
             if (isObjectRecord_ACU$2(checkpointData)) {
                 return {
                     status: 'resolved',
-                    sheetData: deepClone_ACU$1(checkpointData),
+                    sheetData: deepClone_ACU$3(checkpointData),
                     sourceKind: 'current_sheet_checkpoint',
                     messageIndex: maxMessageIndex,
                 };
@@ -45823,7 +47301,7 @@ $CONTENT
         }
         const targetExistingTagData = cloneIsolatedData_ACU(target.message)?.[isolationKey];
         const targetExistingFrame = isV2TagData_ACU(targetExistingTagData)
-            ? deepClone_ACU$1(targetExistingTagData.storageFrame)
+            ? deepClone_ACU$3(targetExistingTagData.storageFrame)
             : null;
         const isolatedData = cloneIsolatedData_ACU(target.message);
         const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
@@ -45854,7 +47332,7 @@ $CONTENT
             logWarn_ACU(`[V2 Persist] 单一保留边界 checkpoint 策略已忽略非初次 forceCheckpoint：reason=${options.checkpointReason || 'unspecified'}, source=${options.source}`);
         }
         if (options.manualRefillProgress) {
-            frame.manualRefillProgress = deepClone_ACU$1(options.manualRefillProgress);
+            frame.manualRefillProgress = deepClone_ACU$3(options.manualRefillProgress);
         }
         const shouldAppendLogEntry = operations.length > 0 || hasMetadataOnlyFillEvent;
         const now = Date.now();
@@ -45987,9 +47465,9 @@ $CONTENT
                         // 锚点只提供表结构，必须裁成 header-only：
                         // 本次增量会自行写入数据行，若锚点带上同样的行，回放时会主键冲突
                         // （UNIQUE constraint failed）。
-                        const anchorSheet = deepClone_ACU$1(afterData[sheetKey]);
+                        const anchorSheet = deepClone_ACU$3(afterData[sheetKey]);
                         if (Array.isArray(anchorSheet?.content) && anchorSheet.content.length > 0) {
-                            anchorSheet.content = [deepClone_ACU$1(anchorSheet.content[0])];
+                            anchorSheet.content = [deepClone_ACU$3(anchorSheet.content[0])];
                         }
                         const sheetCheckpointResult = buildCanonicalSheetCheckpoint_ACU({
                             createdAt: now,
@@ -46224,12 +47702,12 @@ $CONTENT
             if (!existing) {
                 targetByIndex.set(targetIndex, {
                     targetMessageIndex: targetIndex,
-                    operations: deepClone_ACU$1(target.operations),
+                    operations: deepClone_ACU$3(target.operations),
                     changedSheetKeys: normalizedKeys,
                 });
                 continue;
             }
-            existing.operations.push(...deepClone_ACU$1(target.operations));
+            existing.operations.push(...deepClone_ACU$3(target.operations));
             existing.changedSheetKeys = [...new Set([...existing.changedSheetKeys, ...normalizedKeys])].sort();
         }
         return targetByIndex;
@@ -46276,7 +47754,7 @@ $CONTENT
             const message = error instanceof Error ? error.message : String(error);
             return { saved: false, error: `V2 batch 写入前无法验证 provisional replay：${message}` };
         }
-        const candidateChat = deepClone_ACU$1(chat);
+        const candidateChat = deepClone_ACU$3(chat);
         for (const [targetIndex, target] of targetByIndex) {
             const message = candidateChat[targetIndex];
             let isolatedData = cloneIsolatedData_ACU(message);
@@ -46305,7 +47783,7 @@ $CONTENT
                     return { saved: false, error: rootWrite.error };
                 }
                 // recoveryBackup 必须备份收敛前的原始帧（不含锚点），证据不掺入本次修改。
-                const previousFrame = deepClone_ACU$1(frame);
+                const previousFrame = deepClone_ACU$3(frame);
                 rootMessage.TavernDB_ACU_IsolatedData = rootIsolatedData;
                 if (latestCheckpoint.index === targetIndex) {
                     // 根帧就是当前目标：锚点与本次 log entry 必须落在同一 isolatedData 拷贝上，
@@ -46338,7 +47816,7 @@ $CONTENT
                 groupKeys: [],
                 requestId: options.requestId,
                 batchId: options.batchId,
-                operations: deepClone_ACU$1(target.operations),
+                operations: deepClone_ACU$3(target.operations),
                 baseRevision: options.transactionContext?.baseRevision ?? parentRevision,
                 parentRevision,
                 commitRevision: buildCommitRevision_ACU(nextSeq, entryId),
@@ -46413,7 +47891,7 @@ $CONTENT
         const validation = validateSheetCheckpointInput_ACU(options);
         if ('error' in validation)
             return { saved: false, error: validation.error };
-        const normalizedSheetData = deepClone_ACU$1(options.sheetData);
+        const normalizedSheetData = deepClone_ACU$3(options.sheetData);
         const normalization = normalizeCanonicalTableRows_ACU({ [options.sheetKey]: normalizedSheetData });
         if (normalization.errors.length > 0) {
             return { saved: false, error: `V2 sheet checkpoint 行标识不合法：${formatCanonicalRowIssues_ACU(normalization.errors)}` };
@@ -46557,7 +48035,7 @@ $CONTENT
                     if (!isObjectRecord_ACU$2(sourceSheet)) {
                         return { status: 'skipped_invalid_data', error: `null-row cleanup requires object sheetData: ${sheetKey}.` };
                     }
-                    const sheetData = deepClone_ACU$1(sourceSheet);
+                    const sheetData = deepClone_ACU$3(sourceSheet);
                     const normalization = normalizeCanonicalTableRows_ACU({ [sheetKey]: sheetData });
                     if (normalization.errors.length > 0) {
                         return { status: 'skipped_invalid_data', error: `null-row cleanup sheet 行标识不合法：${formatCanonicalRowIssues_ACU(normalization.errors)}` };
@@ -46594,7 +48072,7 @@ $CONTENT
                         reason: 'integrity_repair',
                         sheetKey,
                         data: normalizedSheets.get(sheetKey),
-                        ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$1(scheduleSummary) } : {}),
+                        ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$3(scheduleSummary) } : {}),
                         event: { filledSheetKeys: [], changedSheetKeys: [sheetKey] },
                         baseRevision: transactionContext.baseRevision,
                     });
@@ -46781,7 +48259,7 @@ $CONTENT
         if (sheetKeys.length === 0) {
             throw new Error('V2 首次模板提交的 templateSource 不包含任何 Sheet。');
         }
-        const normalizedGuideData = normalizeGuideData_ACU(deepClone_ACU$1(guideData));
+        const normalizedGuideData = normalizeGuideData_ACU(deepClone_ACU$3(guideData));
         if (!normalizedGuideData) {
             throw new Error('V2 首次模板提交的 guideData 无法规范化。');
         }
@@ -46993,7 +48471,7 @@ $CONTENT
                     if (!isObjectRecord_ACU$2(options.templateSource)) {
                         throw new Error('预填表模板提交必须提供完整有效的 templateSource。');
                     }
-                    const templateSnapshot = deepClone_ACU$1(options.templateSource);
+                    const templateSnapshot = deepClone_ACU$3(options.templateSource);
                     // 这条分支不做增量删除：checkpoint 完全由 templateSource 重建，且此时没有任何
                     // 历史楼层数据需要回溯清理。因此删除只要求「被删表确实已不在新快照里」，
                     // 快照仍保留该表说明调用方状态不一致，必须拒绝而不是静默放行。
@@ -47012,7 +48490,7 @@ $CONTENT
                         if (!isObjectRecord_ACU$2(snapshotSheet) || !Array.isArray(snapshotSheet.content)) {
                             throw new Error(`预填表模板提交的 templateSource 缺少变更 Sheet：${change.sheetKey}。`);
                         }
-                        const expectedSheet = deepClone_ACU$1(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
+                        const expectedSheet = deepClone_ACU$3(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
                         const expectedNormalization = normalizeCanonicalTableRows_ACU({ [change.sheetKey]: expectedSheet });
                         if (expectedNormalization.errors.length > 0) {
                             throw new Error(`预填表模板提交目标 Sheet 行标识不合法：${formatCanonicalRowIssues_ACU(expectedNormalization.errors)}`);
@@ -47032,11 +48510,11 @@ $CONTENT
                     const previousGuideContainer = cloneOptionalJson_ACU(peekChatSheetGuideContainer_ACU(chat));
                     const messageSnapshots = snapshotTemplateDeleteMessages_ACU(chat, true);
                     try {
-                        const checkpointData = deepClone_ACU$1(templateSnapshot);
+                        const checkpointData = deepClone_ACU$3(templateSnapshot);
                         const checkpointSheets = Object.keys(checkpointData).filter(key => key.startsWith('sheet_')).sort();
                         for (const sheetKey of checkpointSheets) {
                             const sheet = checkpointData[sheetKey];
-                            sheet.content = [deepClone_ACU$1(sheet.content[0])];
+                            sheet.content = [deepClone_ACU$3(sheet.content[0])];
                         }
                         const checkpointResult = buildCanonicalFullCheckpoint_ACU({
                             createdAt,
@@ -47129,7 +48607,7 @@ $CONTENT
                             hideSheetKeys.add(change.sheetKey);
                             continue;
                         }
-                        const targetSheetData = deepClone_ACU$1(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
+                        const targetSheetData = deepClone_ACU$3(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
                         // introduction 允许两种形态：header-only 空壳（首次填表前可改结构），
                         // 或模板自带数据的整表（作者已定义初始格式，引入时即落盘）。
                         if (change.kind === 'introduction' && !Array.isArray(targetSheetData.content?.[0])) {
@@ -47181,7 +48659,7 @@ $CONTENT
                     for (const change of requestedChanges.filter(item => item.kind === 'introduction')) {
                         const checkpoint = frame.perSheetCheckpoints?.[change.sheetKey];
                         if (checkpoint !== undefined)
-                            revealCheckpointSources.set(change.sheetKey, deepClone_ACU$1(checkpoint));
+                            revealCheckpointSources.set(change.sheetKey, deepClone_ACU$3(checkpoint));
                     }
                     if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
                         if (!activeReplay.compatibilityRepairs?.length
@@ -47202,7 +48680,7 @@ $CONTENT
                         // 同一隔离键同一时刻只有一个 full checkpoint：convergence 只在既有 full 根帧
                         // 写 per-sheet 锚点（untimed），绝不第二个 full，否则回放根被抢占。
                         // recoveryBackup 必须备份收敛前的原始帧（不含锚点），证据不掺入本次修改。
-                        const previousFrame = deepClone_ACU$1(frame);
+                        const previousFrame = deepClone_ACU$3(frame);
                         const rootIsolatedData = latestFullCheckpoint.index === target.index
                             ? isolatedData
                             : cloneIsolatedData_ACU(chat[latestFullCheckpoint.index]);
@@ -47307,7 +48785,7 @@ $CONTENT
                             reason: 'schema_change',
                             sheetKey: change.sheetKey,
                             data: introductionSheets.get(change.sheetKey),
-                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$1(scheduleSummary) } : {}),
+                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$3(scheduleSummary) } : {}),
                             event: { filledSheetKeys: [], changedSheetKeys: [change.sheetKey] },
                             timeline: {
                                 kind: 'sheet_introduction',
@@ -47349,14 +48827,28 @@ $CONTENT
                         if (existingCheckpoint && Number(existingCheckpoint.createdAt) > createdAt) {
                             throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
                         }
+                        // reveal 后列级再协调（S1-4）：恢复的是"离开时最新状态"，休眠期间模板可能已演进
+                        // （加列/减列/改名）。落盘前把恢复数据 rebase 到当前模板列集——匹配列继承数据、
+                        // 新列按契约填充、模板缺失列进尾部隐藏列（列级休眠，数据不删）。
+                        // not_found 回退时 revealData 就是模板结构本身（同一对象引用），无需再协调。
+                        const revealTemplateStructure = revealSheets.get(sheetKey) ?? introductionSheets.get(sheetKey);
+                        let effectiveRevealData = revealData;
+                        if (revealTemplateStructure && revealTemplateStructure !== revealData) {
+                            const rebase = reconcileRevealedSheetWithTemplate_ACU(revealData, revealTemplateStructure, sheetKey, storageMode);
+                            effectiveRevealData = rebase.sheet;
+                            // 与其他 targetSheetData 同一关卡：协调结果必须能构造合法 hydrate 映射。
+                            if (storageMode === 'sqlite')
+                                createSheetInsertPlan(effectiveRevealData);
+                            logDebug_ACU(`[V2 Persist] reveal_rebase: requestId=${options.requestId || 'unknown'}, sheetKey=${sheetKey}, inherited=${rebase.audit.inheritedColumns.length}, added=${rebase.audit.addedColumns.length}, hidden=${rebase.audit.hiddenColumns.length}, changed=${rebase.changed}。`);
+                        }
                         const scheduleSummary = scheduleSummaryBySheet[sheetKey];
                         checkpoints.push({
                             kind: 'sheet_full',
                             createdAt,
                             reason: 'schema_change',
                             sheetKey,
-                            data: revealData,
-                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$1(scheduleSummary) } : {}),
+                            data: effectiveRevealData,
+                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$3(scheduleSummary) } : {}),
                             event: { filledSheetKeys: [], changedSheetKeys: [sheetKey] },
                             timeline: {
                                 kind: 'sheet_reveal',
@@ -47384,7 +48876,7 @@ $CONTENT
                             reason: 'schema_change',
                             sheetKey: change.sheetKey,
                             data: rebaseSheets.get(change.sheetKey),
-                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$1(scheduleSummary) } : {}),
+                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$3(scheduleSummary) } : {}),
                             event: { filledSheetKeys: [], changedSheetKeys: [change.sheetKey] },
                             timeline: {
                                 kind: 'sheet_rebase',
@@ -47407,7 +48899,7 @@ $CONTENT
                         if (isObjectRecord_ACU$2(activeSheetData)) {
                             hideSource = {
                                 status: 'resolved',
-                                sheetData: deepClone_ACU$1(activeSheetData),
+                                sheetData: deepClone_ACU$3(activeSheetData),
                                 sourceKind: 'bounded_replay',
                                 messageIndex: target.index,
                             };
@@ -47427,13 +48919,19 @@ $CONTENT
                             throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
                         }
                         const scheduleSummary = scheduleSummaryBySheet[sheetKey];
+                        const hideSourcePresetName = typeof options.hideSourcePresetName === 'string' && options.hideSourcePresetName.trim().length > 0
+                            ? options.hideSourcePresetName
+                            : undefined;
                         checkpoints.push({
                             kind: 'sheet_full',
                             createdAt,
                             reason: 'schema_change',
                             sheetKey,
                             data: hideSource.sheetData,
-                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$1(scheduleSummary) } : {}),
+                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$3(scheduleSummary) } : {}),
+                            // S3-4 休眠溯源：记录休眠前活跃的预设名，供生命周期投影展示「来源模板」。
+                            // 可选附加字段，checkpoint 校验与回放对未知字段宽容，历史数据缺失时展示层回退「未记录」。
+                            ...(hideSourcePresetName ? { hideSourcePresetName } : {}),
                             event: { filledSheetKeys: [], changedSheetKeys: [sheetKey] },
                             timeline: {
                                 kind: 'sheet_hide',
@@ -47449,7 +48947,7 @@ $CONTENT
                         });
                     }
                     const operationChanges = requestedChanges.filter((change) => change.kind === 'operations');
-                    const operations = operationChanges.flatMap(change => change.operations.map(operation => deepClone_ACU$1(operation)));
+                    const operations = operationChanges.flatMap(change => change.operations.map(operation => deepClone_ACU$3(operation)));
                     const entryOptions = operations.length === 0 ? undefined : (() => {
                         const seq = targetFrameLastLogSeq + 1;
                         const parentRevision = frame.headRevision ?? null;
@@ -47475,8 +48973,8 @@ $CONTENT
                         // data_replace 是完整历史状态，不能靠从旧 payload 局部删除 key 来伪造历史。
                         // 最新楼层改写为删除后的完整 checkpoint，使更早的整库替换不再参与当前 replay。
                         const terminalData = isObjectRecord_ACU$2(options.templateSource)
-                            ? deepClone_ACU$1(options.templateSource)
-                            : deepClone_ACU$1(activeReplayState);
+                            ? deepClone_ACU$3(options.templateSource)
+                            : deepClone_ACU$3(activeReplayState);
                         deletedSheetKeys.forEach(sheetKey => delete terminalData[sheetKey]);
                         const terminalScheduleSummary = Object.fromEntries(Object.entries(scheduleSummaryBySheet).filter(([sheetKey]) => !deletedSheetKeys.includes(sheetKey)));
                         const terminalCheckpoint = buildCanonicalFullCheckpoint_ACU({
@@ -47502,7 +49000,7 @@ $CONTENT
                         frame.headRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
                         persistedCheckpoints = [];
                         hardDeleteCheckpointCreated = true;
-                        const candidateChat = deepClone_ACU$1(chat);
+                        const candidateChat = deepClone_ACU$3(chat);
                         for (const message of candidateChat) {
                             if (message && !message.is_user)
                                 purgeSheetKeysFromMessage_ACU(message, deletedSheetKeys);
@@ -47608,7 +49106,7 @@ $CONTENT
         'isolated_independent', 'isolated_incremental', 'isolated_tracking_only',
         'top_level_independent', 'top_level_standard', 'top_level_summary', 'top_level_tracking_only',
     ];
-    function clone_ACU$7(value) { return JSON.parse(JSON.stringify(value)); }
+    function clone_ACU$6(value) { return JSON.parse(JSON.stringify(value)); }
     function sortedUnique_ACU(values) {
         return [...new Set(values.filter((value) => typeof value === 'string' && value.startsWith('sheet_')))].sort((a, b) => a.localeCompare(b));
     }
@@ -47837,9 +49335,9 @@ $CONTENT
                     replay = detailed ? {
                         status: 'success',
                         fingerprint: getTableDataFingerprint_ACU(detailed.data),
-                        data: clone_ACU$7(detailed.data),
+                        data: clone_ACU$6(detailed.data),
                         ...(detailed.requiresCheckpointConvergence ? { requiresCheckpointConvergence: true } : {}),
-                        ...(detailed.compatibilityRepairs?.length ? { compatibilityRepairs: clone_ACU$7(detailed.compatibilityRepairs) } : {}),
+                        ...(detailed.compatibilityRepairs?.length ? { compatibilityRepairs: clone_ACU$6(detailed.compatibilityRepairs) } : {}),
                     } : { status: 'unavailable', fingerprint: null };
             }
             catch (error) {
@@ -47851,7 +49349,7 @@ $CONTENT
             ? { present: false }
             : {
                 present: true,
-                value: clone_ACU$7(rawProvenance),
+                value: clone_ACU$6(rawProvenance),
                 validation: validateMigrationProvenanceV1_ACU(rawProvenance),
                 targetMatchesAnchor: rawProvenance.targetMessageIndex === anchor.messageIndex && rawProvenance.targetAiFloor === anchor.aiFloor,
                 isolationKeyMatches: rawProvenance.isolationKey === options.isolationKey,
@@ -48064,7 +49562,7 @@ $CONTENT
         };
     }
 
-    function clone_ACU$6(value) { return JSON.parse(JSON.stringify(value)); }
+    function clone_ACU$5(value) { return JSON.parse(JSON.stringify(value)); }
     function scopeError_ACU(decision) {
         if (getChatArray_ACU() !== decision.scopeSnapshot.chatReference)
             return 'active chat reference changed';
@@ -48131,7 +49629,7 @@ $CONTENT
             const existingEntries = Array.isArray(frame.logEntries) ? frame.logEntries : [];
             const finiteSeqs = existingEntries.map((entry) => Number(entry?.seq)).filter(Number.isFinite);
             const seq = Math.min(0, (finiteSeqs.length > 0 ? Math.min(...finiteSeqs) : 1) - 1);
-            const fallbackData = clone_ACU$6(checkpoint.data || {});
+            const fallbackData = clone_ACU$5(checkpoint.data || {});
             const sheetCheckpoints = frame.perSheetCheckpoints;
             if (sheetCheckpoints && typeof sheetCheckpoints === 'object' && !Array.isArray(sheetCheckpoints)) {
                 for (const [sheetKey, sheetCheckpoint] of Object.entries(sheetCheckpoints)) {
@@ -48143,7 +49641,7 @@ $CONTENT
                         || typeof sheetCheckpoint.data !== 'object'
                         || Array.isArray(sheetCheckpoint.data))
                         continue;
-                    fallbackData[sheetKey] = clone_ACU$6(sheetCheckpoint.data);
+                    fallbackData[sheetKey] = clone_ACU$5(sheetCheckpoint.data);
                 }
             }
             const sheetKeys = Object.keys(fallbackData).filter(key => key.startsWith('sheet_'));
@@ -48205,7 +49703,7 @@ $CONTENT
     function buildDecisionBackup_ACU(decision, action, createdAt) {
         return {
             version: 1, createdAt, action,
-            legacyData: clone_ACU$6(decision.legacyAudit.sourceData),
+            legacyData: clone_ACU$5(decision.legacyAudit.sourceData),
             legacyFingerprint: decision.legacyFingerprint,
             v2Fingerprint: decision.v2Fingerprint,
             sourceMessageIndices: [...decision.evidence.legacy.sourceMessageIndices],
@@ -48241,7 +49739,7 @@ $CONTENT
         catch (error) {
             return commitFailure_ACU(decision, `unable to revalidate mixed storage evidence: ${error instanceof Error ? error.message : String(error)}`);
         }
-        const candidateChat = clone_ACU$6(chat);
+        const candidateChat = clone_ACU$5(chat);
         const isolationKey = decision.scopeSnapshot.activeIsolationKey;
         const originalV2 = v2Projection_ACU(candidateChat, isolationKey);
         const createdAt = Date.now();
@@ -48251,7 +49749,7 @@ $CONTENT
             return commitFailure_ACU(decision, 'verified V2 anchor is unavailable for decision backup');
         }
         if (action === 'commit_merge_candidate') {
-            const candidateData = clone_ACU$6(decision.frozenMergeCandidate);
+            const candidateData = clone_ACU$5(decision.frozenMergeCandidate);
             if (auditTableDataForUpgrade_ACU(candidateData).status !== 'clean') {
                 return commitFailure_ACU(decision, 'frozen merge candidate no longer satisfies the canonical audit');
             }
@@ -48266,7 +49764,7 @@ $CONTENT
                 legacyDataFingerprint: getTableDataFingerprint_ACU(candidateData),
                 legacySourceMessageIndices: [...decision.evidence.legacy.sourceMessageIndices],
                 legacySourceAiFloors: [...decision.evidence.legacy.sourceAiFloors],
-                legacyLastChangedAiFloorBySheet: clone_ACU$6(decision.evidence.legacy.lastChangedAiFloorBySheet),
+                legacyLastChangedAiFloorBySheet: clone_ACU$5(decision.evidence.legacy.lastChangedAiFloorBySheet),
                 targetMessageIndex: targetIndex,
                 targetAiFloor: aiFloor_ACU(candidateChat, targetIndex),
                 isolationKey,
@@ -48310,7 +49808,7 @@ $CONTENT
         const finalScopeError = scopeError_ACU(decision);
         if (finalScopeError)
             return commitFailure_ACU(decision, finalScopeError);
-        const originalChat = clone_ACU$6(chat);
+        const originalChat = clone_ACU$5(chat);
         chat.splice(0, chat.length, ...candidateChat);
         try {
             await saveChatToHostStrict_ACU();
@@ -48341,7 +49839,7 @@ $CONTENT
     }
 
     let decisionSequence_ACU = 0;
-    function clone_ACU$5(value) {
+    function clone_ACU$4(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function deepFreeze_ACU$2(value) {
@@ -48401,7 +49899,7 @@ $CONTENT
             if (v2Row && stableJson_ACU(v2Row) !== stableJson_ACU(legacyRow))
                 return false;
             if (!v2Row)
-                v2Rows.push(clone_ACU$5(legacyRow));
+                v2Rows.push(clone_ACU$4(legacyRow));
         }
         return true;
     }
@@ -48416,7 +49914,7 @@ $CONTENT
         const v2Keys = sheetKeys_ACU(replayedV2Data);
         if (stableJson_ACU(legacyKeys) !== stableJson_ACU(v2Keys))
             return null;
-        const candidate = clone_ACU$5(replayedV2Data);
+        const candidate = clone_ACU$4(replayedV2Data);
         for (const sheetKey of legacyKeys) {
             const legacySheet = legacyData[sheetKey];
             const v2Sheet = candidate[sheetKey];
@@ -48469,7 +49967,7 @@ $CONTENT
         const migrations = resolveHistoricalSheetKeyMigrations_ACU(data, replayedData);
         if (migrations.size === 0)
             return { data, migrations };
-        const normalized = clone_ACU$5(data);
+        const normalized = clone_ACU$4(data);
         for (const [sourceKey, targetKey] of migrations) {
             normalized[targetKey] = normalized[sourceKey];
             const targetSheet = normalized[targetKey];
@@ -48587,18 +50085,18 @@ $CONTENT
             decisionId: `mixed:${createdAt.toString(36)}:${decisionSequence_ACU.toString(36)}`,
             createdAt,
             scopeSnapshot: freezeScopeSnapshot_ACU(scopeSnapshot),
-            evidence: clone_ACU$5(evidence),
-            legacyAudit: clone_ACU$5(legacyAudit),
-            legacyRepair: clone_ACU$5(legacyRepair),
+            evidence: clone_ACU$4(evidence),
+            legacyAudit: clone_ACU$4(legacyAudit),
+            legacyRepair: clone_ACU$4(legacyRepair),
             legacyFingerprint: evidence.legacy.candidateFingerprint,
             v2Fingerprint: evidence.v2.replay.fingerprint,
             diagnosticCodes: [...new Set(diagnostics)],
             allowedActions: actionsFor_ACU(kind),
-            ...(frozenMergeCandidate ? { frozenMergeCandidate: clone_ACU$5(frozenMergeCandidate) } : {}),
+            ...(frozenMergeCandidate ? { frozenMergeCandidate: clone_ACU$4(frozenMergeCandidate) } : {}),
         });
     }
 
-    function deepClone_ACU(value) {
+    function deepClone_ACU$2(value) {
         return JSON.parse(JSON.stringify(value));
     }
     function sheetKeysOfData_ACU(data) {
@@ -48957,7 +50455,7 @@ $CONTENT
         const migrations = resolveHistoricalSheetKeyMigrations_ACU(data, replayedV2Data);
         if (migrations.size === 0)
             return { data, migrations };
-        const normalized = deepClone_ACU(data);
+        const normalized = deepClone_ACU$2(data);
         for (const [sourceKey, targetKey] of migrations) {
             normalized[targetKey] = normalized[sourceKey];
             const targetSheet = normalized[targetKey];
@@ -48990,8 +50488,8 @@ $CONTENT
             // 无 storageFrame（仅版本标记残留）时归档整个 tagData，保证可还原；
             // 有 storageFrame 时归档 frame 原样深拷贝，不做任何结构修正。
             const storageFrame = tagData?.storageFrame === undefined
-                ? deepClone_ACU(tagData)
-                : deepClone_ACU(tagData?.storageFrame);
+                ? deepClone_ACU$2(tagData)
+                : deepClone_ACU$2(tagData?.storageFrame);
             result.push({
                 messageIndex,
                 isolationKey,
@@ -49155,7 +50653,7 @@ $CONTENT
                     const v2IsNewerDirection = replayUsable && anchorIndex !== null
                         && (provenanceVerified || latestLegacySourceIndex === undefined || anchorIndex > latestLegacySourceIndex);
                     if (v2IsNewerDirection) {
-                        const keepV2Chat = deepClone_ACU(chat);
+                        const keepV2Chat = deepClone_ACU$2(chat);
                         const anchorMessage = keepV2Chat[anchorIndex];
                         const anchorIsolated = cloneIsolatedData_ACU(anchorMessage);
                         const anchorTagData = readIsolatedTagData_ACU(anchorMessage, options.isolationKey);
@@ -49165,7 +50663,7 @@ $CONTENT
                                 version: 1,
                                 createdAt: Date.now(),
                                 action: 'keep_v2',
-                                legacyData: deepClone_ACU(audit.sourceData),
+                                legacyData: deepClone_ACU$2(audit.sourceData),
                                 legacyFingerprint: mixedDecision.legacyFingerprint,
                                 v2Fingerprint: mixedDecision.v2Fingerprint,
                                 sourceMessageIndices: [...mixedDecision.evidence.legacy.sourceMessageIndices],
@@ -49179,7 +50677,7 @@ $CONTENT
                         const keepV2ScopeError = getLegacyMigrationScopeChangeError_ACU(scopeSnapshot);
                         if (keepV2ScopeError)
                             return { migrated: false, mixedDecision, error: keepV2ScopeError };
-                        const chatBeforeKeepV2 = deepClone_ACU(chat);
+                        const chatBeforeKeepV2 = deepClone_ACU$2(chat);
                         chat.splice(0, chat.length, ...keepV2Chat);
                         try {
                             await saveChatToHostStrict_ACU();
@@ -49213,7 +50711,7 @@ $CONTENT
                             const v2Name = canonicalizeDisplayName_ACU(replayedV2Data[sheetKey]?.name);
                             if (v2Name && candidateNames.has(v2Name))
                                 continue;
-                            candidateData[sheetKey] = deepClone_ACU(replayedV2Data[sheetKey]);
+                            candidateData[sheetKey] = deepClone_ACU$2(replayedV2Data[sheetKey]);
                             if (v2Name)
                                 candidateNames.add(v2Name);
                             backfilledSheetKeys.push(sheetKey);
@@ -49261,7 +50759,7 @@ $CONTENT
                 return { migrated: true, data, mixedDecision };
             }
         }
-        const candidateChat = deepClone_ACU(chat);
+        const candidateChat = deepClone_ACU$2(chat);
         if (supersededV2Frames.length > 0)
             removeSupersededV2Frames_ACU(candidateChat, options.isolationKey);
         const candidateTarget = candidateChat[target.index];
@@ -49315,14 +50813,14 @@ $CONTENT
         const migrationAuditBackup = {
             version: 1,
             createdAt: migratedAt,
-            sourceData: deepClone_ACU(audit.sourceData),
+            sourceData: deepClone_ACU$2(audit.sourceData),
             dataFingerprintBefore: audit.dataFingerprintBefore,
             dataFingerprintAfter: repair.dataFingerprintAfter,
             auditStatus: audit.status,
-            issues: deepClone_ACU(audit.issues),
-            repairPlan: deepClone_ACU(audit.repairPlan),
-            idRemap: deepClone_ACU(repair.idRemap),
-            ...(supersededV2Frames.length > 0 ? { supersededV2Frames: deepClone_ACU(supersededV2Frames) } : {}),
+            issues: deepClone_ACU$2(audit.issues),
+            repairPlan: deepClone_ACU$2(audit.repairPlan),
+            idRemap: deepClone_ACU$2(repair.idRemap),
+            ...(supersededV2Frames.length > 0 ? { supersededV2Frames: deepClone_ACU$2(supersededV2Frames) } : {}),
         };
         isolatedData[options.isolationKey] = {
             ...(existingTargetTagData?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTargetTagData.summaryVectorIndexState } : {}),
@@ -49337,7 +50835,7 @@ $CONTENT
         if (scopeChangeError) {
             return { migrated: false, error: scopeChangeError };
         }
-        const originalChat = deepClone_ACU(chat);
+        const originalChat = deepClone_ACU$2(chat);
         chat.splice(0, chat.length, ...candidateChat);
         try {
             await saveChatToHostStrict_ACU();
@@ -50819,6 +52317,7 @@ $CONTENT
                             break;
                         }
                         materializeSeedRowsIfNeeded_ACU(table);
+                        const sheetKey = sheetKeysForIndexing[tableIndex];
                         const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
                         if (isSummaryTable) {
                             logDebug_ACU(`[屏蔽] 总结表/总体大纲忽略 deleteRow 操作 (tableIndex: ${tableIndex}, tableName: ${table.name})`);
@@ -50844,6 +52343,13 @@ $CONTENT
                             }
                         }
                         if (table && table.content && table.content.length > rowIndex + 1) {
+                            // 行锁与 SQL 模式差异回滚语义对齐：锁定行不可被删除。
+                            // 传入工作副本 content：身份锁按当前副本解析，插行/删行后不错位。
+                            const deleteLockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey, table.content) : { rows: new Set(), cols: new Set(), cells: new Set() };
+                            if (deleteLockState.rows.has(rowIndex)) {
+                                logDebug_ACU(`[锁定] 行锁定阻止 deleteRow (tableIndex: ${tableIndex}, rowIndex: ${rowIndex})`);
+                                break;
+                            }
                             table.content.splice(rowIndex + 1, 1);
                             logDebug_ACU(`Applied deleteRow to table ${tableIndex} (${table.name}) at index ${rowIndex}`);
                             appliedEdits++;
@@ -50885,7 +52391,8 @@ $CONTENT
                             }
                         }
                         if (table && table.content && table.content.length > rowIndex + 1 && typeof data === 'object') {
-                            const lockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey) : { rows: new Set(), cols: new Set(), cells: new Set() };
+                            // 传入工作副本 content：身份锁按当前副本解析索引，前序 insertRow/deleteRow 不会造成锁错位。
+                            const lockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey, table.content) : { rows: new Set(), cols: new Set(), cells: new Set() };
                             if (lockState.rows.has(rowIndex)) {
                                 logDebug_ACU(`[锁定] 行锁定阻止 updateRow (tableIndex: ${tableIndex}, rowIndex: ${rowIndex})`);
                                 break;
@@ -51079,17 +52586,17 @@ $CONTENT
             const value = data[key];
             if (!SHEET_LIKE_KEY_PATTERN_ACU.test(key) && !isSheetLikeObject_ACU(value))
                 return;
-            diagnostics.push(issue_ACU$1('invalid_sheet_key', key, value?.name, `表「${String(value?.name || key)}」的 key「${key}」不合法。`));
+            diagnostics.push(issue_ACU('invalid_sheet_key', key, value?.name, `表「${String(value?.name || key)}」的 key「${key}」不合法。`));
         });
         const names = sheetKeys.map(key => data[key]?.name);
         const allocation = allocateStableSheetKeys_ACU(names);
         allocation.diagnostics.forEach(diagnostic => {
             const sheetKey = sheetKeys[diagnostic.index] || '';
             if (diagnostic.code === 'empty_name') {
-                diagnostics.push(issue_ACU$1('empty_sheet_name', sheetKey, names[diagnostic.index], '表名不能为空。'));
+                diagnostics.push(issue_ACU('empty_sheet_name', sheetKey, names[diagnostic.index], '表名不能为空。'));
             }
             else if (diagnostic.code === 'duplicate_canonical_name') {
-                diagnostics.push(issue_ACU$1('duplicate_sheet_name', sheetKey, names[diagnostic.index], `表名与「${String(names[diagnostic.conflictsWithIndex])}」规范化后重复。`, undefined, diagnostic.conflictsWithIndex));
+                diagnostics.push(issue_ACU('duplicate_sheet_name', sheetKey, names[diagnostic.index], `表名与「${String(names[diagnostic.conflictsWithIndex])}」规范化后重复。`, undefined, diagnostic.conflictsWithIndex));
             }
         });
         validateTableAliases_ACU(data, sheetKeys, diagnostics);
@@ -51098,21 +52605,21 @@ $CONTENT
             const sheet = data[sheetKey];
             const sheetName = String(sheet?.name ?? '');
             if (!SHEET_KEY_PATTERN_ACU.test(sheetKey)) {
-                diagnostics.push(issue_ACU$1('invalid_sheet_key', sheetKey, sheetName, `表「${sheetName || sheetKey}」的 key「${sheetKey}」不合法。`));
+                diagnostics.push(issue_ACU('invalid_sheet_key', sheetKey, sheetName, `表「${sheetName || sheetKey}」的 key「${sheetKey}」不合法。`));
             }
             const canonicalKey = sheetKey.toLowerCase();
             const firstKey = seenKeys.get(canonicalKey);
             if (firstKey)
-                diagnostics.push(issue_ACU$1('duplicate_sheet_key', sheetKey, sheetName, `表 key「${sheetKey}」与「${firstKey}」冲突。`, undefined, firstKey));
+                diagnostics.push(issue_ACU('duplicate_sheet_key', sheetKey, sheetName, `表 key「${sheetKey}」与「${firstKey}」冲突。`, undefined, firstKey));
             else
                 seenKeys.set(canonicalKey, sheetKey);
             if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet))
                 return;
             if (typeof sheet.uid !== 'string' || !sheet.uid) {
-                diagnostics.push(issue_ACU$1('missing_sheet_uid', sheetKey, sheetName, `表「${sheetName || sheetKey}」缺少 uid。`));
+                diagnostics.push(issue_ACU('missing_sheet_uid', sheetKey, sheetName, `表「${sheetName || sheetKey}」缺少 uid。`));
             }
             else if (sheet.uid !== sheetKey) {
-                diagnostics.push(issue_ACU$1('sheet_uid_mismatch', sheetKey, sheetName, `表「${sheetName || sheetKey}」的 uid「${sheet.uid}」必须与 key「${sheetKey}」一致。`));
+                diagnostics.push(issue_ACU('sheet_uid_mismatch', sheetKey, sheetName, `表「${sheetName || sheetKey}」的 uid「${sheet.uid}」必须与 key「${sheetKey}」一致。`));
             }
             validateHeaders_ACU(sheetKey, sheetName, sheet.content, diagnostics);
         });
@@ -51155,7 +52662,7 @@ $CONTENT
                         firstColumnByDisplay.set(canonical, { sheetKey, sheetName, displayName, sqlName });
                     }
                     else if (first.sheetKey !== sheetKey && first.sqlName.toLowerCase() !== sqlName.toLowerCase()) {
-                        warnings.push(issue_ACU$1('display_column_translation_ambiguity', sheetKey, sheetName, `列展示名「${displayName}」在表「${sheetName || sheetKey}」映射为「${sqlName}」，但在表「${first.sheetName || first.sheetKey}」映射为「${first.sqlName}」；旧式 SQL 全文翻译可能按表加载顺序选错列。`, undefined, first.sheetKey));
+                        warnings.push(issue_ACU('display_column_translation_ambiguity', sheetKey, sheetName, `列展示名「${displayName}」在表「${sheetName || sheetKey}」映射为「${sqlName}」，但在表「${first.sheetName || first.sheetKey}」映射为「${first.sqlName}」；旧式 SQL 全文翻译可能按表加载顺序选错列。`, undefined, first.sheetKey));
                     }
                 }
             }
@@ -51170,19 +52677,19 @@ $CONTENT
                 // so a table can corrupt a column from its own sheet as well as another one.
                 if (!column.displayName.includes(table.displayName))
                     continue;
-                warnings.push(issue_ACU$1('display_name_substring_hazard', table.sheetKey, table.sheetName, `表展示名「${table.displayName}」是表「${column.sheetName || column.sheetKey}」列展示名「${column.displayName}」的子串；旧式 SQL 翻译会先替换表名，可能破坏列名。`, undefined, column.sheetKey));
+                warnings.push(issue_ACU('display_name_substring_hazard', table.sheetKey, table.sheetName, `表展示名「${table.displayName}」是表「${column.sheetName || column.sheetKey}」列展示名「${column.displayName}」的子串；旧式 SQL 翻译会先替换表名，可能破坏列名。`, undefined, column.sheetKey));
             }
         }
         return warnings;
     }
     function validateHeaders_ACU(sheetKey, sheetName, content, diagnostics) {
         if (!Array.isArray(content) || content.length === 0) {
-            diagnostics.push(issue_ACU$1('missing_header_row', sheetKey, sheetName, `表「${sheetName || sheetKey}」缺少表头行。`));
+            diagnostics.push(issue_ACU('missing_header_row', sheetKey, sheetName, `表「${sheetName || sheetKey}」缺少表头行。`));
             return;
         }
         const headers = content[0];
         if (!Array.isArray(headers)) {
-            diagnostics.push(issue_ACU$1('invalid_header_row', sheetKey, sheetName, `表「${sheetName || sheetKey}」的表头必须是数组。`));
+            diagnostics.push(issue_ACU('invalid_header_row', sheetKey, sheetName, `表「${sheetName || sheetKey}」的表头必须是数组。`));
             return;
         }
         const mapping = mapSqlColumnIdentifiers_ACU(headers);
@@ -51195,7 +52702,7 @@ $CONTENT
             };
             const code = diagnostic.code === 'empty_column_name' ? 'empty_header_cell'
                 : diagnostic.code === 'duplicate_canonical_column_name' ? 'duplicate_column_name' : diagnostic.code;
-            diagnostics.push(issue_ACU$1(code, sheetKey, sheetName, `表「${sheetName || sheetKey}」${messages[diagnostic.code]}`, diagnostic.index, diagnostic.conflictsWithIndex));
+            diagnostics.push(issue_ACU(code, sheetKey, sheetName, `表「${sheetName || sheetKey}」${messages[diagnostic.code]}`, diagnostic.index, diagnostic.conflictsWithIndex));
         });
         const firstPhysicalCandidate = new Map();
         headers.forEach((header, index) => {
@@ -51207,7 +52714,7 @@ $CONTENT
                 firstPhysicalCandidate.set(candidate, index);
                 return;
             }
-            diagnostics.push(issue_ACU$1('physical_column_name_collision', sheetKey, sheetName, `第 ${index + 1} 列与第 ${firstIndex + 1} 列映射为相同物理列名候选「${candidate}」。`, index, firstIndex));
+            diagnostics.push(issue_ACU('physical_column_name_collision', sheetKey, sheetName, `第 ${index + 1} 列与第 ${firstIndex + 1} 列映射为相同物理列名候选「${candidate}」。`, index, firstIndex));
         });
     }
     /**
@@ -51236,12 +52743,12 @@ $CONTENT
                     continue;
                 }
                 if (owner.sheetKey !== sheetKey) {
-                    diagnostics.push(issue_ACU$1('table_alias_conflict', sheetKey, sheetName, `表「${sheetName || sheetKey}」的名称或历史别名「${String(identity).trim()}」与表「${owner.sheetName || owner.sheetKey}」冲突。`, undefined, owner.sheetKey));
+                    diagnostics.push(issue_ACU('table_alias_conflict', sheetKey, sheetName, `表「${sheetName || sheetKey}」的名称或历史别名「${String(identity).trim()}」与表「${owner.sheetName || owner.sheetKey}」冲突。`, undefined, owner.sheetKey));
                 }
             }
         }
     }
-    function issue_ACU$1(code, sheetKey, sheetName, message, columnIndex, conflictsWith) {
+    function issue_ACU(code, sheetKey, sheetName, message, columnIndex, conflictsWith) {
         return { code, sheetKey, sheetName: String(sheetName ?? ''), message, columnIndex, conflictsWith };
     }
     function normalizeTranslationDisplayName_ACU(value) {
@@ -51256,1320 +52763,6 @@ $CONTENT
         const sheetFieldCount = ['uid', 'name', 'content', 'sourceData']
             .filter(key => Object.prototype.hasOwnProperty.call(candidate, key)).length;
         return sheetFieldCount >= 2;
-    }
-
-    /**
-     * service/template/template-row-id-normalizer.ts — 外部模板 row_id 结构规范化纯函数
-     *
-     * 职责：在外部模板进入系统（游戏初始化重置、聊天模板协调、模板预设导入）之前，
-     * 把每张 Sheet 的表头与行结构规范化为 canonical 形态（首列 row_id）。
-     *
-     * 边界：本模块是纯函数，不读取聊天、不写存储、不触发 UI 或事务。
-     * 不可无损证明的输入（错位 row_id、重复身份表头、非法行、DDL 歧义）返回 blocker，
-     * 不做猜测性修复。
-     */
-    function isRecordValue_ACU(value) {
-        return value !== null && typeof value === 'object' && !Array.isArray(value);
-    }
-    function cloneValue_ACU$3(value) {
-        return value === undefined ? value : JSON.parse(JSON.stringify(value));
-    }
-    function canonicalHeader_ACU(value) {
-        return canonicalizeDisplayName_ACU(value);
-    }
-    const ROW_ID_ALIASES_ACU = new Set(['id', 'rowid', 'row_id', '行号']);
-    function isRowIdHeader_ACU(value) {
-        return canonicalHeader_ACU(value) === 'row_id';
-    }
-    function isRowIdAliasHeader_ACU(value) {
-        return ROW_ID_ALIASES_ACU.has(canonicalHeader_ACU(value));
-    }
-    function sheetLabel_ACU(sheet, sheetKey) {
-        return `表「${String(sheet?.name ?? '') || sheetKey}」(${sheetKey})`;
-    }
-    function issue_ACU(code, sheetKey, sheetName, message, rowIndex, columnIndex) {
-        return { code, sheetKey, sheetName, message, rowIndex, columnIndex };
-    }
-    function blankAudit_ACU$1(sheetKey, sheetName) {
-        return {
-            sheetKey, sheetName,
-            headerAction: 'unchanged',
-            contentRowsUpdated: 0,
-            seedRowsUpdated: 0,
-            generatedRowIdCount: 0,
-            ddlUpdated: false,
-            deduplicatedSeedRows: [],
-        };
-    }
-    /**
-     * 在同一张表内共享 content 与 seedRows 的身份空间，避免两个行池各自分配出重复 ID。
-     * 已经存在相同非空身份时保持原样，由后续 canonical 校验拒绝，不在规范化器里猜测重映射。
-     * 传入 sharedReserved 时在既有保留区上继续分配，保证跨池不冲突。
-     */
-    function normalizeRowIdsForRows_ACU(rows, assignStableRowIds, audit, sharedReserved) {
-        if (!assignStableRowIds)
-            return;
-        const reserved = sharedReserved || createStableRowIdReservation_ACU(rows);
-        for (const row of rows) {
-            if (!Array.isArray(row) || row.length === 0)
-                continue;
-            const raw = row[0];
-            const rowId = raw === null || raw === undefined ? '' : String(raw).trim();
-            if (rowId)
-                reserved.add(rowId);
-        }
-        for (const row of rows) {
-            if (!Array.isArray(row) || row.length === 0)
-                continue;
-            const raw = row[0];
-            const rowId = raw === null || raw === undefined ? '' : String(raw).trim();
-            if (!rowId) {
-                row[0] = allocateStableRowId_ACU(reserved);
-                audit.generatedRowIdCount += 1;
-            }
-            else
-                row[0] = rowId;
-        }
-    }
-    /**
-     * canonical 行比较：row_id 使用既有 trim 规则比较；其余列逐列严格相等（===），
-     * 不做未经证明的业务字段 trim、大小写折叠或 null/空串互换；行宽不一致不判定相同。
-     */
-    function canonicalRowsEqual_ACU(contentRow, seedRow) {
-        if (contentRow.length !== seedRow.length)
-            return false;
-        for (let index = 0; index < contentRow.length; index += 1) {
-            if (index === 0) {
-                // row_id 列：按既有 trim 规则规范化比较（与 rejectDuplicateRowIds_ACU 一致）
-                if (String(contentRow[0] ?? '').trim() !== String(seedRow[0] ?? '').trim())
-                    return false;
-                continue;
-            }
-            if (contentRow[index] !== seedRow[index])
-                return false;
-        }
-        return true;
-    }
-    /**
-     * 跨来源完全重复去重（content 优先，仅处理深拷贝候选）：
-     * 在跨池重复 blocker 生成之前，删除与 content 行完全相同（规范 row_id 相同 + 完整行逐列相同）
-     * 的 seedRows 行。只修改候选 seedRows，不修改 content；输入对象由调用方深拷贝保证不受影响。
-     *
-     * 返回删除的行数；被删除行的 row_id 与对应 content 行索引记录进 audit.deduplicatedSeedRows。
-     */
-    function deduplicateIdenticalCrossSourceSeedRows_ACU(contentRows, seedRows, sheetKey, sheetName, audit, blockers) {
-        // 同池结构错误由既有校验先行阻断；此处假定行均为合法数组（调用方保证）。
-        const contentById = new Map();
-        for (let index = 0; index < contentRows.length; index += 1) {
-            const row = contentRows[index];
-            if (!Array.isArray(row) || row.length === 0)
-                continue;
-            const rowId = String(row[0] ?? '').trim();
-            if (!rowId)
-                continue;
-            // content 内部重复由 rejectDuplicateRowIds_ACU 处理；索引仅记录首个，不覆盖。
-            if (!contentById.has(rowId))
-                contentById.set(rowId, { row, index });
-        }
-        const retained = [];
-        let removed = 0;
-        for (const seedRow of seedRows) {
-            if (!Array.isArray(seedRow) || seedRow.length === 0) {
-                retained.push(seedRow);
-                continue;
-            }
-            const seedRowId = String(seedRow[0] ?? '').trim();
-            const matched = seedRowId ? contentById.get(seedRowId) : undefined;
-            if (matched && canonicalRowsEqual_ACU(matched.row, seedRow)) {
-                removed += 1;
-                audit.deduplicatedSeedRows.push({ rowId: seedRowId, contentRowIndex: matched.index });
-                continue;
-            }
-            retained.push(seedRow);
-        }
-        if (removed > 0) {
-            seedRows.length = 0;
-            for (const row of retained)
-                seedRows.push(row);
-            audit.seedRowsUpdated += removed;
-        }
-        return removed;
-    }
-    function rejectDuplicateRowIds_ACU(rows, source, sheetKey, sheetName, seen, blockers) {
-        for (let index = 0; index < rows.length; index += 1) {
-            const row = rows[index];
-            if (!Array.isArray(row))
-                continue;
-            const rowId = String(row[0] ?? '').trim();
-            if (!rowId)
-                continue;
-            if (seen.has(rowId)) {
-                blockers.push(issue_ACU('duplicate_row_id', sheetKey, sheetName, `${sheetLabel_ACU({ name: sheetName }, sheetKey)} 的 ${source} 第 ${index + 1} 行 row_id「${rowId}」重复，不能安全重写身份。`, index + 1));
-                continue;
-            }
-            seen.add(rowId);
-        }
-    }
-    /**
-     * 插入 row_id 列时，验证原业务行宽度并同步右移。
-     * 行宽超过原表头时 fail-loud；不足时按仓库既有 canonical 契约补 null。
-     */
-    function insertRowIdColumnForRows_ACU(rows, businessWidth, sheetKey, sheetName, blockers, audit) {
-        for (let index = 0; index < rows.length; index += 1) {
-            const row = rows[index];
-            if (!Array.isArray(row)) {
-                blockers.push(issue_ACU('invalid_content_row', sheetKey, sheetName, `${sheetLabel_ACU({ name: sheetName }, sheetKey)} 第 ${index + 1} 行不是数组，无法自动插入 row_id。`, index + 1));
-                continue;
-            }
-            if (row.length > businessWidth) {
-                blockers.push(issue_ACU('row_width_mismatch', sheetKey, sheetName, `${sheetLabel_ACU({ name: sheetName }, sheetKey)} 第 ${index + 1} 行宽度为 ${row.length}，超过原表头 ${businessWidth} 列，无法安全插入 row_id。`, index + 1));
-                continue;
-            }
-            while (row.length < businessWidth)
-                row.push(null);
-            row.unshift('');
-            audit.contentRowsUpdated += 1;
-        }
-    }
-    /**
-     * 规范单张 Sheet 的 row_id 结构。
-     */
-    function normalizeSheetRowId_ACU(sheetKey, sheet, options, blockers, audits) {
-        const sheetName = String(sheet?.name ?? '');
-        const label = sheetLabel_ACU(sheet, sheetKey);
-        const audit = blankAudit_ACU$1(sheetKey, sheetName);
-        if (!isRecordValue_ACU(sheet)) {
-            blockers.push(issue_ACU('invalid_sheet', sheetKey, sheetName, `${label} 不是对象，无法规范化。`));
-            return;
-        }
-        const content = sheet.content;
-        if (!Array.isArray(content) || content.length === 0) {
-            blockers.push(issue_ACU('missing_content', sheetKey, sheetName, `${label} 缺少 content 表头行。`));
-            return;
-        }
-        const header = content[0];
-        if (!Array.isArray(header)) {
-            blockers.push(issue_ACU('invalid_header', sheetKey, sheetName, `${label} 表头不是数组。`));
-            return;
-        }
-        if (header.length === 0) {
-            blockers.push(issue_ACU('empty_header', sheetKey, sheetName, `${label} 表头为空。`));
-            return;
-        }
-        // 可视化编辑器使用 content[0][0] === null/undefined 表示不可编辑的 row_id 占位，
-        // 与 sql-identifier-mapper.ts 的首列 null/undefined row_id 身份契约一致（仅限首列）。
-        const firstIsRowIdPlaceholder = header[0] === null || header[0] === undefined;
-        // 占位本身就是身份列，不能进入“缺失身份列”的扫描/插入语义。
-        const firstIsRowId = isRowIdHeader_ACU(header[0]);
-        const firstIsAlias = !firstIsRowId && !firstIsRowIdPlaceholder && isRowIdAliasHeader_ACU(header[0]);
-        let misplacedIndex = -1;
-        let duplicateHeaderIndex = -1;
-        if (!firstIsRowId && !firstIsAlias && !firstIsRowIdPlaceholder) {
-            for (let index = 1; index < header.length; index += 1) {
-                if (isRowIdHeader_ACU(header[index])) {
-                    misplacedIndex = index;
-                    break;
-                }
-                if (duplicateHeaderIndex < 0 && isRowIdAliasHeader_ACU(header[index])) {
-                    duplicateHeaderIndex = index;
-                }
-            }
-        }
-        if (misplacedIndex >= 0) {
-            blockers.push(issue_ACU('misplaced_row_id', sheetKey, sheetName, `${label} 的 row_id 位于第 ${misplacedIndex + 1} 列；自动移动可能改变数据列语义，请手动调整模板列顺序。`, undefined, misplacedIndex));
-            return;
-        }
-        if (duplicateHeaderIndex >= 0) {
-            blockers.push(issue_ACU('duplicate_row_id_header', sheetKey, sheetName, `${label} 第 ${duplicateHeaderIndex + 1} 列也是身份列（id/rowid/行号）；不能自动决定哪一列保留，请手动调整模板列顺序。`, undefined, duplicateHeaderIndex));
-            return;
-        }
-        const businessWidth = header.length;
-        for (let index = 1; index < content.length; index += 1) {
-            if (!Array.isArray(content[index])) {
-                blockers.push(issue_ACU('invalid_content_row', sheetKey, sheetName, `${label} 第 ${index + 1} 行不是数组，无法自动修复。`, index + 1));
-                return;
-            }
-        }
-        const seedRows = sheet.seedRows;
-        if (seedRows !== undefined && !Array.isArray(seedRows)) {
-            blockers.push(issue_ACU('invalid_seed_rows', sheetKey, sheetName, `${label} 的 seedRows 不是数组。`));
-            return;
-        }
-        if (Array.isArray(seedRows)) {
-            for (let index = 0; index < seedRows.length; index += 1) {
-                if (!Array.isArray(seedRows[index])) {
-                    blockers.push(issue_ACU('invalid_seed_row', sheetKey, sheetName, `${label} 的 seedRows 第 ${index + 1} 行不是数组。`, index + 1));
-                    return;
-                }
-            }
-        }
-        let changed = false;
-        if (firstIsRowIdPlaceholder) {
-            // 占位规范化：原地替换为文本 row_id，不增加列、不移动业务列、不改数据行。
-            header[0] = 'row_id';
-            audit.headerAction = 'renamed';
-            changed = true;
-        }
-        else if (firstIsAlias) {
-            header[0] = 'row_id';
-            audit.headerAction = 'renamed';
-            changed = true;
-        }
-        else if (!firstIsRowId) {
-            header.unshift('row_id');
-            audit.headerAction = 'inserted';
-            changed = true;
-            insertRowIdColumnForRows_ACU(content.slice(1), businessWidth, sheetKey, sheetName, blockers, audit);
-            if (Array.isArray(seedRows)) {
-                const seedAudit = blankAudit_ACU$1(sheetKey, sheetName);
-                insertRowIdColumnForRows_ACU(seedRows, businessWidth, sheetKey, sheetName, blockers, seedAudit);
-                audit.seedRowsUpdated = seedAudit.contentRowsUpdated;
-            }
-        }
-        // content 与 seedRows 必须共享同一身份空间，避免两个行池各自从 1 分配出重复 ID。
-        const sharedReserved = options.assignStableRowIds !== false
-            ? createStableRowIdReservation_ACU([...content.slice(1), ...(Array.isArray(seedRows) ? seedRows : [])])
-            : undefined;
-        normalizeRowIdsForRows_ACU(content.slice(1), options.assignStableRowIds !== false, audit, sharedReserved);
-        if (Array.isArray(seedRows)) {
-            normalizeRowIdsForRows_ACU(seedRows, options.assignStableRowIds !== false, audit, sharedReserved);
-        }
-        // 跨来源完全重复去重（content 优先）：必须在跨池重复 blocker 生成之前完成。
-        // 只处理深拷贝候选，删除与 content 完全相同的 seedRows 副本，更新审计。
-        if (options.deduplicateIdenticalCrossSourceRows === true && Array.isArray(seedRows) && seedRows.length > 0) {
-            deduplicateIdenticalCrossSourceSeedRows_ACU(content.slice(1), seedRows, sheetKey, sheetName, audit, blockers);
-        }
-        const rowIds = new Set();
-        rejectDuplicateRowIds_ACU(content.slice(1), 'content', sheetKey, sheetName, rowIds, blockers);
-        if (Array.isArray(seedRows)) {
-            rejectDuplicateRowIds_ACU(seedRows, 'seedRows', sheetKey, sheetName, options.rejectCrossSourceDuplicateRowIds === false ? new Set() : rowIds, blockers);
-        }
-        if (options.syncDdl && sheet.sourceData && typeof sheet.sourceData === 'object') {
-            const ddl = String(sheet.sourceData.ddl || '').trim();
-            if (ddl) {
-                const columns = parseDDLColumnInfos_ACU(ddl);
-                const firstColumn = columns[0];
-                if (audit.headerAction !== 'inserted') {
-                    if (options.validateExistingDdl === false) {
-                        audits.push(audit);
-                        return;
-                    }
-                    if (!firstColumn || firstColumn.sqlName.toLowerCase() !== 'row_id'
-                        || firstColumn.declaredType !== 'INTEGER' || !firstColumn.isPrimaryKey) {
-                        blockers.push(issue_ACU('invalid_ddl', sheetKey, sheetName, `${label} 的 DDL 缺少首列 row_id INTEGER PRIMARY KEY，无法安全规范化。`));
-                        return;
-                    }
-                }
-                else if (firstColumn && firstColumn.sqlName.toLowerCase() === 'row_id'
-                    && firstColumn.declaredType === 'INTEGER' && firstColumn.isPrimaryKey) {
-                    // 已有合法身份列，保持不变。
-                }
-                else if (firstColumn && firstColumn.sqlName.toLowerCase() !== 'row_id'
-                    && !columns.some(column => column.sqlName.toLowerCase() === 'row_id')) {
-                    if (columns.length === businessWidth) {
-                        try {
-                            sheet.sourceData.ddl = injectRowIdPrimaryKeyColumn_ACU(ddl);
-                            audit.ddlUpdated = true;
-                            changed = true;
-                        }
-                        catch (error) {
-                            blockers.push(issue_ACU('invalid_ddl', sheetKey, sheetName, `${label} 无法在 DDL 中注入 row_id：${error instanceof Error ? error.message : String(error)}`));
-                            return;
-                        }
-                    }
-                    else {
-                        blockers.push(issue_ACU('ambiguous_ddl', sheetKey, sheetName, `${label} 的 DDL 列数（${columns.length}）与原业务表头（${businessWidth}）不一致，无法证明应注入 row_id。`));
-                        return;
-                    }
-                }
-                else {
-                    blockers.push(issue_ACU('invalid_ddl', sheetKey, sheetName, `${label} 的 DDL 中 row_id 不是首列 INTEGER PRIMARY KEY，无法安全规范化。`));
-                    return;
-                }
-                const validation = validateDDLTextAgainstHeaders_ACU(String(sheet.sourceData.ddl || ''), content[0]);
-                if (!validation.valid) {
-                    blockers.push(issue_ACU('ambiguous_ddl', sheetKey, sheetName, `${label} DDL 校验失败：${validation.message}`));
-                    return;
-                }
-            }
-        }
-        audits.push(audit);
-    }
-    /**
-     * 对外入口：深拷贝输入并规范化所有 sheet_* 的 row_id 结构。
-     * 输入对象不被修改；任何 blocker 都代表本次调用不产生可提交候选。
-     */
-    function normalizeTemplateRowIds_ACU(templateData, options = {}) {
-        const input = templateData;
-        if (!isRecordValue_ACU(input)) {
-            return { templateData, changed: false, audits: [], blockers: [issue_ACU('invalid_template', '', '', '模板必须是对象。')] };
-        }
-        const template = cloneValue_ACU$3(input);
-        const blockers = [];
-        const audits = [];
-        let changed = false;
-        for (const [key, value] of Object.entries(template)) {
-            if (!key.startsWith('sheet_'))
-                continue;
-            if (!isRecordValue_ACU(value)) {
-                blockers.push(issue_ACU('invalid_sheet', key, String(value?.name ?? ''), `表「${key}」不是对象，无法规范化。`));
-                continue;
-            }
-            const before = JSON.stringify(value);
-            normalizeSheetRowId_ACU(key, value, options, blockers, audits);
-            if (JSON.stringify(value) !== before)
-                changed = true;
-        }
-        return {
-            templateData: template,
-            changed: blockers.length === 0 && changed,
-            audits: blockers.length > 0 ? [] : audits,
-            blockers,
-        };
-    }
-
-    /**
-     * Builds a read-only V2 change plan. Runtime writes, guide persistence and locking remain
-     * owned by commitCurrentFloorTemplateChanges_ACU; this function deliberately has no I/O.
-     */
-    async function reconcileChatTemplate_ACU(input) {
-        const baselineData = clone_ACU$4(input.baselineData);
-        const rawTemplateData = clone_ACU$4(input.templateData);
-        const blockers = [];
-        const deletedSheetKeys = [];
-        const hiddenSheetKeys = [];
-        const audit = [];
-        const normalization = normalizeTemplateRowIds_ACU(rawTemplateData, {
-            syncDdl: input.storageMode !== 'native',
-            rejectCrossSourceDuplicateRowIds: false,
-            validateExistingDdl: false,
-        });
-        if (normalization.blockers.length > 0) {
-            return emptyPlan_ACU(baselineData, audit, normalization.blockers.map(item => item.message));
-        }
-        const templateData = normalization.templateData;
-        if (input.storageMode !== 'native') {
-            // SQLite 模式下，已有数据的聊天表可能没有持久化 DDL（运行时依赖 fallback）。
-            // 协调层是唯一没有接入缺失 DDL fallback 的入口，导致空 DDL 被解析为零列、
-            // 与含 row_id 的表头必然不等，所有匹配表都被误判为“DDL 与表头列数不一致”。
-            // 在进入表身份匹配与 schema 协调前，为 baseline 与规范化后的 template 补齐
-            // 缺失 DDL（仅缺失/全空白，绝不覆盖非空 DDL），使后续逻辑看到同一份合法契约。
-            const baselineFallback = applyMissingDdlFallback_ACU(baselineData, '当前聊天基线');
-            if (baselineFallback.blockers.length > 0) {
-                return emptyPlan_ACU(baselineData, audit, baselineFallback.blockers);
-            }
-            const templateFallback = applyMissingDdlFallback_ACU(templateData, '目标模板');
-            if (templateFallback.blockers.length > 0) {
-                return emptyPlan_ACU(baselineData, audit, templateFallback.blockers);
-            }
-        }
-        const candidateData = stripRuntimeSeedRows_ACU(baselineData);
-        candidateData.mate = clone_ACU$4(templateData.mate || baselineData.mate);
-        for (const [key, sheet] of listSheets_ACU(baselineData)) {
-            try {
-                validateBaselineSheetRows_ACU(sheet);
-            }
-            catch (error) {
-                blockers.push(`当前聊天表「${sheet.name || key}」历史数据无效：${error?.message || String(error)}`);
-            }
-        }
-        const baselineByName = indexSheetsByName_ACU(baselineData, '当前聊天', blockers);
-        const templateByName = indexSheetsByName_ACU(templateData, '导入模板', blockers);
-        validateTableAliasDeclarations_ACU(baselineData, '当前聊天', blockers);
-        validateTableAliasDeclarations_ACU(templateData, '导入模板', blockers);
-        if (blockers.length > 0)
-            return emptyPlan_ACU(baselineData, audit, blockers);
-        const matchedKeys = new Set();
-        const rebaseKeys = new Set();
-        const revealKeys = new Set();
-        for (const [canonicalName, templateEntry] of templateByName) {
-            const matchedByName = baselineByName.get(canonicalName);
-            const occupiedByKey = baselineData[templateEntry.key];
-            if (matchedByName && occupiedByKey && matchedByName.key !== templateEntry.key) {
-                blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」的名称匹配当前聊天 key「${matchedByName.key}」，但模板 key「${templateEntry.key}」已被表「${occupiedByKey.name || templateEntry.key}」占用，无法唯一协调。`);
-                continue;
-            }
-            let previous = matchedByName;
-            if (!previous) {
-                const aliasMatches = findExplicitTableAliasMatches_ACU(templateEntry.sheet, baselineData);
-                if (aliasMatches.length > 1) {
-                    blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」的显式历史别名同时匹配多张当前聊天表，无法唯一协调。`);
-                    continue;
-                }
-                previous = aliasMatches[0];
-            }
-            if (!previous) {
-                const introducedKey = buildStableSheetKeyCandidate_ACU(templateEntry.sheet.name);
-                if (!introducedKey) {
-                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」缺少可用于派生 key 的有效显示名。`);
-                    continue;
-                }
-                // 生命周期感知：派生 key 在历史中曾存在（hidden / indeterminate / active）时，
-                // 这不是"新增表"。协调层显式消费唯一生命周期事实，不再靠 baseline 缺席猜测。
-                const lifecycleEntry = input.lifecycle?.statusBySheetKey?.[introducedKey];
-                if (lifecycleEntry) {
-                    if (lifecycleEntry.status === 'hidden') {
-                        // hidden → 显式 reveal：恢复历史 key（稳定 sheetKey），数据由 persist 层
-                        // resolveRevealSource_ACU 恢复"离开时最新状态"。协调层只带模板结构，不伪装 introduction。
-                        const revealed = asIntroducedSheet_ACU(templateEntry.sheet, introducedKey);
-                        candidateData[introducedKey] = revealed;
-                        audit.push({ sheetKey: introducedKey, resolvedSheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(revealed).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, revealed.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
-                        revealKeys.add(introducedKey);
-                        continue;
-                    }
-                    if (lifecycleEntry.status === 'indeterminate') {
-                        blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 的历史生命周期无法判定（indeterminate），已阻止模板提交。请先在数据管理中检查并恢复 V2 历史。`);
-                        continue;
-                    }
-                    // status === 'active' 但基线不含该表：这里刻意不 fail-closed。
-                    //
-                    // 「是否仍活跃」的权威来源只有 replay 后的 active state，不是 lifecycle 派生结论；
-                    // lifecycle 是历史 timeline 归并，遇到无 full-checkpoint 基底（replacement_anchor /
-                    // temporary baseline）等场景仍可能与同一时点的基线不一致。在协调层按这个非权威结论
-                    // 拒绝，会把「模板重新包含一张历史痕迹表」变成用户无法自救的死局：重新读取表格不会
-                    // 改变任何历史事实，错误必然复现。
-                    //
-                    // 因此这里按 introduction 继续，真正的覆盖风险由提交层用权威事实判定：
-                    // storage-frame-v2-persist.ts 的 activeHas → active_introduction_conflict（活数据保护），
-                    // introductionHistoryEvidence_ACU → reveal / indeterminate（历史存在则唤醒而非覆盖）。
-                    // never_seen 同样落到 introduction。
-                }
-                const occupiedByIntroducedKey = candidateData[introducedKey];
-                if (occupiedByIntroducedKey) {
-                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」派生 key「${introducedKey}」与当前表「${occupiedByIntroducedKey.name || introducedKey}」冲突；两张不同名称的表不能共享同一 key。`);
-                    continue;
-                }
-                try {
-                    const introduced = asIntroducedSheet_ACU(templateEntry.sheet, introducedKey);
-                    candidateData[introducedKey] = introduced;
-                    audit.push({ sheetKey: introducedKey, resolvedSheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, introduced.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
-                }
-                catch (error) {
-                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 无法引入：${error?.message || String(error)}`);
-                }
-                continue;
-            }
-            if (matchedKeys.has(previous.key)) {
-                blockers.push(`导入模板中的多个表同时匹配当前聊天表「${previous.sheet.name || previous.key}」（key=${previous.key}），无法唯一协调。`);
-                continue;
-            }
-            matchedKeys.add(previous.key);
-            try {
-                const reconciled = input.storageMode === 'native'
-                    ? reconcileMatchedSheetNative_ACU(previous.sheet, templateEntry.sheet, previous.key, templateEntry.key)
-                    : reconcileMatchedSheet_ACU(previous.sheet, templateEntry.sheet, previous.key, templateEntry.key);
-                candidateData[previous.key] = reconciled.sheet;
-                if (reconciled.changed)
-                    rebaseKeys.add(previous.key);
-                audit.push(reconciled.audit);
-            }
-            catch (error) {
-                blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」无法协调（baselineKey=${previous.key} → templateKey=${templateEntry.key}）：${error?.message || String(error)}`);
-            }
-        }
-        for (const [key, sheet] of listSheets_ACU(baselineData)) {
-            if (matchedKeys.has(key))
-                continue;
-            // 目标模板缺失的既有表：默认隐藏保留（语义1），仅在显式硬删除时才进 deletedSheetKeys。
-            if (input.hardDeleteMissingSheets === true) {
-                if (!input.destructiveChangeConfirmed)
-                    blockers.push(`删除表「${sheet.name || key}」需要显式确认。`);
-                deletedSheetKeys.push(key);
-                delete candidateData[key];
-                audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
-            }
-            else {
-                // 生命周期感知：目标表历史生命周期无法判定时，隐藏操作也属于"不知道它在哪"，
-                // 不能静默隐藏（可能误伤 indeterminate 历史）。fail-closed 阻止提交。
-                const lifecycleEntry = input.lifecycle?.statusBySheetKey?.[key];
-                if (lifecycleEntry?.status === 'indeterminate') {
-                    blockers.push(`表「${sheet.name || key}」(${key}) 的历史生命周期无法判定（indeterminate），已阻止隐藏操作。请先在数据管理中检查并恢复 V2 历史。`);
-                    continue;
-                }
-                hiddenSheetKeys.push(key);
-                delete candidateData[key];
-                audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: [], hiddenColumns: headers_ACU(sheet).slice(1), physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
-            }
-        }
-        if (blockers.length > 0)
-            return emptyPlan_ACU(baselineData, audit, blockers);
-        // checkpoint.data 就是协调器算好的目标全量；结构变更统一表达为数据边界上的 per-sheet checkpoint。
-        const sheetChanges = [];
-        for (const [key, sheet] of listSheets_ACU(candidateData)) {
-            if (revealKeys.has(key)) {
-                sheetChanges.push({ kind: 'reveal', sheetKey: key, sheetData: sheet });
-                audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'reveal' });
-            }
-            else if (!baselineData[key]) {
-                sheetChanges.push({ kind: 'introduction', sheetKey: key, sheetData: sheet });
-                audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'introduction' });
-            }
-            else if (rebaseKeys.has(key)) {
-                sheetChanges.push({ kind: 'rebase', sheetKey: key, sheetData: sheet });
-                audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'rebase' });
-            }
-        }
-        // 隐藏表：产出 hide change（sheetData 携带 baseline 结构，persist 层据此定位并保留数据）。
-        for (const key of hiddenSheetKeys) {
-            sheetChanges.push({ kind: 'hide', sheetKey: key, sheetData: clone_ACU$4(baselineData[key]) });
-            audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'hide' });
-        }
-        candidateData.mate = clone_ACU$4(candidateData.mate);
-        if (input.storageMode !== 'native') {
-            for (const [key, sheet] of listSheets_ACU(candidateData)) {
-                try {
-                    const validation = validateDDLTextAgainstHeaders_ACU(String(sheet.sourceData?.ddl || ''), headers_ACU(sheet));
-                    if (validation.valid)
-                        continue;
-                    return emptyPlan_ACU(baselineData, audit, [
-                        `完整 replay candidate DDL/表头预检失败: ${key}: ${validation.message}`,
-                    ]);
-                }
-                catch (error) {
-                    return emptyPlan_ACU(baselineData, audit, [
-                        `完整 replay candidate DDL/表头预检失败: ${key}: ${error?.message || String(error)}`,
-                    ]);
-                }
-            }
-            for (const [key, sheet] of listSheets_ACU(candidateData)) {
-                try {
-                    getSheetColumnProjection_ACU(sheet);
-                }
-                catch (error) {
-                    return emptyPlan_ACU(baselineData, audit, [
-                        `完整 replay candidate 列投影预检失败: ${key}: ${error?.message || String(error)}`,
-                    ]);
-                }
-            }
-            try {
-                // 运行时协调路径：与 template-state-reset.ts（initGameSession）同为运行时注入/协调，
-                // 非法显式 DDL 允许降级为 fallback schema（:242 已存在 native 门禁，此处只作用于 sqlite）。
-                // 持久化契约校验（storage-frame-v2-persist.ts:3190）保持严格，不在此处放宽。
-                await hydrateTableDataStrict_ACU(candidateData, { allowRuntimeDdlFallback: true });
-            }
-            catch (error) {
-                return emptyPlan_ACU(baselineData, audit, [
-                    `完整 replay candidate SQLite hydrate 失败: ${error?.message || String(error)}`,
-                ]);
-            }
-        }
-        for (const key of deletedSheetKeys)
-            audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'delete' });
-        return { candidateData, sheetChanges, deletedSheetKeys, hiddenSheetKeys, audit, blockers: [] };
-    }
-    function stripRuntimeSeedRows_ACU(data) {
-        const clone = clone_ACU$4(data);
-        for (const [, sheet] of listSheets_ACU(clone))
-            delete sheet.seedRows;
-        return clone;
-    }
-    function emptyPlan_ACU(candidateData, audit, blockers) {
-        return {
-            candidateData: stripRuntimeSeedRows_ACU(candidateData),
-            sheetChanges: [],
-            deletedSheetKeys: [],
-            hiddenSheetKeys: [],
-            audit: audit.map(item => ({ ...item, operations: [] })),
-            blockers,
-        };
-    }
-    function clone_ACU$4(value) {
-        return JSON.parse(JSON.stringify(value));
-    }
-    function listSheets_ACU(data) {
-        return Object.keys(data || {}).filter(key => key.startsWith('sheet_'))
-            .map(key => [key, data[key]])
-            .filter(([, sheet]) => !!sheet && typeof sheet === 'object' && !Array.isArray(sheet));
-    }
-    function indexSheetsByName_ACU(data, label, blockers) {
-        const entries = new Map();
-        for (const [key, sheet] of listSheets_ACU(data)) {
-            const canonicalName = canonicalizeDisplayName_ACU(sheet.name);
-            if (!canonicalName) {
-                blockers.push(`${label}存在空表名：${key}。`);
-                continue;
-            }
-            const existing = entries.get(canonicalName);
-            if (existing) {
-                blockers.push(`${label}表名规范化重复：「${existing.sheet.name}」与「${sheet.name}」。`);
-                continue;
-            }
-            entries.set(canonicalName, { key, sheet });
-        }
-        return entries;
-    }
-    /**
-     * tableAliases 是显式身份声明。它可以和同表的当前名称重合，但不能被另一张
-     * 表的当前名称或历史别名占用；否则后续 SQL/AI 路由会扩大写入目标。
-     */
-    function validateTableAliasDeclarations_ACU(data, label, blockers) {
-        const ownerByIdentity = new Map();
-        for (const entry of listSheets_ACU(data).map(([key, sheet]) => ({ key, sheet }))) {
-            const identities = [entry.sheet.name, ...getExplicitTableAliases_ACU(entry.sheet)];
-            for (const identity of identities) {
-                const canonical = canonicalizeDisplayName_ACU(identity);
-                if (!canonical)
-                    continue;
-                const owner = ownerByIdentity.get(canonical);
-                if (!owner) {
-                    ownerByIdentity.set(canonical, entry);
-                    continue;
-                }
-                if (owner.key !== entry.key) {
-                    blockers.push(`${label}表别名规范化重复：「${owner.sheet.name || owner.key}」与「${entry.sheet.name || entry.key}」都声明了「${String(identity).trim()}」。`);
-                }
-            }
-        }
-    }
-    function getExplicitTableAliases_ACU(sheet) {
-        const raw = sheet.sourceData?.tableAliases;
-        if (!Array.isArray(raw))
-            return [];
-        return raw.map(value => String(value ?? '').trim()).filter(Boolean);
-    }
-    function findExplicitTableAliasMatches_ACU(template, baselineData) {
-        const aliases = new Set(getExplicitTableAliases_ACU(template).map(canonicalizeDisplayName_ACU).filter(Boolean));
-        if (aliases.size === 0)
-            return [];
-        return listSheets_ACU(baselineData)
-            .map(([key, sheet]) => ({ key, sheet }))
-            .filter(entry => {
-            const identities = [entry.sheet.name, ...getExplicitTableAliases_ACU(entry.sheet)]
-                .map(canonicalizeDisplayName_ACU);
-            return identities.some(identity => aliases.has(identity));
-        });
-    }
-    function accumulateTableAliases_ACU(sheet, before, template) {
-        if (!sheet.sourceData || typeof sheet.sourceData !== 'object')
-            sheet.sourceData = {};
-        const currentName = canonicalizeDisplayName_ACU(sheet.name);
-        const aliases = [
-            ...getExplicitTableAliases_ACU(before),
-            ...getExplicitTableAliases_ACU(template),
-            before.name,
-        ];
-        const seen = new Set();
-        const normalized = aliases.filter(alias => {
-            const canonical = canonicalizeDisplayName_ACU(alias);
-            if (!canonical || canonical === currentName || seen.has(canonical))
-                return false;
-            seen.add(canonical);
-            return true;
-        });
-        if (normalized.length > 0)
-            sheet.sourceData.tableAliases = normalized;
-        else
-            delete sheet.sourceData.tableAliases;
-    }
-    /**
-     * SQLite 协调输入的缺失 DDL fallback（方案 A）。
-     * 只处理缺失或全空白 DDL 的 Sheet；非空 DDL 保持原值，绝不覆盖。
-     * 只在调用方传入的克隆对象上运行，不修改外部输入。
-     */
-    function applyMissingDdlFallback_ACU(data, sourceLabel) {
-        const blockers = [];
-        for (const [key, sheet] of listSheets_ACU(data)) {
-            if (!sheet || typeof sheet !== 'object')
-                continue;
-            const rawDdl = sheet.sourceData?.ddl;
-            const hasNonEmptyDdl = typeof rawDdl === 'string' && rawDdl.trim().length > 0;
-            if (hasNonEmptyDdl)
-                continue;
-            if (!sheet.sourceData || typeof sheet.sourceData !== 'object') {
-                sheet.sourceData = {};
-            }
-            try {
-                const tableName = sheet.uid || key;
-                sheet.sourceData.ddl = generateDDL(sheet, tableName);
-                const headers = Array.isArray(sheet.content?.[0])
-                    ? sheet.content[0].map((value) => String(value ?? ''))
-                    : [];
-                const validation = validateDDLTextAgainstHeaders_ACU(sheet.sourceData.ddl, headers);
-                if (!validation.valid) {
-                    blockers.push(`${sourceLabel} 表「${sheet.name || key}」（${key}）生成的 fallback DDL 校验失败：${validation.message}`);
-                }
-            }
-            catch (error) {
-                blockers.push(`${sourceLabel} 表「${sheet.name || key}」（${key}）缺失 DDL fallback 失败：${error?.message || String(error)}`);
-            }
-        }
-        return { blockers };
-    }
-    function headers_ACU(sheet) {
-        const headers = sheet?.content?.[0];
-        if (!Array.isArray(headers) || headers[0] !== 'row_id')
-            throw new Error('缺少 row_id 首列表头。');
-        return headers.map(value => String(value ?? ''));
-    }
-    /**
-     * 新增表的引入形态按“模板是否自带数据”分流：
-     * - 自带数据：作者已定义初始格式，原样保留数据行，引入时即落盘建表。
-     * - 不带数据：保持 header-only 空壳，保留“首次填表前可自由修改表结构”的能力。
-     * 两种形态都要求 uid 等于 key，且 seedRows 不随 sheet 落盘（数据已在 content 中）。
-     */
-    function asIntroducedSheet_ACU(sheet, sheetKey) {
-        const clone = clone_ACU$4(sheet);
-        clone.uid = sheetKey;
-        const headers = headers_ACU(clone);
-        const templateRows = Array.isArray(clone.content) ? clone.content.slice(1) : [];
-        const seedRows = Array.isArray(clone.seedRows) ? clone.seedRows : [];
-        // content 数据行优先；仅 seedRows 提供数据时也视为“自带数据”。
-        const dataRows = templateRows.length > 0 ? templateRows : seedRows;
-        clone.content = dataRows.length > 0
-            ? [headers, ...assignMissingRowIds_ACU(dataRows.map(row => normalizeIntroducedRow_ACU(row, headers.length, sheetKey)))]
-            : [headers];
-        delete clone.seedRows;
-        if (dataRows.length > 0)
-            validateBaselineSheetRows_ACU(clone);
-        return clone;
-    }
-    /**
-     * 模板作者通常不手写 row_id，首列多为空。引入前按现有稳定分配器补齐缺失 row_id，
-     * 已显式给出的 row_id 一律保留原值，绝不重写。
-     */
-    function assignMissingRowIds_ACU(rows) {
-        const reserved = createStableRowIdReservation_ACU(rows);
-        for (const row of rows) {
-            const rowId = row[0] === null || row[0] === undefined ? '' : String(row[0]).trim();
-            row[0] = rowId || allocateStableRowId_ACU(reserved);
-        }
-        return rows;
-    }
-    /**
-     * 模板行末尾省略单元格是常见写法，按表头宽度补 null 即可。
-     * 但行宽超过表头说明模板结构本身不一致，必须 fail-loud，不能静默截断丢数据。
-     */
-    function normalizeIntroducedRow_ACU(row, headerWidth, sheetKey) {
-        const cells = (Array.isArray(row) ? row : [row]).map(cell => (cell === null || cell === undefined ? '' : String(cell)));
-        if (cells.length > headerWidth) {
-            throw new Error(`模板数据行宽度为 ${cells.length}，超过表头 ${headerWidth} 列（${sheetKey}）。`);
-        }
-        while (cells.length < headerWidth)
-            cells.push('');
-        return cells;
-    }
-    function validateBaselineSheetRows_ACU(sheet) {
-        const headers = headers_ACU(sheet);
-        const rowIds = new Set();
-        for (let index = 1; index < sheet.content.length; index += 1) {
-            const row = sheet.content[index];
-            if (!Array.isArray(row))
-                throw new Error(`第 ${index + 1} 行不是数组。`);
-            if (row.length !== headers.length)
-                throw new Error(`第 ${index + 1} 行宽度为 ${row.length}，应为 ${headers.length}。`);
-            const rowId = String(row[0] ?? '').trim();
-            if (!rowId)
-                throw new Error(`第 ${index + 1} 行 row_id 为空。`);
-            if (rowIds.has(rowId))
-                throw new Error(`row_id 重复：${rowId}。`);
-            rowIds.add(rowId);
-        }
-    }
-    /**
-     * 原生模式只按 JSON 表头协调数据，不读取 DDL、物理列、SQL DEFAULT 或 SQLite 隐藏列元数据。
-     * 模板目标表头就是可见目标结构：同名列继承，新增列填 null，模板未包含的旧列不进入候选。
-     */
-    function reconcileMatchedSheetNative_ACU(before, template, sheetKey, templateSheetKey) {
-        const beforeHeaders = headers_ACU(before);
-        const targetHeaders = headers_ACU(template);
-        const beforeEntries = beforeHeaders.slice(1).map((header, index) => ({
-            canonical: canonicalizeDisplayName_ACU(header), header, index: index + 1,
-        }));
-        const targetEntries = targetHeaders.slice(1).map((header, index) => ({
-            canonical: canonicalizeDisplayName_ACU(header), header, index: index + 1,
-        }));
-        const beforeByCanonical = new Map(beforeEntries.map(entry => [entry.canonical, entry]));
-        const targetByCanonical = new Map(targetEntries.map(entry => [entry.canonical, entry]));
-        if (beforeByCanonical.size !== beforeEntries.length || targetByCanonical.size !== targetEntries.length
-            || beforeEntries.some(entry => !entry.canonical) || targetEntries.some(entry => !entry.canonical)) {
-            throw new Error('存在空列或规范化重复列。');
-        }
-        const inheritedColumns = [];
-        const addedColumns = [];
-        const sourceByTargetCanonical = new Map();
-        for (const target of targetEntries) {
-            const source = beforeByCanonical.get(target.canonical);
-            if (source) {
-                sourceByTargetCanonical.set(target.canonical, source);
-                inheritedColumns.push(target.header);
-            }
-            else {
-                addedColumns.push(target.header);
-            }
-        }
-        const deletedColumns = beforeEntries
-            .filter(entry => !targetByCanonical.has(entry.canonical))
-            .map(entry => entry.header);
-        const migratedRows = before.content.slice(1).map(beforeRow => {
-            const row = [beforeRow[0] ?? null];
-            for (const target of targetEntries) {
-                const source = sourceByTargetCanonical.get(target.canonical);
-                row.push(source ? (beforeRow[source.index] ?? null) : null);
-            }
-            return row;
-        });
-        const templateRows = Array.isArray(template.content) ? template.content.slice(1) : [];
-        const adoptedRows = migratedRows.length === 0 && templateRows.length > 0
-            ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, 0)
-            : migratedRows;
-        const sheet = clone_ACU$4(template);
-        sheet.uid = before.uid;
-        sheet.content = [targetHeaders, ...adoptedRows];
-        delete sheet.seedRows;
-        if (sheet.sourceData && typeof sheet.sourceData === 'object') {
-            delete sheet.sourceData.hiddenPhysicalColumns;
-            delete sheet.sourceData.columnAliases;
-        }
-        accumulateTableAliases_ACU(sheet, before, template);
-        validateBaselineSheetRows_ACU(sheet);
-        const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
-        const beforeProjection = clone_ACU$4(before);
-        delete beforeProjection.seedRows;
-        const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
-        return {
-            sheet,
-            changed,
-            meta,
-            audit: {
-                sheetKey,
-                resolvedSheetKey: sheetKey,
-                match: 'matched',
-                baselineSheetKey: sheetKey,
-                templateSheetKey,
-                baselineName: before.name,
-                templateName: template.name,
-                canonicalName: canonicalizeDisplayName_ACU(before.name),
-                inheritedColumns,
-                addedColumns,
-                deletedColumns,
-                hiddenColumns: [],
-                physicalColumnMappings: [],
-                fills: addedColumns.map(header => ({ physicalName: header, kind: 'null', literal: null })),
-                affectedRowCount: before.content.length - 1,
-                metadataChanged: !!meta,
-                metadataChangedFields: meta ? Object.keys(meta) : [],
-                destructiveChangeConfirmed: false,
-                operations: [],
-            },
-        };
-    }
-    function reconcileMatchedSheet_ACU(before, template, sheetKey, templateSheetKey) {
-        const beforeHeaders = headers_ACU(before);
-        const targetHeaders = headers_ACU(template);
-        const beforeColumns = parseDDLColumnInfos_ACU(String(before.sourceData?.ddl || ''));
-        const targetColumns = parseDDLColumnInfos_ACU(String(template.sourceData?.ddl || ''));
-        if (beforeColumns.length !== beforeHeaders.length || targetColumns.length !== targetHeaders.length)
-            throw new Error('DDL 与表头列数不一致。');
-        const beforeEntries = beforeHeaders.slice(1).map((name, index) => ({
-            canonical: canonicalizeDisplayName_ACU(name), index: index + 1, physical: beforeColumns[index + 1].sqlName, header: name,
-        }));
-        const targetEntries = targetHeaders.slice(1).map((name, index) => ({
-            canonical: canonicalizeDisplayName_ACU(name), index: index + 1, physical: targetColumns[index + 1].sqlName, header: name, column: targetColumns[index + 1],
-        }));
-        const beforeByCanonical = new Map(beforeEntries.map(column => [column.canonical, column]));
-        const targetByCanonical = new Map(targetEntries.map(column => [column.canonical, column]));
-        if (beforeByCanonical.size !== beforeHeaders.length - 1 || targetByCanonical.size !== targetHeaders.length - 1)
-            throw new Error(`表「${before.name || sheetKey}」(${sheetKey}) → 模板表「${template.name || templateSheetKey}」(${templateSheetKey}) 存在空列或规范化重复列。`);
-        const beforeByPhysical = new Map(beforeEntries.map(column => [column.physical.toLowerCase(), column]));
-        const targetByPhysical = new Map(targetEntries.map(column => [column.physical.toLowerCase(), column]));
-        if (beforeByPhysical.size !== beforeEntries.length || targetByPhysical.size !== targetEntries.length)
-            throw new Error(`表「${before.name || sheetKey}」(${sheetKey}) → 模板表「${template.name || templateSheetKey}」(${templateSheetKey}) DDL 存在重复 physical column。`);
-        // === 零数据覆盖语义（计划 3.1）===
-        // 逐表判定：before.content.length > 1 才认为有数据行。该表无任何单元格时，
-        // “继承/隐藏/重解释”全部退化为空操作，却可能因隐藏列与目标可见列撞 physical 名
-        // 而误阻断（计划 2.3）。此时按覆盖处理：不继承、不隐藏、不做 reuse 判定，
-        // 结构与元数据整体取模板，仅保留既有 sheet key / uid（计划 3.2）。
-        const hasBaselineRows = before.content.length > 1;
-        if (!hasBaselineRows) {
-            const sheet = clone_ACU$4(template);
-            sheet.uid = before.uid;
-            // 模板自带数据行是模板结构的一部分，按目标可见列落地并补齐稳定 row_id。
-            const templateRows = Array.isArray(template.content) ? template.content.slice(1) : [];
-            const adoptedRows = templateRows.length > 0
-                ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, 0)
-                : [];
-            sheet.content = [targetHeaders, ...adoptedRows];
-            sheet.sourceData = clone_ACU$4(template.sourceData);
-            // 旧表无行 ⇒ 所有旧列均无单元格，丢弃无损；不把旧隐藏列/旧别名带进新结构，
-            // 避免残留投影指向不存在的 physical column，或跨 key 把无关列误认为同一列。
-            // 模板自身声明的 hiddenPhysicalColumns / columnAliases 保留（属于新结构）。
-            delete sheet.seedRows;
-            // 表级别名仍累积（覆盖后表名取模板，后续切换仍需按历史表名认回）。
-            accumulateTableAliases_ACU(sheet, before, template);
-            validateBaselineSheetRows_ACU(sheet);
-            const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
-            const beforeProjection = clone_ACU$4(before);
-            delete beforeProjection.seedRows;
-            const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
-            // audit 如实记录：旧列全部丢弃（零数据无单元格，无损但必须可审计），
-            // 新增列为模板全部可见列，无隐藏列、无填充、无行受影响。
-            const deletedColumns = beforeEntries.map(column => column.header);
-            return {
-                sheet,
-                changed,
-                meta,
-                audit: {
-                    sheetKey,
-                    resolvedSheetKey: sheetKey,
-                    match: 'matched',
-                    baselineSheetKey: sheetKey,
-                    templateSheetKey,
-                    baselineName: before.name,
-                    templateName: template.name,
-                    canonicalName: canonicalizeDisplayName_ACU(before.name),
-                    inheritedColumns: [],
-                    addedColumns: targetEntries.map(column => column.header),
-                    deletedColumns,
-                    hiddenColumns: [],
-                    physicalColumnMappings: [],
-                    fills: [],
-                    affectedRowCount: 0,
-                    metadataChanged: !!meta,
-                    metadataChangedFields: meta ? Object.keys(meta) : [],
-                    destructiveChangeConfirmed: false,
-                    operations: [],
-                },
-            };
-        }
-        const matchedBeforeCanonical = new Set();
-        const matchedTargetCanonical = new Set();
-        const targetSourceByCanonical = new Map();
-        const mappings = [];
-        const inheritedColumns = [];
-        for (const [canonicalName, target] of targetByCanonical) {
-            const source = beforeByCanonical.get(canonicalName);
-            if (!source)
-                continue;
-            matchedBeforeCanonical.add(source.canonical);
-            matchedTargetCanonical.add(target.canonical);
-            targetSourceByCanonical.set(target.canonical, source);
-            inheritedColumns.push(target.header);
-            if (source.physical !== target.physical)
-                mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
-        }
-        // 同一稳定 Sheet key 下，physical column 才是持久化数据身份；表头只是可变显示名。
-        // 不同 key 的导入模板仍禁止依赖 physical 同名推断，以免把无关字段重新解释为旧数据。
-        if (sheetKey === templateSheetKey) {
-            for (const target of targetEntries) {
-                if (matchedTargetCanonical.has(target.canonical))
-                    continue;
-                const source = beforeByPhysical.get(target.physical.toLowerCase());
-                if (!source || matchedBeforeCanonical.has(source.canonical))
-                    continue;
-                matchedBeforeCanonical.add(source.canonical);
-                matchedTargetCanonical.add(target.canonical);
-                targetSourceByCanonical.set(target.canonical, source);
-                inheritedColumns.push(target.header);
-                if (source.physical !== target.physical) {
-                    mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
-                }
-            }
-        }
-        // 列改名后 canonical 不再相等，靠 columnAliases 的历史显示名声明认回同一列，
-        // 使数据继续继承。这是显式声明驱动，不做启发式推断：
-        // 一个别名必须唯一命中一个未匹配的旧列，否则宁可不继承，也不把无关字段混进来。
-        const aliasCanonicalToPhysical = buildColumnAliasIndex_ACU(before, template);
-        for (const target of targetEntries) {
-            if (matchedTargetCanonical.has(target.canonical))
-                continue;
-            const aliasCanonicals = aliasCanonicalToPhysical.get(target.physical.toLowerCase());
-            if (!aliasCanonicals)
-                continue;
-            const candidates = [...new Set(aliasCanonicals)]
-                .map(alias => beforeByCanonical.get(alias))
-                .filter((entry) => !!entry && !matchedBeforeCanonical.has(entry.canonical));
-            const unique = [...new Map(candidates.map(entry => [entry.canonical, entry])).values()];
-            if (unique.length !== 1)
-                continue;
-            const source = unique[0];
-            matchedBeforeCanonical.add(source.canonical);
-            matchedTargetCanonical.add(target.canonical);
-            targetSourceByCanonical.set(target.canonical, source);
-            inheritedColumns.push(target.header);
-            if (source.physical !== target.physical) {
-                mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
-            }
-        }
-        const hiddenEntries = beforeEntries.filter(column => !matchedBeforeCanonical.has(column.canonical));
-        const hiddenColumns = hiddenEntries.map(column => column.header);
-        const addedColumns = targetEntries.filter(column => !matchedTargetCanonical.has(column.canonical)).map(column => column.header);
-        const hiddenPhysicalNames = new Set(hiddenEntries.map(column => column.physical.toLowerCase()));
-        const reusedPhysicalNames = targetEntries
-            .filter(column => !matchedTargetCanonical.has(column.canonical) && hiddenPhysicalNames.has(column.physical.toLowerCase()))
-            .map(column => column.physical);
-        if (reusedPhysicalNames.length > 0) {
-            // 真实原因：隐藏旧列与目标可见列产生重复列名 DDL，SQLite 建表必然失败。
-            // 列出 key 对、冲突 physical 名、两侧显示名与 baseline 行数，便于定位。
-            const conflictDetails = reusedPhysicalNames.map(physical => {
-                const hidden = hiddenEntries.find(entry => entry.physical.toLowerCase() === physical.toLowerCase());
-                const target = targetEntries.find(entry => entry.physical.toLowerCase() === physical.toLowerCase());
-                return `physical=${physical}（隐藏列「${hidden?.header}」→ 目标列「${target?.header}」）`;
-            }).join('；');
-            throw new Error(`表「${before.name || sheetKey}」(${sheetKey}) → 模板表「${template.name || templateSheetKey}」(${templateSheetKey})：隐藏列与目标可见列存在同名 physical column，产出重复列名 DDL，SQLite 建表会失败。冲突：${conflictDetails}。baseline 行数=${before.content.length - 1}。`);
-        }
-        // 新列填充决策（替代 fills 静态契约）：可解析 literal DEFAULT → 该值；NOT NULL 无 DEFAULT → 空串；nullable → null。
-        const fillAudit = [];
-        const fillByTargetCanonical = new Map();
-        for (const target of targetEntries) {
-            if (matchedTargetCanonical.has(target.canonical))
-                continue;
-            const literal = parseDDLSafeDefaultLiteral_ACU(target.column.defaultExpression);
-            let value;
-            let kind;
-            if (literal) {
-                value = literalToCellValue_ACU(literal);
-                kind = 'literal_default';
-            }
-            else if (target.column.isNotNull) {
-                value = '';
-                kind = 'empty_not_null';
-            }
-            else {
-                value = null;
-                kind = 'null';
-            }
-            fillByTargetCanonical.set(target.canonical, value);
-            fillAudit.push({ physicalName: target.physical, kind, literal: value });
-        }
-        const sheet = clone_ACU$4(template);
-        sheet.uid = before.uid;
-        const retainedHiddenColumns = hiddenEntries.map(entry => beforeColumns[entry.index]);
-        const retainedHiddenHeaders = hiddenEntries.map(entry => entry.header);
-        // 迁移后数据行（纯 JS 直通，替代契约驱动迁移）：匹配列原值直通，新列取填充值，隐藏列原值保留。
-        const migratedRows = [];
-        for (let rowIndex = 1; rowIndex < before.content.length; rowIndex += 1) {
-            const beforeRow = before.content[rowIndex];
-            const targetRow = [beforeRow[0] ?? null];
-            for (const target of targetEntries) {
-                const source = targetSourceByCanonical.get(target.canonical);
-                if (source)
-                    targetRow.push(beforeRow[source.index] ?? null);
-                else
-                    targetRow.push(fillByTargetCanonical.get(target.canonical) ?? null);
-            }
-            for (const hidden of hiddenEntries)
-                targetRow.push(beforeRow[hidden.index] ?? null);
-            migratedRows.push(targetRow);
-        }
-        const nextHeaders = [...targetHeaders, ...retainedHiddenHeaders];
-        // 数据归属规则：
-        // - 旧表已有数据 → 以旧表为主，忽略模板自带数据（避免覆盖用户/AI 写过的内容）。
-        // - 旧表无数据且模板自带数据 → 采用模板数据（作者定义的初始格式必须落地），
-        //   与「是否首楼、是否首次初始化」无关。
-        // - 两边都无数据 → 表头空表。
-        const templateRows = Array.isArray(template.content) ? template.content.slice(1) : [];
-        const useTemplateRows = migratedRows.length === 0 && templateRows.length > 0;
-        const adoptedRows = useTemplateRows
-            ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, retainedHiddenHeaders.length)
-            : migratedRows;
-        sheet.content = [nextHeaders, ...adoptedRows];
-        sheet.sourceData = clone_ACU$4(template.sourceData);
-        // 列身份由 canonical 显示名决定，物理列名一旦确立就不再随模板 DDL 文本变动。
-        // 若采用模板的物理名，同一显示名会在切模板时被改名（如 last_round_time → prev_scene_time），
-        // 而历史 log 里的 SQL 仍按旧物理名书写，回放时必然撞 "has no column named ..."。
-        const effectiveTargetColumns = targetColumns.map((column, index) => {
-            if (index === 0)
-                return column;
-            const target = targetEntries[index - 1];
-            const source = target ? targetSourceByCanonical.get(target.canonical) : undefined;
-            if (!source || source.physical === column.sqlName)
-                return column;
-            return renamePhysicalColumn_ACU(column, source.physical);
-        });
-        sheet.sourceData.ddl = buildRetainedColumnDDL_ACU(before, template, effectiveTargetColumns, targetHeaders, retainedHiddenColumns, retainedHiddenHeaders);
-        const activePhysical = new Set(effectiveTargetColumns.map(column => column.sqlName.toLowerCase()));
-        const previousHidden = getSheetColumnProjection_ACU(before).hiddenPhysicalColumns;
-        const candidatePhysical = new Map([...effectiveTargetColumns, ...retainedHiddenColumns].map(column => [column.sqlName.toLowerCase(), column.sqlName]));
-        const hiddenPhysicalColumns = [...previousHidden, ...retainedHiddenColumns.map(column => column.sqlName)]
-            .filter(name => !activePhysical.has(name.toLowerCase()) && candidatePhysical.has(name.toLowerCase()))
-            .filter((name, index, values) => values.findIndex(value => value.toLowerCase() === name.toLowerCase()) === index)
-            .map(name => candidatePhysical.get(name.toLowerCase()));
-        if (previousHidden.length > 0 || hiddenPhysicalColumns.length > 0)
-            sheet.sourceData.hiddenPhysicalColumns = hiddenPhysicalColumns;
-        else
-            delete sheet.sourceData.hiddenPhysicalColumns;
-        // 记下本次发生的显示名变更，使后续切换仍能顺着别名链认回同一列。
-        const renamedColumns = targetEntries
-            .map(target => {
-            const source = targetSourceByCanonical.get(target.canonical);
-            if (!source || source.canonical === target.canonical)
-                return null;
-            const physicalName = source.physical;
-            return { physicalName, previousHeader: source.header, nextHeader: target.header };
-        })
-            .filter((entry) => !!entry);
-        accumulateColumnAliases_ACU(sheet, before, template, renamedColumns, new Set([...effectiveTargetColumns, ...retainedHiddenColumns].map(column => column.sqlName.toLowerCase())));
-        accumulateTableAliases_ACU(sheet, before, template);
-        delete sheet.seedRows;
-        const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
-        const beforeProjection = clone_ACU$4(before);
-        delete beforeProjection.seedRows;
-        const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
-        return { sheet, changed, meta, audit: { sheetKey, resolvedSheetKey: sheetKey, match: 'matched', baselineSheetKey: sheetKey, templateSheetKey, baselineName: before.name,
-                templateName: template.name, canonicalName: canonicalizeDisplayName_ACU(before.name), inheritedColumns, addedColumns, deletedColumns: [], hiddenColumns,
-                physicalColumnMappings: mappings, fills: fillAudit,
-                affectedRowCount: before.content.length - 1, metadataChanged: !!meta, metadataChangedFields: meta ? Object.keys(meta) : [], destructiveChangeConfirmed: false, operations: [] } };
-    }
-    /**
-     * 把列定义的物理列名换成已存在的名字，保留类型、约束与 DEFAULT 不变。
-     * 只替换 normalizedDefinition 开头的标识符（解析保证它以列名起头），
-     * 不做全文替换，避免误伤 DEFAULT 字面量或约束中的同名片段。
-     */
-    function renamePhysicalColumn_ACU(column, nextSqlName) {
-        const definition = column.normalizedDefinition;
-        const remainder = definition.slice(column.sqlName.length);
-        if (!definition.startsWith(column.sqlName)) {
-            throw new Error(`无法重绑定物理列名：列定义未以列名起头（${column.sqlName}）。`);
-        }
-        return { ...column, sqlName: nextSqlName, normalizedDefinition: `${nextSqlName}${remainder}` };
-    }
-    /**
-     * 把模板自带数据行整形成当前目标结构：按目标列数对齐，为保留的隐藏列补 null，
-     * 并为缺失的 row_id 分配稳定值（模板作者通常不写 row_id，首列常为 null）。
-     * 行宽超过目标可见列时 fail-loud，不静默截断丢数据。
-     */
-    function adoptTemplateRowsForMatchedSheet_ACU(templateRows, visibleColumnCount, hiddenColumnCount) {
-        const rows = templateRows.map(row => {
-            const cells = (Array.isArray(row) ? row : [row])
-                .map(cell => (cell === null || cell === undefined ? null : String(cell)));
-            // cells[0] 是 row_id，其后是可见列。
-            const expected = visibleColumnCount + 1;
-            if (cells.length > expected) {
-                throw new Error(`模板数据行宽度为 ${cells.length}，超过目标可见列 ${expected} 列。`);
-            }
-            while (cells.length < expected)
-                cells.push(null);
-            // 隐藏列在新数据下无值。
-            for (let index = 0; index < hiddenColumnCount; index += 1)
-                cells.push(null);
-            return cells;
-        });
-        const reserved = createStableRowIdReservation_ACU(rows);
-        for (const row of rows) {
-            const rowId = row[0] === null ? '' : String(row[0]).trim();
-            row[0] = rowId || allocateStableRowId_ACU(reserved);
-        }
-        return rows;
-    }
-    /**
-     * 汇总旧表与模板声明的 columnAliases，得到 physical column name(lowercase) → canonical 历史显示名列表。
-     * 两侧都参与：模板作者可声明“新列对应哪个旧名”，旧表则携带历史累积的别名。
-     */
-    function buildColumnAliasIndex_ACU(before, template) {
-        const index = new Map();
-        const absorb = (sheet) => {
-            const raw = sheet.sourceData?.columnAliases;
-            if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-                return;
-            for (const [physicalName, aliases] of Object.entries(raw)) {
-                const key = String(physicalName || '').trim().toLowerCase();
-                if (!key || !Array.isArray(aliases))
-                    continue;
-                const canonicals = aliases
-                    .map(alias => canonicalizeDisplayName_ACU(alias))
-                    .filter(Boolean);
-                if (canonicals.length === 0)
-                    continue;
-                index.set(key, [...(index.get(key) || []), ...canonicals]);
-            }
-        };
-        absorb(before);
-        absorb(template);
-        return index;
-    }
-    /**
-     * 累积列别名：已确认同一身份但显示名变了的列，把旧显示名记入该物理列的别名。
-     * 仅保留当前 DDL 中仍存在的物理列，避免别名无限膨胀。
-     */
-    function accumulateColumnAliases_ACU(sheet, before, template, renamed, livePhysicalNames) {
-        const merged = new Map();
-        const absorb = (source) => {
-            const raw = source.sourceData?.columnAliases;
-            if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-                return;
-            for (const [physicalName, aliases] of Object.entries(raw)) {
-                const key = String(physicalName || '').trim();
-                if (!key || !Array.isArray(aliases))
-                    continue;
-                merged.set(key, [
-                    ...(merged.get(key) || []),
-                    ...aliases.map(alias => String(alias || '')).filter(Boolean),
-                ]);
-            }
-        };
-        absorb(before);
-        absorb(template);
-        for (const entry of renamed) {
-            merged.set(entry.physicalName, [
-                ...(merged.get(entry.physicalName) || []),
-                entry.previousHeader,
-                entry.nextHeader,
-            ]);
-        }
-        const normalized = {};
-        for (const [physicalName, aliases] of merged) {
-            if (!livePhysicalNames.has(physicalName.toLowerCase()))
-                continue;
-            // 保留该物理列用过的全部历史显示名（含变更前后两侧），别名链才不会在
-            // 「A→B 之后再 B→A」这类往复改名中断开。当前显示名一并留下是有意的：
-            // 它是下一次协调时 before 侧的名字，必须能被查到。
-            const unique = [...new Set(aliases.map(alias => alias.trim()).filter(Boolean))];
-            if (unique.length > 0)
-                normalized[physicalName] = unique;
-        }
-        if (Object.keys(normalized).length > 0)
-            sheet.sourceData.columnAliases = normalized;
-        else
-            delete sheet.sourceData.columnAliases;
-    }
-    function buildRetainedColumnDDL_ACU(before, template, targetColumns, targetHeaders, retainedColumns, retainedHeaders) {
-        const templateDDL = String(template.sourceData?.ddl || '');
-        const tableName = parseDDLTableName(templateDDL);
-        if (!tableName)
-            throw new Error('模板 DDL 缺少可解析的物理表名。');
-        const allColumns = [...targetColumns, ...retainedColumns];
-        const definitions = allColumns.map((column, index) => {
-            const header = index < targetColumns.length ? targetHeaders[index] : retainedHeaders[index - targetColumns.length];
-            const comment = header && header !== column.sqlName ? ` -- ${header}` : '';
-            return { definition: column.normalizedDefinition, comment };
-        });
-        const constraints = Array.from(new Set([
-            ...parseDDLTableConstraints_ACU(String(before.sourceData?.ddl || '')),
-            ...parseDDLTableConstraints_ACU(templateDDL),
-        ]));
-        const suffix = parseDDLTableSuffix_ACU(templateDDL);
-        const entries = [...definitions, ...constraints.map(definition => ({ definition, comment: '' }))];
-        return `CREATE TABLE ${tableName} (\n${entries.map((entry, index) => `  ${entry.definition}${index < entries.length - 1 ? ',' : ''}${entry.comment}`).join('\n')}\n)${suffix ? ` ${suffix}` : ''};`;
-    }
-    function buildPersistentMetadataUpdate_ACU(before, template) {
-        const beforeSourceData = clone_ACU$4(before.sourceData || {});
-        const targetSourceData = clone_ACU$4(template.sourceData || {});
-        delete beforeSourceData.ddl;
-        delete targetSourceData.ddl;
-        const removedSourceDataKeys = Object.keys(beforeSourceData).filter(key => !Object.prototype.hasOwnProperty.call(targetSourceData, key));
-        const sourceDataDelta = Object.fromEntries(Object.entries(targetSourceData).filter(([key, value]) => !sameValue_ACU(beforeSourceData[key], value)));
-        const meta = {};
-        if (before.name !== template.name)
-            meta.name = template.name;
-        if (before.orderNo !== template.orderNo)
-            meta.orderNo = template.orderNo;
-        if (Object.keys(sourceDataDelta).length > 0 || removedSourceDataKeys.length > 0)
-            meta.sourceData = clone_ACU$4(targetSourceData);
-        if (!sameValue_ACU(before.updateConfig, template.updateConfig))
-            meta.updateConfig = clone_ACU$4(template.updateConfig);
-        if (!sameValue_ACU(before.exportConfig, template.exportConfig))
-            meta.exportConfig = clone_ACU$4(template.exportConfig);
-        return Object.keys(meta).length > 0 ? meta : undefined;
-    }
-    function sameValue_ACU(left, right) {
-        return JSON.stringify(left) === JSON.stringify(right);
-    }
-    function literalToCellValue_ACU(literal) {
-        if (literal.kind === 'null')
-            return null;
-        if (literal.kind === 'boolean')
-            return literal.value ? '1' : '0';
-        return String(literal.value);
     }
 
     /**
@@ -53533,6 +53726,24 @@ $CONTENT
         return normalizedPresetName;
     }
     // ═══ 模板应用（纯业务逻辑，不做 UI 刷新） ═══
+    /**
+     * 协调提交固定写 chat_override 快照；"跟随全局"类语义要求提交成功后把 scope
+     * 翻回 inherit_global。刻意不走 persistTemplateScopeSelectionState_ACU 的
+     * inherit_global 分支——那条路会顺带清除协调刚写入的聊天指导表。
+     * saveChatToHost 失败只降级为警告：容器已在内存更新，将随下次保存落盘。
+     */
+    async function flipCurrentChatScopeToInheritGlobal_ACU(reason) {
+        setCurrentChatTemplateScopeState_ACU({ mode: 'inherit_global' }, {
+            isolationKey: normalizeTemplateScopeIsolationKey_ACU(getCurrentIsolationKey_ACU()),
+            reason,
+        });
+        try {
+            await saveChatToHost_ACU();
+        }
+        catch (error) {
+            logWarn_ACU('[TemplateScope] scope 翻转 inherit_global 后保存聊天失败（容器已在内存更新，将随下次保存落盘）:', error);
+        }
+    }
     async function applyTemplateSnapshotToScope_ACU(templateSource, { scope = 'global', source = 'ui', presetName = '', save = true, persistChatScope = null, registerChatPresetEntry = null, destructiveChangeConfirmed = false, signal = undefined } = {}) {
         const normalizedScope = normalizeTemplateOperationScope_ACU(scope);
         const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateSource);
@@ -53550,9 +53761,37 @@ $CONTENT
         const updateGlobal = normalizedScope === 'global';
         const effectivePersistChatScope = persistChatScope === null ? !updateGlobal : !!persistChatScope;
         void registerChatPresetEntry;
+        // ═══ S1-3：全局切换若影响当前聊天生效模板，强制走协调器 ═══
+        // 当前聊天无 chat scope 状态（inherit_global 生效中）且聊天非空时，全局模板
+        // 就是当前聊天的生效模板；直接替换 TABLE_TEMPLATE 会绕过 hide checkpoint、
+        // 列级隐藏与破坏性确认，导致运行时结构与 V2 历史脱节。此处先经协调器提交
+        // 当前聊天，失败（含 blockers）则原样返回且不碰任何全局状态（fail-closed）；
+        // 空聊天或存在 chat_override/preset_link 的聊天不受全局切换影响，走轻路径。
+        let reconciledForGlobalSwitch = null;
+        if (updateGlobal) {
+            const chatForGlobalSwitch = getChatArray_ACU();
+            const globalAffectsCurrentChat = Array.isArray(chatForGlobalSwitch)
+                && chatForGlobalSwitch.length > 0
+                && !getCurrentChatTemplateScopeState_ACU();
+            if (globalAffectsCurrentChat) {
+                reconciledForGlobalSwitch = await applyChatTemplateSnapshotWithReconciliation_ACU(snapshot.templateObj, {
+                    source,
+                    presetName: normalizedPresetName,
+                    destructiveChangeConfirmed,
+                    signal,
+                });
+                if (!reconciledForGlobalSwitch || reconciledForGlobalSwitch.saved !== true) {
+                    return reconciledForGlobalSwitch || false;
+                }
+            }
+        }
         _set_TABLE_TEMPLATE_ACU(snapshot.templateStr);
         if (updateGlobal) {
             saveCurrentProfileTemplate_ACU(TABLE_TEMPLATE_ACU, settings_ACU);
+        }
+        if (reconciledForGlobalSwitch) {
+            // 协调提交写了 chat_override；全局切换语义下当前聊天仍应跟随全局。
+            await flipCurrentChatScopeToInheritGlobal_ACU('template_scope_global_switch_reconcile');
         }
         const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(snapshot.templateObj, { stripSeedRows: false });
         persistTemplateScopeSelectionState_ACU(normalizedPresetName, {
@@ -53572,10 +53811,18 @@ $CONTENT
         catch (e) { }
         notifyTemplateRuntimeCommitted_ACU();
         return {
+            saved: true,
             scope: normalizedScope,
             presetName: normalizedPresetName,
             templateStr: snapshot.templateStr,
             templateObj: snapshot.templateObj,
+            ...(reconciledForGlobalSwitch ? {
+                reconciledCurrentChat: true,
+                ...('runtimeReady' in reconciledForGlobalSwitch ? { runtimeReady: reconciledForGlobalSwitch.runtimeReady } : {}),
+                ...(typeof reconciledForGlobalSwitch.postCommitWarning === 'string' && reconciledForGlobalSwitch.postCommitWarning
+                    ? { postCommitWarning: reconciledForGlobalSwitch.postCommitWarning }
+                    : {}),
+            } : {}),
         };
     }
     function getChatContextSnapshot_ACU() {
@@ -53914,6 +54161,9 @@ $CONTENT
                 syncTemplateScope: true,
                 templateSource: plan.candidateData,
                 presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
+                // 休眠溯源（S3-4）：此刻 scope 尚未被本次提交改写，取到的是切换前的活跃预设名，
+                // 即本次被 hide 的表在休眠前所属的模板。
+                hideSourcePresetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey }) || undefined,
                 source,
                 reason: 'chat_template_reconciliation',
                 baseRevision: commitBaseRevision,
@@ -54050,10 +54300,49 @@ $CONTENT
             presetName: name,
             save,
             persistChatScope: _persistChatScope,
+            destructiveChangeConfirmed,
+            signal,
         });
         if (!applied)
             return false;
+        // S1-3：全局切换经协调器失败时（saved:false，含 blockers/error），原样透传给
+        // 调用方做破坏性确认重试或错误展示，不得伪装成成功。
+        if (typeof applied === 'object' && 'saved' in applied && applied.saved === false)
+            return applied;
         return { ...applied, isDefault: isDefaultPreset };
+    }
+    /**
+     * 跟随全局：清除当前聊天的模板覆盖，让当前聊天回到 inherit_global（S1-2）。
+     *
+     * 语义：先经协调器把当前聊天切到当前全局模板（保留休眠/隐藏语义、破坏性确认、
+     * V2 原子提交），提交成功后再把 scope 翻成 {mode:'inherit_global'}。协调提交
+     * 固定写 chat_override 快照，因此翻转必须在提交之后单独执行；刻意不走
+     * persistTemplateScopeSelectionState_ACU 的 inherit_global 分支——那条路会顺带
+     * 清除协调刚写入的聊天指导表。
+     */
+    async function followGlobalTemplateForCurrentChat_ACU({ source = 'follow_global', destructiveChangeConfirmed = false, signal = undefined, } = {}) {
+        const isolationKey = normalizeTemplateScopeIsolationKey_ACU(getCurrentIsolationKey_ACU());
+        const globalPresetName = normalizeTemplatePresetSelectionValue_ACU(getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: false }));
+        const scopeState = getCurrentChatTemplateScopeState_ACU({ isolationKey });
+        if (!scopeState) {
+            return { saved: true, alreadyFollowing: true, mode: 'inherit_global', presetName: globalPresetName };
+        }
+        const globalSnapshot = getGlobalTemplateSnapshotForCurrentProfile_ACU();
+        if (!globalSnapshot?.templateStr || !globalSnapshot?.templateObj) {
+            return { saved: false, error: '无法解析当前全局模板，已取消跟随全局。' };
+        }
+        const result = await applyChatTemplateSnapshotWithReconciliation_ACU(globalSnapshot.templateObj, {
+            source,
+            presetName: globalPresetName,
+            destructiveChangeConfirmed,
+            signal,
+        });
+        if (!result || result.saved !== true)
+            return result;
+        await flipCurrentChatScopeToInheritGlobal_ACU('template_scope_follow_global');
+        applyTemplateScopeForCurrentChat_ACU();
+        notifyTemplateRuntimeCommitted_ACU();
+        return { ...result, mode: 'inherit_global', presetName: globalPresetName };
     }
     /**
      * 解析指定 scope 的模板数据用于导出
@@ -55891,6 +56180,643 @@ $CONTENT
     }
 
     /**
+     * service/runtime/helpers-table-lock.ts — 表格锁定与索引
+     * 从 helpers-remaining.ts 拆出
+     *
+     * 锁存储 v2（身份键）：
+     * - 旧格式（legacy）以位置索引存储 { rows:number[], cols:number[], cells:'r:c'[] }，
+     *   插行/删行后索引错位，锁会漂移到错误的行列。
+     * - v2 以稳定身份存储 { v:2, rowIds:string[], colNames:string[], cells:[rowId,colName][] }：
+     *   行锁定挂 row_id、列锁定挂表头显示名、单元格锁定挂 [row_id, 列名] 元组。
+     * - 对外 index 契约全部保留（解析器/编辑器/开放 API 仍用行列下标交互），
+     *   本模块在读写边界用表内容（content）做 index↔identity 双向解析；
+     *   读到 legacy 桶且有内容上下文时惰性迁移为 v2 并持久化。
+     */
+    function getTableLockScopeKey_ACU() {
+        const chatKey = (currentChatFileIdentifier_ACU || 'default').trim() || 'default';
+        const isolationKey = getCurrentIsolationKey_ACU() || '';
+        return `${chatKey}::${isolationKey}`;
+    }
+    function ensureTableLockStore_ACU() {
+        if (!settings_ACU.tableUpdateLocks || typeof settings_ACU.tableUpdateLocks !== 'object') {
+            settings_ACU.tableUpdateLocks = {};
+        }
+        if (!settings_ACU.specialIndexLocks || typeof settings_ACU.specialIndexLocks !== 'object') {
+            settings_ACU.specialIndexLocks = {};
+        }
+    }
+    /** 单元格锁的内部集合键。\u0000 不会出现在 row_id 或表头名中。 */
+    function makeCellLockKey_ACU(rowId, colName) {
+        return `${rowId}\u0000${colName}`;
+    }
+    function isV2Bucket_ACU(bucket) {
+        return !!bucket && bucket.v === 2;
+    }
+    function emptyV2Bucket_ACU() {
+        return { v: 2, rowIds: [], colNames: [], cells: [] };
+    }
+    function isBucketEmpty_ACU(bucket) {
+        return bucket.rowIds.length === 0 && bucket.colNames.length === 0 && bucket.cells.length === 0;
+    }
+    /** 解析锁定操作的内容上下文：显式传入优先，否则用当前运行时表格。 */
+    function resolveLockContent_ACU(sheetKey, content) {
+        const resolved = Array.isArray(content) ? content : currentJsonTableData_ACU?.[sheetKey]?.content;
+        if (!Array.isArray(resolved) || !Array.isArray(resolved[0]))
+            return null;
+        return resolved;
+    }
+    /** 数据行下标（0 基，content[rowIndex+1]）→ row_id。 */
+    function rowIdAtIndex_ACU(content, rowIndex) {
+        const row = content[rowIndex + 1];
+        if (!Array.isArray(row))
+            return null;
+        const rowId = String(row[0] ?? '').trim();
+        return rowId || null;
+    }
+    /** 数据列下标（0 基，不含 row_id 列）→ 表头显示名。 */
+    function colNameAtIndex_ACU(content, colIndex) {
+        const header = content[0]?.[colIndex + 1];
+        if (header === undefined || header === null)
+            return null;
+        const name = String(header);
+        return name || null;
+    }
+    function rowIndexOfId_ACU(content, rowId) {
+        for (let i = 1; i < content.length; i += 1) {
+            const row = content[i];
+            if (Array.isArray(row) && String(row[0] ?? '').trim() === rowId)
+                return i - 1;
+        }
+        return -1;
+    }
+    function colIndexOfName_ACU(content, colName) {
+        const headers = content[0] || [];
+        for (let i = 1; i < headers.length; i += 1) {
+            if (String(headers[i]) === colName)
+                return i - 1;
+        }
+        return -1;
+    }
+    /** legacy 位置索引桶 → v2 身份桶。越界/无 row_id 的项丢弃（本就指向不存在的目标）。 */
+    function migrateLegacyBucket_ACU(bucket, content) {
+        const next = emptyV2Bucket_ACU();
+        const rowIdSeen = new Set();
+        for (const rawIndex of (Array.isArray(bucket?.rows) ? bucket.rows : [])) {
+            const rowIndex = Number(rawIndex);
+            if (!Number.isInteger(rowIndex))
+                continue;
+            const rowId = rowIdAtIndex_ACU(content, rowIndex);
+            if (rowId && !rowIdSeen.has(rowId)) {
+                rowIdSeen.add(rowId);
+                next.rowIds.push(rowId);
+            }
+        }
+        const colNameSeen = new Set();
+        for (const rawIndex of (Array.isArray(bucket?.cols) ? bucket.cols : [])) {
+            const colIndex = Number(rawIndex);
+            if (!Number.isInteger(colIndex))
+                continue;
+            const colName = colNameAtIndex_ACU(content, colIndex);
+            if (colName && !colNameSeen.has(colName)) {
+                colNameSeen.add(colName);
+                next.colNames.push(colName);
+            }
+        }
+        const cellSeen = new Set();
+        for (const rawKey of (Array.isArray(bucket?.cells) ? bucket.cells : [])) {
+            const match = /^(\d+):(\d+)$/.exec(String(rawKey ?? ''));
+            if (!match)
+                continue;
+            const rowId = rowIdAtIndex_ACU(content, Number(match[1]));
+            const colName = colNameAtIndex_ACU(content, Number(match[2]));
+            if (!rowId || !colName)
+                continue;
+            const key = makeCellLockKey_ACU(rowId, colName);
+            if (cellSeen.has(key))
+                continue;
+            cellSeen.add(key);
+            next.cells.push([rowId, colName]);
+        }
+        return next;
+    }
+    function writeBucket_ACU(sheetKey, bucket, { save = true } = {}) {
+        ensureTableLockStore_ACU();
+        const scopeKey = getTableLockScopeKey_ACU();
+        if (!settings_ACU.tableUpdateLocks[scopeKey])
+            settings_ACU.tableUpdateLocks[scopeKey] = {};
+        settings_ACU.tableUpdateLocks[scopeKey][sheetKey] = {
+            v: 2,
+            rowIds: [...bucket.rowIds],
+            colNames: [...bucket.colNames],
+            cells: bucket.cells.map(pair => [pair[0], pair[1]]),
+        };
+        if (save)
+            saveSettings_ACU();
+    }
+    /**
+     * 读取 sheet 的 v2 身份桶。
+     * legacy 桶在内容上下文可用时惰性迁移并持久化；不可用时返回 null（调用方回退 legacy 语义）。
+     */
+    function readIdentityBucket_ACU(sheetKey, content) {
+        const scopeKey = getTableLockScopeKey_ACU();
+        const stored = settings_ACU?.tableUpdateLocks?.[scopeKey]?.[sheetKey];
+        if (!stored)
+            return emptyV2Bucket_ACU();
+        if (isV2Bucket_ACU(stored)) {
+            return {
+                v: 2,
+                rowIds: Array.isArray(stored.rowIds) ? stored.rowIds.map(String) : [],
+                colNames: Array.isArray(stored.colNames) ? stored.colNames.map(String) : [],
+                cells: Array.isArray(stored.cells)
+                    ? stored.cells
+                        .filter((pair) => Array.isArray(pair) && pair.length >= 2)
+                        .map((pair) => [String(pair[0]), String(pair[1])])
+                    : [],
+            };
+        }
+        const resolvedContent = resolveLockContent_ACU(sheetKey, content);
+        if (!resolvedContent)
+            return null;
+        const migrated = migrateLegacyBucket_ACU(stored, resolvedContent);
+        writeBucket_ACU(sheetKey, migrated);
+        return migrated;
+    }
+    /** 身份锁查询：SQL 差异回滚、CRUD 查锁与提示词注入的统一入口。 */
+    function getTableLockIdentitiesForSheet_ACU(sheetKey, content) {
+        const bucket = readIdentityBucket_ACU(sheetKey, content);
+        if (!bucket) {
+            // legacy 桶且无内容上下文：无法解析身份，按无锁处理（旧行为在此场景同样无法正确定位）。
+            return { rowIds: new Set(), colNames: new Set(), cellPairs: [], hasAny: false };
+        }
+        return {
+            rowIds: new Set(bucket.rowIds),
+            colNames: new Set(bucket.colNames),
+            cellPairs: bucket.cells,
+            hasAny: !isBucketEmpty_ACU(bucket),
+        };
+    }
+    /**
+     * index 视图（对外契约不变）：身份锁按给定内容解析回行列下标。
+     * 身份指向的行/列在当前内容中不存在时不出现在视图里（数据不在场即无格可锁）。
+     */
+    function getTableLocksForSheet_ACU(sheetKey, content) {
+        const scopeKey = getTableLockScopeKey_ACU();
+        const stored = settings_ACU?.tableUpdateLocks?.[scopeKey]?.[sheetKey];
+        const resolvedContent = resolveLockContent_ACU(sheetKey, content);
+        if (stored && !isV2Bucket_ACU(stored) && !resolvedContent) {
+            // legacy 桶且无内容上下文：按旧格式原样返回，保持完整向后兼容。
+            return {
+                rows: new Set(Array.isArray(stored.rows) ? stored.rows : []),
+                cols: new Set(Array.isArray(stored.cols) ? stored.cols : []),
+                cells: new Set(Array.isArray(stored.cells) ? stored.cells : []),
+            };
+        }
+        const bucket = readIdentityBucket_ACU(sheetKey, resolvedContent);
+        const rows = new Set();
+        const cols = new Set();
+        const cells = new Set();
+        if (bucket && resolvedContent) {
+            for (const rowId of bucket.rowIds) {
+                const rowIndex = rowIndexOfId_ACU(resolvedContent, rowId);
+                if (rowIndex >= 0)
+                    rows.add(rowIndex);
+            }
+            for (const colName of bucket.colNames) {
+                const colIndex = colIndexOfName_ACU(resolvedContent, colName);
+                if (colIndex >= 0)
+                    cols.add(colIndex);
+            }
+            for (const [rowId, colName] of bucket.cells) {
+                const rowIndex = rowIndexOfId_ACU(resolvedContent, rowId);
+                const colIndex = colIndexOfName_ACU(resolvedContent, colName);
+                if (rowIndex >= 0 && colIndex >= 0)
+                    cells.add(`${rowIndex}:${colIndex}`);
+            }
+        }
+        return { rows, cols, cells };
+    }
+    /** index 锁状态写入（对外契约不变）：经内容解析为身份后落 v2。 */
+    function saveTableLocksForSheet_ACU(sheetKey, lockState, content) {
+        if (!sheetKey)
+            return;
+        const resolvedContent = resolveLockContent_ACU(sheetKey, content);
+        if (!resolvedContent) {
+            // 无内容上下文无法解析身份：按旧格式存储，等待下次可解析时机迁移。
+            ensureTableLockStore_ACU();
+            const scopeKey = getTableLockScopeKey_ACU();
+            if (!settings_ACU.tableUpdateLocks[scopeKey])
+                settings_ACU.tableUpdateLocks[scopeKey] = {};
+            settings_ACU.tableUpdateLocks[scopeKey][sheetKey] = {
+                rows: Array.from(lockState.rows || []),
+                cols: Array.from(lockState.cols || []),
+                cells: Array.from(lockState.cells || []),
+            };
+            saveSettings_ACU();
+            return;
+        }
+        const bucket = emptyV2Bucket_ACU();
+        const rowIdSeen = new Set();
+        for (const rawIndex of Array.from(lockState?.rows || [])) {
+            const rowIndex = Number(rawIndex);
+            if (!Number.isInteger(rowIndex))
+                continue;
+            const rowId = rowIdAtIndex_ACU(resolvedContent, rowIndex);
+            if (rowId && !rowIdSeen.has(rowId)) {
+                rowIdSeen.add(rowId);
+                bucket.rowIds.push(rowId);
+            }
+        }
+        const colNameSeen = new Set();
+        for (const rawIndex of Array.from(lockState?.cols || [])) {
+            const colIndex = Number(rawIndex);
+            if (!Number.isInteger(colIndex))
+                continue;
+            const colName = colNameAtIndex_ACU(resolvedContent, colIndex);
+            if (colName && !colNameSeen.has(colName)) {
+                colNameSeen.add(colName);
+                bucket.colNames.push(colName);
+            }
+        }
+        const cellSeen = new Set();
+        for (const rawKey of Array.from(lockState?.cells || [])) {
+            const match = /^(\d+):(\d+)$/.exec(String(rawKey ?? ''));
+            if (!match)
+                continue;
+            const rowId = rowIdAtIndex_ACU(resolvedContent, Number(match[1]));
+            const colName = colNameAtIndex_ACU(resolvedContent, Number(match[2]));
+            if (!rowId || !colName)
+                continue;
+            const key = makeCellLockKey_ACU(rowId, colName);
+            if (cellSeen.has(key))
+                continue;
+            cellSeen.add(key);
+            bucket.cells.push([rowId, colName]);
+        }
+        writeBucket_ACU(sheetKey, bucket);
+    }
+    function deleteTableLocksForSheet_ACU(sheetKey, { save = true } = {}) {
+        const normalizedSheetKey = String(sheetKey || '').trim();
+        if (!normalizedSheetKey)
+            return false;
+        const scopeKey = getTableLockScopeKey_ACU();
+        let changed = false;
+        const tableLocks = settings_ACU?.tableUpdateLocks?.[scopeKey];
+        if (tableLocks && typeof tableLocks === 'object' && !Array.isArray(tableLocks)
+            && Object.prototype.hasOwnProperty.call(tableLocks, normalizedSheetKey)) {
+            delete tableLocks[normalizedSheetKey];
+            changed = true;
+        }
+        const specialIndexLocks = settings_ACU?.specialIndexLocks?.[scopeKey];
+        if (specialIndexLocks && typeof specialIndexLocks === 'object' && !Array.isArray(specialIndexLocks)
+            && Object.prototype.hasOwnProperty.call(specialIndexLocks, normalizedSheetKey)) {
+            delete specialIndexLocks[normalizedSheetKey];
+            changed = true;
+        }
+        if (save && changed)
+            saveSettings_ACU();
+        return changed;
+    }
+    function toggleRowLock_ACU(sheetKey, rowIndex, content) {
+        const resolvedContent = resolveLockContent_ACU(sheetKey, content);
+        if (!resolvedContent) {
+            logWarn_ACU(`[TableLock] toggleRowLock 无法解析表 ${sheetKey} 的内容上下文，已忽略。`);
+            return;
+        }
+        const rowId = rowIdAtIndex_ACU(resolvedContent, rowIndex);
+        if (!rowId) {
+            logWarn_ACU(`[TableLock] toggleRowLock 行下标 ${rowIndex} 在表 ${sheetKey} 中不存在或缺少 row_id，已忽略。`);
+            return;
+        }
+        const bucket = readIdentityBucket_ACU(sheetKey, resolvedContent) || emptyV2Bucket_ACU();
+        const existing = bucket.rowIds.indexOf(rowId);
+        if (existing >= 0)
+            bucket.rowIds.splice(existing, 1);
+        else
+            bucket.rowIds.push(rowId);
+        writeBucket_ACU(sheetKey, bucket);
+    }
+    function toggleColLock_ACU(sheetKey, colIndex, content) {
+        const resolvedContent = resolveLockContent_ACU(sheetKey, content);
+        if (!resolvedContent) {
+            logWarn_ACU(`[TableLock] toggleColLock 无法解析表 ${sheetKey} 的内容上下文，已忽略。`);
+            return;
+        }
+        const colName = colNameAtIndex_ACU(resolvedContent, colIndex);
+        if (!colName) {
+            logWarn_ACU(`[TableLock] toggleColLock 列下标 ${colIndex} 在表 ${sheetKey} 中不存在，已忽略。`);
+            return;
+        }
+        const bucket = readIdentityBucket_ACU(sheetKey, resolvedContent) || emptyV2Bucket_ACU();
+        const existing = bucket.colNames.indexOf(colName);
+        if (existing >= 0)
+            bucket.colNames.splice(existing, 1);
+        else
+            bucket.colNames.push(colName);
+        writeBucket_ACU(sheetKey, bucket);
+    }
+    function toggleCellLock_ACU(sheetKey, rowIndex, colIndex, content) {
+        const resolvedContent = resolveLockContent_ACU(sheetKey, content);
+        if (!resolvedContent) {
+            logWarn_ACU(`[TableLock] toggleCellLock 无法解析表 ${sheetKey} 的内容上下文，已忽略。`);
+            return;
+        }
+        const rowId = rowIdAtIndex_ACU(resolvedContent, rowIndex);
+        const colName = colNameAtIndex_ACU(resolvedContent, colIndex);
+        if (!rowId || !colName) {
+            logWarn_ACU(`[TableLock] toggleCellLock 目标 (${rowIndex}, ${colIndex}) 在表 ${sheetKey} 中不存在，已忽略。`);
+            return;
+        }
+        const bucket = readIdentityBucket_ACU(sheetKey, resolvedContent) || emptyV2Bucket_ACU();
+        const existing = bucket.cells.findIndex(pair => pair[0] === rowId && pair[1] === colName);
+        if (existing >= 0)
+            bucket.cells.splice(existing, 1);
+        else
+            bucket.cells.push([rowId, colName]);
+        writeBucket_ACU(sheetKey, bucket);
+    }
+    function isSpecialIndexLockEnabled_ACU(sheetKey) {
+        const scopeKey = getTableLockScopeKey_ACU();
+        const bucket = settings_ACU?.specialIndexLocks?.[scopeKey] || {};
+        if (typeof bucket[sheetKey] === 'boolean')
+            return bucket[sheetKey];
+        return true; // 默认锁定
+    }
+    function setSpecialIndexLockEnabled_ACU(sheetKey, enabled) {
+        if (!sheetKey)
+            return;
+        ensureTableLockStore_ACU();
+        const scopeKey = getTableLockScopeKey_ACU();
+        if (!settings_ACU.specialIndexLocks[scopeKey])
+            settings_ACU.specialIndexLocks[scopeKey] = {};
+        settings_ACU.specialIndexLocks[scopeKey][sheetKey] = !!enabled;
+        saveSettings_ACU();
+    }
+    function clearCurrentTableLocks_ACU({ save = true } = {}) {
+        const scopeKey = getTableLockScopeKey_ACU();
+        const result = {
+            scopeKey,
+            removedTableLocks: false,
+            removedSpecialIndexLocks: false,
+            changed: false,
+        };
+        if (settings_ACU.tableUpdateLocks && typeof settings_ACU.tableUpdateLocks === 'object' && !Array.isArray(settings_ACU.tableUpdateLocks)) {
+            if (Object.prototype.hasOwnProperty.call(settings_ACU.tableUpdateLocks, scopeKey)) {
+                delete settings_ACU.tableUpdateLocks[scopeKey];
+                result.removedTableLocks = true;
+                result.changed = true;
+            }
+        }
+        else if (settings_ACU.tableUpdateLocks !== undefined) {
+            settings_ACU.tableUpdateLocks = {};
+            result.changed = true;
+        }
+        if (settings_ACU.specialIndexLocks && typeof settings_ACU.specialIndexLocks === 'object' && !Array.isArray(settings_ACU.specialIndexLocks)) {
+            if (Object.prototype.hasOwnProperty.call(settings_ACU.specialIndexLocks, scopeKey)) {
+                delete settings_ACU.specialIndexLocks[scopeKey];
+                result.removedSpecialIndexLocks = true;
+                result.changed = true;
+            }
+        }
+        else if (settings_ACU.specialIndexLocks !== undefined) {
+            settings_ACU.specialIndexLocks = {};
+            result.changed = true;
+        }
+        if (save && result.changed) {
+            saveSettings_ACU();
+        }
+        return result;
+    }
+    function getSummaryIndexColumnIndex_ACU(table) {
+        try {
+            if (!table || !Array.isArray(table.content) || !Array.isArray(table.content[0]))
+                return -1;
+            const headers = table.content[0].slice(1);
+            if (!headers.length)
+                return -1;
+            let idx = headers.findIndex(h => {
+                if (typeof h !== 'string')
+                    return false;
+                return /编码|索引/.test(h);
+            });
+            if (idx === -1)
+                idx = headers.length - 1;
+            return idx;
+        }
+        catch (e) {
+            return -1;
+        }
+    }
+    function formatSummaryIndexCode_ACU(num) {
+        const n = Math.max(1, parseInt(num, 10) || 1);
+        return `AM${String(n).padStart(4, '0')}`;
+    }
+    function applySummaryIndexSequenceToTable_ACU(table, colIndex) {
+        if (!table || !Array.isArray(table.content) || colIndex < 0)
+            return;
+        for (let i = 1; i < table.content.length; i++) {
+            const row = table.content[i];
+            if (!Array.isArray(row))
+                continue;
+            row[colIndex + 1] = formatSummaryIndexCode_ACU(i);
+        }
+    }
+    function applySpecialIndexSequenceToSummaryTables_ACU(dataObj) {
+        if (!dataObj || typeof dataObj !== 'object')
+            return;
+        Object.keys(dataObj).forEach(sheetKey => {
+            if (!sheetKey.startsWith('sheet_'))
+                return;
+            const table = dataObj[sheetKey];
+            if (!table || !isSummaryOrOutlineTable_ACU(table.name))
+                return;
+            if (!isSpecialIndexLockEnabled_ACU(sheetKey))
+                return;
+            const colIndex = getSummaryIndexColumnIndex_ACU(table);
+            if (colIndex < 0)
+                return;
+            applySummaryIndexSequenceToTable_ACU(table, colIndex);
+        });
+    }
+
+    function quoteIdent_ACU(name) {
+        return `"${String(name).replace(/"/g, '""')}"`;
+    }
+    function quoteValue_ACU(value) {
+        if (value === null || value === undefined)
+            return "''";
+        return `'${String(value).replace(/'/g, "''")}'`;
+    }
+    function normalizeCellValue_ACU(value) {
+        return value === null || value === undefined ? '' : String(value);
+    }
+    /** content → { headers（显示名，不含 row_id）, rows: row_id → 数据数组（不含 row_id 列） } */
+    function indexContent_ACU(content) {
+        const headers = (content[0] || []).slice(1).map((h) => String(h ?? ''));
+        const rows = new Map();
+        for (let i = 1; i < content.length; i += 1) {
+            const row = content[i];
+            if (!Array.isArray(row))
+                continue;
+            const rowId = String(row[0] ?? '').trim();
+            if (!rowId)
+                continue;
+            rows.set(rowId, row.slice(1));
+        }
+        return { headers, rows };
+    }
+    /**
+     * 对单张表计算锁定目标的执行前后差异，产出补偿计划。
+     * 无违规时返回空计划（statements 为空数组）。
+     */
+    function buildLockRevertPlanForSheet_ACU(options) {
+        const { sheetKey, displayTableName, physicalTableName, beforeContent, afterContent, identities, displayToPhysicalCol } = options;
+        const plan = { statements: [], reverted: [] };
+        if (!identities.hasAny || !Array.isArray(beforeContent) || !Array.isArray(beforeContent[0]))
+            return plan;
+        if (!afterContent || !Array.isArray(afterContent[0]))
+            return plan;
+        const before = indexContent_ACU(beforeContent);
+        const after = indexContent_ACU(afterContent);
+        const beforeColIndex = new Map(before.headers.map((name, index) => [name, index]));
+        const afterColSet = new Set(after.headers);
+        const physicalCol = (displayName) => displayToPhysicalCol.get(displayName) ?? displayName;
+        const lockedCellsByRow = new Map();
+        for (const [rowId, colName] of identities.cellPairs) {
+            if (!lockedCellsByRow.has(rowId))
+                lockedCellsByRow.set(rowId, new Set());
+            lockedCellsByRow.get(rowId).add(colName);
+        }
+        // ── 1. 需要整列恢复的锁定列：列锁列被 DROP，或含锁定格的列被 DROP ─────────
+        const columnsToRestore = [];
+        for (const colName of identities.colNames) {
+            if (beforeColIndex.has(colName) && !afterColSet.has(colName))
+                columnsToRestore.push(colName);
+        }
+        for (const [, colNames] of lockedCellsByRow) {
+            for (const colName of colNames) {
+                if (beforeColIndex.has(colName) && !afterColSet.has(colName) && !columnsToRestore.includes(colName)) {
+                    columnsToRestore.push(colName);
+                }
+            }
+        }
+        // ── 2. 需要整行恢复的行：行锁行被 DELETE，或含锁定格的行被 DELETE ─────────
+        const rowsToRestore = [];
+        for (const rowId of identities.rowIds) {
+            if (before.rows.has(rowId) && !after.rows.has(rowId))
+                rowsToRestore.push(rowId);
+        }
+        for (const [rowId] of lockedCellsByRow) {
+            if (before.rows.has(rowId) && !after.rows.has(rowId) && !rowsToRestore.includes(rowId)) {
+                rowsToRestore.push(rowId);
+            }
+        }
+        const rowRestoreSet = new Set(rowsToRestore);
+        // ── 3. 需要按格恢复的值变化：rowId → (显示列名 → 前像值) ─────────
+        const cellRestores = new Map();
+        const addCellRestore = (rowId, colName) => {
+            if (rowRestoreSet.has(rowId))
+                return; // 整行恢复已覆盖
+            const beforeRow = before.rows.get(rowId);
+            const afterRow = after.rows.get(rowId);
+            const beforeIdx = beforeColIndex.get(colName);
+            if (!beforeRow || !afterRow || beforeIdx === undefined)
+                return;
+            const afterIdx = after.headers.indexOf(colName);
+            if (afterIdx < 0)
+                return; // 列被 DROP：由整列恢复处理
+            const beforeValue = beforeRow[beforeIdx];
+            const afterValue = afterRow[afterIdx];
+            if (normalizeCellValue_ACU(beforeValue) === normalizeCellValue_ACU(afterValue))
+                return;
+            if (!cellRestores.has(rowId))
+                cellRestores.set(rowId, new Map());
+            cellRestores.get(rowId).set(colName, beforeValue);
+        };
+        for (const rowId of identities.rowIds) {
+            if (!before.rows.has(rowId) || !after.rows.has(rowId))
+                continue;
+            for (const colName of before.headers) {
+                if (afterColSet.has(colName))
+                    addCellRestore(rowId, colName);
+            }
+        }
+        for (const colName of identities.colNames) {
+            if (!beforeColIndex.has(colName) || !afterColSet.has(colName))
+                continue;
+            for (const rowId of after.rows.keys()) {
+                if (before.rows.has(rowId))
+                    addCellRestore(rowId, colName);
+            }
+        }
+        for (const [rowId, colNames] of lockedCellsByRow) {
+            for (const colName of colNames) {
+                if (beforeColIndex.has(colName))
+                    addCellRestore(rowId, colName);
+            }
+        }
+        // ── 4. 生成补偿 SQL：先补列，再补行，最后按行分组 UPDATE ─────────
+        const table = quoteIdent_ACU(physicalTableName);
+        for (const colName of columnsToRestore) {
+            const physical = physicalCol(colName);
+            const declaredType = options.physicalColTypes?.get(physical) || 'TEXT';
+            plan.statements.push(`ALTER TABLE ${table} ADD COLUMN ${quoteIdent_ACU(physical)} ${declaredType};`);
+            plan.reverted.push({ sheetKey, tableName: displayTableName, kind: 'column_restored', colName });
+            const beforeIdx = beforeColIndex.get(colName);
+            for (const [rowId, beforeRow] of before.rows) {
+                if (!after.rows.has(rowId) && !rowRestoreSet.has(rowId))
+                    continue; // 行已不在且不恢复：无处可写
+                if (rowRestoreSet.has(rowId))
+                    continue; // 整行 INSERT 会带上该列
+                const value = beforeRow[beforeIdx];
+                if (normalizeCellValue_ACU(value) === '')
+                    continue;
+                plan.statements.push(`UPDATE ${table} SET ${quoteIdent_ACU(physical)} = ${quoteValue_ACU(value)} WHERE ${quoteIdent_ACU('row_id')} = ${quoteValue_ACU(rowId)};`);
+            }
+        }
+        // 行恢复可写入的列 = 执行前存在，且执行后仍存在（或刚被补回）
+        const restorableCols = before.headers.filter(colName => afterColSet.has(colName) || columnsToRestore.includes(colName));
+        for (const rowId of rowsToRestore) {
+            const beforeRow = before.rows.get(rowId);
+            const insertCols = ['row_id', ...restorableCols.map(physicalCol)];
+            const insertValues = [
+                quoteValue_ACU(rowId),
+                ...restorableCols.map(colName => quoteValue_ACU(beforeRow[beforeColIndex.get(colName)])),
+            ];
+            plan.statements.push(`INSERT INTO ${table} (${insertCols.map(quoteIdent_ACU).join(', ')}) VALUES (${insertValues.join(', ')});`);
+            plan.reverted.push({ sheetKey, tableName: displayTableName, kind: 'row_restored', rowId });
+        }
+        const reportedCells = new Set();
+        for (const [rowId, colValues] of cellRestores) {
+            const setClauses = [];
+            for (const [colName, beforeValue] of colValues) {
+                setClauses.push(`${quoteIdent_ACU(physicalCol(colName))} = ${quoteValue_ACU(beforeValue)}`);
+                const cellKey = `${rowId}\u0000${colName}`;
+                if (!reportedCells.has(cellKey)) {
+                    reportedCells.add(cellKey);
+                    plan.reverted.push({ sheetKey, tableName: displayTableName, kind: 'cell_restored', rowId, colName });
+                }
+            }
+            if (setClauses.length === 0)
+                continue;
+            plan.statements.push(`UPDATE ${table} SET ${setClauses.join(', ')} WHERE ${quoteIdent_ACU('row_id')} = ${quoteValue_ACU(rowId)};`);
+        }
+        return plan;
+    }
+    /** 把回滚项汇总为一句可上报/可注入日志的人类可读描述。 */
+    function formatLockRevertSummary_ACU(reverted) {
+        if (!reverted.length)
+            return '';
+        const parts = reverted.map(item => {
+            if (item.kind === 'row_restored')
+                return `${item.tableName} 行 ${item.rowId} 已恢复（行被删除）`;
+            if (item.kind === 'column_restored')
+                return `${item.tableName} 列「${item.colName}」已恢复（列被删除）`;
+            return `${item.tableName} 行 ${item.rowId} 列「${item.colName}」已恢复（值被修改）`;
+        });
+        return `锁定保护已回滚 ${reverted.length} 处修改：${parts.join('；')}`;
+    }
+
+    /**
      * service/table/sql-table-service.ts — SQLite 模式的 ITableStorageProvider 实现
      *
      * 核心职责：
@@ -56280,9 +57206,10 @@ $CONTENT
             : projectedWithRows.skippedSheets;
         if (skippedSheets.length > 0) {
             // 脱敏诊断：只记录 sheetKey / 显示名 / 空列序号，不记录数据行、DDL 或聊天正文。
-            logWarn_ACU(`[SqlTableService] 模板存在非首列空业务表头的表，SQL 填表中将休眠跳过: ${skippedSheets
+            // 术语（S3-7）：这是「结构跳过」而非「休眠」——不产生 hide 记录、不进休眠清单，修正表头即自动恢复。
+            logWarn_ACU(`[SqlTableService] 模板存在非首列空业务表头的表，SQL 填表中将结构跳过（不产生休眠记录）: ${skippedSheets
             .map(skip => `${skip.sheetKey}(${skip.name}) 空列[${skip.emptyHeaderIndexes.join(',')}]`)
-            .join('；')}。修正表头后可在下次请求恢复参与。`);
+            .join('；')}。修正表头后可在下次请求自动恢复参与。`);
         }
         // 物理表名冲突检查在投影后执行：被判定为不存在的无效表不阻塞有效表；
         // 但有效表之间的冲突仍 fail-loud。
@@ -57241,7 +58168,7 @@ $CONTENT
             const runtimeData = this._exportCurrentDataStrict();
             let materializedStatements;
             try {
-                materializedStatements = materializeSystemRowIdsForSqlInserts_ACU(userStatements, runtimeData, reseedPlan.rowIdsByTable, 
+                materializedStatements = materializeSystemRowIdsForSqlInserts_ACU(userStatements, runtimeData, reseedPlan.rowIdsByTable,
                 // INSERT…SELECT/WITH 先执行后物化：SELECT 在当前 live 引擎（本批 mutation
                 // 执行前的快照）上预执行，物化文本即回放事实来源。
                 { selectQueryRunner: (sql) => this.engine.query(sql) });
@@ -57760,6 +58687,58 @@ $CONTENT
     // ═══════════════════════════════════════════════════════════════
     // 快照级 SQL 应用（用于 grouped unified commit）
     // ═══════════════════════════════════════════════════════════════
+    /**
+     * SQL 执行后的锁定差异回滚：对比执行前后快照，锁定目标被改则生成补偿 SQL，
+     * 在同一引擎会话内执行并返回补偿语句（调用方必须把它们追加进持久化语句集，
+     * 否则 storage frame V2 冷回放重放原始 SQL 时锁定目标会再次被改）。
+     */
+    function enforceTableLocksAfterSqlApply_ACU(engine, syncBridge, beforeData, interimData, modifiedKeys) {
+        const allStatements = [];
+        const allReverted = [];
+        let physicalNames = null;
+        for (const sheetKey of modifiedKeys) {
+            const beforeSheet = beforeData?.[sheetKey];
+            const beforeContent = beforeSheet?.content;
+            if (!Array.isArray(beforeContent) || !Array.isArray(beforeContent[0]))
+                continue;
+            // 身份锁按执行前快照解析：legacy 索引锁在此处按前像内容完成惰性迁移。
+            const identities = getTableLockIdentitiesForSheet_ACU(sheetKey, beforeContent);
+            if (!identities.hasAny)
+                continue;
+            if (!physicalNames)
+                physicalNames = resolvePhysicalTableNames_ACU(beforeData);
+            const physicalTableName = physicalNames.get(sheetKey);
+            if (!physicalTableName) {
+                logWarn_ACU(`[SqlTableService] 锁定回滚跳过表 ${sheetKey}：无法解析物理表名。`);
+                continue;
+            }
+            // 列映射用执行前快照的 effective DDL 重算（与 hydrate 使用同一函数同一输入），
+            // 被 DROP 的锁定列也能取到物理列名与声明类型。
+            const resolvedDdl = resolveEffectiveDDL(beforeSheet, beforeSheet.uid || sheetKey, physicalTableName);
+            const { chineseToSql } = buildColumnNameMap(resolvedDdl.effectiveDDL);
+            const physicalColTypes = new Map(parseDDLColumnInfos_ACU(resolvedDdl.effectiveDDL).map(info => [info.sqlName, info.declaredType]));
+            const afterContent = interimData?.[sheetKey]?.content;
+            const plan = buildLockRevertPlanForSheet_ACU({
+                sheetKey,
+                displayTableName: String(beforeSheet.name || sheetKey),
+                physicalTableName,
+                beforeContent,
+                afterContent: Array.isArray(afterContent) ? afterContent : null,
+                identities,
+                displayToPhysicalCol: chineseToSql,
+                physicalColTypes,
+            });
+            allStatements.push(...plan.statements);
+            allReverted.push(...plan.reverted);
+        }
+        if (allStatements.length === 0) {
+            return { workingData: interimData, statements: [], reverted: [] };
+        }
+        engine.runBatch(allStatements);
+        const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(beforeData), { strict: true });
+        logWarn_ACU(`[SqlTableService] ${formatLockRevertSummary_ACU(allReverted)}`);
+        return { workingData, statements: allStatements, reverted: allReverted };
+    }
     async function applyParameterizedSqlMutationToTableDataSnapshot_ACU(sql, params, tableData, operationOptions = {}) {
         const engine = new SqliteEngine();
         const syncBridge = new SyncBridge(engine);
@@ -57822,22 +58801,30 @@ $CONTENT
                 selectQueryRunner: (sql) => engine.query(sql),
             }).filter(Boolean);
             engine.runBatch(statements);
-            const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy), { strict: true });
+            const interimData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy), { strict: true });
             const modifiedTableNames = extractTableNamesFromStatements(statements);
-            const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(workingData, modifiedTableNames);
-            const operationBuild = buildSqlSheetBatchOperations_ACU(statements, workingData, {
+            const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(interimData, modifiedTableNames);
+            // 锁定差异回滚：前像用调用方传入的 tableData（snapshotCopy 在 rebind/物化中可能
+            // 被写入 row_id 预留），补偿语句必须与原始语句一起持久化以保证冷回放一致。
+            const lockEnforcement = enforceTableLocksAfterSqlApply_ACU(engine, syncBridge, JSON.parse(JSON.stringify(tableData || {})), interimData, modifiedKeys);
+            const workingData = lockEnforcement.workingData;
+            const persistedStatements = lockEnforcement.statements.length > 0
+                ? [...statements, ...lockEnforcement.statements]
+                : statements;
+            const operationBuild = buildSqlSheetBatchOperations_ACU(persistedStatements, workingData, {
                 fallbackTargetSheetKeys: operationOptions.targetSheetKeys,
                 allowSingleTargetFallback: operationOptions.allowSingleTargetFallback === true,
                 keepLegacyForUnclassified: true,
                 reason: 'system',
             });
-            logDebug_ACU(`[SqlTableService] 快照 SQL 执行成功: ${statements.length} 条语句, modifiedKeys=${modifiedKeys.join(',')}`);
+            logDebug_ACU(`[SqlTableService] 快照 SQL 执行成功: ${statements.length} 条语句, modifiedKeys=${modifiedKeys.join(',')}${lockEnforcement.reverted.length > 0 ? `, 锁定回滚 ${lockEnforcement.reverted.length} 处` : ''}`);
             return {
                 success: true,
                 modifiedKeys,
                 appliedEdits: statements.length,
                 workingData,
                 operations: operationBuild.operations,
+                ...(lockEnforcement.reverted.length > 0 ? { revertedByLocks: lockEnforcement.reverted } : {}),
             };
         }
         catch (e) {
@@ -61180,20 +62167,27 @@ $CONTENT
         books: {},
     };
     let cachedAgentWorldbookSnapshotRevision_ACU = 0;
+    /**
+     * 快照是纯 JSON 数据，出入口双向深拷贝隔离：
+     * 调用方拿到的对象可随意修改而不污染缓存，缓存也不受调用方 set 后继续改动的影响。
+     */
+    function cloneAgentWorldbookSnapshot_ACU(snapshot) {
+        return JSON.parse(JSON.stringify(snapshot));
+    }
     function getAgentWorldbookSnapshotState_ACU() {
-        return cachedAgentWorldbookSnapshot_ACU;
+        return cloneAgentWorldbookSnapshot_ACU(cachedAgentWorldbookSnapshot_ACU);
     }
     function getAgentWorldbookSnapshotRevision_ACU() {
         return cachedAgentWorldbookSnapshotRevision_ACU;
     }
     function setAgentWorldbookSnapshotState_ACU(snapshot) {
-        cachedAgentWorldbookSnapshot_ACU = snapshot;
+        cachedAgentWorldbookSnapshot_ACU = cloneAgentWorldbookSnapshot_ACU(snapshot);
         cachedAgentWorldbookSnapshotRevision_ACU += 1;
     }
     function setAgentWorldbookSnapshotStateIfRevision_ACU(expectedRevision, snapshot) {
         if (cachedAgentWorldbookSnapshotRevision_ACU !== expectedRevision)
             return false;
-        cachedAgentWorldbookSnapshot_ACU = snapshot;
+        cachedAgentWorldbookSnapshot_ACU = cloneAgentWorldbookSnapshot_ACU(snapshot);
         cachedAgentWorldbookSnapshotRevision_ACU += 1;
         return true;
     }
@@ -61844,6 +62838,28 @@ $CONTENT
             .filter(message => message.content.trim());
     }
 
+    /**
+     * Agent 世界书结构性写操作的互斥队列。
+     *
+     * 接管、恢复、正文绿灯写入/清理、UI 配置写入都遵循"读账本 → 算补丁 → 写条目 → 写账本"
+     * 的多步异步序列，交错执行会让账本与条目状态互相覆盖（例如恢复读到接管写到一半的
+     * pending 账本）。这里用 promise 链把它们串成单队列。
+     *
+     * 边界约束（防死锁）：
+     * 1. 锁是非重入的。被包裹的入口（takeover / restoreWorldbookGreenlights / writeFinal /
+     *    clearFinal / writeAgentWorldbookControlToWorldbook）之间不得互相调用；它们内部只能
+     *    调用不加锁的实现层（如 writeAgentWorldbookStateToWorldbook_ACU、私有 restore 帮助函数）。
+     * 2. skillify 的 comment 写入刻意不进队列：整批 skillify 含多次 AI 调用、耗时以分钟计，
+     *    入队会长时间阻塞剧情绿灯操作；其与接管的交错由 commentHash 守卫与 reconcile 自愈。
+     */
+    let agentWorldbookOperationQueue_ACU = Promise.resolve();
+    function runExclusiveAgentWorldbookOperation_ACU(operation) {
+        const result = agentWorldbookOperationQueue_ACU.then(() => operation());
+        // 队列尾部吞掉失败：异常只传递给本次调用方，不能把后续操作永久卡死。
+        agentWorldbookOperationQueue_ACU = result.then(() => undefined, () => undefined);
+        return result;
+    }
+
     const AGENT_WORLDBOOK_CONFIG_COMMENT_ACU = 'TavernDB-ACU-AgentWorldbookConfig';
     function cloneDefaultAgentControl_ACU() {
         return JSON.parse(JSON.stringify(buildDefaultAgentWorldbookControl_ACU()));
@@ -62483,7 +63499,12 @@ $CONTENT
             };
         }
     }
-    async function writeAgentWorldbookControlToWorldbook_ACU(controlPatch) {
+    function writeAgentWorldbookControlToWorldbook_ACU(controlPatch) {
+        // UI 配置写（含 scope 变更引发的条目恢复）与接管/恢复/绿灯操作互斥；
+        // 内层 writeAgentWorldbookStateToWorldbook_ACU 不加锁，供 takeover 持锁期间调用。
+        return runExclusiveAgentWorldbookOperation_ACU(() => writeAgentWorldbookControlToWorldbookExclusive_ACU(controlPatch));
+    }
+    async function writeAgentWorldbookControlToWorldbookExclusive_ACU(controlPatch) {
         const result = await writeAgentWorldbookStateToWorldbook_ACU({ control: controlPatch });
         return {
             updated: result.updated,
@@ -62880,15 +63901,21 @@ $CONTENT
         let lastReason = 'AI 未返回内容';
         let meta = null;
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const response = await callAIWithPreset_ACU(messages, presetName);
-            if (!response) {
-                lastReason = 'AI 未返回内容';
+            // AI 调用异常只作为该条目的失败原因参与重试，不允许穿透 runWithConcurrency 拖垮整批 skillify。
+            try {
+                const response = await callAIWithPreset_ACU(messages, presetName);
+                if (!response) {
+                    lastReason = 'AI 未返回内容';
+                }
+                else {
+                    meta = parseAgentSkillifyResponse_ACU(response, summary.tk);
+                    if (meta)
+                        break;
+                    lastReason = 'AI 返回不是有效 Skill JSON';
+                }
             }
-            else {
-                meta = parseAgentSkillifyResponse_ACU(response, summary.tk);
-                if (meta)
-                    break;
-                lastReason = 'AI 返回不是有效 Skill JSON';
+            catch (error) {
+                lastReason = `AI 调用异常：${error instanceof Error ? error.message : String(error)}`;
             }
             if (attempt < maxAttempts) {
                 options.onProgress?.({
@@ -63355,6 +64382,7 @@ $CONTENT
     }
     function setPlotAgentWorldbookSnapshot_ACU(snapshot) {
         setAgentWorldbookSnapshotState_ACU(snapshot);
+        plotAgentWorldbookSnapshotHydrated_ACU = true;
     }
     /**
      * 切换角色卡会话时丢弃上一会话的内存快照。
@@ -63363,11 +64391,39 @@ $CONTENT
     function resetPlotAgentWorldbookSessionSnapshot_ACU() {
         setAgentWorldbookSnapshotState_ACU(buildInactiveSnapshot_ACU());
         preTakeoverSnapshotResolutionPromisesBySignature_ACU.clear();
+        plotAgentWorldbookSnapshotHydrated_ACU = false;
+        plotAgentWorldbookSnapshotHydrationPromise_ACU = null;
+    }
+    /** 内存快照是否已从持久账本（或权威操作结果）填充过；页面刷新/会话切换后为 false。 */
+    let plotAgentWorldbookSnapshotHydrated_ACU = false;
+    let plotAgentWorldbookSnapshotHydrationPromise_ACU = null;
+    /**
+     * 确保内存快照至少水合过一次持久账本。
+     * 供生成前的接管激活判定使用：页面刷新后内存快照为空，若不回读持久态，
+     * 接管活跃期间的最终提示词过滤会在冷启动首轮被跳过。
+     * 读取失败只记录警告并保持未水合（下轮重试），不阻断本轮生成。
+     */
+    async function ensurePlotAgentWorldbookSnapshotHydrated_ACU() {
+        if (plotAgentWorldbookSnapshotHydrated_ACU)
+            return;
+        if (!plotAgentWorldbookSnapshotHydrationPromise_ACU) {
+            plotAgentWorldbookSnapshotHydrationPromise_ACU = refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU()
+                .then(() => undefined)
+                .catch(error => {
+                logWarn_ACU('[Agent世界书] 冷启动水合接管快照失败，本轮按未接管处理，下轮将重试。', error);
+            })
+                .finally(() => {
+                plotAgentWorldbookSnapshotHydrationPromise_ACU = null;
+            });
+        }
+        await plotAgentWorldbookSnapshotHydrationPromise_ACU;
     }
     const preTakeoverSnapshotResolutionPromisesBySignature_ACU = new Map();
     async function readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, selectionSignature, initialRevision, readContext, options = {}) {
         const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { readContext, onStaleBookNames: options.onStaleBookNames });
         setAgentWorldbookSnapshotStateIfRevision_ACU(initialRevision, snapshot);
+        // CAS 失败也视为已水合：说明并发方已写入更新的权威快照。
+        plotAgentWorldbookSnapshotHydrated_ACU = true;
         return snapshot;
     }
     /** 内部：带 stale 收集的刷新，供清绿灯预检使用（公共 refresh 保持原签名不变）。 */
@@ -63378,6 +64434,7 @@ $CONTENT
         let staleBookNames = [];
         const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { readContext, onStaleBookNames: (stale) => { staleBookNames = stale; }, backfillMissingMeta: false });
         setAgentWorldbookSnapshotStateIfRevision_ACU(initialRevision, snapshot);
+        plotAgentWorldbookSnapshotHydrated_ACU = true;
         return { snapshot, staleBookNames };
     }
     async function refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readContext) {
@@ -63837,11 +64894,22 @@ $CONTENT
         }
         return recovered;
     }
-    async function writeFinalGenerationGreenlights_ACU(greenlights) {
-        const snapshot = getPlotAgentWorldbookSnapshot_ACU();
-        const snapshotUidSetByBook = buildSnapshotUidSetByBook_ACU(snapshot);
-        if (snapshotUidSetByBook.size === 0)
-            return false;
+    function writeFinalGenerationGreenlights_ACU(greenlights) {
+        return runExclusiveAgentWorldbookOperation_ACU(() => writeFinalGenerationGreenlightsExclusive_ACU(greenlights));
+    }
+    async function writeFinalGenerationGreenlightsExclusive_ACU(greenlights) {
+        let snapshot = getPlotAgentWorldbookSnapshot_ACU();
+        let snapshotUidSetByBook = buildSnapshotUidSetByBook_ACU(snapshot);
+        if (snapshotUidSetByBook.size === 0) {
+            // 内存快照可能因刷新页面/会话切换被清空，回退到持久账本快照重建后再判定。
+            // 刻意不用完整 refresh：其 comment 扫描与 merge 会把账本写入失败场景下的
+            // pending 条目调和成 applied 并污染内存缓存，破坏"账本未确认不消费绿灯"的恢复不变量。
+            const selectionSignature = buildWorldbookSelectionSignature_ACU(await resolveTakeoverBookNames_ACU());
+            snapshot = await readPlotAgentWorldbookStateSnapshotOnly_ACU(selectionSignature);
+            snapshotUidSetByBook = buildSnapshotUidSetByBook_ACU(snapshot);
+            if (snapshotUidSetByBook.size === 0)
+                return false;
+        }
         const normalizedGreenlights = normalizeAgentWorldbookRefs_ACU(greenlights);
         const allowedKeySet = buildAllowedFinalGreenlightKeySet_ACU(normalizedGreenlights, snapshotUidSetByBook);
         const patchResult = await patchSnapshotEntries_ACU(snapshotUidSetByBook, (bookName, entry) => {
@@ -63896,7 +64964,10 @@ $CONTENT
      * - 读取权限/宿主契约/写入失败 → failed（失败关闭，由调用方阻断 AI）。
      * 不自动修改 manualSelection 或角色绑定，只记录安全诊断。
      */
-    async function clearFinalGenerationGreenlights_ACU(readContext) {
+    function clearFinalGenerationGreenlights_ACU(readContext) {
+        return runExclusiveAgentWorldbookOperation_ACU(() => clearFinalGenerationGreenlightsExclusive_ACU(readContext));
+    }
+    async function clearFinalGenerationGreenlightsExclusive_ACU(readContext) {
         function buildFailedError(subphase, error) {
             // 取消/作用域变化必须保留独立安全分类，不能落为 strict_lorebook_read/unknown。
             const classifiedCategory = classifyLorebookReadError_ACU(error);
@@ -63988,7 +65059,10 @@ $CONTENT
             staleBookNames,
         };
     }
-    async function takeoverWorldbookGreenlights_ACU() {
+    function takeoverWorldbookGreenlights_ACU() {
+        return runExclusiveAgentWorldbookOperation_ACU(() => takeoverWorldbookGreenlightsExclusive_ACU());
+    }
+    async function takeoverWorldbookGreenlightsExclusive_ACU() {
         const availability = await resolveAgentWorldbookFilterAvailability_ACU();
         const resolvedBookNames = availability.bookNames;
         const selectionSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
@@ -64105,7 +65179,10 @@ $CONTENT
             updates,
         };
     }
-    async function restoreWorldbookGreenlights_ACU(options = {}) {
+    function restoreWorldbookGreenlights_ACU(options = {}) {
+        return runExclusiveAgentWorldbookOperation_ACU(() => restoreWorldbookGreenlightsExclusive_ACU(options));
+    }
+    async function restoreWorldbookGreenlightsExclusive_ACU(options = {}) {
         const cleanupMode = options.cleanupMode || 'full';
         const resolvedBookNames = await resolveTakeoverBookNames_ACU();
         const selectionSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
@@ -64412,6 +65489,9 @@ $CONTENT
                     flightModeEnabled: flightMode.enabled,
                     ...selectedPromptName,
                 });
+                // 锁定信息软约束：硬保护由执行后差异回滚兜底，此处提示模型避开锁定目标，
+                // 减少被回滚浪费的输出。
+                tableDataText += buildSqlLockPromptNote_ACU(sheetKey, rawTable?.content);
                 continue;
             }
             const allRows = table.content.slice(1);
@@ -64718,6 +65798,35 @@ $CONTENT
             }
             return { runtimeTableName: runtimeName };
         };
+    }
+    /**
+     * SQL 模式锁定信息的提示词软约束注释。
+     * 无锁或内容不可解析时返回空串；有锁时输出一段 `--` 注释，
+     * 用 AI 可见的定位方式（row_id / 列显示名）列出禁改目标。
+     */
+    function buildSqlLockPromptNote_ACU(sheetKey, content) {
+        try {
+            if (!Array.isArray(content) || !Array.isArray(content[0]))
+                return '';
+            const identities = getTableLockIdentitiesForSheet_ACU(sheetKey, content);
+            if (!identities.hasAny)
+                return '';
+            const parts = [];
+            if (identities.rowIds.size > 0) {
+                parts.push(`锁定行（禁止 UPDATE/DELETE）：row_id ∈ [${[...identities.rowIds].join(', ')}]`);
+            }
+            if (identities.colNames.size > 0) {
+                parts.push(`锁定列（禁止修改该列任何值）：${[...identities.colNames].map(name => `「${name}」`).join('、')}`);
+            }
+            if (identities.cellPairs.length > 0) {
+                parts.push(`锁定单元格（禁止修改）：${identities.cellPairs.map(([rowId, colName]) => `(row_id=${rowId}, 列「${colName}」)`).join('、')}`);
+            }
+            return `-- [锁定] 用户已锁定以下目标，请勿在 SQL 中修改它们（违规修改会被系统自动回滚）：\n${parts.map(part => `--   ${part}`).join('\n')}\n`;
+        }
+        catch (e) {
+            // 软约束注入失败不能阻断填表 prompt 构建。
+            return '';
+        }
     }
     /**
      * SQLite 模式下的表格格式化
@@ -70314,7 +71423,14 @@ $CONTENT
                     : [];
                 _set_pendingFinalGenerationGreenlights_ACU(finalGenerationGreenlights);
                 if (agentDecision.active === true) {
-                    await writeFinalGenerationGreenlights_ACU(finalGenerationGreenlights);
+                    const written = await writeFinalGenerationGreenlights_ACU(finalGenerationGreenlights);
+                    if (!written && finalGenerationGreenlights.length > 0) {
+                        // 写入未生效时放行条目在世界书里仍是禁用态，原生注入不会包含它们；
+                        // 生成不阻断（缺内容比漏内容安全），但必须可观测。
+                        logWarn_ACU('[剧情推进] Agent 正文绿灯写入未生效，放行条目可能缺失于正文提示词。', {
+                            greenlights: finalGenerationGreenlights.map(ref => `${ref?.bookName ?? ''}#${ref?.uid ?? ''}`),
+                        });
+                    }
                 }
             }
             if (agentWorldbookControl && agentExecutionMode === 'concurrent') {
@@ -71045,197 +72161,6 @@ $CONTENT
     // 数据格式化
 
     /**
-     * service/runtime/helpers-table-lock.ts — 表格锁定与索引
-     * 从 helpers-remaining.ts 拆出
-     */
-    function getTableLockScopeKey_ACU() {
-        const chatKey = (currentChatFileIdentifier_ACU || 'default').trim() || 'default';
-        const isolationKey = getCurrentIsolationKey_ACU() || '';
-        return `${chatKey}::${isolationKey}`;
-    }
-    function ensureTableLockStore_ACU() {
-        if (!settings_ACU.tableUpdateLocks || typeof settings_ACU.tableUpdateLocks !== 'object') {
-            settings_ACU.tableUpdateLocks = {};
-        }
-        if (!settings_ACU.specialIndexLocks || typeof settings_ACU.specialIndexLocks !== 'object') {
-            settings_ACU.specialIndexLocks = {};
-        }
-    }
-    function getTableLocksForSheet_ACU(sheetKey) {
-        const scopeKey = getTableLockScopeKey_ACU();
-        const bucket = settings_ACU?.tableUpdateLocks?.[scopeKey]?.[sheetKey] || {};
-        return {
-            rows: new Set(Array.isArray(bucket.rows) ? bucket.rows : []),
-            cols: new Set(Array.isArray(bucket.cols) ? bucket.cols : []),
-            cells: new Set(Array.isArray(bucket.cells) ? bucket.cells : []),
-        };
-    }
-    function saveTableLocksForSheet_ACU(sheetKey, lockState) {
-        if (!sheetKey)
-            return;
-        ensureTableLockStore_ACU();
-        const scopeKey = getTableLockScopeKey_ACU();
-        if (!settings_ACU.tableUpdateLocks[scopeKey])
-            settings_ACU.tableUpdateLocks[scopeKey] = {};
-        settings_ACU.tableUpdateLocks[scopeKey][sheetKey] = {
-            rows: Array.from(lockState.rows || []),
-            cols: Array.from(lockState.cols || []),
-            cells: Array.from(lockState.cells || []),
-        };
-        saveSettings_ACU();
-    }
-    function deleteTableLocksForSheet_ACU(sheetKey, { save = true } = {}) {
-        const normalizedSheetKey = String(sheetKey || '').trim();
-        if (!normalizedSheetKey)
-            return false;
-        const scopeKey = getTableLockScopeKey_ACU();
-        let changed = false;
-        const tableLocks = settings_ACU?.tableUpdateLocks?.[scopeKey];
-        if (tableLocks && typeof tableLocks === 'object' && !Array.isArray(tableLocks)
-            && Object.prototype.hasOwnProperty.call(tableLocks, normalizedSheetKey)) {
-            delete tableLocks[normalizedSheetKey];
-            changed = true;
-        }
-        const specialIndexLocks = settings_ACU?.specialIndexLocks?.[scopeKey];
-        if (specialIndexLocks && typeof specialIndexLocks === 'object' && !Array.isArray(specialIndexLocks)
-            && Object.prototype.hasOwnProperty.call(specialIndexLocks, normalizedSheetKey)) {
-            delete specialIndexLocks[normalizedSheetKey];
-            changed = true;
-        }
-        if (save && changed)
-            saveSettings_ACU();
-        return changed;
-    }
-    function toggleRowLock_ACU(sheetKey, rowIndex) {
-        const lockState = getTableLocksForSheet_ACU(sheetKey);
-        if (lockState.rows.has(rowIndex))
-            lockState.rows.delete(rowIndex);
-        else
-            lockState.rows.add(rowIndex);
-        saveTableLocksForSheet_ACU(sheetKey, lockState);
-    }
-    function toggleColLock_ACU(sheetKey, colIndex) {
-        const lockState = getTableLocksForSheet_ACU(sheetKey);
-        if (lockState.cols.has(colIndex))
-            lockState.cols.delete(colIndex);
-        else
-            lockState.cols.add(colIndex);
-        saveTableLocksForSheet_ACU(sheetKey, lockState);
-    }
-    function toggleCellLock_ACU(sheetKey, rowIndex, colIndex) {
-        const lockState = getTableLocksForSheet_ACU(sheetKey);
-        const key = `${rowIndex}:${colIndex}`;
-        if (lockState.cells.has(key))
-            lockState.cells.delete(key);
-        else
-            lockState.cells.add(key);
-        saveTableLocksForSheet_ACU(sheetKey, lockState);
-    }
-    function isSpecialIndexLockEnabled_ACU(sheetKey) {
-        const scopeKey = getTableLockScopeKey_ACU();
-        const bucket = settings_ACU?.specialIndexLocks?.[scopeKey] || {};
-        if (typeof bucket[sheetKey] === 'boolean')
-            return bucket[sheetKey];
-        return true; // 默认锁定
-    }
-    function setSpecialIndexLockEnabled_ACU(sheetKey, enabled) {
-        if (!sheetKey)
-            return;
-        ensureTableLockStore_ACU();
-        const scopeKey = getTableLockScopeKey_ACU();
-        if (!settings_ACU.specialIndexLocks[scopeKey])
-            settings_ACU.specialIndexLocks[scopeKey] = {};
-        settings_ACU.specialIndexLocks[scopeKey][sheetKey] = !!enabled;
-        saveSettings_ACU();
-    }
-    function clearCurrentTableLocks_ACU({ save = true } = {}) {
-        const scopeKey = getTableLockScopeKey_ACU();
-        const result = {
-            scopeKey,
-            removedTableLocks: false,
-            removedSpecialIndexLocks: false,
-            changed: false,
-        };
-        if (settings_ACU.tableUpdateLocks && typeof settings_ACU.tableUpdateLocks === 'object' && !Array.isArray(settings_ACU.tableUpdateLocks)) {
-            if (Object.prototype.hasOwnProperty.call(settings_ACU.tableUpdateLocks, scopeKey)) {
-                delete settings_ACU.tableUpdateLocks[scopeKey];
-                result.removedTableLocks = true;
-                result.changed = true;
-            }
-        }
-        else if (settings_ACU.tableUpdateLocks !== undefined) {
-            settings_ACU.tableUpdateLocks = {};
-            result.changed = true;
-        }
-        if (settings_ACU.specialIndexLocks && typeof settings_ACU.specialIndexLocks === 'object' && !Array.isArray(settings_ACU.specialIndexLocks)) {
-            if (Object.prototype.hasOwnProperty.call(settings_ACU.specialIndexLocks, scopeKey)) {
-                delete settings_ACU.specialIndexLocks[scopeKey];
-                result.removedSpecialIndexLocks = true;
-                result.changed = true;
-            }
-        }
-        else if (settings_ACU.specialIndexLocks !== undefined) {
-            settings_ACU.specialIndexLocks = {};
-            result.changed = true;
-        }
-        if (save && result.changed) {
-            saveSettings_ACU();
-        }
-        return result;
-    }
-    function getSummaryIndexColumnIndex_ACU(table) {
-        try {
-            if (!table || !Array.isArray(table.content) || !Array.isArray(table.content[0]))
-                return -1;
-            const headers = table.content[0].slice(1);
-            if (!headers.length)
-                return -1;
-            let idx = headers.findIndex(h => {
-                if (typeof h !== 'string')
-                    return false;
-                return /编码|索引/.test(h);
-            });
-            if (idx === -1)
-                idx = headers.length - 1;
-            return idx;
-        }
-        catch (e) {
-            return -1;
-        }
-    }
-    function formatSummaryIndexCode_ACU(num) {
-        const n = Math.max(1, parseInt(num, 10) || 1);
-        return `AM${String(n).padStart(4, '0')}`;
-    }
-    function applySummaryIndexSequenceToTable_ACU(table, colIndex) {
-        if (!table || !Array.isArray(table.content) || colIndex < 0)
-            return;
-        for (let i = 1; i < table.content.length; i++) {
-            const row = table.content[i];
-            if (!Array.isArray(row))
-                continue;
-            row[colIndex + 1] = formatSummaryIndexCode_ACU(i);
-        }
-    }
-    function applySpecialIndexSequenceToSummaryTables_ACU(dataObj) {
-        if (!dataObj || typeof dataObj !== 'object')
-            return;
-        Object.keys(dataObj).forEach(sheetKey => {
-            if (!sheetKey.startsWith('sheet_'))
-                return;
-            const table = dataObj[sheetKey];
-            if (!table || !isSummaryOrOutlineTable_ACU(table.name))
-                return;
-            if (!isSpecialIndexLockEnabled_ACU(sheetKey))
-                return;
-            const colIndex = getSummaryIndexColumnIndex_ACU(table);
-            if (colIndex < 0)
-                return;
-            applySummaryIndexSequenceToTable_ACU(table, colIndex);
-        });
-    }
-
-    /**
      * service/runtime/helpers-remaining.ts — 辅助函数集入口文件
      * 原 4,263 行代码已按职责拆分为以下子模块：
      *   - helpers-context-tags.ts    — 上下文标签提取/过滤
@@ -71247,59 +72172,7 @@ $CONTENT
      * 本文件保留 handleChatCompletionReady_ACU（依赖多个子模块，不适合放入任何单一子模块），
      * 并 re-export 所有子模块的公开 API。
      */
-    function normalizeAgentWorldbookDepth_ACU(value) {
-        const depth = typeof value === 'number' ? value : parseInt(String(value ?? ''), 10);
-        return Number.isFinite(depth) && depth > 0 ? Math.floor(depth) : 1;
-    }
-    function normalizeAgentWorldbookRole_ACU(value) {
-        const role = String(value || '').trim().toLowerCase();
-        if (role === 'user' || role === 'assistant' || role === 'system')
-            return role;
-        return 'system';
-    }
-    function normalizeAgentWorldbookPosition_ACU(value) {
-        const position = String(value || '').trim().toLowerCase();
-        if (position === 'before_char' || position === 'before_character' || position === 'before_character_definition' || position === '0')
-            return 'worldInfoBefore';
-        if (position === 'after_char' || position === 'after_character' || position === 'after_character_definition' || position === '1')
-            return 'worldInfoAfter';
-        return 'inChat';
-    }
-    function formatAgentWorldbookEntryForPrompt_ACU(entry) {
-        const content = String(entry?.content || '').trim();
-        if (!content)
-            return '';
-        const comment = String(entry?.comment || '').trim();
-        const marker = comment ? `[ACU Agent Greenlight: ${comment}]` : '[ACU Agent Greenlight]';
-        return `${marker}\n${content}`;
-    }
-    function findAgentWorldbookPromptMessageIndex_ACU(messages, identifier) {
-        return (Array.isArray(messages) ? messages : []).findIndex((message) => {
-            if (!message || typeof message !== 'object')
-                return false;
-            return message.identifier === identifier || message.id === identifier || message.name === identifier;
-        });
-    }
-    function appendAgentWorldbookContentToMessage_ACU(message, content) {
-        if (!message || typeof message !== 'object' || !content)
-            return false;
-        if (typeof message.content === 'string') {
-            message.content = [message.content, content].filter(chunk => typeof chunk === 'string' && chunk.trim()).join('\n\n');
-            return true;
-        }
-        if (Array.isArray(message.content)) {
-            const textPart = message.content.find((part) => part && part.type === 'text' && typeof part.text === 'string');
-            if (textPart) {
-                textPart.text = [textPart.text, content].filter(chunk => typeof chunk === 'string' && chunk.trim()).join('\n\n');
-            }
-            else {
-                message.content.unshift({ type: 'text', text: content });
-            }
-            return true;
-        }
-        message.content = content;
-        return true;
-    }
+    // ═══ 保留在入口文件中的函数（依赖多个子模块） ═══
     function escapeAgentWorldbookRegExp_ACU(value) {
         return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
@@ -71418,86 +72291,6 @@ $CONTENT
             return false;
         return allowedKeySet.has(`${bookName}\u0000${String(uid).trim()}`);
     }
-    function buildAgentWorldbookInjectionItems_ACU(entries) {
-        return (Array.isArray(entries) ? entries : [])
-            .map(entry => {
-            const content = formatAgentWorldbookEntryForPrompt_ACU(entry);
-            if (!content)
-                return null;
-            const order = Number(entry?.order);
-            return {
-                entry,
-                content,
-                order: Number.isFinite(order) ? order : 0,
-                position: normalizeAgentWorldbookPosition_ACU(entry?.position),
-            };
-        })
-            .filter(Boolean);
-    }
-    function injectAgentWorldbookEntriesIntoMessages_ACU(messages, entries) {
-        const items = buildAgentWorldbookInjectionItems_ACU(entries);
-        const positionedGroups = {
-            worldInfoBefore: items.filter(item => item.position === 'worldInfoBefore').sort((a, b) => a.order - b.order),
-            worldInfoAfter: items.filter(item => item.position === 'worldInfoAfter').sort((a, b) => a.order - b.order),
-            inChat: items.filter(item => item.position === 'inChat'),
-        };
-        let injectedMessageCount = 0;
-        for (const identifier of ['worldInfoBefore', 'worldInfoAfter']) {
-            const content = positionedGroups[identifier].map(item => item.content).join('\n\n').trim();
-            if (!content)
-                continue;
-            const targetIndex = findAgentWorldbookPromptMessageIndex_ACU(messages, identifier);
-            if (targetIndex >= 0 && appendAgentWorldbookContentToMessage_ACU(messages[targetIndex], content)) {
-                injectedMessageCount++;
-            }
-            else {
-                logDebug_ACU(`[提示词模板] 未找到 ${identifier} 消息，Agent 正文世界书绿灯降级为 system injected message。`);
-                messages.push({ role: 'system', content, injected: true });
-                injectedMessageCount++;
-            }
-        }
-        const groups = new Map();
-        for (const item of positionedGroups.inChat) {
-            const depth = normalizeAgentWorldbookDepth_ACU(item.entry?.depth);
-            const role = normalizeAgentWorldbookRole_ACU(item.entry?.role);
-            if (!groups.has(depth))
-                groups.set(depth, new Map());
-            const roleGroups = groups.get(depth);
-            if (!roleGroups.has(role))
-                roleGroups.set(role, []);
-            roleGroups.get(role).push({
-                order: item.order,
-                content: item.content,
-            });
-        }
-        let totalInsertedMessages = 0;
-        const roleOrder = ['system', 'user', 'assistant'];
-        // 对齐 SillyTavern openai.js 的 populationInjectionPrompts：该 hook 阶段的
-        // messages 仍是 reverse 前的顺序，depth=i 的注入点是 i + 已插入消息数，
-        // 之后由 SillyTavern 统一 reverse 成最终请求顺序。不能用 messages.length - depth，
-        // 否则会落到靠近最后 role 的位置，表现为被合并到错误身份附近。
-        const sortedDepths = Array.from(groups.keys()).sort((a, b) => a - b);
-        for (const depth of sortedDepths) {
-            const roleGroups = groups.get(depth);
-            const injectionMessages = roleOrder
-                .map(role => {
-                const content = (roleGroups.get(role) || [])
-                    .sort((a, b) => b.order - a.order)
-                    .map(item => item.content)
-                    .join('\n\n')
-                    .trim();
-                return content ? { role, content, injected: true } : null;
-            })
-                .filter(Boolean);
-            if (injectionMessages.length === 0)
-                continue;
-            const insertIndex = Math.min(messages.length, Math.max(0, depth + totalInsertedMessages));
-            messages.splice(insertIndex, 0, ...injectionMessages);
-            injectedMessageCount += injectionMessages.length;
-            totalInsertedMessages += injectionMessages.length;
-        }
-        return injectedMessageCount;
-    }
     function getTableDataForPrompt_ACU() {
         return currentJsonTableData_ACU || {};
     }
@@ -71512,7 +72305,13 @@ $CONTENT
             return;
         }
         const finalGenerationGreenlights = Array.isArray(pendingFinalGenerationGreenlights_ACU) ? [...pendingFinalGenerationGreenlights_ACU] : [];
-        const shouldHandleAgentWorldbookFinalPrompt = isWorldbookTakeoverActive_ACU() || finalGenerationGreenlights.length > 0;
+        let shouldHandleAgentWorldbookFinalPrompt = isWorldbookTakeoverActive_ACU() || finalGenerationGreenlights.length > 0;
+        if (!shouldHandleAgentWorldbookFinalPrompt) {
+            // 页面刷新后内存快照为空，接管可能仍在持久账本中活跃；水合一次后复判，
+            // 否则冷启动首轮生成会跳过接管条目过滤。水合失败按未接管处理（内部已告警）。
+            await ensurePlotAgentWorldbookSnapshotHydrated_ACU();
+            shouldHandleAgentWorldbookFinalPrompt = isWorldbookTakeoverActive_ACU();
+        }
         const startTime = Date.now();
         logDebug_ACU('[提示词模板] 开始处理酒馆提示词...');
         if (shouldHandleAgentWorldbookFinalPrompt) {
@@ -71527,7 +72326,8 @@ $CONTENT
                 }
             }
             catch (e) {
-                logDebug_ACU('[提示词模板] 运行时 Agent 正文世界书绿灯过滤失败，已跳过本轮过滤:', e);
+                // 过滤失败意味着未放行的接管条目可能残留在最终提示词里，方向与接管语义相反，必须用 error 级可见。
+                logError_ACU('[提示词模板] 运行时 Agent 正文世界书绿灯过滤失败，未放行条目可能残留在本轮提示词中:', e);
             }
         }
         const lastPlotContent = getPlotFromHistory_ACU();
@@ -78352,8 +79152,10 @@ $CONTENT
      * service/chat/chat-database-purge.ts — 当前聊天级原子硬清空
      *
      * 职责：清除当前聊天在数据库中的全部本地持久化痕迹（消息字段、chatMetadata
-     * scope/Guide 容器、旧版表头清单镜像），成功后保持运行时真正空状态，绝不自动
-     * 重建模板/Guide/初始化锚点。
+     * scope/Guide 容器、旧版表头清单镜像）。成功后运行时回落为当前全局模板的
+     * header-only 空结构（S1-1：pristine 语义——重建的是空结构不是旧数据，
+     * 不写任何 checkpoint/frame/锚点，首次填表提交才建回放根），避免清空后
+     * UI 显示"无可用表格"且填表判定失效。
      *
      * 与 deleteLocalDataInChatCore_ACU('all', range) 的区别：
      * - 旧 API 按 AI 楼层遍历，且全范围删除会保留每个隔离域最早的 init header-only
@@ -78434,7 +79236,7 @@ $CONTENT
             }
         }
     }
-    /** 当前聊天在清理前后的身份标识（用于事务内自证归属，替代空实现 assertFresh）。 */
+    /** 当前聊天在清理前后的身份标识（事务内自证归属；与 assertFresh 的版本校验互为双保险，覆盖聊天切换这一版本快照不感知的维度）。 */
     function captureChatIdentity_ACU() {
         return getActiveChatStorageIdentity_ACU(getChatArray_ACU());
     }
@@ -78609,8 +79411,8 @@ $CONTENT
      *    清理前聊天身份标识；
      * 2. 清空全部消息字段与 chat[0] scope/Guide 镜像（chatMetadata 容器经
      *    setChatScopedConfigContainer_ACU / setChatSheetGuideContainer_ACU 同步清空）；
-     * 3. 清理前/后复核聊天身份标识一致（assertFresh 为空实现，必须自证归属），
-     *    不一致则回滚并中止；
+     * 3. 清理前/后复核聊天身份标识一致（assertFresh 校验的是表版本，不感知聊天
+     *    切换，purge 必须自证归属），不一致则回滚并中止；
      * 4. 残留扫描：仍存在任一本地字段/镜像则拒绝严格保存（fail-closed）；
      * 5. saveChatToHostStrict_ACU 严格保存；失败按快照回滚并返回 error；
      * 6. 保存成功后复核残留为空；再清理外置向量资源与数据库派生世界书条目，
@@ -78619,7 +79421,49 @@ $CONTENT
      * 不调用 collectInitialCheckpointSlotsForFullDeletion_ACU，不保留任何
      * init/boundary frame；保留 qrf_plot* 与受 import stable prefix 保护的条目。
      */
+    /**
+     * purge 成功后的回落：runtime 从当前全局模板重建 header-only 空结构（S1-1）。
+     *
+     * - 必须在 purge 独占事务之外执行：loadOrCreate/reloadStorageProvider 链路
+     *   自带事务与 Guide 保存，事务内调用会嵌套死锁。
+     * - loadOrCreateJsonTableFromChatHistory_ACU 内部先 applyTemplateScopeForCurrentChat
+     *   （scope override 已被清除 → 回落全局模板，名称/内存对齐），聊天无表数据时
+     *   从模板初始化 header-only 结构到内存（不写聊天记录，pristine 保持）。
+     * - 失败降级为警告，不推翻已成功的 purge。
+     */
+    async function rebuildEmptyRuntimeFromGlobalTemplateAfterPurge_ACU() {
+        try {
+            const loadResult = await loadOrCreateJsonTableFromChatHistory_ACU();
+            if (isSqliteMode()) {
+                await reloadStorageProvider();
+            }
+            if (!loadResult.loaded) {
+                return [`硬清空已完成，但回落全局模板空结构失败：${loadResult.error || '模板初始化未完成'}。`];
+            }
+            logDebug_ACU('[硬清空] 运行时已回落为当前全局模板的 header-only 空结构（pristine）。');
+            // S1-2：回落即模板运行时变更，广播给模板面板刷新名称/徽标/下拉（回落失败不广播）。
+            notifyTemplateRuntimeCommitted_ACU();
+            return [];
+        }
+        catch (error) {
+            const message = error?.message || String(error || '未知错误');
+            logWarn_ACU(`[硬清空] 回落全局模板空结构失败：${message}`, error);
+            return [`硬清空已完成，但回落全局模板空结构失败：${message}。`];
+        }
+    }
     async function purgeCurrentChatDatabaseState_ACU() {
+        const result = await purgeCurrentChatDatabaseStateCore_ACU();
+        if (!result.saved)
+            return result;
+        const rebuildWarnings = await rebuildEmptyRuntimeFromGlobalTemplateAfterPurge_ACU();
+        if (rebuildWarnings.length === 0)
+            return result;
+        return {
+            ...result,
+            cleanupWarnings: [...(result.cleanupWarnings || []), ...rebuildWarnings],
+        };
+    }
+    async function purgeCurrentChatDatabaseStateCore_ACU() {
         const emptyResult = { saved: false, clearedMessageCount: 0, removedMetadata: [], error: '当前聊天记录为空。' };
         const chat = getChatArray_ACU();
         if (!Array.isArray(chat) || chat.length === 0) {
@@ -78730,8 +79574,10 @@ $CONTENT
                     cleanupWarnings: [`硬清空已保存，但保存后残留扫描发现未清空状态（消息残留=${postResidualMessages.map(item => `#${item.index}:${item.fields.join(',')}`).join('；') || '无'}；首条镜像残留=${postResidualScopeFields.join(',') || '无'}；ScopedConfig=${postScopedConfig === null ? '无' : '存在'}；SheetGuide=${postSheetGuide === null ? '无' : '存在'}），请人工检查。`],
                 };
             }
-            // 严格保存与 post-condition 均已成立，才允许将当前运行时置为真正空态。
-            // 此入口绝不加载聊天、模板或 Guide，避免删除后被立即重新物化。
+            // 严格保存与 post-condition 均已成立，才允许将当前运行时置为空态。
+            // 事务内不做任何重建（reload 链路自带事务，嵌套会死锁）；事务结束后由
+            // rebuildEmptyRuntimeFromGlobalTemplateAfterPurge_ACU 回落为当前全局模板的
+            // header-only 空结构（S1-1，pristine：重建的是空结构不是旧数据）。
             clearTableRuntimeWithoutReload_ACU();
             // ── 派生资源清理（保存成功后；失败仅警告） ──
             const cleanupWarnings = [];
@@ -79008,6 +79854,23 @@ $CONTENT
             }
         }
     }
+    /**
+     * 填表期间会拒绝的外部变更来源：开放 API 的 CRUD/SQL 与可视化编辑器/SQL 控制台。
+     * 填表自身（auto_fill/manual_fill/group_fill）、导入（import）与模板提交不受影响。
+     * 拒绝而非排队：排队的写入基于陈旧快照，醒来后仍会与填表结果冲突。
+     */
+    const EXTERNAL_MUTATION_SOURCES_ACU = new Set([
+        'manual_crud',
+        'raw_sql_mutation',
+        'raw_sql_batch',
+    ]);
+    function assertNoActiveFillForExternalMutation_ACU(options) {
+        if (!EXTERNAL_MUTATION_SOURCES_ACU.has(options.source))
+            return;
+        if (!isAutoUpdatingCard_ACU)
+            return;
+        throw new TableUpdateCommitError_ACU(`[TableUpdateCommit] ${options.reason}: AI 填表正在进行中，已拒绝外部表格写入（source=${options.source}），请等待填表完成后重试。`, 'precondition');
+    }
     function assertExpectedCommitScope_ACU(options, phase) {
         if (options.chatKey === undefined && options.isolationKey === undefined)
             return;
@@ -79022,6 +79885,7 @@ $CONTENT
     async function runTableUpdateCommit_ACU(options, apply) {
         let requiresRuntimeReload = false;
         try {
+            assertNoActiveFillForExternalMutation_ACU(options);
             assertExpectedCommitScope_ACU(options, '提交前');
             const commitMode = options.commitMode ?? 'persist_v2';
             if (commitMode === 'stage_only') {
@@ -79697,6 +80561,10 @@ $CONTENT
         }
         return [...keys];
     }
+    /** 边界 full 判定：compaction（保留层清理前滚）与 periodic（S3-2 距离触发前滚）共享同一套单根滚动语义。 */
+    function isV2BoundaryCheckpointReason_ACU(reason) {
+        return reason === 'compaction' || reason === 'periodic';
+    }
     function hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, messageIndex) {
         if (!Array.isArray(chat) || messageIndex < 0 || messageIndex >= chat.length)
             return false;
@@ -79706,7 +80574,7 @@ $CONTENT
         const tagData = readIsolatedTagData_ACU(msg, isolationKey);
         return isV2TagData_ACU(tagData)
             && tagData.storageFrame.checkpoint?.kind === 'full'
-            && tagData.storageFrame.checkpoint.reason === 'compaction';
+            && isV2BoundaryCheckpointReason_ACU(tagData.storageFrame.checkpoint.reason);
     }
     function resolveLatestCompactionTrigger_ACU(chat, aiMessageIndices, retainCount, maxAnchorIndex) {
         let latest = null;
@@ -79720,7 +80588,7 @@ $CONTENT
                 if (!isV2TagData_ACU(tagData))
                     continue;
                 const checkpoint = tagData.storageFrame.checkpoint;
-                if (checkpoint?.kind !== 'full' || checkpoint.reason !== 'compaction')
+                if (checkpoint?.kind !== 'full' || !isV2BoundaryCheckpointReason_ACU(checkpoint.reason))
                     continue;
                 if (!latest || messageIndex > latest.anchorIndex)
                     latest = { anchorIndex: messageIndex, checkpoint };
@@ -79817,6 +80685,94 @@ $CONTENT
             retainedEndIndex,
             checkpointBufferStartIndex,
             checkpointBufferEndIndex,
+            anchorIndex,
+        };
+    }
+    /**
+     * periodic 前滚步长（S3-2）：根滚动到尾部缓冲线后，每再累积这么多 AI 楼层就触发下一次前滚。
+     * 与 cleanup compaction 的缓冲节流（RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU）保持同一节奏。
+     */
+    const PERIODIC_V2_FULL_CHECKPOINT_ROLL_STEP_AI_LAYERS_ACU = 20;
+    /**
+     * S3-2 periodic full checkpoint 冗余：当最陈旧隔离键的 replay 根距聊天尾部过远时，
+     * 把单根前滚到尾部缓冲线（reason:'periodic'），消除"根远离尾部 + 超长增量链"的单点。
+     *
+     * 与 cleanup compaction 的关系：
+     * - 复用同一套 core（写锚点 full → 无损降级其余 full → 单根断言），不引入第二基线；
+     * - 尾部缓冲取 max(20, retainCount)，保证 periodic 锚点永不越过 cleanup 的未来锚点线
+     *   （tail − retainCount），否则 hasAdvancedAnchor 会永久阻塞清理滚动；
+     * - 本解析器不清除任何楼层：indicesToPurge 仅表示"锚点前已被新根覆盖的数据帧"，
+     *   供 core 准入与诊断，购物式清理仍由 cleanup 流程独立负责。
+     */
+    function resolvePeriodicCheckpointBoundary_ACU(chat, retainCount) {
+        const aiMessageIndices = [];
+        const dataMessageIndices = [];
+        for (let i = 0; i < chat.length; i++) {
+            const msg = chat[i];
+            if (msg && !msg.is_user) {
+                aiMessageIndices.push(i);
+            }
+            if (messageHasLocalLayerData_ACU(msg)) {
+                dataMessageIndices.push(i);
+            }
+        }
+        const bufferLayers = Math.max(RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU, Math.max(0, retainCount));
+        const stepLayers = PERIODIC_V2_FULL_CHECKPOINT_ROLL_STEP_AI_LAYERS_ACU;
+        const noRotate = {
+            shouldCompact: false,
+            shouldRotateCheckpoint: false,
+            aiMessageIndices,
+            dataMessageIndices,
+            effectiveRetainCount: bufferLayers + stepLayers,
+            bufferLayers,
+            cutoffIndex: 0,
+            indicesToPurge: [],
+            retainedDataIndices: dataMessageIndices.slice(),
+            checkpointBufferIndices: [],
+        };
+        // 最陈旧根：每个 V2 隔离键取最后一个 full checkpoint 的位置；退化历史（有帧无 full）
+        // 取该键首个 V2 帧位置——此时 periodic 写入同时修复该键的根缺失。
+        let stalestRootIndex;
+        for (const isolationKey of collectIsolationKeysWithV2Frames_ACU(chat)) {
+            const fullRefs = collectV2FullCheckpointRefsForIsolation_ACU(chat, isolationKey);
+            let rootIndex = fullRefs.length > 0
+                ? fullRefs[fullRefs.length - 1].messageIndex
+                : undefined;
+            if (rootIndex === undefined) {
+                for (let i = 0; i < chat.length; i++) {
+                    const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
+                    if (isV2TagData_ACU(tagData)) {
+                        rootIndex = i;
+                        break;
+                    }
+                }
+            }
+            if (rootIndex === undefined)
+                continue;
+            if (stalestRootIndex === undefined || rootIndex < stalestRootIndex) {
+                stalestRootIndex = rootIndex;
+            }
+        }
+        if (stalestRootIndex === undefined)
+            return noRotate;
+        const aiTotal = aiMessageIndices.length;
+        const rootAiOrdinal = countAiFloorAtMessage_ACU(chat, stalestRootIndex);
+        const distanceLayers = aiTotal - rootAiOrdinal;
+        const anchorAiOrdinal = aiTotal - bufferLayers;
+        if (distanceLayers < bufferLayers + stepLayers || anchorAiOrdinal < 1)
+            return noRotate;
+        const anchorIndex = aiMessageIndices[anchorAiOrdinal - 1];
+        // 只进不退：锚点必须严格晚于最陈旧根，否则前滚没有意义。
+        if (anchorIndex === undefined || anchorIndex <= stalestRootIndex)
+            return noRotate;
+        const indicesToPurge = dataMessageIndices.filter(index => index < anchorIndex);
+        if (indicesToPurge.length === 0)
+            return noRotate;
+        return {
+            ...noRotate,
+            shouldRotateCheckpoint: true,
+            indicesToPurge,
+            retainedDataIndices: dataMessageIndices.filter(index => index >= anchorIndex),
             anchorIndex,
         };
     }
@@ -79939,7 +80895,7 @@ $CONTENT
         }
         return refs;
     }
-    async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(chat, boundary, options = {}) {
+    async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(chat, boundary, options = {}, checkpointReason = 'compaction') {
         if (!boundary.shouldRotateCheckpoint || boundary.indicesToPurge.length === 0) {
             return { success: true, changed: false, skipped: true };
         }
@@ -79963,13 +80919,13 @@ $CONTENT
                 }
             });
             try {
-                const changed = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex);
+                const changed = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex, checkpointReason);
                 const downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
                 const obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
                 // 单根不变量：降级后同一隔离键必须至多一个 full checkpoint，
                 // 否则写新边界基线前就把历史搞成多根，回放只认最后一个，之前增量全部失效。
                 for (const isolationKey of collectIsolationKeysWithV2Frames_ACU(chat)) {
-                    const invariantViolation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'compaction_boundary');
+                    const invariantViolation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, `${checkpointReason}_boundary`);
                     if (invariantViolation) {
                         throw new Error(invariantViolation);
                     }
@@ -80002,13 +80958,18 @@ $CONTENT
     }
     function shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU() {
         const retainCount = settings_ACU.retainRecentLayers || 0;
-        if (retainCount <= 0)
-            return false;
         const chat = getChatArray_ACU();
         if (!chat || !Array.isArray(chat) || chat.length === 0)
             return false;
-        const boundary = resolveRetainedCheckpointBoundary_ACU(chat, retainCount);
-        return boundary.shouldRotateCheckpoint && boundary.indicesToPurge.length > 0 && boundary.anchorIndex !== undefined;
+        if (retainCount > 0) {
+            const boundary = resolveRetainedCheckpointBoundary_ACU(chat, retainCount);
+            if (boundary.shouldRotateCheckpoint && boundary.indicesToPurge.length > 0 && boundary.anchorIndex !== undefined) {
+                return true;
+            }
+        }
+        // S3-2：cleanup 边界不滚动时，检查 periodic 前滚是否到期（含 retain=0 清理禁用场景）。
+        const periodicBoundary = resolvePeriodicCheckpointBoundary_ACU(chat, retainCount);
+        return periodicBoundary.shouldRotateCheckpoint && periodicBoundary.anchorIndex !== undefined;
     }
     async function ensureV2BoundaryCheckpointForRetainedBuffer_ACU(options = {}) {
         // provisional bridge 活跃期间禁止 compaction：compaction 会直接改写帧、绕过
@@ -80035,20 +80996,27 @@ $CONTENT
             maintenanceMode: 'exclusive',
         }, async () => {
             const retainCount = settings_ACU.retainRecentLayers || 0;
-            if (retainCount <= 0) {
-                logDebug_ACU('[V2 Compaction] retainRecentLayers 为 0 或未设置，跳过边界 checkpoint 建立。');
-                return { success: true, changed: false, skipped: true };
-            }
             const chat = getChatArray_ACU();
             if (!chat || !Array.isArray(chat) || chat.length === 0) {
                 logDebug_ACU('[V2 Compaction] 聊天记录为空，跳过边界 checkpoint 建立。');
                 return { success: true, changed: false, skipped: true };
             }
-            const boundary = resolveRetainedCheckpointBoundary_ACU(chat, retainCount);
-            if (!boundary.shouldRotateCheckpoint) {
-                logDebug_ACU(`[V2 Compaction] AI 楼层总数(${boundary.aiMessageIndices.length}) < 滚动触发层数(${boundary.effectiveRetainCount}=保留${retainCount}+缓冲${RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU})，无需建立边界 checkpoint。`);
+            // 保留层清理边界优先：cleanup 可滚动时按原语义写 reason:'compaction'。
+            if (retainCount > 0) {
+                const boundary = resolveRetainedCheckpointBoundary_ACU(chat, retainCount);
+                if (boundary.shouldRotateCheckpoint) {
+                    return ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(chat, boundary, options, 'compaction');
+                }
+                logDebug_ACU(`[V2 Compaction] AI 楼层总数(${boundary.aiMessageIndices.length}) < 滚动触发层数(${boundary.effectiveRetainCount}=保留${retainCount}+缓冲${RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU})，检查 periodic 前滚。`);
             }
-            return ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(chat, boundary, options);
+            // S3-2 periodic 前滚：cleanup 不滚动（含 retain=0 清理禁用）时，若 replay 根距
+            // 尾部超过缓冲+步长阈值，则把单根前滚到尾部缓冲线并写 reason:'periodic' full。
+            const periodicBoundary = resolvePeriodicCheckpointBoundary_ACU(chat, retainCount);
+            if (periodicBoundary.shouldRotateCheckpoint) {
+                logDebug_ACU(`[V2 Compaction] periodic 前滚触发：锚点楼层 #${periodicBoundary.anchorIndex}，尾部缓冲 ${periodicBoundary.bufferLayers} 层。`);
+                return ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(chat, periodicBoundary, options, 'periodic');
+            }
+            return { success: true, changed: false, skipped: true };
         });
     }
     function getBoundaryVectorPointerRevision_ACU(manifest) {
@@ -80149,7 +81117,7 @@ $CONTENT
         logDebug_ACU(`[V2 Compaction] 已将交火向量 immutable pointer 迁移到边界楼层 #${boundaryAnchorIndex}：isolationKey=[${isolationKey || '无标签'}], indexId=${candidate.manifest.indexId}`);
         return true;
     }
-    async function writeV2BoundaryCheckpointBeforePurge_ACU(chat, boundaryAnchorIndex) {
+    async function writeV2BoundaryCheckpointBeforePurge_ACU(chat, boundaryAnchorIndex, checkpointReason = 'compaction') {
         if (boundaryAnchorIndex < 0 || !chat[boundaryAnchorIndex] || chat[boundaryAnchorIndex].is_user) {
             throw new Error(`边界 checkpoint 写入失败：boundaryAnchorIndex=${boundaryAnchorIndex} 不是有效 AI 楼层。`);
         }
@@ -80270,7 +81238,7 @@ $CONTENT
             const checkpoint = {
                 kind: 'full',
                 createdAt: Date.now(),
-                reason: 'compaction',
+                reason: checkpointReason,
                 data,
                 scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundaryAnchorIndex }),
                 compactionProvenance,
@@ -80278,7 +81246,7 @@ $CONTENT
             const validation = validateCanonicalCheckpoint_ACU(checkpoint, {
                 messageIndex: boundaryAnchorIndex,
                 isolationKey,
-                reason: 'compaction',
+                reason: checkpointReason,
             });
             if (!validation.valid) {
                 const issueSummary = validation.issues
@@ -80307,10 +81275,10 @@ $CONTENT
                 }
                 const built = buildCanonicalSheetCheckpoint_ACU({
                     createdAt: Date.now(),
-                    reason: 'compaction',
+                    reason: checkpointReason,
                     sheetKey: hiddenSheetKey,
                     data: JSON.parse(JSON.stringify(restoreData)),
-                    context: { messageIndex: boundaryAnchorIndex, isolationKey, reason: 'compaction' },
+                    context: { messageIndex: boundaryAnchorIndex, isolationKey, reason: checkpointReason },
                 });
                 if (!built.checkpoint) {
                     const error = new Error(`边界 checkpoint 写入失败：隐藏表 ${hiddenSheetKey} 的迁移 checkpoint 不合法：${built.error}`);
@@ -80382,7 +81350,7 @@ $CONTENT
                 }
             }
             changed = true;
-            logDebug_ACU(`[V2 Compaction] 已在 AI 保留边界楼层 #${boundaryAnchorIndex} 写入 isolationKey=[${isolationKey || '无标签'}] 的 full checkpoint。`);
+            logDebug_ACU(`[V2 Compaction] 已在 AI 保留边界楼层 #${boundaryAnchorIndex} 写入 isolationKey=[${isolationKey || '无标签'}] 的 full checkpoint（reason=${checkpointReason}）。`);
         }
         return changed;
     }
@@ -94843,6 +95811,44 @@ $CONTENT
         });
     }
 
+    let registeredUiSurface_ACU = null;
+    function registerUiSurface_ACU(handlers) {
+        registeredUiSurface_ACU = handlers;
+    }
+    function getUiSurface_ACU() {
+        return registeredUiSurface_ACU;
+    }
+    /**
+     * 统一 toast 入口：优先走已注册 UI surface 的 showToast；未注册或抛错时
+     * 回退宿主 toastr；两者都不可用时静默（调用方自行负责日志）。绝不抛错。
+     */
+    function showUiSurfaceToast_ACU(payload) {
+        try {
+            const handler = registeredUiSurface_ACU?.showToast;
+            if (handler) {
+                handler(payload);
+                return;
+            }
+        }
+        catch (_) {
+            // 已注册 handler 抛错时继续尝试宿主 toastr。
+        }
+        try {
+            const toastr = topLevelWindow_ACU?.toastr;
+            if (toastr && typeof toastr[payload.kind] === 'function') {
+                toastr[payload.kind](payload.text, undefined, payload.action
+                    ? { onclick: () => { void payload.action.onClick(); } }
+                    : undefined);
+            }
+        }
+        catch (_) {
+            // 宿主 toastr 不可用：静默，不让提示通道反过来破坏调用方流程。
+        }
+    }
+    function resetUiSurfaceRegistryForTests_ACU() {
+        registeredUiSurface_ACU = null;
+    }
+
     const plans_ACU = new Map();
     function clone_ACU$3(value) { return JSON.parse(JSON.stringify(value)); }
     function buildPlanId_ACU$1() { return `v2_recovery_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`; }
@@ -95966,6 +96972,27 @@ $CONTENT
             return { data: null, attempted: true, failed: message };
         }
     }
+    /** 空基底退化提示的节流窗口：同一次手动补齐会按批次多次命中，30 秒内只提示一次。 */
+    const EMPTY_BASE_FALLBACK_TOAST_THROTTLE_MS_ACU = 30000;
+    let lastEmptyBaseFallbackToastAt_ACU = 0;
+    /**
+     * S2-3：有界填表在目标楼层前找不到任何可回放表格基底时，会从空指导表/模板结构起底填表。
+     * 该退化语义上是安全的（避免把边界后的未来状态喂给本批次），但必须让用户知道
+     * 「本次填表不含任何历史数据」，否则会误以为历史数据参与了填表。提示绝不抛错，且做节流去重。
+     */
+    function notifyBoundedEmptyBaseFallback_ACU(batchNumber) {
+        try {
+            const now = Date.now();
+            if (now - lastEmptyBaseFallbackToastAt_ACU < EMPTY_BASE_FALLBACK_TOAST_THROTTLE_MS_ACU)
+                return;
+            lastEmptyBaseFallbackToastAt_ACU = now;
+            showUiSurfaceToast_ACU({
+                kind: 'info',
+                text: `目标楼层之前没有可用的表格历史基底，本次填表（批次 ${batchNumber} 起）将从空白模板结构开始，不包含任何历史表格数据。`,
+            });
+        }
+        catch (_) { }
+    }
     function buildGuideOrTemplateMergeBase_ACU(batchNumber) {
         const batchIsoKey = getCurrentIsolationKey_ACU();
         const sheetGuideForBatch = getChatSheetGuideDataForIsolationKey_ACU(batchIsoKey);
@@ -95998,6 +97025,7 @@ $CONTENT
                 // 否则会把目标范围之后的未来表格状态带回 prompt。只有非 SQLite 且未命中 V2 replay
                 // 的旧路径才允许沿用 runtime fallback，以保留连续 bucket 的既有行为。
                 if (isSqliteMode() || v2ReplayResult.attempted) {
+                    notifyBoundedEmptyBaseFallback_ACU(batchNumber);
                     return buildGuideOrTemplateMergeBase_ACU(batchNumber);
                 }
             }
@@ -96018,6 +97046,7 @@ $CONTENT
             // 指定了历史边界时，若当前聊天是 V2 但边界前没有可重放 checkpoint，不能退回“最新运行时快照”，
             // 否则会把目标楼之后的表格数据喂给本批次；此时应按空指导表/模板从零开始。
             if (!isSqliteMode() && v2ReplayResult.attempted && hasBoundedScope) {
+                notifyBoundedEmptyBaseFallback_ACU(batchNumber);
                 return buildGuideOrTemplateMergeBase_ACU(batchNumber);
             }
             if (runtimeData) {
@@ -100913,7 +101942,7 @@ $CONTENT
                 return { primary, additional };
             }
             : null, (options) => native.getCharLorebooks(options));
-        resolve('getCharWorldbookNames',
+        resolve('getCharWorldbookNames', 
         // 宿主只有旧版 getCharLorebooks 时反向映射为新版签名
         () => hasFn_ACU(rawTH, 'getCharLorebooks')
             ? async (characterName) => {
@@ -101723,44 +102752,6 @@ $CONTENT
             updateApiModeView_ACU(s.apiMode);
     }
 
-    let registeredUiSurface_ACU = null;
-    function registerUiSurface_ACU(handlers) {
-        registeredUiSurface_ACU = handlers;
-    }
-    function getUiSurface_ACU() {
-        return registeredUiSurface_ACU;
-    }
-    /**
-     * 统一 toast 入口：优先走已注册 UI surface 的 showToast；未注册或抛错时
-     * 回退宿主 toastr；两者都不可用时静默（调用方自行负责日志）。绝不抛错。
-     */
-    function showUiSurfaceToast_ACU(payload) {
-        try {
-            const handler = registeredUiSurface_ACU?.showToast;
-            if (handler) {
-                handler(payload);
-                return;
-            }
-        }
-        catch (_) {
-            // 已注册 handler 抛错时继续尝试宿主 toastr。
-        }
-        try {
-            const toastr = topLevelWindow_ACU?.toastr;
-            if (toastr && typeof toastr[payload.kind] === 'function') {
-                toastr[payload.kind](payload.text, undefined, payload.action
-                    ? { onclick: () => { void payload.action.onClick(); } }
-                    : undefined);
-            }
-        }
-        catch (_) {
-            // 宿主 toastr 不可用：静默，不让提示通道反过来破坏调用方流程。
-        }
-    }
-    function resetUiSurfaceRegistryForTests_ACU() {
-        registeredUiSurface_ACU = null;
-    }
-
     /**
      * presentation/components/template-preset-ui.ts — 模板预设 UI 函数（纯 DOM 操作）
      *
@@ -102457,13 +103448,13 @@ $CONTENT
      */
     /** 通知前端后等待其完成数据读取的窗口；仅在确实发出通知时才等待。 */
     const FRONTEND_READBACK_WAIT_MS_ACU = 800;
-    async function refreshMergedDataAndNotifyWithUI_ACU({ skipNotify = false } = {}) {
+    async function refreshMergedDataAndNotifyWithUI_ACU({ skipNotify = false, notifyMeta } = {}) {
         const result = await refreshMergedDataAndNotify_ACU();
-        // 1. 通知前端 (iframe context)
+        // 1. 通知前端 (iframe context)；notifyMeta.persisted=false 表示本次更新未写入聊天持久化（S2-1）
         let didNotifyFrontend = false;
         try {
             if (!skipNotify && topLevelWindow_ACU.AutoCardUpdaterAPI) {
-                topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate();
+                topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate(notifyMeta);
                 didNotifyFrontend = true;
                 logDebug_ACU('Notified frontend to refresh UI after data merge.');
             }
@@ -102781,7 +103772,7 @@ $CONTENT
      * 批处理更新：presentation 层调用 service 层，根据返回值显示 toast
      */
     async function processUpdates_ACU(indicesToUpdate, mode = 'auto', options = {}) {
-        const result = await processUpdatesBatch_ACU(indicesToUpdate, mode, options,
+        const result = await processUpdatesBatch_ACU(indicesToUpdate, mode, options, 
         // executeUpdate 回调：创建 AbortController 并调用 presentation 层的 proceedWithCardUpdate
         async (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => {
             return proceedWithCardUpdate_ACU(messagesToUse, '', saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext, false);
@@ -102853,15 +103844,15 @@ $CONTENT
                     }
                 },
             });
-            const result = await orchestrateManualUpdate_ACU(targetKeys,
+            const result = await orchestrateManualUpdate_ACU(targetKeys, 
             // processBatch 回调保留给兼容路径；当前手动填表主路径由 service grouped helper 执行。
             async (indices, batchMode, batchOptions) => {
                 return processUpdates_ACU(indices, batchMode, batchOptions);
-            },
+            }, 
             // refreshData 回调（纯数据刷新 + UI 刷新）
             async () => {
                 await refreshMergedDataAndNotifyWithUI_ACU();
-            },
+            }, 
             // [新增] 传入用户确认后的预清空选项
             {
                 clearBeforeUpdate: true,
@@ -103725,6 +104716,285 @@ $CONTENT
     // 通过文件顶部的 re-export 保持外部调用方兼容
 
     /**
+     * service/chat/checkpoint-delete-guard.ts — 删楼 checkpoint 保管库与前移恢复（S0-4）
+     *
+     * 背景：宿主的 MESSAGE_DELETED 在消息已从 chat 数组 splice 并保存之后才触发。
+     * 被删楼层携带的 full checkpoint（回放根）、perSheetCheckpoints（休眠表恢复数据 /
+     * 结构 shard）、过渡根在事件到达时已经从数组中消失，冷回放会直接判定"无根 / 休眠
+     * 数据丢失"。补救只能依赖删除发生前捕获的影子副本（保管库 vault）。
+     *
+     * 设计：
+     * - vault 按 chatKey 隔离，逐 isolationKey 按楼层序记录每个 V2 frame 的消息对象引用
+     *   与不可替代产物的深克隆；log-only 帧只存引用作后继信标（零克隆成本）。
+     *   宿主删楼对同一数组 splice，幸存消息对象引用不变——用对象引用判"楼层是否被删"
+     *   零误报，无需内容指纹。
+     * - 捕获点：聊天加载完成 + 每次插件保存成功后（chat-gateway post-save 监听）。插件
+     *   自身的 purge / 清空 / compaction 删楼都以插件保存收尾，保存同步会以当前聊天为
+     *   权威重建 vault，因此插件侧的删除天然不会被本模块复活（防"删了重生"语义保持）。
+     * - 恢复点：MESSAGE_DELETED 调度轮开头（冷回放之前）。丢失产物嫁接到其原位置之后
+     *   第一个幸存 frame 楼层：帧内 checkpoint 先于 logEntries 回放，嫁接后顺序与原
+     *   语义完全一致；被删楼层自身的 logEntries 不恢复（删楼 = 撤销该楼编辑）。
+     *
+     * 残余竞态（接受并记录）：删楼后调度防抖窗口（1.2s）内若插件恰好完成一次保存，
+     * post-save 同步会先丢弃待恢复产物。生成 / 填表落盘耗时远大于该窗口，实际不可达。
+     */
+    let vault_ACU = null;
+    let installed_ACU = false;
+    function deepClone_ACU$1(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function hasEntries_ACU(record) {
+        return !!record && typeof record === 'object' && !Array.isArray(record) && Object.keys(record).length > 0;
+    }
+    function entryHasArtifacts_ACU(entry) {
+        return !!entry.fullCheckpoint
+            || hasEntries_ACU(entry.perSheetCheckpoints)
+            || !!entry.spv79TransitionCheckpoint
+            || !!entry.compatTransitionCheckpoint;
+    }
+    /**
+     * 以当前聊天为权威重建保管库。
+     * 调用时机：聊天加载完成、插件保存成功后、恢复嫁接成功后。
+     */
+    function captureCheckpointVaultForCurrentChat_ACU(chatArg) {
+        const chat = Array.isArray(chatArg) ? chatArg : getChatArray_ACU();
+        const chatKey = String(currentChatFileIdentifier_ACU || '');
+        const entriesByIsolationKey = new Map();
+        for (const message of chat) {
+            if (!message || message.is_user)
+                continue;
+            const container = readIsolatedDataContainer_ACU(message);
+            if (!container)
+                continue;
+            for (const [isolationKey, tagData] of Object.entries(container)) {
+                if (!tagData || typeof tagData !== 'object')
+                    continue;
+                const frame = isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
+                const spv79 = tagData.spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition'
+                    ? tagData.spv79TransitionCheckpoint : null;
+                const compat = tagData.compatTransitionCheckpoint?.kind === 'compat_replay_transition'
+                    ? tagData.compatTransitionCheckpoint : null;
+                if (!frame && !spv79 && !compat)
+                    continue;
+                const fullCheckpoint = frame?.checkpoint?.kind === 'full' ? deepClone_ACU$1(frame.checkpoint) : null;
+                const perSheetCheckpoints = frame && hasEntries_ACU(frame.perSheetCheckpoints)
+                    ? deepClone_ACU$1(frame.perSheetCheckpoints) : null;
+                const entries = entriesByIsolationKey.get(isolationKey) || [];
+                entries.push({
+                    messageRef: message,
+                    fullCheckpoint,
+                    perSheetCheckpoints,
+                    spv79TransitionCheckpoint: spv79 ? deepClone_ACU$1(spv79) : null,
+                    compatTransitionCheckpoint: compat ? deepClone_ACU$1(compat) : null,
+                });
+                entriesByIsolationKey.set(isolationKey, entries);
+            }
+        }
+        vault_ACU = { chatKey, entriesByIsolationKey };
+    }
+    /** 切聊 / 测试清理。 */
+    function resetCheckpointVault_ACU() {
+        vault_ACU = null;
+    }
+    /** 注册 post-save 捕获监听。幂等，重复调用只注册一次。 */
+    function installCheckpointDeleteGuard_ACU() {
+        if (installed_ACU)
+            return;
+        installed_ACU = true;
+        registerPostChatSaveListener_ACU(() => {
+            try {
+                captureCheckpointVaultForCurrentChat_ACU();
+            }
+            catch (error) {
+                logWarn_ACU('[删楼守卫] post-save 保管库同步失败:', error?.message || error);
+            }
+        });
+    }
+    function ensureTargetFrame_ACU(message, isolationKey) {
+        if (!message.TavernDB_ACU_IsolatedData
+            || typeof message.TavernDB_ACU_IsolatedData !== 'object'
+            || Array.isArray(message.TavernDB_ACU_IsolatedData)) {
+            message.TavernDB_ACU_IsolatedData = {};
+        }
+        const container = message.TavernDB_ACU_IsolatedData;
+        if (!container[isolationKey] || typeof container[isolationKey] !== 'object') {
+            container[isolationKey] = {};
+        }
+        const tagData = container[isolationKey];
+        if (!isV2TagData_ACU(tagData)) {
+            tagData.storageFrame = { version: 2, logEntries: [] };
+            tagData._acu_storage_version = 2;
+        }
+        return tagData.storageFrame;
+    }
+    function findGraftTargetMessage_ACU(chat, presentMessages, entries, lostIndex, isolationKey) {
+        // 首选：原位置之后第一个幸存且仍携带 V2 frame 的楼层——帧内 checkpoint 先于
+        // logEntries 回放，落在后继帧上顺序与删除前完全一致。
+        for (let i = lostIndex + 1; i < entries.length; i += 1) {
+            const candidate = entries[i];
+            if (!presentMessages.has(candidate.messageRef))
+                continue;
+            const tagData = readIsolatedTagData_ACU(candidate.messageRef, isolationKey);
+            if (isV2TagData_ACU(tagData)) {
+                return { message: candidate.messageRef, absorbedEarlierFrame: false };
+            }
+        }
+        // 无后继帧：落到聊天最后一个 AI 楼层。若该楼层携带的是更早的 frame，其 logs
+        // 已被丢失 checkpoint 的 data 吸收（checkpoint 写于其后），由调用方清空并警告。
+        for (let i = chat.length - 1; i >= 0; i -= 1) {
+            const message = chat[i];
+            if (!message || message.is_user)
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            const hasEarlierFrame = isV2TagData_ACU(tagData) && tagData.storageFrame.logEntries.length > 0;
+            return { message, absorbedEarlierFrame: hasEarlierFrame };
+        }
+        return null;
+    }
+    /**
+     * MESSAGE_DELETED 后的前移恢复：把被删楼层携带的不可替代产物嫁接到最近的幸存楼层。
+     * 在冷回放之前调用；无丢失时零写入零保存。
+     */
+    async function recoverLostCheckpointsAfterMessageDeletion_ACU() {
+        const chat = getChatArray_ACU();
+        const chatKey = String(currentChatFileIdentifier_ACU || '');
+        if (!vault_ACU || vault_ACU.chatKey !== chatKey || !Array.isArray(chat) || chat.length === 0) {
+            return { recovered: false, graftedCount: 0 };
+        }
+        const presentMessages = new Set(chat);
+        const lostItems = [];
+        for (const [isolationKey, entries] of vault_ACU.entriesByIsolationKey) {
+            entries.forEach((entry, vaultIndex) => {
+                if (presentMessages.has(entry.messageRef))
+                    return;
+                if (!entryHasArtifacts_ACU(entry))
+                    return;
+                lostItems.push({ entry, isolationKey, vaultIndex });
+            });
+        }
+        if (lostItems.length === 0)
+            return { recovered: false, graftedCount: 0 };
+        return runTableWriteTransaction_ACU({
+            source: 'system_cleanup',
+            reason: 'message_delete_checkpoint_recovery',
+            isolationKey: getCurrentIsolationKey_ACU(),
+            writeSet: [{ kind: 'all' }],
+            maintenanceMode: 'exclusive',
+        }, async () => {
+            // 只快照将被改写的消息的 IsolatedData 字段，失败时整体还原。
+            const snapshots = new Map();
+            const snapshotTarget = (message) => {
+                if (snapshots.has(message))
+                    return;
+                const field = message.TavernDB_ACU_IsolatedData;
+                snapshots.set(message, field === undefined ? undefined : JSON.stringify(field));
+            };
+            const restoreSnapshots = () => {
+                for (const [message, serialized] of snapshots) {
+                    if (serialized === undefined)
+                        delete message.TavernDB_ACU_IsolatedData;
+                    else
+                        message.TavernDB_ACU_IsolatedData = JSON.parse(serialized);
+                }
+            };
+            let graftedCount = 0;
+            const affectedIsolationKeys = new Set();
+            try {
+                // 逆序处理：同 sheetKey 冲突时"原始位置更靠后的产物"先占位，更早的被
+                // 目标已有判定跳过——幸存者/更新者优先的语义由同一条规则统一表达。
+                for (const item of [...lostItems].reverse()) {
+                    const { entry, isolationKey, vaultIndex } = item;
+                    const entries = vault_ACU.entriesByIsolationKey.get(isolationKey);
+                    const target = findGraftTargetMessage_ACU(chat, presentMessages, entries, vaultIndex, isolationKey);
+                    if (!target) {
+                        logError_ACU(`[删楼守卫] isolationKey=[${isolationKey || '无标签'}] 的丢失 checkpoint 无处嫁接（聊天已无 AI 楼层），保留保管库等待下次机会。`);
+                        continue;
+                    }
+                    snapshotTarget(target.message);
+                    const frame = ensureTargetFrame_ACU(target.message, isolationKey);
+                    const targetIndex = chat.indexOf(target.message);
+                    if (target.absorbedEarlierFrame && entry.fullCheckpoint && frame.logEntries.length > 0) {
+                        logWarn_ACU(`[删楼守卫] 嫁接楼层 #${targetIndex} 携带更早的增量帧；其 logs 已被恢复的 full checkpoint 吸收，清空以保持回放顺序正确。`);
+                        frame.logEntries = [];
+                    }
+                    if (entry.fullCheckpoint) {
+                        if (frame.checkpoint?.kind === 'full') {
+                            logDebug_ACU(`[删楼守卫] 楼层 #${targetIndex} 已有 full checkpoint，跳过回放根嫁接。`);
+                        }
+                        else {
+                            frame.checkpoint = deepClone_ACU$1(entry.fullCheckpoint);
+                            graftedCount += 1;
+                            logWarn_ACU(`[删楼守卫] 被删楼层携带的回放根（reason=${entry.fullCheckpoint.reason}）已前移嫁接到楼层 #${targetIndex}（isolationKey=[${isolationKey || '无标签'}]）。`);
+                        }
+                    }
+                    if (hasEntries_ACU(entry.perSheetCheckpoints)) {
+                        for (const [sheetKey, checkpoint] of Object.entries(entry.perSheetCheckpoints)) {
+                            if (frame.perSheetCheckpoints?.[sheetKey]) {
+                                logDebug_ACU(`[删楼守卫] 楼层 #${targetIndex} 已有 ${sheetKey} 的 per-sheet checkpoint（幸存者优先），跳过嫁接。`);
+                                continue;
+                            }
+                            const cloned = deepClone_ACU$1(checkpoint);
+                            if (cloned.timeline) {
+                                cloned.timeline = { ...cloned.timeline, activateAtMessageIndex: targetIndex, afterSeq: 0 };
+                            }
+                            if (!frame.perSheetCheckpoints)
+                                frame.perSheetCheckpoints = {};
+                            frame.perSheetCheckpoints[sheetKey] = cloned;
+                            graftedCount += 1;
+                            logWarn_ACU(`[删楼守卫] 被删楼层携带的 ${sheetKey} per-sheet checkpoint（timeline=${checkpoint.timeline?.kind || 'legacy'}）已前移嫁接到楼层 #${targetIndex}。`);
+                        }
+                    }
+                    const tagData = target.message.TavernDB_ACU_IsolatedData[isolationKey];
+                    if (entry.spv79TransitionCheckpoint && !tagData.spv79TransitionCheckpoint) {
+                        tagData.spv79TransitionCheckpoint = deepClone_ACU$1(entry.spv79TransitionCheckpoint);
+                        graftedCount += 1;
+                        logWarn_ACU(`[删楼守卫] SPv7.9 过渡根已嫁接到楼层 #${targetIndex}；其 cutoff 楼层索引可能因删除漂移，请留意后续回放告警。`);
+                    }
+                    if (entry.compatTransitionCheckpoint && !tagData.compatTransitionCheckpoint) {
+                        tagData.compatTransitionCheckpoint = deepClone_ACU$1(entry.compatTransitionCheckpoint);
+                        graftedCount += 1;
+                        logWarn_ACU(`[删楼守卫] 兼容过渡根已嫁接到楼层 #${targetIndex}；其 cutoff 楼层索引可能因删除漂移，请留意后续回放告警。`);
+                    }
+                    affectedIsolationKeys.add(isolationKey);
+                }
+                if (graftedCount === 0) {
+                    // 全部被"目标已有"跳过或无处嫁接：无写入即无需保存。
+                    return { recovered: false, graftedCount: 0 };
+                }
+                for (const isolationKey of affectedIsolationKeys) {
+                    const violation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'delete_recovery');
+                    if (violation)
+                        throw new Error(violation);
+                }
+                await saveChatToHostStrict_ACU();
+                captureCheckpointVaultForCurrentChat_ACU(chat);
+                logWarn_ACU(`[删楼守卫] 删楼 checkpoint 前移恢复完成：共嫁接 ${graftedCount} 个产物。`);
+                return { recovered: true, graftedCount };
+            }
+            catch (error) {
+                restoreSnapshots();
+                const message = error?.message || String(error || '删楼 checkpoint 恢复失败。');
+                logError_ACU(`[删楼守卫] 删楼 checkpoint 前移恢复失败，已回滚改动（保管库保留，下次删楼事件重试）：${message}`);
+                return { recovered: false, graftedCount: 0, error: message };
+            }
+        });
+    }
+    /** 仅供测试：读取当前保管库形态。 */
+    function __getCheckpointVaultForTests_ACU() {
+        if (!vault_ACU)
+            return null;
+        const entryCounts = {};
+        for (const [key, entries] of vault_ACU.entriesByIsolationKey)
+            entryCounts[key] = entries.length;
+        return { chatKey: vault_ACU.chatKey, isolationKeys: [...vault_ACU.entriesByIsolationKey.keys()], entryCounts };
+    }
+    /** 仅供测试：重置安装状态。 */
+    function __resetCheckpointDeleteGuardForTests_ACU() {
+        vault_ACU = null;
+        installed_ACU = false;
+    }
+
+    /**
      * presentation/bootstrap/chat-mutation-scheduler.ts
      * 楼层删除/滑动事件的代次化调度器：
      * - 用 trailing 防抖聚合快速连续事件（滑动楼层会连发 MESSAGE_SWIPED）；
@@ -103783,6 +105053,17 @@ $CONTENT
         const startedGeneration = generation_ACU;
         firstRequestAt_ACU = 0;
         try {
+            // S0-4：删楼轮次先做 checkpoint 前移恢复，再进入冷回放——被删楼层携带的
+            // 回放根 / 休眠表 checkpoint 若不先嫁接到幸存楼层，冷回放会把丢失固化。
+            // 失败隔离：恢复失败（守卫内部已回滚）不阻断后续冷回放。
+            if (latestReason_ACU === 'chat_modified_deleted') {
+                try {
+                    await recoverLostCheckpointsAfterMessageDeletion_ACU();
+                }
+                catch (e) {
+                    logError_ACU(`[聊天变更] 删楼 checkpoint 前移恢复失败: ${e?.message}`);
+                }
+            }
             // 与旧实现保持一致的执行顺序；每步独立隔离，失败不中断后续步骤
             if (isSqliteMode()) {
                 try {
@@ -103848,6 +105129,292 @@ $CONTENT
         firstRequestAt_ACU = 0;
         running_ACU$1 = false;
         pendingAfterRun_ACU = false;
+    }
+
+    /**
+     * service/template/dormant-data-service.ts — 休眠数据可见性与唤醒（S3-4）
+     *
+     * 职责：
+     * 1. listDormantTables_ACU：从 V2 生命周期投影列出当前聊天的休眠表（含休眠楼层/时间/来源模板）。
+     * 2. listDormantColumns_ACU：从运行时模板快照列出各现役表的休眠列（hiddenPhysicalColumns 投影）。
+     * 3. wakeDormantTable_ACU / wakeDormantColumn_ACU：构造包含目标项的模板快照，
+     *    统一经 applyChatTemplateSnapshotWithReconciliation_ACU 应用——表级唤醒复用协调器的
+     *    reveal 链路（含 S1-4 reveal 后列级再协调），列级唤醒复用 canonical 匹配复活链路。
+     *    不新增任何持久化写路径。
+     *
+     * 清单是只读投影：本模块不缓存任何状态，每次调用都从聊天历史/运行时重新派生。
+     */
+    /** V2 边界内数据均为纯 JSON（与 storage-frame-v2-persist 同语义的克隆）。 */
+    function deepClone_ACU(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    /** 从休眠快照统计数据行数/列数；结构异常时返回 0 而不抛错（仅展示用途）。 */
+    function countRestoreShape_ACU(restore) {
+        const content = Array.isArray(restore?.content) ? restore.content : [];
+        const headers = Array.isArray(content[0]) ? content[0] : [];
+        return {
+            rowCount: Math.max(0, content.length - 1),
+            // content[0] 首列为 row_id 占位；展示列数按用户可感知的业务列计。
+            columnCount: Math.max(0, headers.length - 1),
+        };
+    }
+    /** 在模板快照中按 canonical 显示名查找现役表；返回命中的 sheetKey（无则 null）。 */
+    function findSheetKeyByCanonicalName_ACU(templateObj, displayName) {
+        const canonical = canonicalizeDisplayName_ACU(displayName);
+        if (!canonical)
+            return null;
+        for (const [key, sheet] of Object.entries(templateObj)) {
+            if (!key.startsWith('sheet_'))
+                continue;
+            if (canonicalizeDisplayName_ACU(sheet?.name) === canonical)
+                return key;
+        }
+        return null;
+    }
+    /**
+     * 对单个休眠表做唤醒前置判定。列表与唤醒动作共用同一守卫，
+     * 保证 UI 显示「可唤醒」与实际唤醒结果一致。
+     */
+    function evaluateWakeGuards_ACU(sheetKey, restore, runtimeTemplateObj) {
+        if (!restore || !Array.isArray(restore.content) || !Array.isArray(restore.content[0])) {
+            return { canWake: false, reason: '休眠数据快照缺失或损坏，无法唤醒。' };
+        }
+        const derivedKey = buildStableSheetKeyCandidate_ACU(restore.name);
+        if (!derivedKey || derivedKey !== sheetKey) {
+            return {
+                canWake: false,
+                reason: '该表的历史标识与当前名称派生结果不一致（可能休眠前后经历过改名），暂不支持自动唤醒。',
+            };
+        }
+        if (!runtimeTemplateObj) {
+            return { canWake: false, reason: '当前运行时模板不可用，无法构造唤醒模板。' };
+        }
+        const conflictKey = findSheetKeyByCanonicalName_ACU(runtimeTemplateObj, String(restore.name ?? ''));
+        if (conflictKey) {
+            return {
+                canWake: false,
+                reason: `当前模板已存在同名表「${String(restore.name ?? '')}」，唤醒会导致数据合并歧义；请先重命名现役表。`,
+            };
+        }
+        return { canWake: true };
+    }
+    /**
+     * 列出当前聊天（当前隔离键）的全部休眠表。
+     *
+     * 数据来源：V2 生命周期投影（deriveSheetLifecycleFromFramesV2_ACU）。
+     * 派生失败返回 ok=false 错误态——展示层必须区分「没有休眠表」与「历史读不出」。
+     */
+    function listDormantTables_ACU() {
+        let lifecycle;
+        const chat = getChatArray_ACU();
+        const isolationKey = getCurrentIsolationKey_ACU();
+        try {
+            lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, isolationKey);
+        }
+        catch (e) {
+            logWarn_ACU('[DormantData] 生命周期派生失败，休眠表清单不可用:', e);
+            return { ok: false, entries: [], error: `无法读取表格历史（生命周期派生失败）：${e instanceof Error ? e.message : String(e)}` };
+        }
+        const runtimeSnapshot = getRuntimeTemplateSnapshot_ACU();
+        const runtimeTemplateObj = runtimeSnapshot?.templateObj ?? null;
+        const entries = lifecycle.hiddenSheetKeys.map((sheetKey) => {
+            const entry = lifecycle.statusBySheetKey[sheetKey];
+            const restore = entry?.restoreSourceData;
+            const { rowCount, columnCount } = countRestoreShape_ACU(restore);
+            const guards = evaluateWakeGuards_ACU(sheetKey, restore, runtimeTemplateObj);
+            return {
+                sheetKey,
+                name: String(restore?.name ?? '') || sheetKey,
+                rowCount,
+                columnCount,
+                hiddenAtMessageIndex: entry?.lastTimelineMessageIndex,
+                hiddenAtTime: entry?.lastTimelineCreatedAt,
+                sourcePresetName: entry?.hideSourcePresetName,
+                canWake: guards.canWake,
+                ...(guards.reason ? { wakeBlockedReason: guards.reason } : {}),
+            };
+        });
+        return { ok: true, entries };
+    }
+    /**
+     * 列出当前运行时模板中各现役表的休眠列。
+     *
+     * 数据来源：运行时模板快照的 hiddenPhysicalColumns 投影（与协调器同一契约：
+     * sqlite 隐藏身份=物理列名，native=表头名）。单表投影失败不拖垮整体——
+     * 该表跳过并记录警告，其余表正常列出。
+     */
+    function listDormantColumns_ACU() {
+        const snapshot = getRuntimeTemplateSnapshot_ACU();
+        if (!snapshot?.templateObj) {
+            return { ok: false, entries: [], error: '当前运行时模板不可用，无法读取休眠列。' };
+        }
+        const entries = [];
+        for (const [sheetKey, sheet] of Object.entries(snapshot.templateObj)) {
+            if (!sheetKey.startsWith('sheet_'))
+                continue;
+            let projection;
+            try {
+                projection = getSheetColumnProjection_ACU(sheet);
+            }
+            catch (e) {
+                logWarn_ACU(`[DormantData] 表 ${sheetKey} 列投影失败，休眠列清单跳过该表:`, e);
+                continue;
+            }
+            if (projection.hiddenPhysicalColumns.length === 0)
+                continue;
+            const sheetName = String(sheet?.name ?? '') || sheetKey;
+            // 以隐藏集条目为主序：每个 hiddenName 找到对应投影列取表头；
+            // 找不到投影列（理论上被投影校验拦截）时以 hiddenName 自身兜底展示。
+            for (const hiddenName of projection.hiddenPhysicalColumns) {
+                const canonical = hiddenName.toLowerCase();
+                const column = projection.columns.find(item => item.hidden && (item.physicalName.toLowerCase() === canonical || item.header.toLowerCase() === canonical));
+                entries.push({
+                    sheetKey,
+                    sheetName,
+                    header: column?.header || hiddenName,
+                    hiddenName,
+                });
+            }
+        }
+        return { ok: true, entries };
+    }
+    /**
+     * 休眠完整性自检（S3-3）：校验每个 hidden 表的恢复来源可达，发现孤儿即报告。
+     *
+     * 纯只读，不做任何修复或写入。判定语义与唤醒守卫（evaluateWakeGuards_ACU 首条）
+     * 及 compaction 前滚的 fail-closed 条件（隐藏表缺 restoreSourceData 时拒绝写边界）
+     * 保持同源：审计报警的表，唤醒必然被拦、边界前滚必然失败——
+     * 及早警告让用户在旧楼层仍在（数据仍可抢救）时处理，而不是事后才暴露。
+     *
+     * indeterminate 生命周期（无法判定 active/hidden）同样计入警告面：
+     * 它意味着该表的历史 checkpoint 链不完整，恢复来源不可达。
+     */
+    function auditDormantDataIntegrity_ACU() {
+        const chat = getChatArray_ACU();
+        const isolationKey = getCurrentIsolationKey_ACU();
+        let lifecycle;
+        try {
+            lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, isolationKey);
+        }
+        catch (e) {
+            return {
+                ok: false,
+                issues: [],
+                hiddenCount: 0,
+                error: `无法读取表格历史（生命周期派生失败）：${e instanceof Error ? e.message : String(e)}`,
+            };
+        }
+        const issues = [];
+        for (const sheetKey of lifecycle.hiddenSheetKeys) {
+            const entry = lifecycle.statusBySheetKey[sheetKey];
+            const restore = entry?.restoreSourceData;
+            if (!restore) {
+                issues.push({
+                    sheetKey,
+                    name: sheetKey,
+                    kind: 'missing_restore_data',
+                    message: `休眠表 ${sheetKey} 的恢复数据缺失：找不到对应的休眠 checkpoint，该表无法唤醒，且在旧楼层被清理后数据将永久丢失。`,
+                });
+                continue;
+            }
+            if (!Array.isArray(restore.content) || !Array.isArray(restore.content[0])) {
+                const name = String(restore.name ?? '') || sheetKey;
+                issues.push({
+                    sheetKey,
+                    name,
+                    kind: 'corrupt_restore_data',
+                    message: `休眠表「${name}」的恢复数据已损坏（缺少有效表头），该表无法唤醒；请在旧楼层被清理前导出备份。`,
+                });
+            }
+        }
+        for (const sheetKey of lifecycle.indeterminateSheetKeys) {
+            issues.push({
+                sheetKey,
+                name: sheetKey,
+                kind: 'indeterminate_lifecycle',
+                message: `表 ${sheetKey} 的生命周期无法判定（历史 checkpoint 链不完整），其休眠数据的恢复来源不可达。`,
+            });
+        }
+        return { ok: true, issues, hiddenCount: lifecycle.hiddenSheetKeys.length };
+    }
+    /**
+     * 唤醒一个休眠表：把它的 header-only 结构壳并入当前运行时模板快照，
+     * 经协调器应用——协调器识别到模板含派生 key 命中生命周期 hidden 的表后
+     * 产出 reveal 变更，持久层从 hide checkpoint 恢复离开时的完整数据（S1-4 再协调对齐结构）。
+     *
+     * 守卫（与 listDormantTables_ACU 的 canWake 判定一致，fail-loud）：
+     * 快照存在且结构有效、派生 key 与历史 key 一致、当前模板无 canonical 同名表。
+     */
+    async function wakeDormantTable_ACU(sheetKey, options = {}) {
+        const chat = getChatArray_ACU();
+        const isolationKey = getCurrentIsolationKey_ACU();
+        let lifecycle;
+        try {
+            lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, isolationKey);
+        }
+        catch (e) {
+            return { saved: false, error: `无法读取表格历史（生命周期派生失败）：${e instanceof Error ? e.message : String(e)}` };
+        }
+        const entry = lifecycle.statusBySheetKey[sheetKey];
+        if (!entry || entry.status !== 'hidden') {
+            return { saved: false, error: `表 ${sheetKey} 当前不处于休眠状态，无法唤醒。` };
+        }
+        const snapshot = getRuntimeTemplateSnapshot_ACU();
+        const guards = evaluateWakeGuards_ACU(sheetKey, entry.restoreSourceData, snapshot?.templateObj ?? null);
+        if (!guards.canWake) {
+            return { saved: false, error: guards.reason || '该休眠表当前不可唤醒。' };
+        }
+        // header-only 壳：保留结构（表头/DDL/隐藏集/别名/配置），剥掉数据行——
+        // 数据由 reveal 链路从 hide checkpoint 权威恢复，模板携带数据行反而会造成重复合并语义。
+        const shell = deepClone_ACU(entry.restoreSourceData);
+        shell.content = [shell.content[0]];
+        const templateObj = deepClone_ACU(snapshot.templateObj);
+        templateObj[sheetKey] = shell;
+        return await applyChatTemplateSnapshotWithReconciliation_ACU(templateObj, {
+            source: 'dormant_wake_table',
+            presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey }),
+            signal: options.signal,
+        });
+    }
+    /**
+     * 唤醒一个休眠列：从当前运行时模板快照中该表的 hiddenPhysicalColumns 移除目标项
+     * （大小写不敏感精确匹配隐藏集条目），经协调器应用——该列成为目标可见列后由
+     * canonical 匹配复活其数据。
+     */
+    async function wakeDormantColumn_ACU(sheetKey, hiddenName, options = {}) {
+        const requested = String(hiddenName ?? '').trim();
+        if (!requested)
+            return { saved: false, error: '未指定要唤醒的休眠列。' };
+        const snapshot = getRuntimeTemplateSnapshot_ACU();
+        if (!snapshot?.templateObj) {
+            return { saved: false, error: '当前运行时模板不可用，无法唤醒休眠列。' };
+        }
+        const templateObj = deepClone_ACU(snapshot.templateObj);
+        const sheet = templateObj[sheetKey];
+        if (!sheet || typeof sheet !== 'object') {
+            return { saved: false, error: `当前模板中不存在表 ${sheetKey}，无法唤醒其休眠列。` };
+        }
+        const rawHidden = sheet.sourceData?.hiddenPhysicalColumns;
+        const hidden = Array.isArray(rawHidden) ? rawHidden.map(value => String(value ?? '')) : [];
+        const requestedCanonical = requested.toLowerCase();
+        const remaining = hidden.filter(value => value.trim().toLowerCase() !== requestedCanonical);
+        if (remaining.length === hidden.length) {
+            return { saved: false, error: `列「${requested}」不在表「${String(sheet.name ?? sheetKey)}」的休眠集中，无法唤醒。` };
+        }
+        if (!sheet.sourceData || typeof sheet.sourceData !== 'object') {
+            return { saved: false, error: `表 ${sheetKey} 缺少 sourceData，休眠集状态异常。` };
+        }
+        if (remaining.length > 0) {
+            sheet.sourceData.hiddenPhysicalColumns = remaining;
+        }
+        else {
+            delete sheet.sourceData.hiddenPhysicalColumns;
+        }
+        return await applyChatTemplateSnapshotWithReconciliation_ACU(templateObj, {
+            source: 'dormant_wake_column',
+            presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true }),
+            signal: options.signal,
+        });
     }
 
     /**
@@ -112419,6 +113986,8 @@ $CONTENT
     const SEARCH_TOTAL_CHAR_BUDGET_ACU = 20000;
     /** 每条命中的结构开销估算（标签、地址、分隔符）。 */
     const SEARCH_HIT_OVERHEAD_ACU = 60;
+    /** isRegex 模式的正则长度上限：模型产出的超长模式几乎必然是错误或病态回溯，直接拒绝并要求修正。 */
+    const SEARCH_REGEX_MAX_LENGTH_ACU = 300;
     function escapeRegex_ACU(text) {
         return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
@@ -112571,6 +114140,9 @@ $CONTENT
      * @returns 结果文本：每条命中一行「[域] 位置：片段｜读取地址」；正则非法/无命中时返回可修正的说明
      */
     function runAgentSearch_ACU(call, context) {
+        if (call.isRegex && call.query.length > SEARCH_REGEX_MAX_LENGTH_ACU) {
+            return `搜索正则过长（${call.query.length} > ${SEARCH_REGEX_MAX_LENGTH_ACU} 字符），已拒绝执行。请精简正则，或拆分为多次搜索。`;
+        }
         let regex;
         try {
             regex = call.isRegex ? new RegExp(call.query, 'i') : new RegExp(escapeRegex_ACU(call.query), 'i');
@@ -114501,6 +116073,37 @@ $CONTENT
         notifyRuntimeTableCleared_ACU();
         logDebug_ACU(`ACU: No active chat after CHAT_CHANGED (${String(chatFileName)}), runtime table state cleared.`);
     }
+    /**
+     * S3-3 休眠完整性自检：聊天加载完成后校验每个 hidden 表的恢复来源可达，
+     * 发现孤儿即 logWarn + warning toast（带跳转数据管理入口）。
+     * 纯只读且全降级——审计自身故障绝不影响加载主链路；
+     * 生命周期派生失败只记日志（加载失败已有 C5 error toast，休眠面板另有 listError），不重复弹报。
+     */
+    function runDormantIntegrityAuditQuietly_ACU(stage) {
+        try {
+            const audit = auditDormantDataIntegrity_ACU();
+            if (!audit.ok) {
+                logWarn_ACU(`[休眠自检] ${stage} 审计不可用：${audit.error || '未知错误'}`);
+                return;
+            }
+            if (audit.issues.length === 0)
+                return;
+            for (const issue of audit.issues) {
+                logWarn_ACU(`[休眠自检] ${stage} 发现问题（${issue.kind}）：${issue.message}`);
+            }
+            showUiSurfaceToast_ACU({
+                kind: 'warning',
+                text: `检测到 ${audit.issues.length} 项休眠数据完整性问题（涉及恢复来源缺失或损坏），相关表暂时无法唤醒。详情见数据管理页的「休眠数据」面板。`,
+                action: {
+                    label: '打开数据管理',
+                    onClick: async () => { await getUiSurface_ACU()?.openSettings?.(); },
+                },
+            });
+        }
+        catch (e) {
+            logWarn_ACU(`[休眠自检] ${stage} 审计执行失败: ${e?.message}`);
+        }
+    }
     function installSendIntentCaptureHooks_ACU() {
         try {
             const parentDoc = (window.parent || window).document;
@@ -114546,6 +116149,8 @@ $CONTENT
             logDebug_ACU('AutoCardUpdater Initialization successful! Core APIs loaded.');
             showToastr_ACU('success', '数据库自动更新脚本已加载！', '脚本启动');
             loadSettings_ACU();
+            // S0-4：注册插件保存后的 checkpoint 保管库同步（删楼恢复的影子基线）。
+            installCheckpointDeleteGuard_ACU();
             // Register the bridge before generation events are subscribed. Runtime
             // migration remains page-owned so no chat persistence is touched at startup.
             getContinuationRuntime_ACU();
@@ -114764,6 +116369,15 @@ $CONTENT
                                 catch (restoreFlushError) {
                                     logWarn_ACU('[交火向量索引] CHAT_CHANGED 恢复防抖归档队列失败:', restoreFlushError);
                                 }
+                            // S0-4：聊天切换加载完成后捕获 checkpoint 保管库（删楼恢复的影子基线）。
+                            try {
+                                captureCheckpointVaultForCurrentChat_ACU();
+                            }
+                            catch (vaultError) {
+                                logWarn_ACU(`[删楼守卫] CHAT_CHANGED 保管库捕获失败: ${vaultError?.message}`);
+                            }
+                            // S3-3：加载完成后做休眠完整性自检（只读，发现孤儿即警告）。
+                            runDormantIntegrityAuditQuietly_ACU('CHAT_CHANGED');
                             logDebug_ACU('ACU: Chat data reload and UI refresh triggered after chat change (Delayed).');
                         }
                         catch (chatChangedError) {
@@ -115099,6 +116713,15 @@ $CONTENT
                         }
                     }
                 }
+                // S0-4：初始加载完成后捕获 checkpoint 保管库（删楼恢复的影子基线）。
+                try {
+                    captureCheckpointVaultForCurrentChat_ACU();
+                }
+                catch (e) {
+                    logWarn_ACU(`[删楼守卫] initWithChatId 保管库捕获失败: ${e?.message}`);
+                }
+                // S3-3：初始加载完成后做休眠完整性自检（只读，发现孤儿即警告）。
+                runDormantIntegrityAuditQuietly_ACU('initWithChatId');
             };
             // C5 加载失败可见化：初始加载与 CHAT_CHANGED 同级兜底，不允许静默空表。
             const initWithChatIdSafely = async (chatId) => {
@@ -115157,18 +116780,20 @@ $CONTENT
      */
     let isNotifyingTableUpdate_ACU = false;
     let hasPendingTableUpdateNotification_ACU = false;
-    function notifyTableUpdateCallbacksOnce_ACU(ctx) {
+    // 合并窗口内只要出现过一次未落盘通知，跟发就按未落盘告知（宁可保守，不虚报已落盘）。
+    let pendingNotificationHasUnpersisted_ACU = false;
+    function notifyTableUpdateCallbacksOnce_ACU(ctx, meta) {
         const callbacksSnapshot = [...ctx.tableUpdateCallbacks];
         const callbackCount = callbacksSnapshot.length;
-        logDebug_ACU(`Notifying ${callbackCount} callbacks about table update.`);
+        logDebug_ACU(`Notifying ${callbackCount} callbacks about table update (persisted=${meta.persisted}).`);
         if (callbackCount === 0)
             return;
         // 修复：确保回调函数永远不会收到 null，而是收到一个空对象，增加稳健性。
         const dataToSend = currentJsonTableData_ACU || {};
         callbacksSnapshot.forEach((callback, callbackIndex) => {
             try {
-                // 将最新的数据作为参数传给回调
-                callback(dataToSend);
+                // 将最新的数据与元信息作为参数传给回调；旧回调只声明一个参数时第二参数被自然忽略。
+                callback(dataToSend, meta);
             }
             catch (e) {
                 logError_ACU('[回调管理] Error executing a table update callback:', {
@@ -115180,19 +116805,24 @@ $CONTENT
             }
         });
     }
-    function notifyTableUpdateCallbacksSafely_ACU(ctx) {
+    function notifyTableUpdateCallbacksSafely_ACU(ctx, meta) {
         if (isNotifyingTableUpdate_ACU) {
             hasPendingTableUpdateNotification_ACU = true;
+            if (!meta.persisted)
+                pendingNotificationHasUnpersisted_ACU = true;
             logDebug_ACU('[回调管理] Table update notification is already running; queued one coalesced follow-up notification.');
             return;
         }
         isNotifyingTableUpdate_ACU = true;
         try {
             hasPendingTableUpdateNotification_ACU = false;
-            notifyTableUpdateCallbacksOnce_ACU(ctx);
+            pendingNotificationHasUnpersisted_ACU = false;
+            notifyTableUpdateCallbacksOnce_ACU(ctx, meta);
             if (hasPendingTableUpdateNotification_ACU) {
                 hasPendingTableUpdateNotification_ACU = false;
-                notifyTableUpdateCallbacksOnce_ACU(ctx);
+                const followUpMeta = { persisted: !pendingNotificationHasUnpersisted_ACU };
+                pendingNotificationHasUnpersisted_ACU = false;
+                notifyTableUpdateCallbacksOnce_ACU(ctx, followUpMeta);
             }
         }
         finally {
@@ -115216,9 +116846,9 @@ $CONTENT
                     logDebug_ACU('A table update callback has been unregistered.');
                 }
             },
-            // 内部使用：通知更新
-            _notifyTableUpdate: function () {
-                notifyTableUpdateCallbacksSafely_ACU(ctx);
+            // 内部使用：通知更新；meta.persisted=false 表示本次更新未写入聊天持久化（默认按已落盘处理）
+            _notifyTableUpdate: function (meta) {
+                notifyTableUpdateCallbacksSafely_ACU(ctx, { persisted: meta?.persisted !== false });
             },
             // 注册"填表开始"回调
             registerTableFillStartCallback: function (callback) {
@@ -115471,7 +117101,7 @@ $CONTENT
                         }
                         else {
                             logDebug_ACU('[importTableAsJson] 已按运行时恢复模式导入表格数据，未写入聊天持久化。');
-                            topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
+                            topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.({ persisted: false });
                         }
                         return true;
                     }
@@ -115545,6 +117175,34 @@ $CONTENT
      */
     function getEnglishTableName(tableData, sheetKey) {
         return getPhysicalTableNameForSheet_ACU(tableData, sheetKey);
+    }
+    /**
+     * CRUD 开放 API 与 AI 填表/SQL 差异回滚共用同一套身份锁判定（S2-2）：
+     * 锁不再只防 AI，也防外部脚本。返回冲突描述；null 表示无锁冲突。
+     * - update：目标行被行锁锁定、目标列被列锁锁定、或目标格被单元格锁锁定时拒绝；
+     * - delete：目标行被行锁锁定或含任一锁定单元格时拒绝（与 SQL 模式回滚语义一致）。
+     */
+    function findTableLockViolationForCrud_ACU(sheetKey, content, check) {
+        const identities = getTableLockIdentitiesForSheet_ACU(sheetKey, content);
+        if (!identities.hasAny)
+            return null;
+        const rowId = String(content?.[check.rowIndex]?.[0] ?? '').trim();
+        if (!rowId)
+            return null; // 目标行尚不存在（updateRow 扩容路径），无锁可判
+        if (identities.rowIds.has(rowId))
+            return `行（row_id=${rowId}）已被行锁锁定`;
+        if (check.kind === 'delete') {
+            const lockedCell = identities.cellPairs.find(([cellRowId]) => cellRowId === rowId);
+            return lockedCell ? `行（row_id=${rowId}）含锁定单元格「${lockedCell[1]}」，不可删除` : null;
+        }
+        for (const colName of check.colNames || []) {
+            if (identities.colNames.has(colName))
+                return `列「${colName}」已被列锁锁定`;
+            if (identities.cellPairs.some(([cellRowId, cellColName]) => cellRowId === rowId && cellColName === colName)) {
+                return `单元格（row_id=${rowId}，列「${colName}」）已被锁定`;
+            }
+        }
+        return null;
     }
     /**
      * CRUD 入口需要以本次 canonical JSON 视图为准同步 mapper。
@@ -115866,12 +117524,14 @@ $CONTENT
     }
     async function finalizeTableEditAfterCommit_ACU(tableName, methodName, tableLatestFloorIndex, options) {
         let didNotifyThroughRefresh = false;
-        await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: options.skipNotify });
+        // S2-1：skipChatSave 提交只改运行时未写聊天帧，通知回调时以 persisted=false 明示未落盘
+        const notifyMeta = { persisted: !options.skipChatSave };
+        await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: options.skipNotify, notifyMeta });
         didNotifyThroughRefresh = !options.skipNotify;
         logDebug_ACU(`${methodName}: Worldbook refreshed after saving [${tableName}]`);
         await syncSummaryVectorIndexAfterTableEdit_ACU(tableName, methodName, tableLatestFloorIndex, options.skipChatSave);
         if (!options.skipNotify && !didNotifyThroughRefresh) {
-            topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate();
+            topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate(notifyMeta);
         }
         else if (options.skipNotify) {
             logDebug_ACU(`${methodName}: Skip table update notification for [${tableName}] because this edit is marked as silent.`);
@@ -115928,6 +117588,15 @@ $CONTENT
                     }
                     if (normalizedRowIndex < 1 || normalizedRowIndex >= targetSheet.content.length) {
                         logError_ACU(`updateCell: Row index ${normalizedRowIndex} out of bounds in table "${tableName}".`);
+                        return false;
+                    }
+                    const cellLockViolation = findTableLockViolationForCrud_ACU(targetSheetKey, targetSheet.content, {
+                        rowIndex: normalizedRowIndex,
+                        colNames: [chineseColName],
+                        kind: 'update',
+                    });
+                    if (cellLockViolation) {
+                        logWarn_ACU(`updateCell: 表 "${tableName}" ${cellLockViolation}，写入已拒绝。`);
                         return false;
                     }
                     if (isSqliteMode()) {
@@ -116041,6 +117710,21 @@ $CONTENT
                         return false;
                     }
                     const { sheet: targetSheet, sheetKey: targetSheetKey, englishTableName } = target;
+                    const updateRowColNames = [];
+                    for (const colName in normalizedData) {
+                        if (colName === 'isImportMode')
+                            continue;
+                        updateRowColNames.push(resolveColumnForSheet(englishTableName, targetSheetKey, colName).chineseColName);
+                    }
+                    const rowLockViolation = findTableLockViolationForCrud_ACU(targetSheetKey, targetSheet.content, {
+                        rowIndex: normalizedRowIndex,
+                        colNames: updateRowColNames,
+                        kind: 'update',
+                    });
+                    if (rowLockViolation) {
+                        logWarn_ACU(`updateRow: 表 "${tableName}" ${rowLockViolation}，写入已拒绝。`);
+                        return false;
+                    }
                     if (isSqliteMode()) {
                         // SQLite 模式：统一交给公共提交模型执行运行时 SQL 和持久化。
                         const rowId = targetSheet.content[normalizedRowIndex]?.[0];
@@ -116321,6 +118005,14 @@ $CONTENT
                     const { sheet: targetSheet, sheetKey: targetSheetKey, englishTableName } = target;
                     if (normalizedRowIndex >= targetSheet.content.length) {
                         logError_ACU(`deleteRow: Row index ${normalizedRowIndex} out of bounds.`);
+                        return false;
+                    }
+                    const deleteLockViolation = findTableLockViolationForCrud_ACU(targetSheetKey, targetSheet.content, {
+                        rowIndex: normalizedRowIndex,
+                        kind: 'delete',
+                    });
+                    if (deleteLockViolation) {
+                        logWarn_ACU(`deleteRow: 表 "${tableName}" ${deleteLockViolation}，删除已拒绝。`);
                         return false;
                     }
                     if (isSqliteMode()) {
@@ -116614,7 +118306,7 @@ $CONTENT
             },
             switchTemplatePreset: async function (presetName, options = {}) {
                 try {
-                    const { scope = 'global' } = options || {};
+                    const { scope = 'global', destructiveChangeConfirmed = false } = options || {};
                     const normalizedScope = normalizeTemplateOperationScope_ACU(scope);
                     const name = normalizeTemplatePresetSelectionValue_ACU(presetName);
                     const displayName = name || '默认预设';
@@ -116623,6 +118315,9 @@ $CONTENT
                         updateGlobal: normalizedScope === 'global',
                         save: true,
                         persistChatScope: normalizedScope === 'chat',
+                        // S1-3：全局切换影响 inherit_global 聊天时经协调器，可能返回
+                        // 破坏性 blockers；调用方确认后带 destructiveChangeConfirmed 重试。
+                        destructiveChangeConfirmed: destructiveChangeConfirmed === true,
                     });
                     const saved = !!result && (!(typeof result === 'object' && 'saved' in result) || result.saved !== false);
                     if (saved) {
@@ -116647,11 +118342,15 @@ $CONTENT
                     const error = typeof result === 'object' && result && 'error' in result && typeof result.error === 'string'
                         ? result.error
                         : '';
+                    const blockers = typeof result === 'object' && result && 'blockers' in result && Array.isArray(result.blockers)
+                        ? result.blockers
+                        : null;
                     return {
                         success: false,
                         scope: normalizedScope,
                         message: error || `${normalizedScope === 'global' ? '全局模板预设' : '当前聊天模板预设'}切换失败：${displayName}`,
                         ...(error ? { error } : {}),
+                        ...(blockers && blockers.length > 0 ? { blockers } : {}),
                     };
                 }
                 catch (e) {
@@ -116900,11 +118599,9 @@ $CONTENT
                     });
                     if (!checkpoint.checkpoint)
                         throw new Error(checkpoint.error);
+                    // S2-4：frame 拼装 + 单根断言收敛到 persist 层统一入口，违例抛错走下方快照回滚
+                    writeInitFullCheckpointFrameV2_ACU({ chat, targetIndex, isolationKey, checkpoint: checkpoint.checkpoint });
                     const target = chat[targetIndex];
-                    target.TavernDB_ACU_IsolatedData = {
-                        ...(target.TavernDB_ACU_IsolatedData || {}),
-                        [isolationKey]: { _acu_storage_version: 2, storageFrame: { version: 2, checkpoint: checkpoint.checkpoint, logEntries: [] } },
-                    };
                     if (settings_ACU.dataIsolationEnabled)
                         target.TavernDB_ACU_Identity = settings_ACU.dataIsolationCode;
                     const guideUpdated = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, {
@@ -117430,8 +119127,11 @@ $CONTENT
                         save: true,
                         persistChatScope: false,
                     });
-                    if (!appliedTemplate) {
-                        throw new Error('合并配置中的表格模板已解析，但应用到全局模板失败。');
+                    if (!appliedTemplate || (typeof appliedTemplate === 'object' && 'saved' in appliedTemplate && appliedTemplate.saved === false)) {
+                        const reason = appliedTemplate && typeof appliedTemplate === 'object' && 'error' in appliedTemplate && typeof appliedTemplate.error === 'string'
+                            ? appliedTemplate.error
+                            : '';
+                        throw new Error(reason || '合并配置中的表格模板已解析，但应用到全局模板失败。');
                     }
                     showToastr_ACU('success', '表格模板已成功导入！模板已更新，但不会影响当前聊天记录的本地数据。');
                     // 刷新模板预设下拉 UI，确保预设列表与状态文案同步
@@ -117472,7 +119172,7 @@ $CONTENT
             return;
         }
         if (outcome.path === 'purge') {
-            applyPurgeResultToUi_ACU(outcome.result);
+            await applyPurgeResultToUi_ACU(outcome.result);
             return;
         }
         const deletedCount = outcome.deletedCount;
@@ -117496,19 +119196,19 @@ $CONTENT
     /**
      * 硬清空（purge）结果落 UI（legacy 入口共用）。
      *
-     * 与 range 删除的收尾刻意不同（C 方案 C2/C3）：
-     * purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
-     * clearTableRuntimeWithoutReload_ACU 置为空态，并明令绝不加载聊天/模板/Guide；
-     * 此处不再调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider /
-     * refreshMergedDataAndNotifyWithUI_ACU，否则会把刚清空的状态从模板/guide 重新物化回来；
-     * 世界书条目清理也由 purge 内部完成（cleanupDatabaseGeneratedWorldbookEntries_ACU），
-     * 结果进入 result.cleanupWarnings。
+     * 与 range 删除的收尾差异：
+     * purgeCurrentChatDatabaseState_ACU 内部已在严格保存后回落为当前全局模板的
+     * header-only 空结构（S1-1，pristine：不写 frame，首次填表才建根），此处不再
+     * loadOrCreate / reloadStorageProvider，只调 refreshMergedDataAndNotifyWithUI_ACU
+     * 让面板展示回落后的模板空结构；世界书条目清理由 purge 内部完成
+     * （cleanupDatabaseGeneratedWorldbookEntries_ACU），结果进入 result.cleanupWarnings。
      */
-    function applyPurgeResultToUi_ACU(result) {
+    async function applyPurgeResultToUi_ACU(result) {
         if (!result.saved) {
             showToastr_ACU('error', result.error || '硬清空失败，详情见运行日志。', { timeOut: 10000 });
             return;
         }
+        await refreshMergedDataAndNotifyWithUI_ACU();
         if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
             updateCardUpdateStatusDisplay_ACU();
         }
@@ -138380,7 +140080,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     });
 
-    var _sfc_main$1c = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1d = /*@__PURE__*/ defineComponent({
         __name: 'AcuBadge',
         props: {
             variant: { default: 'neutral' }
@@ -138406,7 +140106,7 @@ Expected function or array of functions, received type ${typeof value}.`
       return target;
     };
 
-    function _sfc_render$1c(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1d(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-badge", $setup.variantClass]) },
@@ -138415,9 +140115,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuBadge = /*#__PURE__*/ _export_sfc(_sfc_main$1c, [["render", _sfc_render$1c], ["__scopeId", "data-v-925544ff"]]);
+    var AcuBadge = /*#__PURE__*/ _export_sfc(_sfc_main$1d, [["render", _sfc_render$1d], ["__scopeId", "data-v-925544ff"]]);
 
-    var _sfc_main$1b = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1c = /*@__PURE__*/ defineComponent({
         __name: 'AcuButton',
         props: {
             variant: { default: 'default' },
@@ -138443,16 +140143,16 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-btn[data-v-85c19efd] {\n  font: inherit;\n  border: 0;\n  background: var(--acu-bg-2);\n  color: var(--acu-text-1);\n  border-radius: var(--acu-radius-sm);\n  cursor: pointer;\n  display: inline-flex; align-items: center; justify-content: center; gap: var(--acu-space-150, 6px);\n  min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere;\n  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;\n}\n.acu-btn--md[data-v-85c19efd] { min-height: var(--acu-button-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-btn--sm[data-v-85c19efd] { min-height: var(--acu-button-height-sm, 28px); padding: var(--acu-space-1, 4px) var(--acu-space-250, 10px); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-btn--block[data-v-85c19efd] { width: 100%; min-width: 0;\n}\n.acu-btn--icon-only[data-v-85c19efd] { min-width: var(--acu-button-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-space-2, 8px);\n}\n.acu-btn--icon-only.acu-btn--sm[data-v-85c19efd] { min-width: var(--acu-button-height-sm, 28px); padding: var(--acu-space-1, 4px) var(--acu-space-2, 8px);\n}\n.acu-btn[data-v-85c19efd]:hover:not(:disabled) {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-btn[data-v-85c19efd]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-btn--primary[data-v-85c19efd] {\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n  font-weight: 500;\n  box-shadow: none;\n}\n.acu-btn--primary[data-v-85c19efd]:hover:not(:disabled) {\n  background: var(--acu-accent-2);\n  box-shadow: none;\n}\n.acu-btn--danger[data-v-85c19efd] {\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\n  color: var(--acu-danger);\n}\n.acu-btn--danger[data-v-85c19efd]:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 18%, transparent);\n}\n.acu-btn[data-v-85c19efd]:focus-visible {\n  outline: none;\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-btn--loading[data-v-85c19efd] { cursor: wait;\n}\n.acu-btn__spinner[data-v-85c19efd] { font-size: 0.85em;\n}\n", "src/presentation-v2/components/_lib/AcuButton.vue#style-0-85c19efd");
     var AcuButton_vue_vue_type_style_index_0_scoped_85c19efd_lang = null;
 
-    const _hoisted_1$17 = [
+    const _hoisted_1$18 = [
 	"type",
 	"disabled",
 	"title"
     ];
-    const _hoisted_2$Y = {
+    const _hoisted_2$Z = {
 	key: 0,
 	class: "fa-solid fa-spinner fa-spin acu-btn__spinner"
     };
-    function _sfc_render$1b(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1c(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", {
 		type: $props.nativeType,
 		disabled: $props.disabled || $props.loading,
@@ -138467,11 +140167,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			}
 		]]),
 		onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("click", $event))
-	}, [$props.loading ? (openBlock(), createElementBlock("i", _hoisted_2$Y)) : createCommentVNode("v-if", true), !$props.loading ? renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true) : renderSlot(_ctx.$slots, "loading-text", { key: 2 }, undefined, true)], 10, _hoisted_1$17);
+	}, [$props.loading ? (openBlock(), createElementBlock("i", _hoisted_2$Z)) : createCommentVNode("v-if", true), !$props.loading ? renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true) : renderSlot(_ctx.$slots, "loading-text", { key: 2 }, undefined, true)], 10, _hoisted_1$18);
     }
-    var AcuButton = /*#__PURE__*/ _export_sfc(_sfc_main$1b, [["render", _sfc_render$1b], ["__scopeId", "data-v-85c19efd"]]);
+    var AcuButton = /*#__PURE__*/ _export_sfc(_sfc_main$1c, [["render", _sfc_render$1c], ["__scopeId", "data-v-85c19efd"]]);
 
-    var _sfc_main$1a = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1b = /*@__PURE__*/ defineComponent({
         ...{ inheritAttrs: false },
         __name: 'AcuCheckbox',
         props: {
@@ -138498,12 +140198,12 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-checkbox[data-v-8a9ddddb] {\r\n  display: inline-flex; align-items: flex-start; gap: var(--acu-space-175, 7px);\r\n  padding: 0; border: 0; background: transparent;\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-2);\r\n  cursor: pointer; user-select: none;\r\n  line-height: 1.5; text-align: left;\n}\n.acu-checkbox--disabled[data-v-8a9ddddb] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-checkbox__box[data-v-8a9ddddb] {\r\n  flex-shrink: 0;\r\n  width: var(--acu-checkbox-size, 16px); height: var(--acu-checkbox-size, 16px); margin-top: var(--acu-space-025, 1px);\r\n  display: flex; align-items: center; justify-content: center;\r\n  border: 0;\r\n  border-radius: var(--acu-space-075, 3px);\r\n  background: var(--acu-bg-2);\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-checkbox--checked .acu-checkbox__box[data-v-8a9ddddb] {\r\n  background: var(--acu-accent);\n}\n.acu-checkbox__icon[data-v-8a9ddddb] {\r\n  display: block;\r\n  width: var(--acu-checkbox-icon-size, 12px); height: var(--acu-checkbox-icon-size, 12px);\r\n  color: #fff;\r\n  fill: none;\r\n  stroke: currentColor;\r\n  stroke-width: 2.15;\r\n  stroke-linecap: round;\r\n  stroke-linejoin: round;\r\n  opacity: 0;\r\n  transform: scale(0.82);\r\n  transition: opacity 0.15s ease, transform 0.15s ease;\n}\n.acu-checkbox--checked .acu-checkbox__icon[data-v-8a9ddddb] {\r\n  opacity: 1;\r\n  transform: scale(1);\n}\n.acu-checkbox__label[data-v-8a9ddddb] { min-width: 0;\n}\n.acu-checkbox:hover:not(:disabled) .acu-checkbox__box[data-v-8a9ddddb] {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-checkbox--checked:hover:not(:disabled) .acu-checkbox__box[data-v-8a9ddddb] {\r\n  background: var(--acu-accent-2);\n}\n.acu-checkbox[data-v-8a9ddddb]:focus-visible {\r\n  outline: none;\n}\n.acu-checkbox:focus-visible .acu-checkbox__box[data-v-8a9ddddb] {\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuCheckbox.vue#style-0-8a9ddddb");
     var AcuCheckbox_vue_vue_type_style_index_0_scoped_8a9ddddb_lang = null;
 
-    const _hoisted_1$16 = ["aria-checked", "disabled"];
-    const _hoisted_2$X = {
+    const _hoisted_1$17 = ["aria-checked", "disabled"];
+    const _hoisted_2$Y = {
 	key: 0,
 	class: "acu-checkbox__label"
     };
-    function _sfc_render$1a(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1b(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", mergeProps({
 		type: "button",
 		class: ["acu-checkbox", {
@@ -138528,15 +140228,15 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CACHED */
 	)), $props.label ? (openBlock(), createElementBlock(
 		"span",
-		_hoisted_2$X,
+		_hoisted_2$Y,
 		toDisplayString($props.label),
 		1
 		/* TEXT */
-	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$16);
+	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$17);
     }
-    var AcuCheckbox = /*#__PURE__*/ _export_sfc(_sfc_main$1a, [["render", _sfc_render$1a], ["__scopeId", "data-v-8a9ddddb"]]);
+    var AcuCheckbox = /*#__PURE__*/ _export_sfc(_sfc_main$1b, [["render", _sfc_render$1b], ["__scopeId", "data-v-8a9ddddb"]]);
 
-    var _sfc_main$19 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1a = /*@__PURE__*/ defineComponent({
         __name: 'AcuInput',
         props: {
             modelValue: {},
@@ -138590,7 +140290,7 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-input-shell[data-v-41a82ceb] {\r\n  position: relative;\r\n  display: block;\r\n  width: 100%;\r\n  min-width: 0;\n}\n.acu-input[data-v-41a82ceb] {\r\n  width: 100%; box-sizing: border-box;\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm) !important;\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit !important;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-input--md[data-v-41a82ceb] { min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px) !important; font-size: var(--acu-font-size-body, 12px) !important;\n}\n.acu-input--sm[data-v-41a82ceb] { min-height: var(--acu-control-height-sm, 26px); padding: var(--acu-control-padding-y-sm, 3px) var(--acu-control-padding-x-sm, 7px) !important; font-size: var(--acu-font-size-caption, 11px) !important;\n}\n.acu-input-shell--number .acu-input--md[data-v-41a82ceb] { padding-right: calc(var(--acu-control-padding-x-md, 9px) + var(--acu-space-5, 20px)) !important;\n}\n.acu-input-shell--number .acu-input--sm[data-v-41a82ceb] { padding-right: calc(var(--acu-control-padding-x-sm, 7px) + var(--acu-space-450, 18px)) !important;\n}\n.acu-input[data-v-41a82ceb]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-input[data-v-41a82ceb]:focus {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-input[data-v-41a82ceb]:disabled,\r\n.acu-input--disabled[data-v-41a82ceb] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-input[type=\"number\"][data-v-41a82ceb] {\r\n  -moz-appearance: textfield;\r\n  font-variant-numeric: tabular-nums;\n}\n.acu-input[type=\"number\"][data-v-41a82ceb]::-webkit-inner-spin-button,\r\n.acu-input[type=\"number\"][data-v-41a82ceb]::-webkit-outer-spin-button {\r\n  -webkit-appearance: none; margin: 0;\n}\n.acu-input__number-indicator[data-v-41a82ceb] {\r\n  position: absolute;\r\n  top: 50%;\r\n  right: var(--acu-control-padding-x-md, 9px);\r\n  width: var(--acu-icon-inline-sm, 10px);\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: var(--acu-space-050, 2px);\r\n  color: var(--acu-text-3);\r\n  pointer-events: none;\r\n  transform: translateY(-50%);\r\n  opacity: 0.8;\n}\n.acu-input-shell--sm .acu-input__number-indicator[data-v-41a82ceb] {\r\n  right: var(--acu-control-padding-x-sm, 7px);\r\n  width: var(--acu-space-2, 8px);\r\n  gap: var(--acu-space-025, 1px);\n}\n.acu-input__number-caret[data-v-41a82ceb] {\r\n  width: 0;\r\n  height: 0;\r\n  border-left: var(--acu-space-1, 4px) solid transparent;\r\n  border-right: var(--acu-space-1, 4px) solid transparent;\n}\n.acu-input__number-caret--up[data-v-41a82ceb] { border-bottom: var(--acu-space-1, 4px) solid currentColor;\n}\n.acu-input__number-caret--down[data-v-41a82ceb] { border-top: var(--acu-space-1, 4px) solid currentColor;\n}\n.acu-input-shell--sm .acu-input__number-caret[data-v-41a82ceb] {\r\n  border-left-width: var(--acu-space-075, 3px);\r\n  border-right-width: var(--acu-space-075, 3px);\n}\n.acu-input-shell--sm .acu-input__number-caret--up[data-v-41a82ceb] { border-bottom-width: var(--acu-space-075, 3px);\n}\n.acu-input-shell--sm .acu-input__number-caret--down[data-v-41a82ceb] { border-top-width: var(--acu-space-075, 3px);\n}\r\n", "src/presentation-v2/components/_lib/AcuInput.vue#style-0-41a82ceb");
     var AcuInput_vue_vue_type_style_index_0_scoped_41a82ceb_lang = null;
 
-    const _hoisted_1$15 = [
+    const _hoisted_1$16 = [
 	"type",
 	"value",
 	"placeholder",
@@ -138600,12 +140300,12 @@ Expected function or array of functions, received type ${typeof value}.`
 	"step",
 	"autocomplete"
     ];
-    const _hoisted_2$W = {
+    const _hoisted_2$X = {
 	key: 0,
 	class: "acu-input__number-indicator",
 	"aria-hidden": "true"
     };
-    function _sfc_render$19(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1a(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-input-shell", [
@@ -138626,7 +140326,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			onInput: $setup.onInput,
 			onChange: $setup.onChangeEvent,
 			onWheel: $setup.onWheel
-		}, null, 42, _hoisted_1$15), $props.type === "number" ? (openBlock(), createElementBlock("span", _hoisted_2$W, [..._cache[0] || (_cache[0] = [createBaseVNode(
+		}, null, 42, _hoisted_1$16), $props.type === "number" ? (openBlock(), createElementBlock("span", _hoisted_2$X, [..._cache[0] || (_cache[0] = [createBaseVNode(
 			"span",
 			{ class: "acu-input__number-caret acu-input__number-caret--up" },
 			null,
@@ -138643,11 +140343,11 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuInput = /*#__PURE__*/ _export_sfc(_sfc_main$19, [["render", _sfc_render$19], ["__scopeId", "data-v-41a82ceb"]]);
+    var AcuInput = /*#__PURE__*/ _export_sfc(_sfc_main$1a, [["render", _sfc_render$1a], ["__scopeId", "data-v-41a82ceb"]]);
 
     const DIALOG_LEAVE_MS = 160;
     const titleId = "acu-dialog-title";
-    var _sfc_main$18 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$19 = /*@__PURE__*/ defineComponent({
         __name: 'AcuDialogHost',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -138690,27 +140390,27 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-dialog-layer[data-v-2a6a0bee] {\r\n  position: fixed;\r\n  inset: 0;\r\n  z-index: 9600;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  height: 100vh;\r\n  height: 100dvh;\r\n  padding:\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-top, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-right, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-bottom, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-left, 0px));\r\n  background: rgba(0, 0, 0, 0.52);\r\n  pointer-events: auto;\r\n  animation: acu-dialog-layer-in-2a6a0bee 0.16s ease-out both;\n}\n.acu-dialog-layer.is-closing[data-v-2a6a0bee] {\r\n  pointer-events: none;\r\n  animation: acu-dialog-layer-out-2a6a0bee 0.16s ease-in both;\n}\n.acu-dialog[data-v-2a6a0bee] {\r\n  width: min(var(--acu-dialog-width, 440px), 100%);\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100vh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100dvh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-page-gap, 14px);\r\n  padding: var(--acu-panel-padding, 16px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-bg-1);\r\n  color: var(--acu-text-1);\r\n  box-shadow: var(--acu-shadow);\r\n  overflow: auto;\r\n  animation: acu-dialog-panel-in-2a6a0bee 0.16s ease-out both;\n}\n.acu-dialog__header[data-v-2a6a0bee] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: var(--acu-panel-gap, 12px);\n}\n.acu-dialog__header h2[data-v-2a6a0bee] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.35;\r\n  font-weight: 700;\n}\n.acu-dialog__message[data-v-2a6a0bee] {\r\n  margin: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__danger-message[data-v-2a6a0bee] {\r\n  margin: 0;\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 700;\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__field[data-v-2a6a0bee] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-150, 6px);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\n}\n.acu-dialog__checklist[data-v-2a6a0bee] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-250, 10px);\r\n  min-width: 0;\r\n  padding: var(--acu-space-250, 10px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 74%, transparent);\n}\n.acu-dialog__checklist[data-v-2a6a0bee] .acu-checkbox {\r\n  width: 100%;\n}\n.acu-dialog__check-option[data-v-2a6a0bee] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-050, 2px);\r\n  min-width: 0;\n}\n.acu-dialog__check-label[data-v-2a6a0bee] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 600;\n}\n.acu-dialog__check-description[data-v-2a6a0bee] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.45;\n}\n.acu-dialog__actions[data-v-2a6a0bee] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex-wrap: wrap;\r\n  padding-top: var(--acu-space-050, 2px);\n}\n.acu-dialog__actions--stacked[data-v-2a6a0bee] .acu-btn {\r\n  flex: 1 1 var(--acu-dialog-choice-min-width, 128px);\n}\n.acu-dialog-layer.is-closing .acu-dialog[data-v-2a6a0bee] {\r\n  animation: acu-dialog-panel-out-2a6a0bee 0.16s ease-in both;\n}\n@keyframes acu-dialog-layer-in-2a6a0bee {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-dialog-layer-out-2a6a0bee {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-dialog-panel-in-2a6a0bee {\nfrom {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\nto {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\n}\n@keyframes acu-dialog-panel-out-2a6a0bee {\nfrom {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\nto {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\n}\n@media (max-width: 520px) {\n.acu-dialog-layer[data-v-2a6a0bee] {\r\n    align-items: flex-end;\r\n    padding:\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-top, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-right, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-bottom, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-left, 0px));\n}\n.acu-dialog[data-v-2a6a0bee] {\r\n    width: 100%;\r\n    max-height: calc(100vh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n    max-height: calc(100dvh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\n}\n.acu-dialog__actions[data-v-2a6a0bee],\r\n  .acu-dialog__actions--stacked[data-v-2a6a0bee] {\r\n    display: grid;\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuDialogHost.vue#style-0-2a6a0bee");
     var AcuDialogHost_vue_vue_type_style_index_0_scoped_2a6a0bee_lang = null;
 
-    const _hoisted_1$14 = { class: "acu-dialog__header" };
-    const _hoisted_2$V = { class: "acu-dialog__message" };
-    const _hoisted_3$M = {
+    const _hoisted_1$15 = { class: "acu-dialog__header" };
+    const _hoisted_2$W = { class: "acu-dialog__message" };
+    const _hoisted_3$N = {
 	key: 0,
 	class: "acu-dialog__danger-message"
     };
-    const _hoisted_4$D = {
+    const _hoisted_4$E = {
 	key: 1,
 	class: "acu-dialog__field"
     };
-    const _hoisted_5$w = {
+    const _hoisted_5$x = {
 	key: 2,
 	class: "acu-dialog__checklist"
     };
-    const _hoisted_6$u = { class: "acu-dialog__check-option" };
-    const _hoisted_7$r = { class: "acu-dialog__check-label" };
-    const _hoisted_8$p = {
+    const _hoisted_6$v = { class: "acu-dialog__check-option" };
+    const _hoisted_7$s = { class: "acu-dialog__check-label" };
+    const _hoisted_8$q = {
 	key: 0,
 	class: "acu-dialog__check-description"
     };
-    function _sfc_render$18(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$19(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.portalTarget ? (openBlock(), createBlock(Teleport, {
 		key: 0,
 		to: $setup.portalTarget
@@ -138729,7 +140429,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			"aria-labelledby": $setup.titleId,
 			onClick: _cache[3] || (_cache[3] = withModifiers(() => {}, ["stop"]))
 		}, [
-			createBaseVNode("header", _hoisted_1$14, [createBaseVNode(
+			createBaseVNode("header", _hoisted_1$15, [createBaseVNode(
 				"h2",
 				{ id: $setup.titleId },
 				toDisplayString($setup.renderedDialog.title),
@@ -138748,19 +140448,19 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, 8, ["variant"])) : createCommentVNode("v-if", true)]),
 			createBaseVNode(
 				"p",
-				_hoisted_2$V,
+				_hoisted_2$W,
 				toDisplayString($setup.renderedDialog.message),
 				1
 				/* TEXT */
 			),
 			$setup.renderedDialog.dangerMessage ? (openBlock(), createElementBlock(
 				"p",
-				_hoisted_3$M,
+				_hoisted_3$N,
 				toDisplayString($setup.renderedDialog.dangerMessage),
 				1
 				/* TEXT */
 			)) : createCommentVNode("v-if", true),
-			$setup.renderedDialog.kind === "prompt" ? (openBlock(), createElementBlock("label", _hoisted_4$D, [createBaseVNode(
+			$setup.renderedDialog.kind === "prompt" ? (openBlock(), createElementBlock("label", _hoisted_4$E, [createBaseVNode(
 				"span",
 				null,
 				toDisplayString($setup.renderedDialog.label),
@@ -138773,7 +140473,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				placeholder: $setup.renderedDialog.placeholder,
 				onKeyup: _cache[1] || (_cache[1] = withKeys(($event) => $setup.dialog.submitActive(), ["enter"]))
 			}, null, 8, ["modelValue", "placeholder"])])) : createCommentVNode("v-if", true),
-			$setup.renderedDialog.kind === "multiselect" ? (openBlock(), createElementBlock("div", _hoisted_5$w, [(openBlock(true), createElementBlock(
+			$setup.renderedDialog.kind === "multiselect" ? (openBlock(), createElementBlock("div", _hoisted_5$x, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.renderedDialog.checkboxOptions || [], (option) => {
@@ -138783,15 +140483,15 @@ Expected function or array of functions, received type ${typeof value}.`
 						disabled: option.disabled,
 						"onUpdate:modelValue": ($event) => $setup.dialog.setCheckedValue(option.value, $event)
 					}, {
-						default: withCtx(() => [createBaseVNode("span", _hoisted_6$u, [createBaseVNode(
+						default: withCtx(() => [createBaseVNode("span", _hoisted_6$v, [createBaseVNode(
 							"span",
-							_hoisted_7$r,
+							_hoisted_7$s,
 							toDisplayString(option.label),
 							1
 							/* TEXT */
 						), option.description ? (openBlock(), createElementBlock(
 							"span",
-							_hoisted_8$p,
+							_hoisted_8$q,
 							toDisplayString(option.description),
 							1
 							/* TEXT */
@@ -138874,9 +140574,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	)) : createCommentVNode("v-if", true)], 8, ["to"])) : createCommentVNode("v-if", true);
     }
-    var AcuDialogHost = /*#__PURE__*/ _export_sfc(_sfc_main$18, [["render", _sfc_render$18], ["__scopeId", "data-v-2a6a0bee"]]);
+    var AcuDialogHost = /*#__PURE__*/ _export_sfc(_sfc_main$19, [["render", _sfc_render$19], ["__scopeId", "data-v-2a6a0bee"]]);
 
-    var _sfc_main$17 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$18 = /*@__PURE__*/ defineComponent({
         __name: 'AcuFileButton',
         props: {
             accept: { default: undefined },
@@ -138924,8 +140624,8 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-file-button[data-v-7b70c7ef] { display: inline-flex;\n}\n.acu-file-button--block[data-v-7b70c7ef] { width: 100%; min-width: 0;\n}\n.acu-file-button__input[data-v-7b70c7ef] { display: none;\n}\n.acu-file-button__button--icon-only-default[data-v-7b70c7ef] {\r\n  background: transparent;\r\n  color: var(--acu-text-2);\n}\n.acu-file-button__button--icon-only-default[data-v-7b70c7ef]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\r\n  color: var(--acu-text-1);\n}\n.acu-file-button__button--icon-only-default.acu-file-button__button--md[data-v-7b70c7ef] {\r\n  width: var(--acu-icon-button-size-md, 32px);\r\n  min-width: var(--acu-icon-button-size-md, 32px);\n}\n.acu-file-button__button--icon-only-default.acu-file-button__button--sm[data-v-7b70c7ef] {\r\n  width: var(--acu-icon-button-size-sm, 22px);\r\n  min-width: var(--acu-icon-button-size-sm, 22px);\r\n  min-height: var(--acu-icon-button-size-sm, 22px);\r\n  padding: var(--acu-space-1, 4px);\r\n  font-size: var(--acu-font-size-micro, 10px);\n}\r\n", "src/presentation-v2/components/_lib/AcuFileButton.vue#style-0-7b70c7ef");
     var AcuFileButton_vue_vue_type_style_index_0_scoped_7b70c7ef_lang = null;
 
-    const _hoisted_1$13 = ["accept"];
-    function _sfc_render$17(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$14 = ["accept"];
+    function _sfc_render$18(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-file-button", { "acu-file-button--block": $props.block }]) },
@@ -138941,14 +140641,14 @@ Expected function or array of functions, received type ${typeof value}.`
 			accept: $props.accept,
 			class: "acu-file-button__input",
 			onChange: $setup.onChange
-		}, null, 40, _hoisted_1$13)],
+		}, null, 40, _hoisted_1$14)],
 		2
 		/* CLASS */
 	);
     }
-    var AcuFileButton = /*#__PURE__*/ _export_sfc(_sfc_main$17, [["render", _sfc_render$17], ["__scopeId", "data-v-7b70c7ef"]]);
+    var AcuFileButton = /*#__PURE__*/ _export_sfc(_sfc_main$18, [["render", _sfc_render$18], ["__scopeId", "data-v-7b70c7ef"]]);
 
-    var _sfc_main$16 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$17 = /*@__PURE__*/ defineComponent({
         __name: 'AcuIconButton',
         props: {
             icon: {},
@@ -138970,12 +140670,12 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-icon-btn[data-v-70b36214] {\r\n  --acu-icon-btn-size: var(--acu-icon-button-size-md, 32px);\r\n  --acu-icon-btn-font-size: var(--acu-icon-inline-md, 13px);\r\n  appearance: none !important;\r\n  -webkit-appearance: none !important;\r\n  flex: 0 0 auto;\r\n  display: inline-flex !important;\r\n  align-items: center !important;\r\n  justify-content: center !important;\r\n  width: var(--acu-icon-btn-size) !important;\r\n  min-width: var(--acu-icon-btn-size) !important;\r\n  max-width: var(--acu-icon-btn-size) !important;\r\n  height: var(--acu-icon-btn-size) !important;\r\n  min-height: var(--acu-icon-btn-size) !important;\r\n  max-height: var(--acu-icon-btn-size) !important;\r\n  box-sizing: border-box !important;\r\n  margin: 0 !important;\r\n  padding: 0 !important;\r\n  border: 0 !important;\r\n  background: transparent !important;\r\n  color: var(--acu-text-2) !important;\r\n  border-radius: var(--acu-radius-sm) !important;\r\n  cursor: pointer;\r\n  font: inherit !important;\r\n  font-size: var(--acu-icon-btn-font-size) !important;\r\n  line-height: 1 !important;\r\n  text-align: center !important;\r\n  vertical-align: middle !important;\r\n  box-shadow: none !important;\r\n  outline: none !important;\r\n  -webkit-tap-highlight-color: transparent;\r\n  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n}\n.acu-icon-btn > i[data-v-70b36214] {\r\n  flex: 0 0 auto !important;\r\n  display: inline-block !important;\r\n  width: 1em !important;\r\n  min-width: 1em !important;\r\n  height: 1em !important;\r\n  min-height: 1em !important;\r\n  color: inherit !important;\r\n  font-size: inherit !important;\r\n  line-height: 1 !important;\r\n  text-align: center !important;\r\n  vertical-align: -0.125em !important;\n}\n.acu-icon-btn > i[data-v-70b36214]::before {\r\n  display: block !important;\r\n  width: 1em !important;\r\n  height: 1em !important;\r\n  color: inherit !important;\r\n  font-size: inherit !important;\r\n  line-height: 1 !important;\n}\n.acu-icon-btn--md[data-v-70b36214] {\r\n  --acu-icon-btn-size: var(--acu-icon-button-size-md, 32px);\r\n  --acu-icon-btn-font-size: var(--acu-icon-inline-md, 13px);\n}\n.acu-icon-btn--sm[data-v-70b36214] {\r\n  --acu-icon-btn-size: var(--acu-icon-button-size-sm, 22px);\r\n  --acu-icon-btn-font-size: var(--acu-icon-inline-sm, 10px);\r\n  background: var(--acu-bg-2) !important;\n}\n.acu-icon-btn--default[data-v-70b36214]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\n}\n.acu-icon-btn--danger[data-v-70b36214]:hover:not(:disabled) {\r\n  color: var(--acu-danger) !important;\r\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent) !important;\n}\n.acu-icon-btn--accent[data-v-70b36214] {\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\n}\n.acu-icon-btn--accent[data-v-70b36214]:hover:not(:disabled) {\r\n  background: var(--acu-accent-glow) !important; color: var(--acu-accent) !important;\n}\n.acu-icon-btn[data-v-70b36214]:focus-visible {\r\n  outline: none !important;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-icon-btn[data-v-70b36214]:disabled { opacity: 0.4; cursor: not-allowed;\n}\r\n", "src/presentation-v2/components/_lib/AcuIconButton.vue#style-0-70b36214");
     var AcuIconButton_vue_vue_type_style_index_0_scoped_70b36214_lang = null;
 
-    const _hoisted_1$12 = [
+    const _hoisted_1$13 = [
 	"disabled",
 	"title",
 	"aria-label"
     ];
-    function _sfc_render$16(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$17(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", {
 		type: "button",
 		disabled: $props.disabled,
@@ -138989,11 +140689,11 @@ Expected function or array of functions, received type ${typeof value}.`
 		null,
 		2
 		/* CLASS */
-	)], 10, _hoisted_1$12);
+	)], 10, _hoisted_1$13);
     }
-    var AcuIconButton = /*#__PURE__*/ _export_sfc(_sfc_main$16, [["render", _sfc_render$16], ["__scopeId", "data-v-70b36214"]]);
+    var AcuIconButton = /*#__PURE__*/ _export_sfc(_sfc_main$17, [["render", _sfc_render$17], ["__scopeId", "data-v-70b36214"]]);
 
-    var _sfc_main$15 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$16 = /*@__PURE__*/ defineComponent({
         __name: 'AcuSegmentedControl',
         props: {
             options: {},
@@ -139041,14 +140741,14 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-segmented[data-v-e3d985dd] {\r\n  position: relative;\r\n  display: grid;\r\n  grid-auto-flow: column;\r\n  grid-auto-columns: minmax(0, 1fr);\r\n  min-width: 0;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  padding: var(--acu-space-075, 3px);\r\n  overflow: hidden;\n}\n.acu-segmented--disabled[data-v-e3d985dd] {\r\n  opacity: 0.55;\n}\n.acu-segmented__thumb[data-v-e3d985dd] {\r\n  position: absolute;\r\n  inset: var(--acu-space-075, 3px) auto var(--acu-space-075, 3px) var(--acu-space-075, 3px);\r\n  width: calc((100% - var(--acu-space-150, 6px)) / var(--acu-segment-count));\r\n  border-radius: calc(var(--acu-radius-sm) - var(--acu-space-050, 2px));\r\n  background: var(--acu-accent);\r\n  transform: translateX(calc(var(--acu-segment-index) * 100%));\r\n  transition: transform 0.16s ease, background 0.16s ease;\r\n  pointer-events: none;\n}\n.acu-segmented__item[data-v-e3d985dd] {\r\n  position: relative;\r\n  min-width: 0;\r\n  margin: 0;\r\n  border: 0;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  cursor: pointer;\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: var(--acu-space-150, 6px);\r\n  transition: background 0.15s ease, color 0.15s ease;\r\n  z-index: 1;\n}\n.acu-segmented__item[data-v-e3d985dd]:not(.acu-segmented__item--active):hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-segmented__item[data-v-e3d985dd]:disabled {\r\n  cursor: not-allowed;\r\n  color: var(--acu-text-3);\n}\n.acu-segmented__item--active[data-v-e3d985dd] {\r\n  color: var(--acu-on-accent);\n}\n.acu-segmented__item[data-v-e3d985dd]:focus-visible {\r\n  outline: none;\n}\n.acu-segmented__item[data-v-e3d985dd]:focus-visible::before {\r\n  content: '';\r\n  position: absolute;\r\n  inset: var(--acu-space-050, 2px);\r\n  border-radius: var(--acu-radius-sm);\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\r\n  pointer-events: none;\r\n  z-index: 2;\n}\n.acu-segmented--md .acu-segmented__item[data-v-e3d985dd] {\r\n  min-height: var(--acu-segment-height-md, 30px);\r\n  padding: 0 var(--acu-space-2, 8px);\r\n  border-radius: calc(var(--acu-radius-sm) - var(--acu-space-050, 2px));\n}\n.acu-segmented--sm .acu-segmented__item[data-v-e3d985dd] {\r\n  min-height: var(--acu-segment-height-sm, 24px);\r\n  padding: 0 var(--acu-space-175, 7px);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  border-radius: calc(var(--acu-radius-sm) - var(--acu-space-050, 2px));\n}\n.acu-segmented__label[data-v-e3d985dd] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\r\n", "src/presentation-v2/components/_lib/AcuSegmentedControl.vue#style-0-e3d985dd");
     var AcuSegmentedControl_vue_vue_type_style_index_0_scoped_e3d985dd_lang = null;
 
-    const _hoisted_1$11 = ["aria-label"];
-    const _hoisted_2$U = [
+    const _hoisted_1$12 = ["aria-label"];
+    const _hoisted_2$V = [
 	"aria-checked",
 	"disabled",
 	"onClick"
     ];
-    const _hoisted_3$L = { class: "acu-segmented__label" };
-    function _sfc_render$15(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$M = { class: "acu-segmented__label" };
+    function _sfc_render$16(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", {
 		class: normalizeClass(["acu-segmented", [`acu-segmented--${$props.size}`, { "acu-segmented--disabled": $props.disabled }]]),
 		role: "radiogroup",
@@ -139083,17 +140783,17 @@ Expected function or array of functions, received type ${typeof value}.`
 				]
 			}, [createBaseVNode(
 				"span",
-				_hoisted_3$L,
+				_hoisted_3$M,
 				toDisplayString(opt.label),
 				1
 				/* TEXT */
-			)], 42, _hoisted_2$U);
+			)], 42, _hoisted_2$V);
 		}),
 		128
 		/* KEYED_FRAGMENT */
-	))], 14, _hoisted_1$11);
+	))], 14, _hoisted_1$12);
     }
-    var AcuSegmentedControl = /*#__PURE__*/ _export_sfc(_sfc_main$15, [["render", _sfc_render$15], ["__scopeId", "data-v-e3d985dd"]]);
+    var AcuSegmentedControl = /*#__PURE__*/ _export_sfc(_sfc_main$16, [["render", _sfc_render$16], ["__scopeId", "data-v-e3d985dd"]]);
 
     const DEFAULT_DURATION_BY_KIND = {
         info: 2600,
@@ -139228,7 +140928,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const TOAST_LEAVE_MS = 160;
     const DEFAULT_VISIBLE_TOAST_LIMIT = 4;
-    var _sfc_main$14 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$15 = /*@__PURE__*/ defineComponent({
         __name: 'AcuToastViewport',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -139325,25 +141025,25 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-toast-viewport[data-v-9146b9ef] {\r\n  position: fixed;\r\n  top: 0;\r\n  right: 0;\r\n  bottom: 0;\r\n  left: 0;\r\n  inset: 0;\r\n  z-index: 9410;\r\n  box-sizing: border-box;\r\n  width: 100%;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  min-height: 100%;\r\n  min-height: 100vh;\r\n  min-height: 100dvh;\r\n  overflow: hidden;\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-ui);\r\n  font-size: var(--acu-font-size-body);\r\n  pointer-events: none;\n}\n.acu-toast-viewport[data-v-9146b9ef],\r\n.acu-toast-viewport[data-v-9146b9ef] * {\r\n  box-sizing: border-box;\n}\n.acu-toast-viewport__list[data-v-9146b9ef] {\r\n  position: absolute;\r\n  top: calc(var(--acu-toast-top, 62px) + var(--acu-safe-top, 0px));\r\n  right: calc(var(--acu-toast-edge-gap, 18px) + var(--acu-safe-right, 0px));\r\n  bottom: auto;\r\n  width: min(var(--acu-toast-width, 360px), calc(100% - var(--acu-toast-edge-gap, 18px) - var(--acu-toast-edge-gap, 18px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\r\n  max-height: calc(100% - var(--acu-toast-top, 62px) - var(--acu-toast-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-2, 8px);\r\n  margin: 0;\r\n  padding: 0;\r\n  overflow: visible;\r\n  list-style: none;\n}\n.acu-v2-toast[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-accent);\r\n  position: relative;\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: var(--acu-control-height-sm, 26px) minmax(0, 1fr) auto auto;\r\n  align-items: center;\r\n  gap: var(--acu-space-2, 8px);\r\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\r\n  overflow: hidden;\r\n  border: 1px solid color-mix(in srgb, var(--acu-toast-tone) 22%, var(--acu-border-2));\r\n  border-radius: var(--acu-radius-md);\r\n  background:\r\n    linear-gradient(\r\n      90deg,\r\n      color-mix(in srgb, var(--acu-toast-tone) 7%, transparent),\r\n      transparent 48%\r\n    ),\r\n    color-mix(in srgb, var(--acu-bg-1) 97%, var(--acu-text-1) 3%);\r\n  box-shadow:\r\n    0 18px 46px rgba(0, 0, 0, 0.18),\r\n    0 4px 16px rgba(0, 0, 0, 0.12),\r\n    inset 0 1px 0 color-mix(in srgb, var(--acu-text-1) 8%, transparent);\r\n  color: var(--acu-text-1);\r\n  pointer-events: auto;\r\n  animation: acu-toast-in-9146b9ef 0.16s ease-out both;\n}\n.acu-v2-toast--success[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-success);\n}\n.acu-v2-toast--warning[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-warning);\n}\n.acu-v2-toast--error[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-danger);\n}\n.acu-v2-toast.is-closing[data-v-9146b9ef] {\r\n  pointer-events: none;\r\n  animation: acu-toast-out-9146b9ef 0.16s ease-in both;\n}\n.acu-v2-toast__icon[data-v-9146b9ef] {\r\n  --acu-icon-color: var(--acu-toast-tone);\r\n  min-width: 0;\r\n  width: var(--acu-control-height-sm, 26px);\r\n  height: var(--acu-control-height-sm, 26px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-toast-tone) 13%, transparent);\r\n  color: var(--acu-toast-tone);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1;\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-toast-tone) 18%, transparent);\n}\n.acu-v2-toast__text[data-v-9146b9ef] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.45;\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-toast__action[data-v-9146b9ef] {\r\n  white-space: nowrap;\n}\n.acu-v2-toast__dismiss[data-v-9146b9ef] {\r\n  flex: 0 0 auto;\n}\n@keyframes acu-toast-in-9146b9ef {\nfrom {\r\n    opacity: 0;\r\n    transform: translateY(-6px);\n}\nto {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\n}\n@keyframes acu-toast-out-9146b9ef {\nfrom {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\nto {\r\n    opacity: 0;\r\n    transform: translateY(-6px);\n}\n}\n@media (max-width: 640px) {\n.acu-toast-viewport__list[data-v-9146b9ef] {\r\n    top: calc(var(--acu-toast-top-compact, 58px) + var(--acu-safe-top, 0px));\r\n    right: auto;\r\n    bottom: auto;\r\n    left: calc(50% + (var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)) / 2);\r\n    width: clamp(var(--acu-menu-min-width, 240px), 70vw, calc(100% - var(--acu-toast-edge-gap-compact, 12px) - var(--acu-toast-edge-gap-compact, 12px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\r\n    max-height: calc(100% - var(--acu-toast-top-compact, 58px) - var(--acu-toast-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n    transform: translateX(-50%);\n}\n.acu-v2-toast[data-v-9146b9ef] {\r\n    grid-template-columns: var(--acu-icon-button-size-sm, 22px) minmax(0, 1fr) auto;\r\n    gap: var(--acu-space-175, 7px);\r\n    padding: var(--acu-space-2, 8px) var(--acu-space-225, 9px);\n}\n.acu-v2-toast__icon[data-v-9146b9ef] {\r\n    width: var(--acu-icon-button-size-sm, 22px);\r\n    height: var(--acu-icon-button-size-sm, 22px);\r\n    font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-toast__text[data-v-9146b9ef] {\r\n    font-size: var(--acu-font-size-caption, 11px);\r\n    line-height: 1.4;\n}\n.acu-v2-toast__action[data-v-9146b9ef] {\r\n    grid-column: 2 / 4;\r\n    justify-self: start;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuToastViewport.vue#style-0-9146b9ef");
     var AcuToastViewport_vue_vue_type_style_index_0_scoped_9146b9ef_lang = null;
 
-    const _hoisted_1$10 = {
+    const _hoisted_1$11 = {
 	key: 0,
 	class: "acu-toast-viewport",
 	role: "status",
 	"aria-label": "通知",
 	style: { zIndex: 9410 }
     };
-    const _hoisted_2$T = { class: "acu-toast-viewport__list" };
-    const _hoisted_3$K = ["role"];
-    const _hoisted_4$C = {
+    const _hoisted_2$U = { class: "acu-toast-viewport__list" };
+    const _hoisted_3$L = ["role"];
+    const _hoisted_4$D = {
 	class: "acu-v2-toast__icon",
 	"aria-hidden": "true"
     };
-    const _hoisted_5$v = { class: "acu-v2-toast__text" };
-    function _sfc_render$14(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_5$w = { class: "acu-v2-toast__text" };
+    function _sfc_render$15(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.portalTarget ? (openBlock(), createBlock(Teleport, {
 		key: 0,
 		to: $setup.portalTarget
-	}, [$setup.renderedItems.length ? (openBlock(), createElementBlock("div", _hoisted_1$10, [createBaseVNode("ol", _hoisted_2$T, [(openBlock(true), createElementBlock(
+	}, [$setup.renderedItems.length ? (openBlock(), createElementBlock("div", _hoisted_1$11, [createBaseVNode("ol", _hoisted_2$U, [(openBlock(true), createElementBlock(
 		Fragment,
 		null,
 		renderList($setup.renderedItems, (entry) => {
@@ -139356,7 +141056,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				role: entry.item.kind === "error" ? "alert" : "status"
 			}, [
-				createBaseVNode("span", _hoisted_4$C, [createBaseVNode(
+				createBaseVNode("span", _hoisted_4$D, [createBaseVNode(
 					"i",
 					{ class: normalizeClass($setup.iconForKind(entry.item.kind)) },
 					null,
@@ -139365,7 +141065,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				createBaseVNode(
 					"p",
-					_hoisted_5$v,
+					_hoisted_5$w,
 					toDisplayString(entry.item.text),
 					1
 					/* TEXT */
@@ -139392,15 +141092,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					title: "关闭通知",
 					onClick: ($event) => $setup.toast.dismiss(entry.item.id)
 				}, null, 8, ["onClick"])) : createCommentVNode("v-if", true)
-			], 10, _hoisted_3$K);
+			], 10, _hoisted_3$L);
 		}),
 		128
 		/* KEYED_FRAGMENT */
 	))])])) : createCommentVNode("v-if", true)], 8, ["to"])) : createCommentVNode("v-if", true);
     }
-    var AcuToastViewport = /*#__PURE__*/ _export_sfc(_sfc_main$14, [["render", _sfc_render$14], ["__scopeId", "data-v-9146b9ef"]]);
+    var AcuToastViewport = /*#__PURE__*/ _export_sfc(_sfc_main$15, [["render", _sfc_render$15], ["__scopeId", "data-v-9146b9ef"]]);
 
-    var _sfc_main$13 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$14 = /*@__PURE__*/ defineComponent({
         __name: 'AcuMobilePanelNav',
         props: {
             items: {}
@@ -139581,24 +141281,24 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-mobile-panel-nav[data-v-614843e5] {\r\n  display: none;\n}\n@media (max-width: 860px) {\n.acu-mobile-panel-nav[data-v-614843e5] {\r\n    position: sticky;\r\n    top: 0;\r\n    z-index: 30;\r\n    display: block;\r\n    margin: -20px -20px 4px;\r\n    padding: 0;\r\n    border-top: 0;\r\n    border-bottom: 1px solid var(--acu-border-2);\r\n    background: color-mix(in srgb, var(--acu-bg-0) 94%, transparent);\r\n    backdrop-filter: blur(10px);\r\n    -webkit-backdrop-filter: blur(10px);\n}\n.acu-mobile-panel-nav[data-v-614843e5]::before,\r\n  .acu-mobile-panel-nav[data-v-614843e5]::after {\r\n    content: \"\";\r\n    position: absolute;\r\n    top: 0;\r\n    bottom: 1px;\r\n    z-index: 2;\r\n    width: 22px;\r\n    pointer-events: none;\n}\n.acu-mobile-panel-nav[data-v-614843e5]::before {\r\n    left: 0;\r\n    background: linear-gradient(to right, var(--acu-bg-0), transparent);\n}\n.acu-mobile-panel-nav[data-v-614843e5]::after {\r\n    right: 0;\r\n    background: linear-gradient(to left, var(--acu-bg-0), transparent);\n}\n.acu-mobile-panel-nav__track[data-v-614843e5] {\r\n    min-width: 0;\r\n    display: flex;\r\n    gap: 0;\r\n    overflow-x: auto;\r\n    overscroll-behavior-x: contain;\r\n    scroll-padding-inline: 18px;\r\n    scrollbar-width: none;\r\n    padding: 0 18px;\r\n    border: 0;\r\n    border-radius: 0;\r\n    background: transparent;\n}\n.acu-mobile-panel-nav__track[data-v-614843e5]::-webkit-scrollbar {\r\n    display: none;\n}\n.acu-mobile-panel-nav__item[data-v-614843e5] {\r\n    flex: 0 0 auto;\r\n    position: relative;\r\n    min-width: 84px;\r\n    min-height: 44px;\r\n    max-width: none;\r\n    padding: 0 12px;\r\n    border: 0;\r\n    border-radius: 0;\r\n    background: transparent;\r\n    color: var(--acu-text-3);\r\n    font: inherit;\r\n    font-size: var(--acu-font-size-body, 12px);\r\n    font-weight: 650;\r\n    line-height: 1.2;\r\n    white-space: nowrap;\r\n    overflow: hidden;\r\n    text-overflow: ellipsis;\r\n    cursor: pointer;\r\n    transition:\r\n      background 0.15s ease,\r\n      border-color 0.15s ease,\r\n      color 0.15s ease,\r\n      box-shadow 0.15s ease;\n}\n.acu-mobile-panel-nav__item[data-v-614843e5]:hover {\r\n    background: var(--acu-hover-overlay);\r\n    color: var(--acu-text-1);\n}\n.acu-mobile-panel-nav__item[data-v-614843e5]::after {\r\n    content: \"\";\r\n    position: absolute;\r\n    right: 12px;\r\n    bottom: 0;\r\n    left: 12px;\r\n    height: 2px;\r\n    border-radius: 2px 2px 0 0;\r\n    background: transparent;\r\n    transition: background 0.15s ease, opacity 0.15s ease;\n}\n.acu-mobile-panel-nav__item.is-active[data-v-614843e5] {\r\n    background: transparent;\r\n    color: var(--acu-text-1);\r\n    box-shadow: none;\n}\n.acu-mobile-panel-nav__item.is-active[data-v-614843e5]::after {\r\n    background: var(--acu-accent);\n}\n.acu-mobile-panel-nav__item[data-v-614843e5]:focus-visible {\r\n    outline: none;\r\n    box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-mobile-panel-nav__item.is-active[data-v-614843e5]:focus-visible {\r\n    box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n}\n@media (max-width: 720px) {\n.acu-mobile-panel-nav[data-v-614843e5] {\r\n    margin: -14px -14px 4px;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuMobilePanelNav.vue#style-0-614843e5");
     var AcuMobilePanelNav_vue_vue_type_style_index_0_scoped_614843e5_lang = null;
 
-    const _hoisted_1$$ = {
+    const _hoisted_1$10 = {
 	ref: "rootRef",
 	class: "acu-mobile-panel-nav",
 	"aria-label": "页面板块"
     };
-    const _hoisted_2$S = {
+    const _hoisted_2$T = {
 	ref: "trackRef",
 	class: "acu-mobile-panel-nav__track",
 	role: "list"
     };
-    const _hoisted_3$J = ["aria-current", "onClick"];
-    function _sfc_render$13(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$K = ["aria-current", "onClick"];
+    function _sfc_render$14(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"nav",
-		_hoisted_1$$,
+		_hoisted_1$10,
 		[createBaseVNode(
 			"div",
-			_hoisted_2$S,
+			_hoisted_2$T,
 			[(openBlock(true), createElementBlock(
 				Fragment,
 				null,
@@ -139609,7 +141309,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						class: normalizeClass(["acu-mobile-panel-nav__item", { "is-active": item.id === $setup.activeId }]),
 						"aria-current": item.id === $setup.activeId ? "location" : undefined,
 						onClick: ($event) => $setup.scrollToPanel(item.id)
-					}, toDisplayString(item.label), 11, _hoisted_3$J);
+					}, toDisplayString(item.label), 11, _hoisted_3$K);
 				}),
 				128
 				/* KEYED_FRAGMENT */
@@ -139621,9 +141321,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var AcuMobilePanelNav = /*#__PURE__*/ _export_sfc(_sfc_main$13, [["render", _sfc_render$13], ["__scopeId", "data-v-614843e5"]]);
+    var AcuMobilePanelNav = /*#__PURE__*/ _export_sfc(_sfc_main$14, [["render", _sfc_render$14], ["__scopeId", "data-v-614843e5"]]);
 
-    var _sfc_main$12 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$13 = /*@__PURE__*/ defineComponent({
         __name: 'AcuPanelGrid',
         props: {
             columns: { default: 2 },
@@ -139644,7 +141344,7 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-panel-grid[data-v-b00ea74c] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: repeat(var(--acu-panel-grid-columns), minmax(0, 1fr));\r\n  gap: var(--acu-panel-grid-gap, 16px);\r\n  align-items: stretch;\n}\n.acu-panel-grid[data-v-b00ea74c] >  * {\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-panel-grid--collapse-md[data-v-b00ea74c] {\r\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 1080px) {\n.acu-panel-grid--collapse-lg[data-v-b00ea74c] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuPanelGrid.vue#style-0-b00ea74c");
     var AcuPanelGrid_vue_vue_type_style_index_0_scoped_b00ea74c_lang = null;
 
-    function _sfc_render$12(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$13(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -139656,7 +141356,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS, STYLE */
 	);
     }
-    var AcuPanelGrid = /*#__PURE__*/ _export_sfc(_sfc_main$12, [["render", _sfc_render$12], ["__scopeId", "data-v-b00ea74c"]]);
+    var AcuPanelGrid = /*#__PURE__*/ _export_sfc(_sfc_main$13, [["render", _sfc_render$13], ["__scopeId", "data-v-b00ea74c"]]);
 
     function connectionModeFromDraft(draft) {
         if (draft.apiMode === 'tavern')
@@ -139915,7 +141615,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     });
 
-    var _sfc_main$11 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$12 = /*@__PURE__*/ defineComponent({
         __name: 'AcuFormRow',
         props: {
             label: {},
@@ -139932,20 +141632,20 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-form-row[data-v-16cf0b7e] {\r\n  display: flex; flex-direction: column; gap: var(--acu-space-125, 5px);\r\n  color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\r\n  min-width: 0;\n}\n.acu-form-row__label[data-v-16cf0b7e] { font-weight: 500;\n}\n.acu-form-row__hint[data-v-16cf0b7e] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: var(--acu-line-height-caption, 1.5);\n}\n.acu-form-row[data-v-16cf0b7e] input[type=\"text\"],\r\n.acu-form-row[data-v-16cf0b7e] input[type=\"password\"],\r\n.acu-form-row[data-v-16cf0b7e] input[type=\"number\"],\r\n.acu-form-row[data-v-16cf0b7e] select,\r\n.acu-form-row[data-v-16cf0b7e] textarea {\r\n  min-width: 0; min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-form-row[data-v-16cf0b7e] textarea {\r\n  min-height: unset;\r\n  resize: none;\n}\n.acu-form-row[data-v-16cf0b7e] select {\r\n  appearance: none;\r\n  -webkit-appearance: none;\r\n  padding-right: var(--acu-space-7, 28px);\r\n  background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236b7280' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\") !important;\r\n  background-repeat: no-repeat !important;\r\n  background-position: right var(--acu-control-padding-x-md, 9px) center !important;\r\n  background-size: var(--acu-space-250, 10px) var(--acu-space-150, 6px) !important;\r\n  cursor: pointer;\n}\n.acu-form-row[data-v-16cf0b7e] input:focus,\r\n.acu-form-row[data-v-16cf0b7e] select:focus,\r\n.acu-form-row[data-v-16cf0b7e] textarea:focus {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuFormRow.vue#style-0-16cf0b7e");
     var AcuFormRow_vue_vue_type_style_index_0_scoped_16cf0b7e_lang = null;
 
-    const _hoisted_1$_ = { class: "acu-form-row" };
-    const _hoisted_2$R = {
+    const _hoisted_1$$ = { class: "acu-form-row" };
+    const _hoisted_2$S = {
 	key: 0,
 	class: "acu-form-row__label"
     };
-    const _hoisted_3$I = {
+    const _hoisted_3$J = {
 	key: 1,
 	class: "acu-form-row__hint"
     };
-    function _sfc_render$11(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$_, [
+    function _sfc_render$12(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$$, [
 		$props.label ? (openBlock(), createElementBlock(
 			"span",
-			_hoisted_2$R,
+			_hoisted_2$S,
 			toDisplayString($props.label),
 			1
 			/* TEXT */
@@ -139953,16 +141653,16 @@ Expected function or array of functions, received type ${typeof value}.`
 		renderSlot(_ctx.$slots, "default", {}, undefined, true),
 		$props.hint ? (openBlock(), createElementBlock(
 			"span",
-			_hoisted_3$I,
+			_hoisted_3$J,
 			toDisplayString($props.hint),
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var AcuFormRow = /*#__PURE__*/ _export_sfc(_sfc_main$11, [["render", _sfc_render$11], ["__scopeId", "data-v-16cf0b7e"]]);
+    var AcuFormRow = /*#__PURE__*/ _export_sfc(_sfc_main$12, [["render", _sfc_render$12], ["__scopeId", "data-v-16cf0b7e"]]);
 
-    var _sfc_main$10 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$11 = /*@__PURE__*/ defineComponent({
         __name: 'AcuMessage',
         props: {
             kind: { default: 'info' },
@@ -139981,7 +141681,7 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-message[data-v-9bfe58b8] {\r\n  padding: 8px 0 8px 10px;\r\n  border-radius: 0;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  border: 0;\r\n  border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\r\n  line-height: 1.5;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\n}\n.acu-message--info[data-v-9bfe58b8] {\r\n  border-left-color: color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n.acu-message--success[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-success);\n}\n.acu-message--warning[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-warning);\n}\n.acu-message--error[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-danger);\n}\r\n", "src/presentation-v2/components/_lib/AcuMessage.vue#style-0-9bfe58b8");
     var AcuMessage_vue_vue_type_style_index_0_scoped_9bfe58b8_lang = null;
 
-    function _sfc_render$10(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$11(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.visible ? (openBlock(), createElementBlock(
 		"div",
 		{
@@ -139994,9 +141694,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	)) : createCommentVNode("v-if", true);
     }
-    var AcuMessage = /*#__PURE__*/ _export_sfc(_sfc_main$10, [["render", _sfc_render$10], ["__scopeId", "data-v-9bfe58b8"]]);
+    var AcuMessage = /*#__PURE__*/ _export_sfc(_sfc_main$11, [["render", _sfc_render$11], ["__scopeId", "data-v-9bfe58b8"]]);
 
-    var _sfc_main$$ = /*@__PURE__*/ defineComponent({
+    var _sfc_main$10 = /*@__PURE__*/ defineComponent({
         __name: 'AcuInfoBanner',
         props: {
             text: { default: '' },
@@ -140020,8 +141720,8 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-info-banner[data-v-5b9a5d77] {\r\n  display: flex;\r\n  align-items: flex-start;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-225, 9px) var(--acu-space-250, 10px);\r\n  border-radius: var(--acu-radius-sm);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1.55;\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  color: var(--acu-text-2);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  min-width: 0;\n}\n.acu-info-banner__icon[data-v-5b9a5d77] {\r\n  flex-shrink: 0;\r\n  margin-top: var(--acu-space-050, 2px);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1.55;\n}\n.acu-info-banner__content[data-v-5b9a5d77] {\r\n  min-width: 0;\r\n  width: 100%;\r\n  word-wrap: break-word;\r\n  overflow-wrap: anywhere;\n}\n.acu-info-banner--info[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\n}\n.acu-info-banner--info .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\n}\n.acu-info-banner--tip[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-accent) 10%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 18%, transparent);\n}\n.acu-info-banner--tip .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-accent);\r\n  color: var(--acu-accent);\n}\n.acu-info-banner--warning[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-warning) 10%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-warning) 20%, transparent);\n}\n.acu-info-banner--warning .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-warning);\r\n  color: var(--acu-warning);\n}\r\n", "src/presentation-v2/components/_lib/AcuInfoBanner.vue#style-0-5b9a5d77");
     var AcuInfoBanner_vue_vue_type_style_index_0_scoped_5b9a5d77_lang = null;
 
-    const _hoisted_1$Z = { class: "acu-info-banner__content" };
-    function _sfc_render$$(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$_ = { class: "acu-info-banner__content" };
+    function _sfc_render$10(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -140038,7 +141738,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			null,
 			2
 			/* CLASS */
-		)) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_1$Z, [renderSlot(_ctx.$slots, "default", {}, () => [createTextVNode(
+		)) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_1$_, [renderSlot(_ctx.$slots, "default", {}, () => [createTextVNode(
 			toDisplayString($props.text),
 			1
 			/* TEXT */
@@ -140047,7 +141747,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuInfoBanner = /*#__PURE__*/ _export_sfc(_sfc_main$$, [["render", _sfc_render$$], ["__scopeId", "data-v-5b9a5d77"]]);
+    var AcuInfoBanner = /*#__PURE__*/ _export_sfc(_sfc_main$10, [["render", _sfc_render$10], ["__scopeId", "data-v-5b9a5d77"]]);
 
     const MIN_DURATION_MS = 100;
     const MAX_DURATION_MS = 200;
@@ -140176,7 +141876,7 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    var _sfc_main$_ = /*@__PURE__*/ defineComponent({
+    var _sfc_main$$ = /*@__PURE__*/ defineComponent({
         __name: 'AcuPanel',
         props: {
             title: { default: undefined },
@@ -140231,35 +141931,35 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-panel[data-v-c4139d23] {\r\n  min-width: 0; padding: var(--acu-panel-padding, 16px);\r\n  background: var(--acu-bg-1);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  display: flex; flex-direction: column; gap: 0;\r\n  height: 100%;\n}\n.acu-panel__header[data-v-c4139d23] {\r\n  display: flex; align-items: center; justify-content: space-between;\r\n  gap: var(--acu-panel-gap, 12px); margin-bottom: var(--acu-panel-gap, 12px);\r\n  min-height: var(--acu-control-height-md, 32px);\r\n  transition: margin-bottom 0.15s ease;\n}\n.acu-panel__header--description-open[data-v-c4139d23] {\r\n  margin-bottom: var(--acu-space-2, 8px);\n}\n.acu-panel__title[data-v-c4139d23] {\r\n  margin: 0;\r\n  min-width: 0;\r\n  flex: 1 1 auto;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.3;\r\n  color: var(--acu-text-1);\n}\n.acu-panel__header-right[data-v-c4139d23] {\r\n  margin-left: auto;\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex-shrink: 0;\n}\n.acu-panel__actions[data-v-c4139d23] { display: flex; align-items: center; gap: var(--acu-space-2, 8px); flex-shrink: 0;\n}\n.acu-panel__description-button[data-v-c4139d23] {\r\n  width: var(--acu-button-height-sm, 28px);\r\n  height: var(--acu-button-height-sm, 28px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-3);\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;\n}\n.acu-panel__description-button[data-v-c4139d23]:hover {\r\n  background: var(--acu-bg-2);\r\n  color: var(--acu-text-1);\n}\n.acu-panel__description-button--open[data-v-c4139d23] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\n}\n.acu-panel__description-button[data-v-c4139d23]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-panel__body[data-v-c4139d23] { display: flex; flex-direction: column; gap: var(--acu-panel-gap, 12px); min-width: 0; flex: 1 1 auto;\n}\n.acu-panel__description-region[data-v-c4139d23] {\r\n  min-width: 0;\r\n  overflow: hidden;\n}\n.acu-panel__description-region-inner[data-v-c4139d23] {\r\n  padding-bottom: var(--acu-panel-gap, 12px);\r\n  overflow: hidden;\n}\r\n", "src/presentation-v2/components/_lib/AcuPanel.vue#style-0-c4139d23");
     var AcuPanel_vue_vue_type_style_index_0_scoped_c4139d23_lang = null;
 
-    const _hoisted_1$Y = { class: "acu-panel" };
-    const _hoisted_2$Q = {
+    const _hoisted_1$Z = { class: "acu-panel" };
+    const _hoisted_2$R = {
 	key: 0,
 	class: "acu-panel__title"
     };
-    const _hoisted_3$H = {
+    const _hoisted_3$I = {
 	key: 1,
 	class: "acu-panel__header-right"
     };
-    const _hoisted_4$B = {
+    const _hoisted_4$C = {
 	key: 0,
 	class: "acu-panel__actions"
     };
-    const _hoisted_5$u = ["id", "aria-hidden"];
-    const _hoisted_6$t = { class: "acu-panel__description-region-inner" };
-    const _hoisted_7$q = { class: "acu-panel__body" };
-    function _sfc_render$_(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$Y, [
+    const _hoisted_5$v = ["id", "aria-hidden"];
+    const _hoisted_6$u = { class: "acu-panel__description-region-inner" };
+    const _hoisted_7$r = { class: "acu-panel__body" };
+    function _sfc_render$$(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$Z, [
 		$props.title || _ctx.$slots.title || _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock(
 			"header",
 			{
 				key: 0,
 				class: normalizeClass(["acu-panel__header", { "acu-panel__header--description-open": $setup.descriptionOpen }])
 			},
-			[$props.title || _ctx.$slots.title ? (openBlock(), createElementBlock("h3", _hoisted_2$Q, [renderSlot(_ctx.$slots, "title", {}, () => [createTextVNode(
+			[$props.title || _ctx.$slots.title ? (openBlock(), createElementBlock("h3", _hoisted_2$R, [renderSlot(_ctx.$slots, "title", {}, () => [createTextVNode(
 				toDisplayString($props.title),
 				1
 				/* TEXT */
-			)], true)])) : createCommentVNode("v-if", true), _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock("div", _hoisted_3$H, [_ctx.$slots.actions ? (openBlock(), createElementBlock("div", _hoisted_4$B, [renderSlot(_ctx.$slots, "actions", {}, undefined, true)])) : createCommentVNode("v-if", true), $setup.hasDescription ? (openBlock(), createBlock($setup["AcuIconButton"], {
+			)], true)])) : createCommentVNode("v-if", true), _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock("div", _hoisted_3$I, [_ctx.$slots.actions ? (openBlock(), createElementBlock("div", _hoisted_4$C, [renderSlot(_ctx.$slots, "actions", {}, undefined, true)])) : createCommentVNode("v-if", true), $setup.hasDescription ? (openBlock(), createBlock($setup["AcuIconButton"], {
 				key: 1,
 				class: normalizeClass(["acu-panel__description-button", { "acu-panel__description-button--open": $setup.descriptionOpen }]),
 				icon: "fa-solid fa-circle-info",
@@ -140294,7 +141994,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				id: $setup.descriptionId,
 				class: "acu-panel__description-region",
 				"aria-hidden": !$setup.descriptionOpen
-			}, [createBaseVNode("div", _hoisted_6$t, [createVNode($setup["AcuInfoBanner"], {
+			}, [createBaseVNode("div", _hoisted_6$u, [createVNode($setup["AcuInfoBanner"], {
 				class: "acu-panel__description-banner",
 				tone: $props.descriptionTone
 			}, {
@@ -140304,15 +142004,15 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* TEXT */
 				)], true)]),
 				_: 3
-			}, 8, ["tone"])])], 8, _hoisted_5$u)), [[vShow, $setup.descriptionOpen]]) : createCommentVNode("v-if", true)]),
+			}, 8, ["tone"])])], 8, _hoisted_5$v)), [[vShow, $setup.descriptionOpen]]) : createCommentVNode("v-if", true)]),
 			_: 3
 		}),
-		createBaseVNode("div", _hoisted_7$q, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])
+		createBaseVNode("div", _hoisted_7$r, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])
 	]);
     }
-    var AcuPanel = /*#__PURE__*/ _export_sfc(_sfc_main$_, [["render", _sfc_render$_], ["__scopeId", "data-v-c4139d23"]]);
+    var AcuPanel = /*#__PURE__*/ _export_sfc(_sfc_main$$, [["render", _sfc_render$$], ["__scopeId", "data-v-c4139d23"]]);
 
-    var _sfc_main$Z = /*@__PURE__*/ defineComponent({
+    var _sfc_main$_ = /*@__PURE__*/ defineComponent({
         __name: 'AcuTextarea',
         props: {
             modelValue: {},
@@ -140451,13 +142151,13 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-textarea[data-v-cbb35e09] {\r\n  appearance: none !important;\r\n  -webkit-appearance: none !important;\r\n  display: block !important;\r\n  width: 100% !important;\r\n  min-width: 0 !important;\r\n  box-sizing: border-box !important;\r\n  margin: 0 !important;\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px) !important;\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm) !important;\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit !important;\r\n  font-size: var(--acu-font-size-body, 12px) !important;\r\n  line-height: 1.45 !important;\r\n  letter-spacing: 0 !important;\r\n  text-align: start !important;\r\n  resize: none !important;\r\n  outline: none !important;\r\n  box-shadow: none !important;\r\n  caret-color: var(--acu-text-1);\r\n  -webkit-tap-highlight-color: transparent;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-textarea--auto-resize[data-v-cbb35e09] {\r\n  overflow-x: hidden !important;\r\n  overflow-y: auto;\n}\n.acu-textarea[data-v-cbb35e09]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-textarea[data-v-cbb35e09]:focus {\r\n  outline: none !important;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-textarea[data-v-cbb35e09]:disabled {\r\n  opacity: 0.5; cursor: not-allowed;\n}\r\n", "src/presentation-v2/components/_lib/AcuTextarea.vue#style-0-cbb35e09");
     var AcuTextarea_vue_vue_type_style_index_0_scoped_cbb35e09_lang = null;
 
-    const _hoisted_1$X = [
+    const _hoisted_1$Y = [
 	"value",
 	"placeholder",
 	"rows",
 	"disabled"
     ];
-    function _sfc_render$Z(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$_(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("textarea", {
 		ref: "textareaRef",
 		class: normalizeClass(["acu-textarea", { "acu-textarea--auto-resize": $props.autoResize }]),
@@ -140468,11 +142168,11 @@ Expected function or array of functions, received type ${typeof value}.`
 		onInput: $setup.onInput,
 		onFocus: $setup.onFocus,
 		onBlur: $setup.onBlur
-	}, null, 42, _hoisted_1$X);
+	}, null, 42, _hoisted_1$Y);
     }
-    var AcuTextarea = /*#__PURE__*/ _export_sfc(_sfc_main$Z, [["render", _sfc_render$Z], ["__scopeId", "data-v-cbb35e09"]]);
+    var AcuTextarea = /*#__PURE__*/ _export_sfc(_sfc_main$_, [["render", _sfc_render$_], ["__scopeId", "data-v-cbb35e09"]]);
 
-    var _sfc_main$Y = /*@__PURE__*/ defineComponent({
+    var _sfc_main$Z = /*@__PURE__*/ defineComponent({
         __name: 'AcuPresetDropdown',
         props: {
             items: {},
@@ -140533,28 +142233,28 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-preset-dd[data-v-da92b393] { position: relative; flex: 1; min-width: 0;\n}\n.acu-preset-dd__trigger[data-v-da92b393] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\r\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  background: var(--acu-bg-2); border: 0;\r\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-preset-dd__trigger[data-v-da92b393]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-preset-dd__trigger[data-v-da92b393]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-preset-dd__trigger[data-v-da92b393]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-preset-dd--disabled[data-v-da92b393] { pointer-events: none; opacity: 0.5;\n}\n.acu-preset-dd__label[data-v-da92b393] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-preset-dd__caret[data-v-da92b393] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease;\n}\n.acu-preset-dd__caret--open[data-v-da92b393] { transform: rotate(180deg);\n}\n.acu-preset-dd__menu[data-v-da92b393] {\r\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\r\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\r\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\r\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-preset-dd__item[data-v-da92b393] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px);\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2); transition: background 0.1s ease;\n}\n.acu-preset-dd__item[data-v-da92b393]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active[data-v-da92b393] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-preset-dd__item-name[data-v-da92b393] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500;\n}\n.acu-preset-dd__item-meta[data-v-da92b393] { font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); white-space: nowrap;\n}\n.acu-preset-dd__star[data-v-da92b393] {\r\n  width: var(--acu-menu-action-size, 24px); height: var(--acu-menu-action-size, 24px); display: flex; align-items: center; justify-content: center;\r\n  border: 0; background: transparent; color: var(--acu-text-3); cursor: pointer;\r\n  border-radius: var(--acu-radius-sm); font-size: var(--acu-font-size-body, 12px); transition: color 0.15s ease;\n}\n.acu-preset-dd__star[data-v-da92b393]:hover { color: var(--acu-text-1); background: var(--acu-hover-overlay);\n}\n.acu-preset-dd__star--active[data-v-da92b393] { color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active .acu-preset-dd__item-meta[data-v-da92b393],\r\n.acu-preset-dd__item--active .acu-preset-dd__star[data-v-da92b393],\r\n.acu-preset-dd__item--active .acu-preset-dd__check[data-v-da92b393] { --acu-icon-color: var(--acu-on-accent); color: var(--acu-on-accent);\n}\n.acu-preset-dd__check[data-v-da92b393] { font-size: var(--acu-font-size-caption, 11px); --acu-icon-color: var(--acu-text-1); color: var(--acu-text-1);\n}\n.acu-preset-dd__empty[data-v-da92b393] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\r\n", "src/presentation-v2/components/_lib/AcuPresetDropdown.vue#style-0-da92b393");
     var AcuPresetDropdown_vue_vue_type_style_index_0_scoped_da92b393_lang = null;
 
-    const _hoisted_1$W = ["disabled"];
-    const _hoisted_2$P = { class: "acu-preset-dd__label" };
-    const _hoisted_3$G = {
+    const _hoisted_1$X = ["disabled"];
+    const _hoisted_2$Q = { class: "acu-preset-dd__label" };
+    const _hoisted_3$H = {
 	key: 0,
 	class: "acu-preset-dd__menu"
     };
-    const _hoisted_4$A = ["onClick"];
-    const _hoisted_5$t = { class: "acu-preset-dd__item-name" };
-    const _hoisted_6$s = {
+    const _hoisted_4$B = ["onClick"];
+    const _hoisted_5$u = { class: "acu-preset-dd__item-name" };
+    const _hoisted_6$t = {
 	key: 0,
 	class: "acu-preset-dd__item-meta"
     };
-    const _hoisted_7$p = ["title", "onClick"];
-    const _hoisted_8$o = {
+    const _hoisted_7$q = ["title", "onClick"];
+    const _hoisted_8$p = {
 	key: 2,
 	class: "fa-solid fa-check acu-preset-dd__check"
     };
-    const _hoisted_9$k = {
+    const _hoisted_9$l = {
 	key: 0,
 	class: "acu-preset-dd__empty"
     };
-    function _sfc_render$Y(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$Z(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -140568,7 +142268,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			onClick: $setup.toggleOpen
 		}, [createBaseVNode(
 			"span",
-			_hoisted_2$P,
+			_hoisted_2$Q,
 			toDisplayString($setup.selectedLabel),
 			1
 			/* TEXT */
@@ -140578,7 +142278,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			null,
 			2
 			/* CLASS */
-		)], 8, _hoisted_1$W), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$G, [(openBlock(true), createElementBlock(
+		)], 8, _hoisted_1$X), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$H, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.items, (item) => {
@@ -140589,14 +142289,14 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, [
 					createBaseVNode(
 						"span",
-						_hoisted_5$t,
+						_hoisted_5$u,
 						toDisplayString($setup.itemLabel(item)),
 						1
 						/* TEXT */
 					),
 					item.meta ? (openBlock(), createElementBlock(
 						"span",
-						_hoisted_6$s,
+						_hoisted_6$t,
 						toDisplayString(item.meta),
 						1
 						/* TEXT */
@@ -140613,15 +142313,15 @@ Expected function or array of functions, received type ${typeof value}.`
 						null,
 						2
 						/* CLASS */
-					)], 10, _hoisted_7$p)) : createCommentVNode("v-if", true),
-					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$o)) : createCommentVNode("v-if", true)
-				], 10, _hoisted_4$A);
+					)], 10, _hoisted_7$q)) : createCommentVNode("v-if", true),
+					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$p)) : createCommentVNode("v-if", true)
+				], 10, _hoisted_4$B);
 			}),
 			128
 			/* KEYED_FRAGMENT */
 		)), !$props.items.length ? (openBlock(), createElementBlock(
 			"li",
-			_hoisted_9$k,
+			_hoisted_9$l,
 			toDisplayString($props.emptyText),
 			1
 			/* TEXT */
@@ -140630,9 +142330,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuPresetDropdown = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-da92b393"]]);
+    var AcuPresetDropdown = /*#__PURE__*/ _export_sfc(_sfc_main$Z, [["render", _sfc_render$Z], ["__scopeId", "data-v-da92b393"]]);
 
-    var _sfc_main$X = /*@__PURE__*/ defineComponent({
+    var _sfc_main$Y = /*@__PURE__*/ defineComponent({
         __name: 'AcuSelect',
         props: {
             options: {},
@@ -140683,17 +142383,17 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-select[data-v-da549440] {\n  position: relative;\n  display: block;\n  width: 100%;\n  min-width: 0;\n  max-width: 100%;\n  box-sizing: border-box;\n  margin: 0 !important;\n  padding: 0 !important;\n  border: 0 !important;\n  outline: 0 !important;\n  background: transparent !important;\n  box-shadow: none !important;\n}\n.acu-select__trigger[data-v-da549440] {\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\n  min-width: 0; max-width: 100%; box-sizing: border-box;\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\n  margin: 0 !important;\n  background: var(--acu-bg-2) !important; border: 0 !important;\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n  box-shadow: none;\n}\n.acu-select__trigger[data-v-da549440]:hover {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-select__trigger[data-v-da549440]:focus { outline: none !important;\n}\n.acu-select__trigger[data-v-da549440]:focus:not(:focus-visible) { box-shadow: none !important;\n}\n.acu-select__trigger[data-v-da549440]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-select__trigger[data-v-da549440]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-select__label[data-v-da549440] {\n  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-select__label--placeholder[data-v-da549440] { color: var(--acu-text-3);\n}\n.acu-select__caret[data-v-da549440] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease; flex-shrink: 0;\n}\n.acu-select__caret--open[data-v-da549440] { transform: rotate(180deg);\n}\n.acu-select__menu[data-v-da549440] {\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\n  min-width: 0; max-width: 100%; box-sizing: border-box;\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-select__item[data-v-da549440] {\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-2); transition: background 0.1s ease;\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-select__item[data-v-da549440]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-select__item--active[data-v-da549440] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-select__empty[data-v-da549440] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n\n/* ── sm variant ── */\n.acu-select--sm .acu-select__trigger[data-v-da549440] { min-height: var(--acu-control-height-sm, 26px); padding: var(--acu-control-padding-y-sm, 3px) var(--acu-control-padding-x-sm, 7px); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-select--sm .acu-select__item[data-v-da549440] { padding: var(--acu-space-150, 6px) var(--acu-space-250, 10px); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-select--disabled[data-v-da549440] { pointer-events: none; opacity: 0.5;\n}\n", "src/presentation-v2/components/_lib/AcuSelect.vue#style-0-da549440");
     var AcuSelect_vue_vue_type_style_index_0_scoped_da549440_lang = null;
 
-    const _hoisted_1$V = ["disabled"];
-    const _hoisted_2$O = {
+    const _hoisted_1$W = ["disabled"];
+    const _hoisted_2$P = {
 	key: 0,
 	class: "acu-select__menu"
     };
-    const _hoisted_3$F = ["onClick"];
-    const _hoisted_4$z = {
+    const _hoisted_3$G = ["onClick"];
+    const _hoisted_4$A = {
 	key: 0,
 	class: "acu-select__empty"
     };
-    function _sfc_render$X(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$Y(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -140717,7 +142417,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			null,
 			2
 			/* CLASS */
-		)], 8, _hoisted_1$V), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_2$O, [(openBlock(true), createElementBlock(
+		)], 8, _hoisted_1$W), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_2$P, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.options, (opt) => {
@@ -140725,18 +142425,18 @@ Expected function or array of functions, received type ${typeof value}.`
 					key: opt.value,
 					class: normalizeClass(["acu-select__item", { "acu-select__item--active": opt.value === $props.modelValue }]),
 					onClick: ($event) => $setup.select(opt.value)
-				}, toDisplayString(opt.label), 11, _hoisted_3$F);
+				}, toDisplayString(opt.label), 11, _hoisted_3$G);
 			}),
 			128
 			/* KEYED_FRAGMENT */
-		)), !$props.options.length ? (openBlock(), createElementBlock("li", _hoisted_4$z, "无可选项")) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
+		)), !$props.options.length ? (openBlock(), createElementBlock("li", _hoisted_4$A, "无可选项")) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
 		2
 		/* CLASS */
 	);
     }
-    var AcuSelect = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-da549440"]]);
+    var AcuSelect = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-da549440"]]);
 
-    var _sfc_main$W = /*@__PURE__*/ defineComponent({
+    var _sfc_main$X = /*@__PURE__*/ defineComponent({
         __name: 'ApiConfigPanel',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -140893,28 +142593,28 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-c3462564] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\n  gap: 6px;\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-c3462564] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-c3462564] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-c3462564] {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-c3462564] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-c3462564] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-c3462564] {\n  color: var(--acu-danger);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-c3462564] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n}\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-c3462564");
     var ApiConfigPanel_vue_vue_type_style_index_0_scoped_c3462564_lang = null;
 
-    const _hoisted_1$U = { class: "acu-api-config-panel__select-row" };
-    const _hoisted_2$N = { class: "acu-api-config-panel__editor-section" };
-    const _hoisted_3$E = { class: "acu-api-config-panel__inline-action" };
-    const _hoisted_4$y = {
+    const _hoisted_1$V = { class: "acu-api-config-panel__select-row" };
+    const _hoisted_2$O = { class: "acu-api-config-panel__editor-section" };
+    const _hoisted_3$F = { class: "acu-api-config-panel__inline-action" };
+    const _hoisted_4$z = {
 	key: 0,
 	class: "acu-api-config-panel__muted"
     };
-    const _hoisted_5$s = {
+    const _hoisted_5$t = {
 	key: 1,
 	class: "acu-api-config-panel__danger"
     };
-    const _hoisted_6$r = { class: "acu-api-config-panel__inline-action" };
-    const _hoisted_7$o = {
+    const _hoisted_6$s = { class: "acu-api-config-panel__inline-action" };
+    const _hoisted_7$p = {
 	key: 0,
 	class: "acu-api-config-panel__two-col"
     };
-    const _hoisted_8$n = {
+    const _hoisted_8$o = {
 	key: 1,
 	class: "acu-api-config-panel__editor-section"
     };
-    const _hoisted_9$j = { class: "acu-api-config-panel__actions" };
-    function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_9$k = { class: "acu-api-config-panel__actions" };
+    function _sfc_render$X(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.apiCopy.panels.preset.title,
 		description: $setup.apiCopy.panels.preset.description
@@ -140935,7 +142635,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				label: "当前 API 预设",
 				hint: "星标表示新聊天默认使用的预设。"
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_1$U, [
+				default: withCtx(() => [createBaseVNode("div", _hoisted_1$V, [
 					createVNode($setup["AcuPresetDropdown"], {
 						items: $setup.presetDropdownItems,
 						"model-value": $setup.store.activePresetName,
@@ -140982,7 +142682,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					}),
-					createBaseVNode("div", _hoisted_2$N, [
+					createBaseVNode("div", _hoisted_2$O, [
 						createVNode($setup["AcuFormRow"], { label: "连接方式" }, {
 							default: withCtx(() => [createVNode($setup["AcuSegmentedControl"], {
 								options: $setup.connectionModeOptions,
@@ -141022,16 +142722,16 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, null, 8, ["modelValue"])]),
 									_: 1
 								}),
-								createBaseVNode("div", _hoisted_3$E, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
+								createBaseVNode("div", _hoisted_3$F, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
 									default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
 										"加载模型",
 										-1
 										/* CACHED */
 									)])]),
 									_: 1
-								}), $setup.store.modelLoadStatus === "loading" ? (openBlock(), createElementBlock("span", _hoisted_4$y, "加载中...")) : $setup.store.modelLoadStatus === "error" ? (openBlock(), createElementBlock(
+								}), $setup.store.modelLoadStatus === "loading" ? (openBlock(), createElementBlock("span", _hoisted_4$z, "加载中...")) : $setup.store.modelLoadStatus === "error" ? (openBlock(), createElementBlock(
 									"span",
-									_hoisted_5$s,
+									_hoisted_5$t,
 									toDisplayString($setup.store.modelLoadError),
 									1
 									/* TEXT */
@@ -141063,7 +142763,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.activeDraft.tavernProfile = $event)
 								}, null, 8, ["options", "model-value"])]),
 								_: 1
-							}), createBaseVNode("div", _hoisted_6$r, [createVNode($setup["AcuButton"], { onClick: $setup.store.refreshTavernProfiles }, {
+							}), createBaseVNode("div", _hoisted_6$s, [createVNode($setup["AcuButton"], { onClick: $setup.store.refreshTavernProfiles }, {
 								default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
 									"刷新列表",
 									-1
@@ -141075,7 +142775,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* STABLE_FRAGMENT */
 						)) : createCommentVNode("v-if", true)
 					]),
-					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_7$o, [createVNode($setup["AcuFormRow"], { label: "最大回复长度" }, {
+					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_7$p, [createVNode($setup["AcuFormRow"], { label: "最大回复长度" }, {
 						default: withCtx(() => [createVNode($setup["AcuInput"], {
 							modelValue: $setup.activeDraft.max_tokens,
 							"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.activeDraft.max_tokens = $event),
@@ -141095,7 +142795,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					})])) : createCommentVNode("v-if", true),
-					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$n, [
+					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$o, [
 						createVNode($setup["AcuFormRow"], {
 							label: "附加主体参数",
 							hint: "SillyTavern custom_include_body，填写 YAML object，会合并到最终模型请求体。"
@@ -141144,7 +142844,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_9$j, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_9$k, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.activeDraftDirty,
 						onClick: $setup.syncActiveDraft
 					}, {
@@ -141184,7 +142884,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-c3462564"]]);
+    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-c3462564"]]);
 
     // ═══════════════════════════════════════════════════════════
     // service/settings/feature-preset-reference-service.ts — 功能级 API 预设引用
@@ -142442,7 +144142,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$V = /*@__PURE__*/ defineComponent({
+    var _sfc_main$W = /*@__PURE__*/ defineComponent({
         __name: 'AcuDisclosureGroup',
         props: {
             label: { default: '' },
@@ -142509,13 +144209,13 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-disclosure-group[data-v-621985bb] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 0;\r\n  overflow: hidden;\r\n  border-radius: var(--acu-radius-md);\r\n  background: transparent;\n}\n.acu-disclosure-group__header[data-v-621985bb] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  width: 100%;\r\n  min-height: 34px;\r\n  appearance: none;\r\n  border: 0;\r\n  border-radius: 0;\r\n  padding: 7px 10px;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.35;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  user-select: none;\r\n  transition: background-color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-disclosure-group__header[data-v-621985bb]:hover {\r\n  background: var(--acu-hover-overlay);\n}\n.acu-disclosure-group__header[data-v-621985bb]:focus-visible {\r\n  outline: none;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-disclosure-group__chevron[data-v-621985bb] {\r\n  flex: 0 0 10px;\r\n  width: 10px;\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\r\n  transition: transform 0.15s ease;\n}\n.acu-disclosure-group__chevron--open[data-v-621985bb] {\r\n  transform: rotate(90deg);\n}\n.acu-disclosure-group__label[data-v-621985bb] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-weight: 500;\r\n  color: var(--acu-text-2);\n}\n.acu-disclosure-group__meta[data-v-621985bb] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  font-variant-numeric: tabular-nums;\r\n  white-space: nowrap;\n}\n.acu-disclosure-group__body[data-v-621985bb] {\r\n  box-sizing: border-box;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  padding: 8px;\r\n  opacity: 1;\r\n  transform: translateY(0);\r\n  overflow-x: hidden;\n}\r\n", "src/presentation-v2/components/_lib/AcuDisclosureGroup.vue#style-0-621985bb");
     var AcuDisclosureGroup_vue_vue_type_style_index_0_scoped_621985bb_lang = null;
 
-    const _hoisted_1$T = ["aria-expanded", "aria-controls"];
-    const _hoisted_2$M = [
+    const _hoisted_1$U = ["aria-expanded", "aria-controls"];
+    const _hoisted_2$N = [
 	"id",
 	"aria-hidden",
 	"inert"
     ];
-    function _sfc_render$V(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{ class: normalizeClass(["acu-disclosure-group", [$props.rootClass, { "acu-disclosure-group--expanded": $props.expanded }]]) },
@@ -142564,7 +144264,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				2
 				/* CLASS */
 			)) : createCommentVNode("v-if", true)
-		], 10, _hoisted_1$T), createVNode(Transition, {
+		], 10, _hoisted_1$U), createVNode(Transition, {
 			css: false,
 			onBeforeEnter: $setup.beforeEnter,
 			onEnter: $setup.enter,
@@ -142582,16 +144282,16 @@ Expected function or array of functions, received type ${typeof value}.`
 				style: normalizeStyle($setup.bodyStyle),
 				"aria-hidden": !$props.expanded ? "true" : undefined,
 				inert: !$props.expanded ? true : undefined
-			}, [renderSlot(_ctx.$slots, "default", {}, undefined, true)], 14, _hoisted_2$M)), [[vShow, $props.expanded]]) : createCommentVNode("v-if", true)]),
+			}, [renderSlot(_ctx.$slots, "default", {}, undefined, true)], 14, _hoisted_2$N)), [[vShow, $props.expanded]]) : createCommentVNode("v-if", true)]),
 			_: 3
 		})],
 		2
 		/* CLASS */
 	);
     }
-    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$V, [["render", _sfc_render$V], ["__scopeId", "data-v-621985bb"]]);
+    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-621985bb"]]);
 
-    var _sfc_main$U = /*@__PURE__*/ defineComponent({
+    var _sfc_main$V = /*@__PURE__*/ defineComponent({
         ...{ inheritAttrs: false },
         __name: 'AcuToggle',
         props: {
@@ -142618,12 +144318,12 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-toggle[data-v-61c4c790] {\r\n  display: inline-flex; align-items: center; gap: var(--acu-space-2, 8px);\r\n  flex: 0 0 auto;\r\n  padding: 0; border: 0; background: transparent;\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-2);\r\n  cursor: pointer; user-select: none;\n}\n.acu-toggle--disabled[data-v-61c4c790] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-toggle__track[data-v-61c4c790] {\r\n  position: relative; flex-shrink: 0;\r\n  width: var(--acu-toggle-width, 36px); height: var(--acu-toggle-height, 20px);\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  border-radius: var(--acu-toggle-radius, 10px);\r\n  transition: background 0.2s ease, box-shadow 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__track[data-v-61c4c790] {\r\n  background: var(--acu-accent);\n}\n.acu-toggle__thumb[data-v-61c4c790] {\r\n  position: absolute; top: var(--acu-space-050, 2px); left: var(--acu-space-050, 2px);\r\n  width: var(--acu-toggle-thumb-size, 16px); height: var(--acu-toggle-thumb-size, 16px);\r\n  background: #fff;\r\n  border-radius: 50%;\r\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);\r\n  transition: transform 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__thumb[data-v-61c4c790] {\r\n  transform: translateX(var(--acu-toggle-thumb-shift, 16px));\n}\n.acu-toggle__label[data-v-61c4c790] { white-space: nowrap;\n}\n.acu-toggle:hover:not(.acu-toggle--disabled) .acu-toggle__track[data-v-61c4c790] {\r\n  box-shadow: inset 0 0 0 1px var(--acu-border-2);\n}\n.acu-toggle:focus-visible .acu-toggle__track[data-v-61c4c790] {\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuToggle.vue#style-0-61c4c790");
     var AcuToggle_vue_vue_type_style_index_0_scoped_61c4c790_lang = null;
 
-    const _hoisted_1$S = ["aria-checked", "disabled"];
-    const _hoisted_2$L = {
+    const _hoisted_1$T = ["aria-checked", "disabled"];
+    const _hoisted_2$M = {
 	key: 0,
 	class: "acu-toggle__label"
     };
-    function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$V(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", mergeProps({
 		type: "button",
 		class: ["acu-toggle", {
@@ -142644,15 +144344,15 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CACHED */
 	)), $props.label ? (openBlock(), createElementBlock(
 		"span",
-		_hoisted_2$L,
+		_hoisted_2$M,
 		toDisplayString($props.label),
 		1
 		/* TEXT */
-	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$S);
+	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$T);
     }
-    var AcuToggle = /*#__PURE__*/ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-61c4c790"]]);
+    var AcuToggle = /*#__PURE__*/ _export_sfc(_sfc_main$V, [["render", _sfc_render$V], ["__scopeId", "data-v-61c4c790"]]);
 
-    var _sfc_main$T = /*@__PURE__*/ defineComponent({
+    var _sfc_main$U = /*@__PURE__*/ defineComponent({
         __name: 'FormFillUpdateSettingsPanel',
         props: {
             showAdvanced: { type: Boolean, default: true }
@@ -142737,15 +144437,15 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-form-fill-update-settings-panel__settings-groups[data-v-eaa556c7] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-form-fill-update-settings-panel__setting-group\r\n  + .acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border-2);\n}\n.acu-form-fill-update-settings-panel__advanced[data-v-eaa556c7] {\r\n  border: 0;\r\n  background: transparent;\n}\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n@media (max-width: 560px) {\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/FormFillUpdateSettingsPanel.vue#style-0-eaa556c7");
     var FormFillUpdateSettingsPanel_vue_vue_type_style_index_0_scoped_eaa556c7_lang = null;
 
-    const _hoisted_1$R = { class: "acu-form-fill-update-settings-panel__settings-groups" };
-    const _hoisted_2$K = { class: "acu-form-fill-update-settings-panel__setting-group" };
-    const _hoisted_3$D = { class: "acu-form-fill-update-settings-panel__number-grid" };
-    function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$S = { class: "acu-form-fill-update-settings-panel__settings-groups" };
+    const _hoisted_2$L = { class: "acu-form-fill-update-settings-panel__setting-group" };
+    const _hoisted_3$E = { class: "acu-form-fill-update-settings-panel__number-grid" };
+    function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.formFillCopy.panels.update.title,
 		description: $setup.formFillCopy.panels.update.description
 	}, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_1$R, [createBaseVNode("section", _hoisted_2$K, [
+		default: withCtx(() => [createBaseVNode("div", _hoisted_1$S, [createBaseVNode("section", _hoisted_2$L, [
 			createVNode($setup["AcuFormRow"], {
 				label: "填表 API 预设",
 				hint: "默认使用当前 API，选择后仅影响填表功能。"
@@ -142794,7 +144494,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			"body-mode": "if",
 			onToggle: _cache[1] || (_cache[1] = ($event) => $setup.advancedExpanded = !$setup.advancedExpanded)
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_3$D, [(openBlock(true), createElementBlock(
+			default: withCtx(() => [createBaseVNode("div", _hoisted_3$E, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.advancedFields, (field) => {
@@ -142826,7 +144526,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var FormFillUpdateSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-eaa556c7"]]);
+    var FormFillUpdateSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-eaa556c7"]]);
 
     /**
      * legacy-ui-menu-entry — 旧 UI 菜单入口的显示状态。
@@ -143825,7 +145525,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$S = /*@__PURE__*/ defineComponent({
+    var _sfc_main$T = /*@__PURE__*/ defineComponent({
         __name: 'AcuText',
         props: {
             as: { default: 'p' },
@@ -143844,16 +145544,16 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-text[data-v-7abe2621] {\r\n  margin: 0;\r\n  min-width: 0;\n}\n.acu-text--caption[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-text--meta[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--hint[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\n}\n.acu-text--status-line[data-v-7abe2621] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  min-height: 22px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--empty[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\r\n  text-align: center;\n}\n.acu-text--error[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-danger);\n}\n.acu-text--section-label[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 600;\r\n  color: var(--acu-text-2);\n}\n.acu-text--list-title[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\n}\n[data-v-7abe2621] .acu-text__value {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n", "src/presentation-v2/components/_lib/AcuText.vue#style-0-7abe2621");
     var AcuText_vue_vue_type_style_index_0_scoped_7abe2621_lang = null;
 
-    function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock(resolveDynamicComponent($props.as), { class: normalizeClass(["acu-text", $setup.variantClass]) }, {
 		default: withCtx(() => [renderSlot(_ctx.$slots, "default", {}, undefined, true)]),
 		_: 3
 	}, 8, ["class"]);
     }
-    var AcuText = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-7abe2621"]]);
+    var AcuText = /*#__PURE__*/ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-7abe2621"]]);
 
     const DRAWER_LEAVE_MS = 150;
-    var _sfc_main$R = /*@__PURE__*/ defineComponent({
+    var _sfc_main$S = /*@__PURE__*/ defineComponent({
         __name: 'AcuDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -143940,10 +145640,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-drawer-layer[data-v-6c795a65] {\n  position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 9200;\n  width: 100%; width: 100vw; width: 100dvw;\n  height: 100%; height: 100vh; height: 100dvh;\n  display: flex; justify-content: flex-end;\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\n  background: rgba(0, 0, 0, 0.38);\n  overflow: hidden;\n  animation: acu-drawer-layer-in-6c795a65 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing[data-v-6c795a65] {\n  pointer-events: none;\n  animation: acu-drawer-layer-out-6c795a65 0.15s ease-in both;\n}\n.acu-v2-drawer[data-v-6c795a65] {\n  max-width: 100%;\n  height: 100%; max-height: 100%;\n  display: flex; flex-direction: column;\n  background: var(--acu-bg-1);\n  border-left: 0;\n  box-shadow: var(--acu-shadow);\n  min-width: 0; min-height: 0;\n  overflow: hidden;\n  animation: acu-drawer-panel-in-6c795a65 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing .acu-v2-drawer[data-v-6c795a65] {\n  animation: acu-drawer-panel-out-6c795a65 0.15s ease-in both;\n}\n@supports (max-height: 100dvh) {\n.acu-v2-drawer[data-v-6c795a65] { max-height: 100%;\n}\n}\n.acu-v2-drawer__header[data-v-6c795a65] {\n  flex: 0 0 auto;\n  display: flex; align-items: center; justify-content: space-between;\n  min-width: 0;\n  gap: var(--acu-panel-gap, 12px); padding: var(--acu-page-gap, 14px) var(--acu-panel-padding, 16px);\n  border-bottom: 0;\n}\n.acu-v2-drawer__header-left[data-v-6c795a65] { display: flex; align-items: center; gap: var(--acu-space-250, 10px); min-width: 0;\n}\n.acu-v2-drawer__header h3[data-v-6c795a65] { margin: 0; min-width: 0; font-size: var(--acu-font-size-panel-title, 15px); overflow-wrap: anywhere;\n}\n.acu-v2-drawer__body[data-v-6c795a65] {\n  flex: 1; min-height: 0;\n  min-width: 0; overflow-y: auto; overflow-x: hidden; padding: var(--acu-panel-padding, 16px);\n  display: flex; flex-direction: column; gap: var(--acu-page-gap, 14px);\n}\n@keyframes acu-drawer-layer-in-6c795a65 {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-drawer-panel-in-6c795a65 {\nfrom { transform: translateX(100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes acu-drawer-layer-out-6c795a65 {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-drawer-panel-out-6c795a65 {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(100%);\n}\n}\n@media (max-width: 860px) {\n.acu-v2-drawer[data-v-6c795a65] { width: 100vw !important; max-width: 100vw; border-left: 0;\n}\n}\n", "src/presentation-v2/components/_lib/AcuDrawer.vue#style-0-6c795a65");
     var AcuDrawer_vue_vue_type_style_index_0_scoped_6c795a65_lang = null;
 
-    const _hoisted_1$Q = { class: "acu-v2-drawer__header" };
-    const _hoisted_2$J = { class: "acu-v2-drawer__header-left" };
-    const _hoisted_3$C = { class: "acu-v2-drawer__body" };
-    function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$R = { class: "acu-v2-drawer__header" };
+    const _hoisted_2$K = { class: "acu-v2-drawer__header-left" };
+    const _hoisted_3$D = { class: "acu-v2-drawer__body" };
+    function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.isRendered ? (openBlock(), createElementBlock(
 		"div",
 		{
@@ -143962,7 +145662,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				role: "dialog",
 				onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
 			},
-			[createBaseVNode("header", _hoisted_1$Q, [createBaseVNode("div", _hoisted_2$J, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
+			[createBaseVNode("header", _hoisted_1$R, [createBaseVNode("div", _hoisted_2$K, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
 				key: 0,
 				icon: "fa-solid fa-arrow-left",
 				title: "返回",
@@ -143978,7 +145678,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				"aria-label": "关闭",
 				title: "关闭",
 				onClick: $setup.requestClose
-			})]), createBaseVNode("div", _hoisted_3$C, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
+			})]), createBaseVNode("div", _hoisted_3$D, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
 			4
 			/* STYLE */
 		)],
@@ -143986,9 +145686,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS, NEED_HYDRATION */
 	)) : createCommentVNode("v-if", true);
     }
-    var AcuDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-6c795a65"]]);
+    var AcuDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-6c795a65"]]);
 
-    var _sfc_main$Q = /*@__PURE__*/ defineComponent({
+    var _sfc_main$R = /*@__PURE__*/ defineComponent({
         __name: 'AcuRulePairList',
         props: {
             modelValue: {},
@@ -144039,20 +145739,20 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-rule-pair-list--standalone[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list__body[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list--standalone .acu-rule-pair-list__body[data-v-c9426b22] {\r\n  /* 老接口：未提供 label 时直接展示，无外层 padding */\r\n  border-top: 0;\r\n  padding: 0;\n}\n.acu-rule-pair-list__row[data-v-c9426b22] {\r\n  display: flex; align-items: center; gap: 6px;\n}\n.acu-rule-pair-list__field[data-v-c9426b22] { flex: 1; min-width: 0;\n}\n.acu-rule-pair-list__sep[data-v-c9426b22] {\r\n  flex-shrink: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-rule-pair-list__empty[data-v-c9426b22] {\r\n  padding: 8px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-rule-pair-list__add[data-v-c9426b22] {\r\n  align-self: flex-start;\n}\r\n", "src/presentation-v2/components/_lib/AcuRulePairList.vue#style-0-c9426b22");
     var AcuRulePairList_vue_vue_type_style_index_0_scoped_c9426b22_lang = null;
 
-    const _hoisted_1$P = {
+    const _hoisted_1$Q = {
 	key: 0,
 	class: "acu-rule-pair-list__empty"
     };
-    const _hoisted_2$I = {
+    const _hoisted_2$J = {
 	key: 1,
 	class: "acu-rule-pair-list acu-rule-pair-list--standalone"
     };
-    const _hoisted_3$B = { class: "acu-rule-pair-list__body" };
-    const _hoisted_4$x = {
+    const _hoisted_3$C = { class: "acu-rule-pair-list__body" };
+    const _hoisted_4$y = {
 	key: 0,
 	class: "acu-rule-pair-list__empty"
     };
-    function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 	return $props.label ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
 		key: 0,
 		"root-class": "acu-rule-pair-list",
@@ -144118,7 +145818,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				128
 				/* KEYED_FRAGMENT */
 			)),
-			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$P, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
+			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$Q, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
 			createVNode($setup["AcuButton"], {
 				size: "sm",
 				class: "acu-rule-pair-list__add",
@@ -144143,7 +145843,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		"label",
 		"meta",
 		"expanded"
-	])) : (openBlock(), createElementBlock("div", _hoisted_2$I, [createBaseVNode("div", _hoisted_3$B, [
+	])) : (openBlock(), createElementBlock("div", _hoisted_2$J, [createBaseVNode("div", _hoisted_3$C, [
 		(openBlock(true), createElementBlock(
 			Fragment,
 			null,
@@ -144193,7 +145893,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			128
 			/* KEYED_FRAGMENT */
 		)),
-		!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_4$x, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
+		!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_4$y, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
 		createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-rule-pair-list__add",
@@ -144214,9 +145914,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})
 	])]));
     }
-    var AcuRulePairList = /*#__PURE__*/ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-c9426b22"]]);
+    var AcuRulePairList = /*#__PURE__*/ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-c9426b22"]]);
 
-    var _sfc_main$P = /*@__PURE__*/ defineComponent({
+    var _sfc_main$Q = /*@__PURE__*/ defineComponent({
         __name: 'PlotMatchReplaceFields',
         props: {
             rateMain: {},
@@ -144241,10 +145941,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-match-fields[data-v-8649d835] {\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-match-fields legend[data-v-8649d835] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-match-fields__grid[data-v-8649d835] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));\r\n  gap: 10px;\n}\r\n", "src/presentation-v2/components/PlotMatchReplaceFields.vue#style-0-8649d835");
     var PlotMatchReplaceFields_vue_vue_type_style_index_0_scoped_8649d835_lang = null;
 
-    const _hoisted_1$O = { class: "acu-v2-plot-match-fields" };
-    const _hoisted_2$H = { class: "acu-v2-plot-match-fields__grid" };
-    function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("fieldset", _hoisted_1$O, [
+    const _hoisted_1$P = { class: "acu-v2-plot-match-fields" };
+    const _hoisted_2$I = { class: "acu-v2-plot-match-fields__grid" };
+    function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("fieldset", _hoisted_1$P, [
 		_cache[6] || (_cache[6] = createBaseVNode(
 			"legend",
 			null,
@@ -144263,7 +145963,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			)])]),
 			_: 1
 		}),
-		createBaseVNode("div", _hoisted_2$H, [
+		createBaseVNode("div", _hoisted_2$I, [
 			createVNode($setup["AcuFormRow"], { label: "sulv1" }, {
 				default: withCtx(() => [createVNode($setup["AcuInput"], {
 					type: "number",
@@ -144313,7 +146013,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var PlotMatchReplaceFields = /*#__PURE__*/ _export_sfc(_sfc_main$P, [["render", _sfc_render$P], ["__scopeId", "data-v-8649d835"]]);
+    var PlotMatchReplaceFields = /*#__PURE__*/ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-8649d835"]]);
 
     const DEFAULT_ROLE_OPTIONS = [
         { value: 'SYSTEM', label: 'SYSTEM' },
@@ -144325,7 +146025,7 @@ Expected function or array of functions, received type ${typeof value}.`
         { value: 'A', label: '主插槽 A' },
         { value: 'B', label: '主插槽 B' },
     ];
-    var _sfc_main$O = /*@__PURE__*/ defineComponent({
+    var _sfc_main$P = /*@__PURE__*/ defineComponent({
         __name: 'AcuPromptSegments',
         props: {
             segments: {},
@@ -144354,20 +146054,20 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-prompt-segs[data-v-7a7ca5ef] { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add[data-v-7a7ca5ef] { display: flex; justify-content: center; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add-btn[data-v-7a7ca5ef] { max-width: 100%; white-space: normal;\n}\n.acu-prompt-segs__list[data-v-7a7ca5ef] {\n  list-style: none; margin: 0; padding: 0;\n  display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-7a7ca5ef] {\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent; padding: 0 0 12px;\n  display: flex; flex-direction: column; gap: 8px;\n  min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-7a7ca5ef]:last-child {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-prompt-segs__item-head[data-v-7a7ca5ef] {\n  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__index[data-v-7a7ca5ef] {\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n  min-width: 26px;\n  font-family: var(--acu-font-mono);\n}\n.acu-prompt-segs__role[data-v-7a7ca5ef] { flex: 1 1 110px; min-width: 0; max-width: 180px;\n}\n.acu-prompt-segs__slot[data-v-7a7ca5ef] { flex: 1 1 120px; min-width: 0; max-width: 200px;\n}\n.acu-prompt-segs__actions[data-v-7a7ca5ef] {\n  margin-left: auto;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  flex-wrap: wrap;\n  min-width: 0;\n}\n.acu-prompt-segs[data-v-7a7ca5ef] .acu-textarea,\n.acu-prompt-segs[data-v-7a7ca5ef] textarea {\n  width: 100%;\n  min-width: 0;\n  max-width: 100%;\n  box-sizing: border-box;\n}\n.acu-prompt-segs__empty[data-v-7a7ca5ef] {\n  padding: 10px 0; text-align: center;\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  overflow-wrap: anywhere;\n}\n@media (max-width: 480px) {\n.acu-prompt-segs__item-head[data-v-7a7ca5ef] { align-items: stretch;\n}\n.acu-prompt-segs__index[data-v-7a7ca5ef] { flex: 0 0 100%;\n}\n.acu-prompt-segs__role[data-v-7a7ca5ef],\n  .acu-prompt-segs__slot[data-v-7a7ca5ef] { flex-basis: 100%; max-width: 100%;\n}\n.acu-prompt-segs__actions[data-v-7a7ca5ef] { width: 100%; margin-left: 0; justify-content: flex-end;\n}\n}\n", "src/presentation-v2/components/_lib/AcuPromptSegments.vue#style-0-7a7ca5ef");
     var AcuPromptSegments_vue_vue_type_style_index_0_scoped_7a7ca5ef_lang = null;
 
-    const _hoisted_1$N = { class: "acu-prompt-segs" };
-    const _hoisted_2$G = { class: "acu-prompt-segs__add" };
-    const _hoisted_3$A = { class: "acu-prompt-segs__list" };
-    const _hoisted_4$w = { class: "acu-prompt-segs__item-head" };
-    const _hoisted_5$r = { class: "acu-prompt-segs__index" };
-    const _hoisted_6$q = { class: "acu-prompt-segs__actions" };
-    const _hoisted_7$n = {
+    const _hoisted_1$O = { class: "acu-prompt-segs" };
+    const _hoisted_2$H = { class: "acu-prompt-segs__add" };
+    const _hoisted_3$B = { class: "acu-prompt-segs__list" };
+    const _hoisted_4$x = { class: "acu-prompt-segs__item-head" };
+    const _hoisted_5$s = { class: "acu-prompt-segs__index" };
+    const _hoisted_6$r = { class: "acu-prompt-segs__actions" };
+    const _hoisted_7$o = {
 	key: 0,
 	class: "acu-prompt-segs__empty"
     };
-    const _hoisted_8$m = { class: "acu-prompt-segs__add" };
-    function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$N, [
-		createBaseVNode("div", _hoisted_2$G, [createVNode($setup["AcuButton"], {
+    const _hoisted_8$n = { class: "acu-prompt-segs__add" };
+    function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$O, [
+		createBaseVNode("div", _hoisted_2$H, [createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-prompt-segs__add-btn",
 			onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("add", "top"))
@@ -144385,17 +146085,17 @@ Expected function or array of functions, received type ${typeof value}.`
 			)])]),
 			_: 1
 		})]),
-		createBaseVNode("ol", _hoisted_3$A, [(openBlock(true), createElementBlock(
+		createBaseVNode("ol", _hoisted_3$B, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.segments, (seg, index) => {
 				return openBlock(), createElementBlock("li", {
 					key: index,
 					class: "acu-prompt-segs__item"
-				}, [createBaseVNode("header", _hoisted_4$w, [
+				}, [createBaseVNode("header", _hoisted_4$x, [
 					createBaseVNode(
 						"span",
-						_hoisted_5$r,
+						_hoisted_5$s,
 						"#" + toDisplayString(index + 1),
 						1
 						/* TEXT */
@@ -144430,7 +146130,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"model-value",
 						"onUpdate:modelValue"
 					])) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_6$q, [$props.allowMove ? (openBlock(), createElementBlock(
+					createBaseVNode("div", _hoisted_6$r, [$props.allowMove ? (openBlock(), createElementBlock(
 						Fragment,
 						{ key: 0 },
 						[createVNode($setup["AcuIconButton"], {
@@ -144483,12 +146183,12 @@ Expected function or array of functions, received type ${typeof value}.`
 			/* KEYED_FRAGMENT */
 		)), !$props.segments.length ? (openBlock(), createElementBlock(
 			"li",
-			_hoisted_7$n,
+			_hoisted_7$o,
 			toDisplayString($props.emptyText),
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true)]),
-		createBaseVNode("div", _hoisted_8$m, [createVNode($setup["AcuButton"], {
+		createBaseVNode("div", _hoisted_8$n, [createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-prompt-segs__add-btn",
 			onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("add", "bottom"))
@@ -144508,9 +146208,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})])
 	]);
     }
-    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$O, [["render", _sfc_render$O], ["__scopeId", "data-v-7a7ca5ef"]]);
+    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$P, [["render", _sfc_render$P], ["__scopeId", "data-v-7a7ca5ef"]]);
 
-    var _sfc_main$N = /*@__PURE__*/ defineComponent({
+    var _sfc_main$O = /*@__PURE__*/ defineComponent({
         __name: 'PlotPromptSegments',
         props: {
             segments: {}
@@ -144524,7 +146224,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPromptSegments"], {
 		segments: $props.segments,
 		"show-slot": true,
@@ -144537,9 +146237,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		onUpdate: _cache[3] || (_cache[3] = (i, p) => _ctx.$emit("update", i, p))
 	}, null, 8, ["segments"]);
     }
-    var PlotPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$N, [["render", _sfc_render$N]]);
+    var PlotPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$O, [["render", _sfc_render$O]]);
 
-    var _sfc_main$M = /*@__PURE__*/ defineComponent({
+    var _sfc_main$N = /*@__PURE__*/ defineComponent({
         __name: 'PlotTaskEditor',
         props: {
             task: {},
@@ -144604,27 +146304,27 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-task-editor[data-v-0d30f745] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-0d30f745] {\n  margin: 0;\n  padding: 0 0 14px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-0d30f745]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-plot-task-editor__section legend[data-v-0d30f745] {\n  padding: 0;\n  font-size: var(--acu-font-size-section-title, 12px);\n  font-weight: 600;\n  color: var(--acu-text-2);\n}\n.acu-v2-plot-task-editor__grid[data-v-0d30f745] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));\n  gap: 10px;\n}\n.acu-v2-plot-task-editor__grid--wide[data-v-0d30f745] {\n  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));\n}\n.acu-v2-plot-task-editor__toggles[data-v-0d30f745] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));\n  gap: 8px 12px;\n  padding: 8px 0;\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__toggles[data-v-0d30f745] .acu-toggle {\n  align-items: flex-start;\n  width: 100%;\n  min-width: 0;\n  min-height: var(--acu-control-height-sm, 26px);\n}\n.acu-v2-plot-task-editor__toggles[data-v-0d30f745] .acu-toggle__label {\n  min-width: 0;\n  white-space: normal;\n  line-height: var(--acu-line-height-body, 1.45);\n  overflow-wrap: anywhere;\n}\n.acu-v2-plot-task-editor__hint[data-v-0d30f745] {\n  margin: 0;\n  font-size: var(--acu-font-size-caption, 11px);\n  color: var(--acu-text-3);\n  line-height: var(--acu-line-height-caption, 1.5);\n}\n.acu-v2-plot-task-editor__empty[data-v-0d30f745] {\n  padding: 18px 0;\n  border: 0;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n  text-align: center;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n", "src/presentation-v2/components/PlotTaskEditor.vue#style-0-0d30f745");
     var PlotTaskEditor_vue_vue_type_style_index_0_scoped_0d30f745_lang = null;
 
-    const _hoisted_1$M = {
+    const _hoisted_1$N = {
 	key: 0,
 	class: "acu-v2-plot-task-editor"
     };
-    const _hoisted_2$F = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_3$z = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_4$v = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_5$q = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_6$p = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
-    const _hoisted_7$m = { class: "acu-v2-plot-task-editor__toggles" };
-    const _hoisted_8$l = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_9$i = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
-    const _hoisted_10$h = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_11$f = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_12$c = {
+    const _hoisted_2$G = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_3$A = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_4$w = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_5$r = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_6$q = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
+    const _hoisted_7$n = { class: "acu-v2-plot-task-editor__toggles" };
+    const _hoisted_8$m = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_9$j = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
+    const _hoisted_10$i = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_11$g = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_12$d = {
 	key: 1,
 	class: "acu-v2-plot-task-editor__empty"
     };
-    function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
-	return $props.task ? (openBlock(), createElementBlock("div", _hoisted_1$M, [
-		createBaseVNode("fieldset", _hoisted_2$F, [
+    function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
+	return $props.task ? (openBlock(), createElementBlock("div", _hoisted_1$N, [
+		createBaseVNode("fieldset", _hoisted_2$G, [
 			_cache[23] || (_cache[23] = createBaseVNode(
 				"legend",
 				null,
@@ -144632,7 +146332,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				-1
 				/* CACHED */
 			)),
-			createBaseVNode("div", _hoisted_3$z, [
+			createBaseVNode("div", _hoisted_3$A, [
 				createVNode($setup["AcuFormRow"], { label: "任务名称" }, {
 					default: withCtx(() => [createVNode($setup["AcuInput"], {
 						type: "text",
@@ -144674,7 +146374,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					_: 1
 				})
 			]),
-			createBaseVNode("div", _hoisted_4$v, [
+			createBaseVNode("div", _hoisted_4$w, [
 				createVNode($setup["AcuFormRow"], {
 					label: "标签摘取",
 					hint: "例如 recall,supplement，仅作用于本任务"
@@ -144712,7 +146412,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				})
 			])
 		]),
-		createBaseVNode("fieldset", _hoisted_5$q, [
+		createBaseVNode("fieldset", _hoisted_5$r, [
 			_cache[24] || (_cache[24] = createBaseVNode(
 				"legend",
 				null,
@@ -144727,7 +146427,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				-1
 				/* CACHED */
 			)),
-			createBaseVNode("div", _hoisted_6$p, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_6$q, [createVNode($setup["AcuFormRow"], {
 				label: "任务描述",
 				hint: "说明这个推进任务负责什么。留空时不参与 Agent Skill 判断。"
 			}, {
@@ -144754,7 +146454,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value"])]),
 				_: 1
 			})]),
-			createBaseVNode("div", _hoisted_7$m, [
+			createBaseVNode("div", _hoisted_7$n, [
 				createVNode($setup["AcuToggle"], {
 					"model-value": $props.task.agentControl.enabled,
 					label: $props.task.agentControl.enabled ? "Agent 可控制此任务" : "Agent 不控制此任务",
@@ -144781,7 +146481,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.patchAgentControl({ allowParallel: $event }))
 				}, null, 8, ["model-value"])
 			]),
-			createBaseVNode("div", _hoisted_8$l, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_8$m, [createVNode($setup["AcuFormRow"], {
 				label: "偏好阶段",
 				hint: "Agent 排序参考；留空则不指定。"
 			}, {
@@ -144806,7 +146506,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value"])]),
 				_: 1
 			})]),
-			createBaseVNode("div", _hoisted_9$i, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_9$j, [createVNode($setup["AcuFormRow"], {
 				label: "依赖任务 ID",
 				hint: "逗号分隔。Agent 排序时应先执行这些任务；非法或循环依赖会在运行时校验。"
 			}, {
@@ -144830,7 +146530,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				_: 1
 			})])
 		]),
-		createBaseVNode("fieldset", _hoisted_10$h, [_cache[26] || (_cache[26] = createBaseVNode(
+		createBaseVNode("fieldset", _hoisted_10$i, [_cache[26] || (_cache[26] = createBaseVNode(
 			"legend",
 			null,
 			"当前任务使用的 API",
@@ -144848,7 +146548,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, null, 8, ["options", "model-value"])]),
 			_: 1
 		})]),
-		createBaseVNode("fieldset", _hoisted_11$f, [_cache[27] || (_cache[27] = createBaseVNode(
+		createBaseVNode("fieldset", _hoisted_11$g, [_cache[27] || (_cache[27] = createBaseVNode(
 			"legend",
 			null,
 			"提示词段（promptGroup）",
@@ -144861,11 +146561,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			onMove: _cache[21] || (_cache[21] = (index, delta) => _ctx.$emit("segment-move", index, delta)),
 			onUpdate: _cache[22] || (_cache[22] = (index, patch) => _ctx.$emit("segment-update", index, patch))
 		}, null, 8, ["segments"])])
-	])) : (openBlock(), createElementBlock("div", _hoisted_12$c, " 请在上方选择一个任务进行编辑。 "));
+	])) : (openBlock(), createElementBlock("div", _hoisted_12$d, " 请在上方选择一个任务进行编辑。 "));
     }
-    var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$M, [["render", _sfc_render$M], ["__scopeId", "data-v-0d30f745"]]);
+    var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$N, [["render", _sfc_render$N], ["__scopeId", "data-v-0d30f745"]]);
 
-    var _sfc_main$L = /*@__PURE__*/ defineComponent({
+    var _sfc_main$M = /*@__PURE__*/ defineComponent({
         __name: 'PlotTaskList',
         props: {
             tasks: {},
@@ -144891,32 +146591,32 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-tasks[data-v-ee3c6f4c] {\r\n  margin: 0; padding: 0 0 14px;\r\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex; flex-direction: column; gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-tasks > legend[data-v-ee3c6f4c] {\r\n  padding: 0;\r\n  font-size: var(--acu-font-size-section-title, 12px); font-weight: 600; color: var(--acu-text-2);\r\n  display: flex; align-items: center; gap: 10px;\n}\n.acu-v2-plot-tasks__toolbar[data-v-ee3c6f4c] { display: inline-flex; gap: 4px;\n}\n.acu-v2-plot-tasks__cards[data-v-ee3c6f4c] {\r\n  display: flex; gap: 8px;\r\n  min-width: 0;\r\n  overflow-x: auto;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c] {\r\n  flex: 0 0 140px;\r\n  min-height: 100px;\r\n  display: flex; flex-direction: column; gap: 6px;\r\n  padding: 10px 12px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  color: inherit;\r\n  cursor: pointer;\r\n  font: inherit;\r\n  text-align: left;\r\n  transition: box-shadow 0.15s ease, color 0.15s ease, opacity 0.15s ease;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:hover,\r\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:focus-visible {\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\r\n  outline: none;\n}\n.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__card--disabled[data-v-ee3c6f4c] {\r\n  opacity: 0.5;\n}\n.acu-v2-plot-tasks__card--disabled.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  opacity: 0.7;\n}\n.acu-v2-plot-tasks__card--disabled .acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  text-decoration: line-through;\n}\n.acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-list-title, 13px); color: var(--acu-text-1); font-weight: 500;\r\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__name[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__stage[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__stage[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\r\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-text-3);\r\n  margin-top: auto;\n}\n.acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-warning);\r\n  font-weight: 500;\n}\n.acu-v2-plot-tasks__empty[data-v-ee3c6f4c] {\r\n  padding: 16px 12px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  flex: 1;\n}\r\n", "src/presentation-v2/components/PlotTaskList.vue#style-0-ee3c6f4c");
     var PlotTaskList_vue_vue_type_style_index_0_scoped_ee3c6f4c_lang = null;
 
-    const _hoisted_1$L = { class: "acu-v2-plot-tasks" };
-    const _hoisted_2$E = { class: "acu-v2-plot-tasks__toolbar" };
-    const _hoisted_3$y = { class: "acu-v2-plot-tasks__cards" };
-    const _hoisted_4$u = ["onClick"];
-    const _hoisted_5$p = { class: "acu-v2-plot-tasks__name" };
-    const _hoisted_6$o = {
+    const _hoisted_1$M = { class: "acu-v2-plot-tasks" };
+    const _hoisted_2$F = { class: "acu-v2-plot-tasks__toolbar" };
+    const _hoisted_3$z = { class: "acu-v2-plot-tasks__cards" };
+    const _hoisted_4$v = ["onClick"];
+    const _hoisted_5$q = { class: "acu-v2-plot-tasks__name" };
+    const _hoisted_6$p = {
 	class: "acu-v2-plot-tasks__stage",
 	title: "阶段号 — 同阶段并发，跨阶段串行"
     };
-    const _hoisted_7$l = { class: "acu-v2-plot-tasks__seg-count" };
-    const _hoisted_8$k = {
+    const _hoisted_7$m = { class: "acu-v2-plot-tasks__seg-count" };
+    const _hoisted_8$l = {
 	key: 0,
 	class: "acu-v2-plot-tasks__disabled-label"
     };
-    const _hoisted_9$h = {
+    const _hoisted_9$i = {
 	key: 0,
 	class: "acu-v2-plot-tasks__empty"
     };
-    function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("fieldset", _hoisted_1$L, [createBaseVNode("legend", null, [_cache[4] || (_cache[4] = createBaseVNode(
+    function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("fieldset", _hoisted_1$M, [createBaseVNode("legend", null, [_cache[4] || (_cache[4] = createBaseVNode(
 		"span",
 		null,
 		"剧情任务列表",
 		-1
 		/* CACHED */
-	)), createBaseVNode("span", _hoisted_2$E, [
+	)), createBaseVNode("span", _hoisted_2$F, [
 		createVNode($setup["AcuIconButton"], {
 			icon: "fa-solid fa-arrow-left",
 			size: "sm",
@@ -144946,7 +146646,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			title: "新增任务",
 			onClick: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("add"))
 		})
-	])]), createBaseVNode("div", _hoisted_3$y, [(openBlock(true), createElementBlock(
+	])]), createBaseVNode("div", _hoisted_3$z, [(openBlock(true), createElementBlock(
 		Fragment,
 		null,
 		renderList($props.tasks, (task) => {
@@ -144961,35 +146661,35 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, [
 				createBaseVNode(
 					"span",
-					_hoisted_5$p,
+					_hoisted_5$q,
 					toDisplayString(task.name),
 					1
 					/* TEXT */
 				),
 				createBaseVNode(
 					"span",
-					_hoisted_6$o,
+					_hoisted_6$p,
 					"阶段 " + toDisplayString(task.stage),
 					1
 					/* TEXT */
 				),
 				createBaseVNode(
 					"span",
-					_hoisted_7$l,
+					_hoisted_7$m,
 					toDisplayString(task.promptGroup.length) + " 段",
 					1
 					/* TEXT */
 				),
-				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$k, "已禁用")) : createCommentVNode("v-if", true)
-			], 10, _hoisted_4$u);
+				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$l, "已禁用")) : createCommentVNode("v-if", true)
+			], 10, _hoisted_4$v);
 		}),
 		128
 		/* KEYED_FRAGMENT */
-	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$h, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
+	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$i, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
     }
-    var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-ee3c6f4c"]]);
+    var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$M, [["render", _sfc_render$M], ["__scopeId", "data-v-ee3c6f4c"]]);
 
-    var _sfc_main$K = /*@__PURE__*/ defineComponent({
+    var _sfc_main$L = /*@__PURE__*/ defineComponent({
         __name: 'PlotPresetDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -145024,18 +146724,18 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-drawer__create-btn[data-v-47605d60] {\r\n  width: 100%;\n}\n.acu-v2-plot-drawer__empty[data-v-47605d60] {\r\n  margin-top: 20px;\n}\n.acu-v2-plot-drawer__actions[data-v-47605d60] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  padding-top: 12px;\r\n  margin-top: 12px;\n}\r\n\r\n/* manage list */\n.acu-v2-manage-list[data-v-47605d60] {\r\n  list-style: none;\r\n  margin: 0;\r\n  padding: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-47605d60] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 10px;\r\n  padding: 10px 12px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-47605d60]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-47605d60] {\r\n  flex: 1;\r\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-47605d60] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-47605d60] {\r\n  display: block;\r\n  margin-top: 2px;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-47605d60] {\r\n  display: flex;\r\n  gap: 4px;\n}\r\n\r\n/* form */\n.acu-v2-form[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-form__section[data-v-47605d60] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-v2-form__section[data-v-47605d60]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-form__section legend[data-v-47605d60] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-drawer__rules[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-error[data-v-47605d60] {\r\n  padding: 8px 10px;\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\n}\r\n", "src/presentation-v2/components/PlotPresetDrawer.vue#style-0-47605d60");
     var PlotPresetDrawer_vue_vue_type_style_index_0_scoped_47605d60_lang = null;
 
-    const _hoisted_1$K = {
+    const _hoisted_1$L = {
 	key: 0,
 	class: "acu-v2-manage-list"
     };
-    const _hoisted_2$D = { class: "acu-v2-manage-item__info" };
-    const _hoisted_3$x = { class: "acu-v2-manage-item__actions" };
-    const _hoisted_4$t = { class: "acu-v2-form__section" };
-    const _hoisted_5$o = { class: "acu-v2-form__section" };
-    const _hoisted_6$n = { class: "acu-v2-plot-drawer__rules" };
-    const _hoisted_7$k = { class: "acu-v2-form__section" };
-    const _hoisted_8$j = { class: "acu-v2-plot-drawer__actions" };
-    function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_2$E = { class: "acu-v2-manage-item__info" };
+    const _hoisted_3$y = { class: "acu-v2-manage-item__actions" };
+    const _hoisted_4$u = { class: "acu-v2-form__section" };
+    const _hoisted_5$p = { class: "acu-v2-form__section" };
+    const _hoisted_6$o = { class: "acu-v2-plot-drawer__rules" };
+    const _hoisted_7$l = { class: "acu-v2-form__section" };
+    const _hoisted_8$k = { class: "acu-v2-plot-drawer__actions" };
+    function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: $props.title,
@@ -145065,14 +146765,14 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* CACHED */
 				)])]),
 				_: 1
-			}), $props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_1$K, [(openBlock(true), createElementBlock(
+			}), $props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_1$L, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($props.presetMeta, (meta) => {
 					return openBlock(), createElementBlock("li", {
 						key: meta.name,
 						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_2$D, [createVNode(
+					}, [createBaseVNode("div", _hoisted_2$E, [createVNode(
 						$setup["AcuText"],
 						{
 							as: "span",
@@ -145112,7 +146812,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						},
 						1024
 						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_3$x, [
+					)]), createBaseVNode("div", _hoisted_3$y, [
 						createVNode($setup["AcuIconButton"], {
 							icon: meta.name === $props.defaultPresetName ? "fa-solid fa-star" : "fa-regular fa-star",
 							title: "设为全局默认",
@@ -145167,7 +146867,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onSubmit: _cache[14] || (_cache[14] = withModifiers(($event) => _ctx.$emit("save"), ["prevent"]))
 				},
 				[
-					createBaseVNode("fieldset", _hoisted_4$t, [_cache[19] || (_cache[19] = createBaseVNode(
+					createBaseVNode("fieldset", _hoisted_4$u, [_cache[19] || (_cache[19] = createBaseVNode(
 						"legend",
 						null,
 						"基础信息",
@@ -145182,7 +146882,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						}, null, 8, ["model-value"])]),
 						_: 1
 					})]),
-					createBaseVNode("fieldset", _hoisted_5$o, [
+					createBaseVNode("fieldset", _hoisted_5$p, [
 						_cache[21] || (_cache[21] = createBaseVNode(
 							"legend",
 							null,
@@ -145201,7 +146901,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)])]),
 							_: 1
 						}),
-						createBaseVNode("div", _hoisted_6$n, [createVNode($setup["AcuRulePairList"], {
+						createBaseVNode("div", _hoisted_6$o, [createVNode($setup["AcuRulePairList"], {
 							label: "提取规则",
 							"model-value": $props.contextRules.extractRules,
 							"start-placeholder": "提取开始边界",
@@ -145260,7 +146960,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"api-preset-options",
 						"task-api-override"
 					]),
-					createBaseVNode("fieldset", _hoisted_7$k, [_cache[22] || (_cache[22] = createBaseVNode(
+					createBaseVNode("fieldset", _hoisted_7$l, [_cache[22] || (_cache[22] = createBaseVNode(
 						"legend",
 						null,
 						"最终注入指令",
@@ -145285,7 +146985,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("footer", _hoisted_8$j, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
+					createBaseVNode("footer", _hoisted_8$k, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
 						default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
 							"关闭",
 							-1
@@ -145318,9 +147018,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		"before-close"
 	]);
     }
-    var PlotPresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-47605d60"]]);
+    var PlotPresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-47605d60"]]);
 
-    var _sfc_main$J = /*@__PURE__*/ defineComponent({
+    var _sfc_main$K = /*@__PURE__*/ defineComponent({
         __name: 'PlotPresetPanel',
         props: {
             showEdit: { type: Boolean, default: true },
@@ -145419,10 +147119,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-plot-preset-panel__status-line[data-v-021e572f] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-plot-preset-panel__select-row[data-v-021e572f] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  margin-bottom: 12px;\r\n  min-width: 0;\n}\r\n", "src/presentation-v2/components/PlotPresetPanel.vue#style-0-021e572f");
     var PlotPresetPanel_vue_vue_type_style_index_0_scoped_021e572f_lang = null;
 
-    const _hoisted_1$J = { class: "acu-text__value" };
-    const _hoisted_2$C = { class: "acu-text__value" };
-    const _hoisted_3$w = { class: "acu-plot-preset-panel__select-row" };
-    function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$K = { class: "acu-text__value" };
+    const _hoisted_2$D = { class: "acu-text__value" };
+    const _hoisted_3$x = { class: "acu-plot-preset-panel__select-row" };
+    function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.plotCopy.panels.preset.title,
 		description: $setup.plotCopy.panels.preset.description
@@ -145451,7 +147151,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					)),
 					createBaseVNode(
 						"strong",
-						_hoisted_1$J,
+						_hoisted_1$K,
 						toDisplayString($setup.store.activePresetName || "默认预设"),
 						1
 						/* TEXT */
@@ -145465,7 +147165,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* CACHED */
 						)), createBaseVNode(
 							"strong",
-							_hoisted_2$C,
+							_hoisted_2$D,
 							toDisplayString($setup.store.defaultPresetName),
 							1
 							/* TEXT */
@@ -145500,7 +147200,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				_: 1
 			}),
-			createBaseVNode("div", _hoisted_3$w, [
+			createBaseVNode("div", _hoisted_3$x, [
 				createVNode($setup["AcuPresetDropdown"], {
 					items: $setup.presetDropdownItems,
 					"model-value": $setup.store.activePresetName,
@@ -145611,9 +147311,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var PlotPresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-021e572f"]]);
+    var PlotPresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-021e572f"]]);
 
-    var _sfc_main$I = /*@__PURE__*/ defineComponent({
+    var _sfc_main$J = /*@__PURE__*/ defineComponent({
         __name: 'TablePresetDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -145635,14 +147335,14 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-table-drawer__top-actions[data-v-6ee589ee] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n}\n.acu-v2-manage-list[data-v-6ee589ee] {\n  list-style: none;\n  margin: 0;\n  padding: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-6ee589ee] {\n  display: flex;\n  align-items: center;\n  gap: 10px;\n  padding: 10px 12px;\n  border: 0;\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-6ee589ee]:last-child {\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-6ee589ee] {\n  flex: 1;\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-6ee589ee] {\n  display: block;\n  font-size: var(--acu-font-size-list-title, 13px);\n  line-height: var(--acu-line-height-body, 1.45);\n  font-weight: 500;\n  color: var(--acu-text-1);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-6ee589ee] {\n  display: block;\n  margin-top: 2px;\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: var(--acu-line-height-caption, 1.5);\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-6ee589ee] {\n  display: flex;\n  gap: 4px;\n}\n.acu-v2-table-drawer__empty[data-v-6ee589ee] {\n  margin: 12px 0;\n}\n\n", "src/presentation-v2/components/TablePresetDrawer.vue#style-0-6ee589ee");
     var TablePresetDrawer_vue_vue_type_style_index_0_scoped_6ee589ee_lang = null;
 
-    const _hoisted_1$I = { class: "acu-v2-table-drawer__top-actions" };
-    const _hoisted_2$B = {
+    const _hoisted_1$J = { class: "acu-v2-table-drawer__top-actions" };
+    const _hoisted_2$C = {
 	key: 1,
 	class: "acu-v2-manage-list"
     };
-    const _hoisted_3$v = { class: "acu-v2-manage-item__info" };
-    const _hoisted_4$s = { class: "acu-v2-manage-item__actions" };
-    function _sfc_render$I(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$w = { class: "acu-v2-manage-item__info" };
+    const _hoisted_4$t = { class: "acu-v2-manage-item__actions" };
+    function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: $props.title,
@@ -145661,7 +147361,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$I, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_1$J, [createVNode($setup["AcuButton"], {
 				variant: "primary",
 				disabled: $props.busy,
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("create-blank"))
@@ -145679,14 +147379,14 @@ Expected function or array of functions, received type ${typeof value}.`
 				)])]),
 				_: 1
 			}, 8, ["disabled"])]),
-			$props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_2$B, [(openBlock(true), createElementBlock(
+			$props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_2$C, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($props.presetMeta, (meta) => {
 					return openBlock(), createElementBlock("li", {
 						key: meta.name,
 						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_3$v, [createVNode(
+					}, [createBaseVNode("div", _hoisted_3$w, [createVNode(
 						$setup["AcuText"],
 						{
 							as: "span",
@@ -145738,7 +147438,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						},
 						1024
 						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_4$s, [meta.kind === "runtime" ? (openBlock(), createElementBlock(
+					)]), createBaseVNode("div", _hoisted_4$t, [meta.kind === "runtime" ? (openBlock(), createElementBlock(
 						Fragment,
 						{ key: 0 },
 						[createCommentVNode(" 只读 runtime 项：仅导出，不渲染 star/rename/edit/delete "), createVNode($setup["AcuIconButton"], {
@@ -145824,7 +147524,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var TablePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-6ee589ee"]]);
+    var TablePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-6ee589ee"]]);
 
     /**
      * root-shell-store — 顶层外壳状态（开关、挂载次数）
@@ -146924,6 +148624,95 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     /**
+     * templateFollowGlobalFlow — "跟随全局（清除聊天覆盖）"的共享 UI 流程（S1-2）。
+     *
+     * 三个消费口复用同一流程，避免破坏性确认/stale 重试逻辑出现第三份复制：
+     * 1. 模板面板的"跟随全局"按钮（useTableTemplatePresets.followGlobalTemplate）
+     * 2. 下拉星标设全局默认后的清覆盖确认（useTableTemplatePresets.selectGlobalPreset）
+     * 3. 抽屉星标设全局默认后的清覆盖确认（useTablePresetManagement.setAsDefault）
+     *
+     * 流程：数据恢复守卫 → followGlobalTemplateForCurrentChat_ACU（单次 stale 重试）
+     * → 破坏性 blockers 二次确认 → toast 反馈。模块级函数、不持 Vue 状态，
+     * dialogStore/toast/signal 由调用方注入。
+     */
+    function isStaleRevisionConflict$2(result) {
+        return !!result
+            && typeof result === 'object'
+            && result.saved === false
+            && /^V2 stale_revision_conflict(?:\b|:)/.test(String(result.error || ''));
+    }
+    /**
+     * 执行"跟随全局"完整流程。返回 true 表示已成功跟随全局（或本就在跟随），
+     * false 表示用户取消、守卫失败或提交失败（失败已 toast）。
+     */
+    async function runFollowGlobalTemplateFlow_ACU({ dialogStore, toast, signal, }) {
+        const globalSnapshot = getGlobalTemplateSnapshotForCurrentProfile_ACU();
+        const guideData = globalSnapshot?.templateObj
+            ? buildChatSheetGuideDataFromTemplateObj_ACU(globalSnapshot.templateObj, { stripSeedRows: false })
+            : null;
+        const recoveryGuard = await ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU(guideData, 'switch-template');
+        if (!recoveryGuard.success)
+            return false;
+        const applyWithSingleStaleRetry = async (destructiveChangeConfirmed) => {
+            const firstAttempt = await followGlobalTemplateForCurrentChat_ACU({ destructiveChangeConfirmed, signal });
+            if (!isStaleRevisionConflict$2(firstAttempt))
+                return firstAttempt;
+            if (signal?.aborted)
+                return firstAttempt;
+            return followGlobalTemplateForCurrentChat_ACU({ destructiveChangeConfirmed, signal });
+        };
+        let result = await applyWithSingleStaleRetry(false);
+        if (result && result.saved === false && Array.isArray(result.blockers) && result.blockers.length > 0) {
+            const destructiveBlockers = result.blockers.filter((blocker) => (typeof blocker === 'string' && /删除(?:表|列).+需要显式确认/.test(blocker)));
+            if (destructiveBlockers.length > 0) {
+                const confirmed = await dialogStore.confirm({
+                    title: '确认破坏性模板变更',
+                    message: `跟随全局模板会删除现有表或列：\n${destructiveBlockers.join('\n')}`,
+                    dangerMessage: '确认后将按 V2 原子提交执行。删除的数据只能通过聊天备份或 checkpoint 恢复。',
+                    confirmLabel: '确认删除并继续',
+                    cancelLabel: '取消',
+                    confirmVariant: 'danger',
+                });
+                if (!confirmed)
+                    return false;
+                result = await applyWithSingleStaleRetry(true);
+            }
+        }
+        if (!result || result.saved !== true) {
+            toast.error((result && typeof result.error === 'string' && result.error) || '跟随全局模板失败。');
+            return false;
+        }
+        if (result.alreadyFollowing) {
+            toast.info('当前聊天已跟随全局模板，无需清除覆盖。');
+            return true;
+        }
+        const warning = typeof result.postCommitWarning === 'string' ? result.postCommitWarning : '';
+        if (warning) {
+            toast.warning(warning, { muteable: false, durationMs: 6000 });
+        }
+        else {
+            toast.success('已清除聊天模板覆盖，当前聊天跟随全局模板。', { muteable: false });
+        }
+        return true;
+    }
+    /**
+     * 星标设全局默认成功后的清覆盖确认（S1-2 成因 c）：
+     * 当前聊天存在 chat_override 时询问是否清除；拒绝则保持覆盖（合法状态）。
+     * 返回 true 表示已清除覆盖。
+     */
+    async function promptFollowGlobalAfterSetDefault_ACU({ dialogStore, toast, signal, newDefaultName, }) {
+        const confirmed = await dialogStore.confirm({
+            title: '清除当前聊天的模板覆盖？',
+            message: `「${newDefaultName || '默认预设'}」已设为全局默认，但当前聊天正在使用聊天级模板覆盖，新的全局默认不会在本聊天生效。\n是否清除覆盖，让当前聊天跟随全局模板？`,
+            confirmLabel: '清除覆盖并跟随全局',
+            cancelLabel: '保留聊天覆盖',
+        });
+        if (!confirmed)
+            return false;
+        return runFollowGlobalTemplateFlow_ACU({ dialogStore, toast, signal });
+    }
+
+    /**
      * useTablePresetManagement — 表格模板预设抽屉的状态机
      *
      * 借鉴 usePlotPresetManagement，但表格模板的编辑器是独立窗口（可视化表格编辑器），
@@ -147020,6 +148809,45 @@ Expected function or array of functions, received type ${typeof value}.`
                 refresh();
             }
         }
+        /**
+         * 带破坏性确认与单次 stale 重试的预设应用（editPreset / setAsDefault /
+         * deletePreset 默认回退共用）。updateGlobal:true 时（S1-3）全局切换会经协调器，
+         * 与 chat 路径一样可能返回破坏性 blockers。
+         */
+        async function applyPresetWithDestructiveConfirmAndRetry(presetName, options) {
+            const applyWithSingleStaleRetry = async (destructiveChangeConfirmed) => {
+                const buildOptions = () => ({
+                    source: options.source,
+                    updateGlobal: options.updateGlobal,
+                    save: true,
+                    persistChatScope: options.persistChatScope,
+                    destructiveChangeConfirmed,
+                    signal: templateOperationController.signal,
+                });
+                const firstAttempt = await applyTemplatePresetToCurrent_ACU(presetName, buildOptions());
+                if (!isStaleRevisionConflict$1(firstAttempt))
+                    return firstAttempt;
+                if (templateOperationController.signal.aborted)
+                    return firstAttempt;
+                return applyTemplatePresetToCurrent_ACU(presetName, buildOptions());
+            };
+            const firstResult = await applyWithSingleStaleRetry(false);
+            if (!firstResult || firstResult.saved !== false || !Array.isArray(firstResult.blockers) || firstResult.blockers.length === 0) {
+                return firstResult;
+            }
+            const destructiveBlockers = firstResult.blockers.filter((blocker) => (typeof blocker === 'string' && /删除(?:表|列).+需要显式确认/.test(blocker)));
+            if (destructiveBlockers.length === 0)
+                return firstResult;
+            const confirmed = await dialogStore.confirm({
+                title: '确认破坏性模板变更',
+                message: `此模板变更会删除现有表或列：\n${destructiveBlockers.join('\n')}`,
+                dangerMessage: '确认后将按 V2 原子提交执行。删除的数据只能通过聊天备份或 checkpoint 恢复。',
+                confirmLabel: '确认删除并继续',
+                cancelLabel: '取消',
+                confirmVariant: 'danger',
+            });
+            return confirmed ? applyWithSingleStaleRetry(true) : firstResult;
+        }
         /** 打开可视化表格编辑器；编辑当前生效的模板。 */
         async function openVisualizer() {
             await run(async () => {
@@ -147048,45 +148876,11 @@ Expected function or array of functions, received type ${typeof value}.`
                 const guard = await ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU(guideData, 'switch-template');
                 if (!guard.success)
                     return;
-                const applyWithSingleStaleRetry = async (destructiveChangeConfirmed) => {
-                    const firstAttempt = await applyTemplatePresetToCurrent_ACU(normalized, {
-                        source: 'v2_table_drawer_edit',
-                        updateGlobal: false,
-                        save: true,
-                        persistChatScope: true,
-                        destructiveChangeConfirmed,
-                        signal: templateOperationController.signal,
-                    });
-                    if (!isStaleRevisionConflict$1(firstAttempt))
-                        return firstAttempt;
-                    if (templateOperationController.signal.aborted)
-                        return firstAttempt;
-                    return applyTemplatePresetToCurrent_ACU(normalized, {
-                        source: 'v2_table_drawer_edit',
-                        updateGlobal: false,
-                        save: true,
-                        persistChatScope: true,
-                        destructiveChangeConfirmed,
-                        signal: templateOperationController.signal,
-                    });
-                };
-                const firstResult = await applyWithSingleStaleRetry(false);
-                let result = firstResult;
-                if (firstResult && firstResult.saved === false && Array.isArray(firstResult.blockers) && firstResult.blockers.length > 0) {
-                    const destructiveBlockers = firstResult.blockers.filter((blocker) => (typeof blocker === 'string' && /删除(?:表|列).+需要显式确认/.test(blocker)));
-                    if (destructiveBlockers.length > 0) {
-                        const confirmed = await dialogStore.confirm({
-                            title: '确认破坏性模板变更',
-                            message: `此模板变更会删除现有表或列：\n${destructiveBlockers.join('\n')}`,
-                            dangerMessage: '确认后将按 V2 原子提交执行。删除的数据只能通过聊天备份或 checkpoint 恢复。',
-                            confirmLabel: '确认删除并继续',
-                            cancelLabel: '取消',
-                            confirmVariant: 'danger',
-                        });
-                        if (confirmed)
-                            result = await applyWithSingleStaleRetry(true);
-                    }
-                }
+                const result = await applyPresetWithDestructiveConfirmAndRetry(normalized, {
+                    source: 'v2_table_drawer_edit',
+                    updateGlobal: false,
+                    persistChatScope: true,
+                });
                 const applyError = getTemplateApplyError_ACU(result, '切换到目标预设失败。');
                 if (applyError)
                     throw new Error(applyError);
@@ -147108,15 +148902,29 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             const normalized = normalizeTemplatePresetSelectionValue_ACU(name);
             await run(async () => {
-                const result = await applyTemplatePresetToCurrent_ACU(normalized, {
+                // S1-3：当前聊天 inherit_global 时设默认会经协调器切换生效模板，
+                // 破坏性 blockers 需确认重试；失败则全局默认不变（fail-closed）。
+                const result = await applyPresetWithDestructiveConfirmAndRetry(normalized, {
                     source: 'v2_table_drawer_set_default',
                     updateGlobal: true,
-                    save: true,
                     persistChatScope: false,
                 });
-                if (!result)
-                    throw new Error('设为全局默认失败。');
+                const applyError = getTemplateApplyError_ACU(result, '设为全局默认失败。');
+                if (applyError)
+                    throw new Error(applyError);
+                const applyWarning = getTemplateApplyWarning_ACU(result);
+                if (applyWarning)
+                    toast.warning(applyWarning, { muteable: false, durationMs: 6000 });
                 toast.success(`「${normalized || '默认预设'}」已设为全局默认。`);
+                // S1-2：当前聊天存在覆盖时，新全局默认不会生效——确认后清覆盖跟随全局。
+                if (getActiveTemplatePresetMeta_ACU().mode === 'chat_override') {
+                    await promptFollowGlobalAfterSetDefault_ACU({
+                        dialogStore,
+                        toast,
+                        signal: templateOperationController.signal,
+                        newDefaultName: normalized,
+                    });
+                }
             });
         }
         async function deletePreset(name) {
@@ -147141,10 +148949,11 @@ Expected function or array of functions, received type ${typeof value}.`
                 const wasGlobalDefault = defaultPresetName.value === normalized;
                 const wasActive = normalizeTemplatePresetSelectionValue_ACU(resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true })) === normalized;
                 if (wasGlobalDefault) {
-                    const globalResult = await applyTemplatePresetToCurrent_ACU('', {
+                    // S1-3：回退到内置默认模板同样经协调器（inherit_global 聊天生效模板会变），
+                    // 破坏性 blockers 需确认重试；失败则中止删除（fail-closed）。
+                    const globalResult = await applyPresetWithDestructiveConfirmAndRetry('', {
                         source: 'v2_table_drawer_delete_default_fallback',
                         updateGlobal: true,
-                        save: true,
                         persistChatScope: false,
                     });
                     const globalError = getTemplateApplyError_ACU(globalResult, '全局默认回退失败，未删除预设。');
@@ -147376,6 +149185,33 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         return text;
     }
+    /**
+     * S3-8 名称/内容指纹：判断当前聊天快照内容是否偏离库中同名预设。
+     *
+     * 可比性关键：chat scope 的 templateStr 写入时经过 sanitizeTemplateSnapshotForChat_ACU，
+     * 而库 preset 的 templateStr 是保存时的原始串——两侧都先 sanitize 同构化后再比较，
+     * 否则序列化差异会造成恒误报。任一侧解析失败时宁可不标记也不误报。
+     */
+    function computeChatSnapshotDiff(snapshotTemplateStr, presetName) {
+        const chatSanitized = sanitizeTemplateSnapshotForChat_ACU(snapshotTemplateStr || null);
+        if (!chatSanitized?.templateStr)
+            return { differs: false, reason: null };
+        let librarySanitized;
+        if (presetName) {
+            const libraryStr = getTemplatePreset_ACU(presetName)?.templateStr;
+            if (!libraryStr)
+                return { differs: true, reason: 'library_preset_missing' };
+            librarySanitized = sanitizeTemplateSnapshotForChat_ACU(libraryStr);
+        }
+        else {
+            librarySanitized = getDefaultTemplateSnapshot_ACU();
+        }
+        if (!librarySanitized?.templateStr)
+            return { differs: false, reason: null };
+        return chatSanitized.templateStr === librarySanitized.templateStr
+            ? { differs: false, reason: null }
+            : { differs: true, reason: 'diverged' };
+    }
     function resolveGuideDataForPresetSelection(selection) {
         const normalized = normalizeTemplatePresetSelectionValue_ACU(selection.name);
         const chatScopeState = selection.kind === 'snapshot' ? getCurrentChatTemplateScopeState_ACU() : null;
@@ -147409,6 +149245,8 @@ Expected function or array of functions, received type ${typeof value}.`
         const runtimeTemplateItem = ref(null);
         const runtimeDiffersFromLibrary = ref(false);
         const runtimeTemplateAvailable = ref(false);
+        /** S3-8：当前聊天快照内容是否偏离库中同名预设（仅 chat_override 模式下可能为 true）。 */
+        const chatSnapshotDiffersFromLibrary = ref(false);
         const isChatOverridden = computed(() => activeTemplateScope.value === 'chat');
         function buildChatPresetItems(globalNames, _currentGlobalPreset, activeMeta, runtimeItem) {
             const seen = new Set();
@@ -147429,6 +149267,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 seen.add(value);
                 items.push({ value, label: `${normalized}（全局预设）`, meta: formatSheetCountMeta(getTemplatePreset_ACU(normalized)?.templateStr) });
             }
+            chatSnapshotDiffersFromLibrary.value = false;
             if (activeMeta.mode === 'chat_override') {
                 const currentScope = getCurrentChatTemplateScopeState_ACU();
                 // 空 presetName 是当前聊天选择“默认模板”的有效标识，不能用 || 回退旧全局预设。
@@ -147436,10 +149275,17 @@ Expected function or array of functions, received type ${typeof value}.`
                 const value = encodeChatPresetValue('snapshot', normalized);
                 if (!seen.has(value)) {
                     seen.add(value);
+                    // S3-8：快照内容偏离库中同名预设时在标签处明示，避免同名不同内容的静默混淆。
+                    const diff = computeChatSnapshotDiff(currentScope?.templateStr, normalized);
+                    chatSnapshotDiffersFromLibrary.value = diff.differs;
+                    const divergenceSuffix = diff.reason === 'diverged' ? '（内容已偏离库预设）' : '';
+                    const metaParts = [formatSheetCountMeta(currentScope?.templateStr)].filter(Boolean);
+                    if (diff.reason === 'library_preset_missing')
+                        metaParts.push('库中已无同名预设');
                     items.push({
                         value,
-                        label: `${normalized || '默认预设'}（当前聊天快照）`,
-                        meta: formatSheetCountMeta(currentScope?.templateStr),
+                        label: `${normalized || '默认预设'}（当前聊天快照）${divergenceSuffix}`,
+                        meta: metaParts.length > 0 ? metaParts.join(' · ') : undefined,
                     });
                 }
             }
@@ -147526,14 +149372,44 @@ Expected function or array of functions, received type ${typeof value}.`
             const decoded = decodeChatPresetValue(name);
             const normalized = normalizeTemplatePresetSelectionValue_ACU(decoded.name);
             await run(async () => {
-                const result = await applyTemplatePresetToCurrent_ACU(normalized, {
+                // S1-3：当前聊天 inherit_global 时全局切换会经协调器提交，可能返回破坏性
+                // blockers（需确认重试）或 saved:false（fail-closed，全局未变）。
+                const result = await applyChatTemplateWithDestructiveConfirmation(destructiveChangeConfirmed => applyTemplatePresetToCurrent_ACU(normalized, {
                     source: 'v2_table_global_select',
                     updateGlobal: true,
                     save: true,
                     persistChatScope: false,
-                });
+                    destructiveChangeConfirmed,
+                    signal: templateOperationController.signal,
+                }));
                 if (!result)
                     throw new Error('全局模板预设切换失败。');
+                if (typeof result === 'object' && result.saved === false) {
+                    throw new Error(typeof result.error === 'string' && result.error ? result.error : '全局模板预设切换失败。');
+                }
+                if (typeof result === 'object' && typeof result.postCommitWarning === 'string' && result.postCommitWarning) {
+                    toast.warning(result.postCommitWarning, { muteable: false, durationMs: 6000 });
+                }
+                message.value = null;
+                // S1-2：当前聊天存在覆盖时，新全局默认不会生效——确认后清覆盖跟随全局。
+                if (getActiveTemplatePresetMeta_ACU().mode === 'chat_override') {
+                    await promptFollowGlobalAfterSetDefault_ACU({
+                        dialogStore,
+                        toast,
+                        signal: templateOperationController.signal,
+                        newDefaultName: normalized,
+                    });
+                }
+            });
+        }
+        /** 跟随全局（清除聊天覆盖）：协调到当前全局模板并把 scope 置回 inherit_global（S1-2）。 */
+        async function followGlobalTemplate() {
+            await run(async () => {
+                await runFollowGlobalTemplateFlow_ACU({
+                    dialogStore,
+                    toast,
+                    signal: templateOperationController.signal,
+                });
                 message.value = null;
             });
         }
@@ -147684,9 +149560,13 @@ Expected function or array of functions, received type ${typeof value}.`
                     updateGlobal: true,
                     save: true,
                     persistChatScope: false,
+                    signal: templateOperationController.signal,
                 });
                 if (!result)
                     throw new Error('另存后切换全局模板预设失败。');
+                if (typeof result === 'object' && result.saved === false) {
+                    throw new Error(typeof result.error === 'string' && result.error ? result.error : '另存后切换全局模板预设失败。');
+                }
                 message.value = null;
                 toast.success(`已另存为全局模板预设「${finalName}」。`);
             });
@@ -147725,9 +149605,13 @@ Expected function or array of functions, received type ${typeof value}.`
                         updateGlobal: true,
                         save: true,
                         persistChatScope: false,
+                        signal: templateOperationController.signal,
                     });
                     if (!result)
                         throw new Error('重命名后切换全局模板预设失败。');
+                    if (typeof result === 'object' && result.saved === false) {
+                        throw new Error(typeof result.error === 'string' && result.error ? result.error : '重命名后切换全局模板预设失败。');
+                    }
                 }
                 message.value = null;
             });
@@ -147829,9 +149713,11 @@ Expected function or array of functions, received type ${typeof value}.`
             runtimeTemplateItem,
             runtimeDiffersFromLibrary,
             runtimeTemplateAvailable,
+            chatSnapshotDiffersFromLibrary,
             refresh,
             selectGlobalPreset,
             selectChatPreset,
+            followGlobalTemplate,
             restoreArchivedChatTemplate,
             saveGlobalAs,
             renameGlobalPreset,
@@ -147863,7 +149749,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$H = /*@__PURE__*/ defineComponent({
+    var _sfc_main$I = /*@__PURE__*/ defineComponent({
         __name: 'TableTemplatePresetPanel',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -147882,14 +149768,14 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-table-template-panel__status-line[data-v-1ca9c708] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-table-template-panel__preset-row[data-v-1ca9c708] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);\n  gap: 6px;\n  align-items: stretch;\n  min-width: 0;\n}\n.acu-table-template-panel__action-area[data-v-1ca9c708] {\n  margin-top: 10px;\n}\n.acu-table-template-panel__visualizer-button[data-v-1ca9c708] {\n  width: 100%;\n}\n\n", "src/presentation-v2/components/TableTemplatePresetPanel.vue#style-0-1ca9c708");
-    var TableTemplatePresetPanel_vue_vue_type_style_index_0_scoped_1ca9c708_lang = null;
+    injectSfcStyle("\n.acu-table-template-panel__status-line[data-v-ba7e883c] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-table-template-panel__preset-row[data-v-ba7e883c] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  min-width: 0;\n}\n.acu-table-template-panel__action-area[data-v-ba7e883c] {\r\n  margin-top: 10px;\n}\n.acu-table-template-panel__visualizer-button[data-v-ba7e883c] {\r\n  width: 100%;\n}\r\n\r\n", "src/presentation-v2/components/TableTemplatePresetPanel.vue#style-0-ba7e883c");
+    var TableTemplatePresetPanel_vue_vue_type_style_index_0_scoped_ba7e883c_lang = null;
 
-    const _hoisted_1$H = { class: "acu-text__value" };
-    const _hoisted_2$A = { class: "acu-text__value" };
-    const _hoisted_3$u = { class: "acu-table-template-panel__preset-row" };
-    const _hoisted_4$r = { class: "acu-table-template-panel__action-area" };
-    function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$I = { class: "acu-text__value" };
+    const _hoisted_2$B = { class: "acu-text__value" };
+    const _hoisted_3$v = { class: "acu-table-template-panel__preset-row" };
+    const _hoisted_4$s = { class: "acu-table-template-panel__action-area" };
+    function _sfc_render$I(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.tableCopy.panels.templatePreset.title,
 		description: $setup.tableCopy.panels.templatePreset.description
@@ -147922,14 +149808,14 @@ Expected function or array of functions, received type ${typeof value}.`
 				class: "acu-table-template-panel__status-line"
 			}, {
 				default: withCtx(() => [
-					_cache[13] || (_cache[13] = createTextVNode(
+					_cache[14] || (_cache[14] = createTextVNode(
 						" 当前聊天: ",
 						-1
 						/* CACHED */
 					)),
 					createBaseVNode(
 						"strong",
-						_hoisted_1$H,
+						_hoisted_1$I,
 						toDisplayString($setup.templates.selectedChatPresetLabel.value),
 						1
 						/* TEXT */
@@ -147943,7 +149829,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* CACHED */
 						)), createBaseVNode(
 							"strong",
-							_hoisted_2$A,
+							_hoisted_2$B,
 							toDisplayString($setup.templates.selectedGlobalPreset.value),
 							1
 							/* TEXT */
@@ -147985,11 +149871,22 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* CACHED */
 						)])]),
 						_: 1
+					})) : createCommentVNode("v-if", true),
+					$setup.templates.chatSnapshotDiffersFromLibrary.value ? (openBlock(), createBlock($setup["AcuBadge"], {
+						key: 3,
+						variant: "warning"
+					}, {
+						default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
+							" 聊天快照内容已偏离库中同名预设 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
 					})) : createCommentVNode("v-if", true)
 				]),
 				_: 1
 			}),
-			createBaseVNode("div", _hoisted_3$u, [
+			createBaseVNode("div", _hoisted_3$v, [
 				createVNode($setup["AcuPresetDropdown"], {
 					items: $setup.templates.chatPresetItems.value,
 					"model-value": $setup.templates.selectedChatPreset.value,
@@ -148011,7 +149908,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					disabled: $setup.templates.busy.value || $setup.management.busy.value,
 					onFile: _cache[2] || (_cache[2] = ($event) => $setup.templates.importPresetForCurrentChat($event))
 				}, {
-					default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
+					default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
 						"i",
 						{ class: "fa-solid fa-download" },
 						null,
@@ -148032,6 +149929,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					disabled: $setup.templates.busy.value || $setup.management.busy.value || $setup.templates.chatArchiveItems.value.length === 0,
 					onClick: $setup.templates.restoreArchivedChatTemplate
 				}, null, 8, ["disabled", "onClick"]),
+				$setup.templates.isChatOverridden.value ? (openBlock(), createBlock($setup["AcuIconButton"], {
+					key: 0,
+					icon: "fa-solid fa-link-slash",
+					title: "跟随全局（清除聊天覆盖）",
+					disabled: $setup.templates.busy.value || $setup.management.busy.value,
+					onClick: $setup.templates.followGlobalTemplate
+				}, null, 8, ["disabled", "onClick"])) : createCommentVNode("v-if", true),
 				createVNode($setup["AcuIconButton"], {
 					icon: "fa-solid fa-gear",
 					title: "管理表格模板预设",
@@ -148039,14 +149943,14 @@ Expected function or array of functions, received type ${typeof value}.`
 					onClick: $setup.management.openManage
 				}, null, 8, ["disabled", "onClick"])
 			]),
-			createBaseVNode("div", _hoisted_4$r, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_4$s, [createVNode($setup["AcuButton"], {
 				variant: "primary",
 				class: "acu-table-template-panel__visualizer-button",
 				title: "打开可视化表格编辑器",
 				disabled: $setup.templates.busy.value || $setup.management.busy.value,
 				onClick: $setup.management.openVisualizer
 			}, {
-				default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
+				default: withCtx(() => [..._cache[16] || (_cache[16] = [createBaseVNode(
 					"i",
 					{ class: "fa-solid fa-table-columns" },
 					null,
@@ -148087,7 +149991,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-1ca9c708"]]);
+    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-ba7e883c"]]);
 
     const basicConfigCopy = {
         nav: {
@@ -148098,7 +150002,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$G = /*@__PURE__*/ defineComponent({
+    var _sfc_main$H = /*@__PURE__*/ defineComponent({
         __name: 'BasicConfigPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -148117,9 +150021,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-basic-config-page[data-v-f7cbbc38] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-basic-config-page__grid[data-v-f7cbbc38] {\r\n  grid-template-areas:\r\n    \"api update\"\r\n    \"api table\"\r\n    \"api plot\";\n}\n.acu-v2-basic-config-page__api[data-v-f7cbbc38] {\r\n  grid-area: api;\n}\n.acu-v2-basic-config-page__update[data-v-f7cbbc38] {\r\n  grid-area: update;\n}\n.acu-v2-basic-config-page__table[data-v-f7cbbc38] {\r\n  grid-area: table;\n}\n.acu-v2-basic-config-page__plot[data-v-f7cbbc38] {\r\n  grid-area: plot;\n}\n@media (max-width: 860px) {\n.acu-v2-basic-config-page[data-v-f7cbbc38] {\r\n    padding: 14px;\n}\n.acu-v2-basic-config-page__grid[data-v-f7cbbc38] {\r\n    grid-template-areas:\r\n      \"api\"\r\n      \"update\"\r\n      \"table\"\r\n      \"plot\";\n}\n}\r\n", "src/presentation-v2/pages/BasicConfigPage.vue#style-0-f7cbbc38");
     var BasicConfigPage_vue_vue_type_style_index_0_scoped_f7cbbc38_lang = null;
 
-    const _hoisted_1$G = { class: "acu-v2-basic-config-page" };
-    function _sfc_render$G(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$G, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-basic-config-page__grid" }, {
+    const _hoisted_1$H = { class: "acu-v2-basic-config-page" };
+    function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$H, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-basic-config-page__grid" }, {
 		default: withCtx(() => [
 			createVNode($setup["ApiConfigPanel"], {
 				id: "basic-config-api-panel",
@@ -148142,7 +150046,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var BasicConfigPage = /*#__PURE__*/ _export_sfc(_sfc_main$G, [["render", _sfc_render$G], ["__scopeId", "data-v-f7cbbc38"]]);
+    var BasicConfigPage = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-f7cbbc38"]]);
 
     const dashboardCopy = {
         pageTitle: "仪表盘",
@@ -148404,7 +150308,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$F = /*@__PURE__*/ defineComponent({
+    var _sfc_main$G = /*@__PURE__*/ defineComponent({
         __name: 'DashboardStorageModeSection',
         props: {
             options: {},
@@ -148440,28 +150344,28 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-dashboard-storage-mode[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-dashboard-storage-mode__head[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\n.acu-dashboard-storage-mode__label[data-v-12a63c98] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 500;\n}\n.acu-dashboard-storage-mode__desc-main[data-v-12a63c98] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-dashboard-storage-mode__switch[data-v-12a63c98] {\r\n  flex: 0 0 auto;\r\n  width: 92px;\n}\n.acu-dashboard-storage-mode__cards[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\r\n  margin-top: 4px;\n}\n.acu-dashboard-storage-mode__card[data-v-12a63c98] {\r\n  position: relative;\r\n  min-width: 0;\r\n  padding: 5px 0 5px 8px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  display: grid;\r\n  grid-template-columns: 26px minmax(0, 1fr);\r\n  gap: 8px;\r\n  align-items: center;\r\n  transition:\r\n    background 0.15s ease,\r\n    box-shadow 0.15s ease;\n}\n.acu-dashboard-storage-mode__card--active[data-v-12a63c98] {\r\n  background: color-mix(in srgb, var(--acu-accent) 8%, transparent);\r\n  box-shadow:\r\n    inset 0 0 0 1px\r\n    color-mix(in srgb, var(--acu-accent) 30%, transparent);\n}\n.acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n  width: 26px;\r\n  height: 26px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-3);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  font-size: 15px;\n}\n.acu-dashboard-storage-mode__card--active .acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n  color: var(--acu-accent);\r\n  background: transparent;\n}\n.acu-dashboard-storage-mode__body[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\n}\n.acu-dashboard-storage-mode__card-head[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  flex-wrap: wrap;\r\n  gap: 6px;\n}\n.acu-dashboard-storage-mode__name[data-v-12a63c98] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 600;\r\n  line-height: 1.25;\n}\n.acu-dashboard-storage-mode__badge[data-v-12a63c98] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  min-height: 18px;\r\n  padding: 1px 6px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  line-height: 1.2;\r\n  white-space: nowrap;\n}\n.acu-dashboard-storage-mode__card--active .acu-dashboard-storage-mode__badge[data-v-12a63c98] {\r\n  background: color-mix(in srgb, var(--acu-accent) 16%, transparent);\r\n  color: var(--acu-accent);\n}\n.acu-dashboard-storage-mode__desc[data-v-12a63c98] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n@media (max-width: 640px) {\n.acu-dashboard-storage-mode__head[data-v-12a63c98] {\r\n    align-items: center;\n}\n.acu-dashboard-storage-mode__switch[data-v-12a63c98] {\r\n    width: 88px;\n}\n.acu-dashboard-storage-mode__card[data-v-12a63c98] {\r\n    grid-template-columns: minmax(0, 1fr);\n}\n.acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n    display: none;\n}\n}\r\n", "src/presentation-v2/components/DashboardStorageModeSection.vue#style-0-12a63c98");
     var DashboardStorageModeSection_vue_vue_type_style_index_0_scoped_12a63c98_lang = null;
 
-    const _hoisted_1$F = ["aria-label"];
-    const _hoisted_2$z = { class: "acu-dashboard-storage-mode__head" };
-    const _hoisted_3$t = { class: "acu-dashboard-storage-mode__label" };
-    const _hoisted_4$q = { class: "acu-dashboard-storage-mode__desc-main" };
-    const _hoisted_5$n = { class: "acu-dashboard-storage-mode__cards" };
-    const _hoisted_6$m = {
+    const _hoisted_1$G = ["aria-label"];
+    const _hoisted_2$A = { class: "acu-dashboard-storage-mode__head" };
+    const _hoisted_3$u = { class: "acu-dashboard-storage-mode__label" };
+    const _hoisted_4$r = { class: "acu-dashboard-storage-mode__desc-main" };
+    const _hoisted_5$o = { class: "acu-dashboard-storage-mode__cards" };
+    const _hoisted_6$n = {
 	class: "acu-dashboard-storage-mode__icon",
 	"aria-hidden": "true"
     };
-    const _hoisted_7$j = { class: "acu-dashboard-storage-mode__body" };
-    const _hoisted_8$i = { class: "acu-dashboard-storage-mode__card-head" };
-    const _hoisted_9$g = { class: "acu-dashboard-storage-mode__name" };
-    const _hoisted_10$g = { class: "acu-dashboard-storage-mode__badge" };
-    const _hoisted_11$e = { class: "acu-dashboard-storage-mode__desc" };
-    function _sfc_render$F(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_7$k = { class: "acu-dashboard-storage-mode__body" };
+    const _hoisted_8$j = { class: "acu-dashboard-storage-mode__card-head" };
+    const _hoisted_9$h = { class: "acu-dashboard-storage-mode__name" };
+    const _hoisted_10$h = { class: "acu-dashboard-storage-mode__badge" };
+    const _hoisted_11$f = { class: "acu-dashboard-storage-mode__desc" };
+    function _sfc_render$G(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", {
 		class: "acu-dashboard-storage-mode",
 		"aria-label": $setup.dashboardCopy.storage.sectionLabel
 	}, [
-		createBaseVNode("div", _hoisted_2$z, [createBaseVNode(
+		createBaseVNode("div", _hoisted_2$A, [createBaseVNode(
 			"span",
-			_hoisted_3$t,
+			_hoisted_3$u,
 			toDisplayString($setup.dashboardCopy.storage.sectionLabel),
 			1
 			/* TEXT */
@@ -148479,12 +150383,12 @@ Expected function or array of functions, received type ${typeof value}.`
 		])]),
 		createBaseVNode(
 			"p",
-			_hoisted_4$q,
+			_hoisted_4$r,
 			toDisplayString($setup.dashboardCopy.storage.description),
 			1
 			/* TEXT */
 		),
-		createBaseVNode("div", _hoisted_5$n, [(openBlock(true), createElementBlock(
+		createBaseVNode("div", _hoisted_5$o, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($setup.decoratedOptions, (option) => {
@@ -148494,27 +150398,27 @@ Expected function or array of functions, received type ${typeof value}.`
 						key: option.value,
 						class: normalizeClass(["acu-dashboard-storage-mode__card", { "acu-dashboard-storage-mode__card--active": option.value === $props.modelValue }])
 					},
-					[createBaseVNode("span", _hoisted_6$m, [createBaseVNode(
+					[createBaseVNode("span", _hoisted_6$n, [createBaseVNode(
 						"i",
 						{ class: normalizeClass(option.iconClass) },
 						null,
 						2
 						/* CLASS */
-					)]), createBaseVNode("span", _hoisted_7$j, [createBaseVNode("span", _hoisted_8$i, [createBaseVNode(
+					)]), createBaseVNode("span", _hoisted_7$k, [createBaseVNode("span", _hoisted_8$j, [createBaseVNode(
 						"span",
-						_hoisted_9$g,
+						_hoisted_9$h,
 						toDisplayString(option.label),
 						1
 						/* TEXT */
 					), createBaseVNode(
 						"span",
-						_hoisted_10$g,
+						_hoisted_10$h,
 						toDisplayString(option.badge),
 						1
 						/* TEXT */
 					)]), createBaseVNode(
 						"span",
-						_hoisted_11$e,
+						_hoisted_11$f,
 						toDisplayString(option.description),
 						1
 						/* TEXT */
@@ -148526,11 +150430,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			128
 			/* KEYED_FRAGMENT */
 		))])
-	], 8, _hoisted_1$F);
+	], 8, _hoisted_1$G);
     }
-    var DashboardStorageModeSection = /*#__PURE__*/ _export_sfc(_sfc_main$F, [["render", _sfc_render$F], ["__scopeId", "data-v-12a63c98"]]);
+    var DashboardStorageModeSection = /*#__PURE__*/ _export_sfc(_sfc_main$G, [["render", _sfc_render$G], ["__scopeId", "data-v-12a63c98"]]);
 
-    var _sfc_main$E = /*@__PURE__*/ defineComponent({
+    var _sfc_main$F = /*@__PURE__*/ defineComponent({
         __name: 'DashboardToggleRow',
         props: {
             item: {}
@@ -148554,17 +150458,17 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-dashboard-toggle-row[data-v-52f8e493] {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-dashboard-toggle-row__head[data-v-52f8e493] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n}\n.acu-dashboard-toggle-row__label[data-v-52f8e493] {\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n  color: var(--acu-text-1);\n  min-width: 0;\n}\n.acu-dashboard-toggle-row__desc[data-v-52f8e493] {\n  margin: 0;\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n  color: var(--acu-text-3);\n}\n", "src/presentation-v2/components/DashboardToggleRow.vue#style-0-52f8e493");
     var DashboardToggleRow_vue_vue_type_style_index_0_scoped_52f8e493_lang = null;
 
-    const _hoisted_1$E = { class: "acu-dashboard-toggle-row" };
-    const _hoisted_2$y = { class: "acu-dashboard-toggle-row__head" };
-    const _hoisted_3$s = { class: "acu-dashboard-toggle-row__label" };
-    const _hoisted_4$p = {
+    const _hoisted_1$F = { class: "acu-dashboard-toggle-row" };
+    const _hoisted_2$z = { class: "acu-dashboard-toggle-row__head" };
+    const _hoisted_3$t = { class: "acu-dashboard-toggle-row__label" };
+    const _hoisted_4$q = {
 	key: 0,
 	class: "acu-dashboard-toggle-row__desc"
     };
-    function _sfc_render$E(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$E, [createBaseVNode("div", _hoisted_2$y, [createBaseVNode(
+    function _sfc_render$F(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$F, [createBaseVNode("div", _hoisted_2$z, [createBaseVNode(
 		"span",
-		_hoisted_3$s,
+		_hoisted_3$t,
 		toDisplayString($props.item.label),
 		1
 		/* TEXT */
@@ -148581,13 +150485,13 @@ Expected function or array of functions, received type ${typeof value}.`
 		"disabled"
 	])]), $props.item.description ? (openBlock(), createElementBlock(
 		"p",
-		_hoisted_4$p,
+		_hoisted_4$q,
 		toDisplayString($props.item.description),
 		1
 		/* TEXT */
 	)) : createCommentVNode("v-if", true)]);
     }
-    var ToggleRow = /*#__PURE__*/ _export_sfc(_sfc_main$E, [["render", _sfc_render$E], ["__scopeId", "data-v-52f8e493"]]);
+    var ToggleRow = /*#__PURE__*/ _export_sfc(_sfc_main$F, [["render", _sfc_render$F], ["__scopeId", "data-v-52f8e493"]]);
 
     const FLIGHT_MODE_BIG_SUMMARY_ENTRY_PLACEMENT_ACU = {
         position: 'at_depth_as_system',
@@ -149731,7 +151635,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     }
 
-    var _sfc_main$D = /*@__PURE__*/ defineComponent({
+    var _sfc_main$E = /*@__PURE__*/ defineComponent({
         __name: 'DashboardPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -149836,23 +151740,23 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-dashboard-page[data-v-369cb872] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-dashboard-page__toggle-list[data-v-369cb872] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n  margin-top: 14px;\n}\n.acu-v2-dashboard-page__health-list[data-v-369cb872] {\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-item[data-v-369cb872] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: 30px minmax(0, 1fr) max-content;\n  column-gap: 10px;\n  row-gap: 8px;\n  align-items: center;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n  transition:\n    border-color 0.15s ease,\n    background 0.15s ease;\n}\n.acu-v2-dashboard-page__health-item--error[data-v-369cb872] {\n  border-color: color-mix(in srgb, var(--acu-danger) 38%, var(--acu-border));\n}\n.acu-v2-dashboard-page__health-icon[data-v-369cb872] {\n  width: 30px;\n  height: 30px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-2);\n}\n.acu-v2-dashboard-page__health-item--ok .acu-v2-dashboard-page__health-icon[data-v-369cb872] {\n  color: var(--acu-success);\n  background: color-mix(in srgb, var(--acu-success) 10%, transparent);\n}\n.acu-v2-dashboard-page__health-item--warning\n  .acu-v2-dashboard-page__health-icon[data-v-369cb872] {\n  color: var(--acu-warning);\n  background: color-mix(in srgb, var(--acu-warning) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-item--error .acu-v2-dashboard-page__health-icon[data-v-369cb872] {\n  color: var(--acu-danger);\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-body[data-v-369cb872] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-v2-dashboard-page__health-heading[data-v-369cb872] {\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-heading strong[data-v-369cb872] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 650;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-dashboard-page__health-body p[data-v-369cb872] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-dashboard-page__health-side[data-v-369cb872] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 8px;\n  justify-self: end;\n}\n.acu-v2-dashboard-page__health-action[data-v-369cb872] {\n  white-space: nowrap;\n}\n@media (max-width: 860px) {\n.acu-v2-dashboard-page[data-v-369cb872] {\n    padding: 14px;\n}\n.acu-v2-dashboard-page__health-item[data-v-369cb872] {\n    grid-template-columns: 30px minmax(0, 1fr);\n    align-items: center;\n}\n.acu-v2-dashboard-page__health-side[data-v-369cb872] {\n    grid-column: 2;\n    align-items: flex-start;\n    justify-self: start;\n    flex-direction: row;\n    flex-wrap: wrap;\n}\n.acu-v2-dashboard-page__health-action[data-v-369cb872] {\n    justify-self: start;\n}\n}\n", "src/presentation-v2/pages/DashboardPage.vue#style-0-369cb872");
     var DashboardPage_vue_vue_type_style_index_0_scoped_369cb872_lang = null;
 
-    const _hoisted_1$D = { class: "acu-v2-dashboard-page" };
-    const _hoisted_2$x = { class: "acu-v2-dashboard-page__health-list" };
-    const _hoisted_3$r = {
+    const _hoisted_1$E = { class: "acu-v2-dashboard-page" };
+    const _hoisted_2$y = { class: "acu-v2-dashboard-page__health-list" };
+    const _hoisted_3$s = {
 	class: "acu-v2-dashboard-page__health-icon",
 	"aria-hidden": "true"
     };
-    const _hoisted_4$o = { class: "acu-v2-dashboard-page__health-body" };
-    const _hoisted_5$m = { class: "acu-v2-dashboard-page__health-heading" };
-    const _hoisted_6$l = { class: "acu-v2-dashboard-page__health-side" };
-    const _hoisted_7$i = ["data-acu-toggle-group"];
-    function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$D, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-dashboard-page__grid" }, {
+    const _hoisted_4$p = { class: "acu-v2-dashboard-page__health-body" };
+    const _hoisted_5$n = { class: "acu-v2-dashboard-page__health-heading" };
+    const _hoisted_6$m = { class: "acu-v2-dashboard-page__health-side" };
+    const _hoisted_7$j = ["data-acu-toggle-group"];
+    function _sfc_render$E(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$E, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-dashboard-page__grid" }, {
 		default: withCtx(() => [createVNode($setup["AcuPanel"], {
 			title: $setup.dashboardCopy.panels.healthTitle,
 			description: $setup.dashboardCopy.panels.healthDescription
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_2$x, [(openBlock(true), createElementBlock(
+			default: withCtx(() => [createBaseVNode("div", _hoisted_2$y, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.dashboard.healthItems.value, (item) => {
@@ -149863,14 +151767,14 @@ Expected function or array of functions, received type ${typeof value}.`
 							class: normalizeClass(["acu-v2-dashboard-page__health-item", `acu-v2-dashboard-page__health-item--${item.kind}`])
 						},
 						[
-							createBaseVNode("div", _hoisted_3$r, [createBaseVNode(
+							createBaseVNode("div", _hoisted_3$s, [createBaseVNode(
 								"i",
 								{ class: normalizeClass(item.iconClass) },
 								null,
 								2
 								/* CLASS */
 							)]),
-							createBaseVNode("div", _hoisted_4$o, [createBaseVNode("div", _hoisted_5$m, [createBaseVNode(
+							createBaseVNode("div", _hoisted_4$p, [createBaseVNode("div", _hoisted_5$n, [createBaseVNode(
 								"strong",
 								null,
 								toDisplayString(item.title),
@@ -149883,7 +151787,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								1
 								/* TEXT */
 							)]),
-							createBaseVNode("div", _hoisted_6$l, [createVNode($setup["AcuBadge"], { variant: item.badgeVariant }, {
+							createBaseVNode("div", _hoisted_6$m, [createVNode($setup["AcuBadge"], { variant: item.badgeVariant }, {
 								default: withCtx(() => [createTextVNode(
 									toDisplayString(item.badge),
 									1
@@ -149979,15 +151883,15 @@ Expected function or array of functions, received type ${typeof value}.`
 				],
 				64
 				/* STABLE_FRAGMENT */
-			))], 8, _hoisted_7$i)]),
+			))], 8, _hoisted_7$j)]),
 			_: 1
 		}, 8, ["title", "description"])]),
 		_: 1
 	})]);
     }
-    var DashboardPage = /*#__PURE__*/ _export_sfc(_sfc_main$D, [["render", _sfc_render$D], ["__scopeId", "data-v-369cb872"]]);
+    var DashboardPage = /*#__PURE__*/ _export_sfc(_sfc_main$E, [["render", _sfc_render$E], ["__scopeId", "data-v-369cb872"]]);
 
-    var _sfc_main$C = /*@__PURE__*/ defineComponent({
+    var _sfc_main$D = /*@__PURE__*/ defineComponent({
         __name: 'TableSelector',
         props: {
             sheetKeys: {},
@@ -150025,29 +151929,29 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-table-selector[data-v-b306689c] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-table-selector__empty[data-v-b306689c] {\n  padding: 10px 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n  border: 0;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n}\n.acu-v2-table-selector__actions[data-v-b306689c] { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;\n}\n.acu-v2-table-selector__count[data-v-b306689c] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-table-selector__grid[data-v-b306689c] {\n  display: grid; gap: 6px;\n  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));\n  max-height: 240px; overflow: auto;\n  padding: 0;\n  border: 0; border-radius: 0;\n  background: transparent;\n}\n.acu-v2-table-selector__item[data-v-b306689c] {\n  padding: 8px 10px;\n  border: 0; border-radius: var(--acu-radius-sm);\n  background: transparent; min-width: 0;\n}\n", "src/presentation-v2/components/TableSelector.vue#style-0-b306689c");
     var TableSelector_vue_vue_type_style_index_0_scoped_b306689c_lang = null;
 
-    const _hoisted_1$C = { class: "acu-v2-table-selector" };
-    const _hoisted_2$w = {
+    const _hoisted_1$D = { class: "acu-v2-table-selector" };
+    const _hoisted_2$x = {
 	key: 0,
 	class: "acu-v2-table-selector__empty"
     };
-    const _hoisted_3$q = { class: "acu-v2-table-selector__actions" };
-    const _hoisted_4$n = { class: "acu-v2-table-selector__count" };
-    const _hoisted_5$l = {
+    const _hoisted_3$r = { class: "acu-v2-table-selector__actions" };
+    const _hoisted_4$o = { class: "acu-v2-table-selector__count" };
+    const _hoisted_5$m = {
 	key: 0,
 	class: "acu-v2-table-selector__readonly-hint"
     };
-    const _hoisted_6$k = { class: "acu-v2-table-selector__grid" };
-    function _sfc_render$C(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$C, [!$props.sheetKeys.length ? (openBlock(), createElementBlock(
+    const _hoisted_6$l = { class: "acu-v2-table-selector__grid" };
+    function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$D, [!$props.sheetKeys.length ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_2$w,
+		_hoisted_2$x,
 		toDisplayString($setup.emptyText),
 		1
 		/* TEXT */
 	)) : (openBlock(), createElementBlock(
 		Fragment,
 		{ key: 1 },
-		[createBaseVNode("div", _hoisted_3$q, [
+		[createBaseVNode("div", _hoisted_3$r, [
 			createVNode($setup["AcuButton"], {
 				size: "sm",
 				disabled: $props.disabled,
@@ -150074,13 +151978,13 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, 8, ["disabled"]),
 			createBaseVNode(
 				"span",
-				_hoisted_4$n,
+				_hoisted_4$o,
 				"已选 " + toDisplayString($props.selectedKeys.length) + " / " + toDisplayString($props.sheetKeys.length),
 				1
 				/* TEXT */
 			),
-			$props.disabled ? (openBlock(), createElementBlock("span", _hoisted_5$l, "仅展示模板：数据库运行时未加载，暂不可选择执行目标")) : createCommentVNode("v-if", true)
-		]), createBaseVNode("div", _hoisted_6$k, [(openBlock(true), createElementBlock(
+			$props.disabled ? (openBlock(), createElementBlock("span", _hoisted_5$m, "仅展示模板：数据库运行时未加载，暂不可选择执行目标")) : createCommentVNode("v-if", true)
+		]), createBaseVNode("div", _hoisted_6$l, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.sheetKeys, (key) => {
@@ -150106,7 +152010,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* STABLE_FRAGMENT */
 	))]);
     }
-    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$C, [["render", _sfc_render$C], ["__scopeId", "data-v-b306689c"]]);
+    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$D, [["render", _sfc_render$D], ["__scopeId", "data-v-b306689c"]]);
 
     function currentSheetKeys() {
         try {
@@ -150722,7 +152626,7 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    var _sfc_main$B = /*@__PURE__*/ defineComponent({
+    var _sfc_main$C = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -150756,19 +152660,19 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-form-fill-page[data-v-400489db] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-400489db] {\n  grid-template-areas:\n    \"status update\"\n    \"manual template\"\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-400489db] {\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-400489db] {\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-400489db] {\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-400489db] {\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-400489db] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-400489db] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-400489db] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-400489db] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-400489db] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-400489db] {\n  color: var(--acu-danger);\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-400489db] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-400489db] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-400489db],\n.acu-v2-form-fill-page__status-table td[data-v-400489db] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-400489db] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-400489db] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-400489db] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-400489db] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-400489db] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-400489db] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-400489db] {\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-400489db] {\n    grid-template-areas:\n      \"status\"\n      \"update\"\n      \"manual\"\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-400489db] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-400489db");
     var FormFillPage_vue_vue_type_style_index_0_scoped_400489db_lang = null;
 
-    const _hoisted_1$B = { class: "acu-v2-form-fill-page" };
-    const _hoisted_2$v = ["title"];
-    const _hoisted_3$p = { class: "acu-text__value" };
-    const _hoisted_4$m = { class: "acu-text__value acu-v2-form-fill-page__checkpoint-label" };
-    const _hoisted_5$k = { class: "acu-v2-form-fill-page__table-wrap" };
-    const _hoisted_6$j = { class: "acu-v2-form-fill-page__status-table" };
-    const _hoisted_7$h = { key: 0 };
-    const _hoisted_8$h = { key: 1 };
-    const _hoisted_9$f = { class: "acu-v2-form-fill-page__manual-number-grid" };
-    const _hoisted_10$f = { class: "acu-v2-form-fill-page__manual-extra" };
-    const _hoisted_11$d = { class: "acu-v2-form-fill-page__actions" };
-    function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$B, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
+    const _hoisted_1$C = { class: "acu-v2-form-fill-page" };
+    const _hoisted_2$w = ["title"];
+    const _hoisted_3$q = { class: "acu-text__value" };
+    const _hoisted_4$n = { class: "acu-text__value acu-v2-form-fill-page__checkpoint-label" };
+    const _hoisted_5$l = { class: "acu-v2-form-fill-page__table-wrap" };
+    const _hoisted_6$k = { class: "acu-v2-form-fill-page__status-table" };
+    const _hoisted_7$i = { key: 0 };
+    const _hoisted_8$i = { key: 1 };
+    const _hoisted_9$g = { class: "acu-v2-form-fill-page__manual-number-grid" };
+    const _hoisted_10$g = { class: "acu-v2-form-fill-page__manual-extra" };
+    const _hoisted_11$e = { class: "acu-v2-form-fill-page__actions" };
+    function _sfc_render$C(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$C, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
 		default: withCtx(() => [
 			createVNode($setup["AcuPanel"], {
 				id: "form-fill-status-panel",
@@ -150791,7 +152695,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							createBaseVNode("strong", {
 								class: "acu-text__value acu-v2-form-fill-page__status-chat",
 								title: $setup.dashboard.chatFileIdentifier.value || "未初始化"
-							}, toDisplayString($setup.dashboard.chatFileIdentifier.value || "未初始化"), 9, _hoisted_2$v),
+							}, toDisplayString($setup.dashboard.chatFileIdentifier.value || "未初始化"), 9, _hoisted_2$w),
 							_cache[5] || (_cache[5] = createTextVNode(
 								" · AI回复累计层数: ",
 								-1
@@ -150799,7 +152703,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)),
 							createBaseVNode(
 								"strong",
-								_hoisted_3$p,
+								_hoisted_3$q,
 								toDisplayString($setup.dashboard.aiMessageCount.value),
 								1
 								/* TEXT */
@@ -150811,7 +152715,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)),
 							createBaseVNode(
 								"strong",
-								_hoisted_4$m,
+								_hoisted_4$n,
 								toDisplayString($setup.manualUpdate.checkpointFloorsLabel.value),
 								1
 								/* TEXT */
@@ -150838,7 +152742,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)])]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_5$k, [createBaseVNode("table", _hoisted_6$j, [_cache[10] || (_cache[10] = createBaseVNode(
+					createBaseVNode("div", _hoisted_5$l, [createBaseVNode("table", _hoisted_6$k, [_cache[10] || (_cache[10] = createBaseVNode(
 						"thead",
 						null,
 						[createBaseVNode("tr", null, [
@@ -150850,7 +152754,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						])],
 						-1
 						/* CACHED */
-					)), createBaseVNode("tbody", null, [!$setup.dashboard.tableRows.value.length ? (openBlock(), createElementBlock("tr", _hoisted_7$h, [..._cache[8] || (_cache[8] = [createBaseVNode(
+					)), createBaseVNode("tbody", null, [!$setup.dashboard.tableRows.value.length ? (openBlock(), createElementBlock("tr", _hoisted_7$i, [..._cache[8] || (_cache[8] = [createBaseVNode(
 						"td",
 						{
 							colspan: "5",
@@ -150910,7 +152814,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										_: 1
 									})) : (openBlock(), createElementBlock(
 										"span",
-										_hoisted_8$h,
+										_hoisted_8$i,
 										toDisplayString(row.nextTriggerLabel),
 										1
 										/* TEXT */
@@ -150941,7 +152845,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				description: $setup.formFillCopy.panels.manual.description
 			}, {
 				default: withCtx(() => [
-					createBaseVNode("div", _hoisted_9$f, [createVNode($setup["AcuFormRow"], {
+					createBaseVNode("div", _hoisted_9$g, [createVNode($setup["AcuFormRow"], {
 						label: "手动处理最近 N 层",
 						hint: "从可用 AI 回复中取最近 N 层执行手动填表。"
 					}, {
@@ -150991,7 +152895,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"onSelectAll",
 						"onSelectNone"
 					]),
-					createBaseVNode("div", _hoisted_10$f, [createVNode($setup["AcuFormRow"], {
+					createBaseVNode("div", _hoisted_10$g, [createVNode($setup["AcuFormRow"], {
 						label: "本次填表附加要求",
 						hint: "留空时不会给本次手动填表追加额外要求。"
 					}, {
@@ -151022,7 +152926,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					}),
-					createBaseVNode("div", _hoisted_11$d, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_11$e, [createVNode($setup["AcuButton"], {
 						variant: "secondary",
 						disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.catchUpBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
 						onClick: $setup.manualUpdate.runManualCatchUp
@@ -151052,9 +152956,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$B, [["render", _sfc_render$B], ["__scopeId", "data-v-400489db"]]);
+    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$C, [["render", _sfc_render$C], ["__scopeId", "data-v-400489db"]]);
 
-    var _sfc_main$A = /*@__PURE__*/ defineComponent({
+    var _sfc_main$B = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPromptDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -151091,9 +152995,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-form-fill-prompt-drawer__toolbar[data-v-2d4e260e] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-form-fill-prompt-drawer__actions[data-v-2d4e260e] {\r\n  position: sticky;\r\n  bottom: -16px;\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding: 12px 0 0;\r\n  background: var(--acu-bg-1);\n}\r\n", "src/presentation-v2/components/FormFillPromptDrawer.vue#style-0-2d4e260e");
     var FormFillPromptDrawer_vue_vue_type_style_index_0_scoped_2d4e260e_lang = null;
 
-    const _hoisted_1$A = { class: "acu-form-fill-prompt-drawer__toolbar" };
-    const _hoisted_2$u = { class: "acu-form-fill-prompt-drawer__actions" };
-    function _sfc_render$A(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$B = { class: "acu-form-fill-prompt-drawer__toolbar" };
+    const _hoisted_2$v = { class: "acu-form-fill-prompt-drawer__actions" };
+    function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: "编辑填表提示词",
@@ -151113,7 +153017,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$A, [
+			createBaseVNode("div", _hoisted_1$B, [
 				createVNode($setup["AcuFileButton"], {
 					size: "sm",
 					accept: "application/json,.json",
@@ -151168,7 +153072,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				onDelete: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("delete", $event)),
 				onUpdate: _cache[5] || (_cache[5] = (index, patch) => _ctx.$emit("update", index, patch))
 			}, null, 8, ["segments"]),
-			createBaseVNode("footer", _hoisted_2$u, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
+			createBaseVNode("footer", _hoisted_2$v, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
 				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
 					"关闭",
 					-1
@@ -151191,9 +153095,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open"]);
     }
-    var FormFillPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$A, [["render", _sfc_render$A], ["__scopeId", "data-v-2d4e260e"]]);
+    var FormFillPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$B, [["render", _sfc_render$B], ["__scopeId", "data-v-2d4e260e"]]);
 
-    var _sfc_main$z = /*@__PURE__*/ defineComponent({
+    var _sfc_main$A = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookSelector',
         props: {
             modelValue: {},
@@ -151239,9 +153143,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-selector[data-v-3ed3b837] { display: flex; flex-direction: column; gap: 10px; min-width: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSelector.vue#style-0-3ed3b837");
     var WorldbookSelector_vue_vue_type_style_index_0_scoped_3ed3b837_lang = null;
 
-    const _hoisted_1$z = { class: "acu-v2-wb-selector" };
-    function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$z, [
+    const _hoisted_1$A = { class: "acu-v2-wb-selector" };
+    function _sfc_render$A(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$A, [
 		$props.filterable ? (openBlock(), createBlock($setup["AcuFormRow"], {
 			key: 0,
 			label: "筛选"
@@ -151282,9 +153186,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldbookSelector = /*#__PURE__*/ _export_sfc(_sfc_main$z, [["render", _sfc_render$z], ["__scopeId", "data-v-3ed3b837"]]);
+    var WorldbookSelector = /*#__PURE__*/ _export_sfc(_sfc_main$A, [["render", _sfc_render$A], ["__scopeId", "data-v-3ed3b837"]]);
 
-    var _sfc_main$y = /*@__PURE__*/ defineComponent({
+    var _sfc_main$z = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookSourcePicker',
         props: {
             source: {},
@@ -151323,19 +153227,19 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-source-picker[data-v-3bd327f1] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-wb-source-picker__list[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  max-height: 180px;\r\n  overflow-y: auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  padding: 8px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\n}\n.acu-v2-wb-source-picker__list--disabled[data-v-3bd327f1] {\r\n  opacity: 0.65;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  min-height: 32px;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 10px;\r\n  margin: 0;\r\n  padding: 7px 9px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:disabled {\r\n  cursor: not-allowed;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1] {\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 42%, transparent);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: color-mix(in srgb, var(--acu-accent) 20%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 54%, transparent);\n}\n.acu-v2-wb-source-picker__item-label[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-accent);\r\n  opacity: 0;\r\n  transform: scale(0.86);\r\n  transition: opacity 0.15s ease, transform 0.15s ease;\n}\n.acu-v2-wb-source-picker__item--selected .acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  opacity: 1;\r\n  transform: scale(1);\n}\n.acu-v2-wb-source-picker__empty[data-v-3bd327f1] {\r\n  padding: 8px 2px;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  text-align: center;\n}\n.acu-v2-wb-source-picker__error[data-v-3bd327f1] {\r\n  margin: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSourcePicker.vue#style-0-3bd327f1");
     var WorldbookSourcePicker_vue_vue_type_style_index_0_scoped_3bd327f1_lang = null;
 
-    const _hoisted_1$y = { class: "acu-v2-wb-source-picker" };
-    const _hoisted_2$t = [
+    const _hoisted_1$z = { class: "acu-v2-wb-source-picker" };
+    const _hoisted_2$u = [
 	"aria-checked",
 	"disabled",
 	"onClick"
     ];
-    const _hoisted_3$o = { class: "acu-v2-wb-source-picker__item-label" };
-    const _hoisted_4$l = {
+    const _hoisted_3$p = { class: "acu-v2-wb-source-picker__item-label" };
+    const _hoisted_4$m = {
 	key: 0,
 	class: "acu-v2-wb-source-picker__empty"
     };
-    function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$y, [
+    function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$z, [
 		createVNode($setup["AcuFormRow"], { label: "来源" }, {
 			default: withCtx(() => [createVNode($setup["AcuSegmentedControl"], {
 				"model-value": $props.source,
@@ -151376,7 +153280,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							onClick: ($event) => _ctx.$emit("toggle-book", name, !$setup.selectedSet.has(name))
 						}, [createBaseVNode(
 							"span",
-							_hoisted_3$o,
+							_hoisted_3$p,
 							toDisplayString(name),
 							1
 							/* TEXT */
@@ -151389,13 +153293,13 @@ Expected function or array of functions, received type ${typeof value}.`
 							null,
 							-1
 							/* CACHED */
-						))], 10, _hoisted_2$t);
+						))], 10, _hoisted_2$u);
 					}),
 					128
 					/* KEYED_FRAGMENT */
 				)), !$setup.filteredNames.length ? (openBlock(), createElementBlock(
 					"div",
-					_hoisted_4$l,
+					_hoisted_4$m,
 					toDisplayString($props.status === "loading" ? "正在加载世界书..." : "无可选世界书"),
 					1
 					/* TEXT */
@@ -151420,9 +153324,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldbookSourcePicker = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-3bd327f1"]]);
+    var WorldbookSourcePicker = /*#__PURE__*/ _export_sfc(_sfc_main$z, [["render", _sfc_render$z], ["__scopeId", "data-v-3bd327f1"]]);
 
-    var _sfc_main$x = /*@__PURE__*/ defineComponent({
+    var _sfc_main$y = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryList',
         props: {
             groups: {},
@@ -151528,52 +153432,52 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-entries[data-v-c56bd63a] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-c56bd63a] {\r\n  padding: 8px 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entries__status--error[data-v-c56bd63a] { color: var(--acu-danger);\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 6px 8px;\r\n  align-items: center;\r\n  padding: 3px 10px;\r\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-c56bd63a] {\r\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-c56bd63a] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\r\n\r\n/* 剧情页 / 填表页走 AcuCheckbox 分支；:deep 把夹断锁在本列表内，避免改动全局组件 */\n.acu-v2-wb-entry-item[data-v-c56bd63a] .acu-checkbox__label {\r\n  min-width: 0;\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\r\n  color: var(--acu-warning);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n  grid-column: 1 / -1;\r\n  display: grid;\r\n  gap: 8px;\r\n  margin: 4px 0 6px 24px;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border-1);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-c56bd63a] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n    justify-content: flex-start;\r\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n    margin-left: 0;\n}\n}\r\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-c56bd63a");
     var WorldbookEntryList_vue_vue_type_style_index_0_scoped_c56bd63a_lang = null;
 
-    const _hoisted_1$x = { class: "acu-v2-wb-entries" };
-    const _hoisted_2$s = {
+    const _hoisted_1$y = { class: "acu-v2-wb-entries" };
+    const _hoisted_2$t = {
 	key: 0,
 	class: "acu-v2-wb-entries__status"
     };
-    const _hoisted_3$n = {
+    const _hoisted_3$o = {
 	key: 1,
 	class: "acu-v2-wb-entries__status acu-v2-wb-entries__status--error",
 	role: "alert"
     };
-    const _hoisted_4$k = {
+    const _hoisted_4$l = {
 	key: 2,
 	class: "acu-v2-wb-entries__status"
     };
-    const _hoisted_5$j = ["title"];
-    const _hoisted_6$i = {
+    const _hoisted_5$k = ["title"];
+    const _hoisted_6$j = {
 	key: 2,
 	class: "acu-v2-wb-entry-item__actions"
     };
-    const _hoisted_7$g = {
+    const _hoisted_7$h = {
 	key: 0,
 	class: "acu-v2-wb-entry-item__skill-badge"
     };
-    const _hoisted_8$g = {
+    const _hoisted_8$h = {
 	key: 1,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
-    const _hoisted_9$e = {
+    const _hoisted_9$f = {
 	key: 2,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
-    const _hoisted_10$e = {
+    const _hoisted_10$f = {
 	key: 3,
 	class: "acu-v2-wb-entry-skill"
     };
-    const _hoisted_11$c = { class: "acu-v2-wb-entry-skill__actions" };
-    function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$x, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$s, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
+    const _hoisted_11$d = { class: "acu-v2-wb-entry-skill__actions" };
+    function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$y, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$t, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_3$n,
+		_hoisted_3$o,
 		toDisplayString($props.error || "加载条目失败"),
 		1
 		/* TEXT */
 	)) : $props.groups.length === 0 ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_4$k,
+		_hoisted_4$l,
 		toDisplayString($props.emptyText),
 		1
 		/* TEXT */
@@ -151625,13 +153529,13 @@ Expected function or array of functions, received type ${typeof value}.`
 									key: 1,
 									class: "acu-v2-wb-entry-item__label",
 									title: entry.label
-								}, toDisplayString(entry.label), 9, _hoisted_5$j)),
-								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$i, [
-									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$g, "Skill")) : createCommentVNode("v-if", true),
-									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$g, "常量")) : createCommentVNode("v-if", true),
+								}, toDisplayString(entry.label), 9, _hoisted_5$k)),
+								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$j, [
+									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$h, "Skill")) : createCommentVNode("v-if", true),
+									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$h, "常量")) : createCommentVNode("v-if", true),
 									$props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_9$e,
+										_hoisted_9$f,
 										toDisplayString($setup.formatAgentTakeoverState(entry)),
 										1
 										/* TEXT */
@@ -151660,7 +153564,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										_: 2
 									}, 1032, ["onClick"])) : createCommentVNode("v-if", true)
 								])) : createCommentVNode("v-if", true),
-								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_10$e, [
+								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_10$f, [
 									createVNode($setup["AcuTextarea"], {
 										"model-value": $setup.getSkillDraft(entry).description,
 										label: "Skill 描述",
@@ -151679,7 +153583,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										"auto-resize": "",
 										"onUpdate:modelValue": ($event) => $setup.patchSkillDraft(entry, { triggerWhen: String($event) })
 									}, null, 8, ["model-value", "onUpdate:modelValue"]),
-									createBaseVNode("div", _hoisted_11$c, [createVNode($setup["AcuButton"], {
+									createBaseVNode("div", _hoisted_11$d, [createVNode($setup["AcuButton"], {
 										size: "sm",
 										variant: "primary",
 										onClick: ($event) => $setup.saveSkill(entry)
@@ -151724,9 +153628,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* KEYED_FRAGMENT */
 	))]);
     }
-    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-c56bd63a"]]);
+    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-c56bd63a"]]);
 
-    var _sfc_main$w = /*@__PURE__*/ defineComponent({
+    var _sfc_main$x = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryToolbar',
         props: {
             filter: {},
@@ -151745,9 +153649,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-entry-toolbar[data-v-6263d003] {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  margin-top: 10px;\n  padding-top: 10px;\n  flex-wrap: wrap;\n}\n.acu-v2-wb-entry-toolbar__filter[data-v-6263d003] {\n  flex: 1;\n  min-width: 160px;\n}\n", "src/presentation-v2/components/WorldbookEntryToolbar.vue#style-0-6263d003");
     var WorldbookEntryToolbar_vue_vue_type_style_index_0_scoped_6263d003_lang = null;
 
-    const _hoisted_1$w = { class: "acu-v2-wb-entry-toolbar" };
-    function _sfc_render$w(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$w, [
+    const _hoisted_1$x = { class: "acu-v2-wb-entry-toolbar" };
+    function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$x, [
 		$props.showEntrySelectionControls ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 0 },
@@ -151815,9 +153719,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		})
 	]);
     }
-    var WorldbookEntryToolbar = /*#__PURE__*/ _export_sfc(_sfc_main$w, [["render", _sfc_render$w], ["__scopeId", "data-v-6263d003"]]);
+    var WorldbookEntryToolbar = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-6263d003"]]);
 
-    var _sfc_main$v = /*@__PURE__*/ defineComponent({
+    var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryPickerBody',
         props: {
             source: {},
@@ -151846,10 +153750,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-wb-entry-picker[data-v-648a8ff3] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-wb-entry-picker__hint[data-v-648a8ff3] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-wb-entry-picker__hint strong[data-v-648a8ff3] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n\r\n\r\n", "src/presentation-v2/components/WorldbookEntryPickerBody.vue#style-0-648a8ff3");
     var WorldbookEntryPickerBody_vue_vue_type_style_index_0_scoped_648a8ff3_lang = null;
 
-    const _hoisted_1$v = { class: "acu-v2-wb-entry-picker" };
-    const _hoisted_2$r = { class: "acu-v2-wb-entry-picker__hint" };
-    function _sfc_render$v(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$v, [
+    const _hoisted_1$w = { class: "acu-v2-wb-entry-picker" };
+    const _hoisted_2$s = { class: "acu-v2-wb-entry-picker__hint" };
+    function _sfc_render$w(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$w, [
 		createVNode($setup["WorldbookSourcePicker"], {
 			source: $props.source,
 			"selected-names": $props.selectedNames,
@@ -151867,7 +153771,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			"error",
 			"filterable"
 		]),
-		createBaseVNode("p", _hoisted_2$r, [_cache[7] || (_cache[7] = createTextVNode(
+		createBaseVNode("p", _hoisted_2$s, [_cache[7] || (_cache[7] = createTextVNode(
 			" 目前已选: ",
 			-1
 			/* CACHED */
@@ -151907,7 +153811,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$v, [["render", _sfc_render$v], ["__scopeId", "data-v-648a8ff3"]]);
+    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$w, [["render", _sfc_render$w], ["__scopeId", "data-v-648a8ff3"]]);
 
     /**
      * useFormFillInjectionTarget — 填表"注入目标世界书"（Component A，§4.2）
@@ -152356,7 +154260,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return { names, charPrimary, status, error, refresh };
     }
 
-    var _sfc_main$u = /*@__PURE__*/ defineComponent({
+    var _sfc_main$v = /*@__PURE__*/ defineComponent({
         __name: 'TablePage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -152464,21 +154368,21 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-table-page[data-v-fb8884e1] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-table-page__col[data-v-fb8884e1] {\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n  min-width: 0;\n}\n.acu-v2-table-page__filter[data-v-fb8884e1] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-table-page__toggle-row[data-v-fb8884e1] {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-v2-table-page__toggle-head[data-v-fb8884e1] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n}\n.acu-v2-table-page__toggle-label[data-v-fb8884e1] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n  line-height: 1.35;\n}\n.acu-v2-table-page__toggle-desc[data-v-fb8884e1] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-table-page__actions[data-v-fb8884e1] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-table-page__status-line[data-v-fb8884e1] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  flex-wrap: wrap;\n}\n.acu-v2-table-page__status-line strong[data-v-fb8884e1] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n.acu-v2-table-page__preset-row[data-v-fb8884e1] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\n  gap: 6px;\n  align-items: stretch;\n  min-width: 0;\n}\n.acu-v2-table-page__badge[data-v-fb8884e1] {\n  display: inline-flex;\n  align-items: center;\n  padding: 2px 8px;\n  border-radius: var(--acu-radius-sm);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 500;\n}\n.acu-v2-table-page__badge--inherit[data-v-fb8884e1] {\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  color: var(--acu-text-2);\n}\n.acu-v2-table-page__badge--override[data-v-fb8884e1] {\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-table-page__hint[data-v-fb8884e1] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n}\n.acu-v2-table-page__hint strong[data-v-fb8884e1] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n@media (max-width: 860px) {\n.acu-v2-table-page[data-v-fb8884e1] {\n    padding: 14px;\n}\n}\n", "src/presentation-v2/pages/TablePage.vue#style-0-fb8884e1");
     var TablePage_vue_vue_type_style_index_0_scoped_fb8884e1_lang = null;
 
-    const _hoisted_1$u = { class: "acu-v2-table-page" };
-    const _hoisted_2$q = { class: "acu-v2-table-page__col" };
-    const _hoisted_3$m = { class: "acu-v2-table-page__actions" };
-    const _hoisted_4$j = { class: "acu-v2-table-page__col" };
-    const _hoisted_5$i = { class: "acu-v2-table-page__filter" };
-    const _hoisted_6$h = { class: "acu-v2-table-page__toggle-row" };
-    const _hoisted_7$f = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_8$f = { class: "acu-v2-table-page__toggle-row" };
-    const _hoisted_9$d = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_10$d = { class: "acu-v2-table-page__hint" };
-    function _sfc_render$u(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$u, [
+    const _hoisted_1$v = { class: "acu-v2-table-page" };
+    const _hoisted_2$r = { class: "acu-v2-table-page__col" };
+    const _hoisted_3$n = { class: "acu-v2-table-page__actions" };
+    const _hoisted_4$k = { class: "acu-v2-table-page__col" };
+    const _hoisted_5$j = { class: "acu-v2-table-page__filter" };
+    const _hoisted_6$i = { class: "acu-v2-table-page__toggle-row" };
+    const _hoisted_7$g = { class: "acu-v2-table-page__toggle-head" };
+    const _hoisted_8$g = { class: "acu-v2-table-page__toggle-row" };
+    const _hoisted_9$e = { class: "acu-v2-table-page__toggle-head" };
+    const _hoisted_10$e = { class: "acu-v2-table-page__hint" };
+    function _sfc_render$v(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$v, [
 		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }),
 		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-table-page__grid" }, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_2$q, [createVNode($setup["AcuPanel"], {
+			default: withCtx(() => [createBaseVNode("div", _hoisted_2$r, [createVNode($setup["AcuPanel"], {
 				id: "table-entries-panel",
 				title: $setup.tableCopy.panels.entries.title,
 				description: $setup.tableCopy.panels.entries.description
@@ -152537,7 +154441,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* CACHED */
 					)])]),
 					_: 1
-				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_3$m, [createVNode($setup["AcuButton"], {
+				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_3$n, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					onClick: _cache[6] || (_cache[6] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
@@ -152549,13 +154453,13 @@ Expected function or array of functions, received type ${typeof value}.`
 					_: 1
 				})])]),
 				_: 1
-			}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_4$j, [createVNode($setup["AcuPanel"], {
+			}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_4$k, [createVNode($setup["AcuPanel"], {
 				id: "table-filter-panel",
 				title: $setup.formFillCopy.panels.filter.title,
 				description: $setup.formFillCopy.panels.filter.description
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_5$i, [
-					createBaseVNode("div", _hoisted_6$h, [createBaseVNode("div", _hoisted_7$f, [_cache[18] || (_cache[18] = createBaseVNode(
+				default: withCtx(() => [createBaseVNode("div", _hoisted_5$j, [
+					createBaseVNode("div", _hoisted_6$i, [createBaseVNode("div", _hoisted_7$g, [_cache[18] || (_cache[18] = createBaseVNode(
 						"span",
 						{ class: "acu-v2-table-page__toggle-label" },
 						" 丢弃纯越权 SQL 语句 ",
@@ -152573,7 +154477,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						-1
 						/* CACHED */
 					))]),
-					createBaseVNode("div", _hoisted_8$f, [createBaseVNode("div", _hoisted_9$d, [_cache[20] || (_cache[20] = createBaseVNode(
+					createBaseVNode("div", _hoisted_8$g, [createBaseVNode("div", _hoisted_9$e, [_cache[20] || (_cache[20] = createBaseVNode(
 						"span",
 						{ class: "acu-v2-table-page__toggle-label" },
 						" 仅识别最后一对 <tableEdit> 标签 ",
@@ -152630,7 +154534,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"char-primary",
 					"status",
 					"error"
-				]), createBaseVNode("p", _hoisted_10$d, [_cache[22] || (_cache[22] = createTextVNode(
+				]), createBaseVNode("p", _hoisted_10$e, [_cache[22] || (_cache[22] = createTextVNode(
 					" 目前已选: ",
 					-1
 					/* CACHED */
@@ -152669,9 +154573,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var TablePage = /*#__PURE__*/ _export_sfc(_sfc_main$u, [["render", _sfc_render$u], ["__scopeId", "data-v-fb8884e1"]]);
+    var TablePage = /*#__PURE__*/ _export_sfc(_sfc_main$v, [["render", _sfc_render$v], ["__scopeId", "data-v-fb8884e1"]]);
 
-    var _sfc_main$t = /*@__PURE__*/ defineComponent({
+    var _sfc_main$u = /*@__PURE__*/ defineComponent({
         __name: 'ApiPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -152684,9 +154588,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-api-page[data-v-5b9b27d1] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-api-page__spacer[data-v-5b9b27d1] {\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-api-page[data-v-5b9b27d1] {\r\n    padding: 14px;\n}\n.acu-v2-api-page__spacer[data-v-5b9b27d1] {\r\n    display: none;\n}\n}\r\n", "src/presentation-v2/pages/ApiPage.vue#style-0-5b9b27d1");
     var ApiPage_vue_vue_type_style_index_0_scoped_5b9b27d1_lang = null;
 
-    const _hoisted_1$t = { class: "acu-v2-api-page" };
-    function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$t, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-api-page__grid" }, {
+    const _hoisted_1$u = { class: "acu-v2-api-page" };
+    function _sfc_render$u(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$u, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-api-page__grid" }, {
 		default: withCtx(() => [createVNode($setup["ApiConfigPanel"]), _cache[0] || (_cache[0] = createBaseVNode(
 			"div",
 			{
@@ -152700,7 +154604,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var ApiPage = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-5b9b27d1"]]);
+    var ApiPage = /*#__PURE__*/ _export_sfc(_sfc_main$u, [["render", _sfc_render$u], ["__scopeId", "data-v-5b9b27d1"]]);
 
     /**
      * usePlotWorldbookConfig — 剧情推进世界书配置（D23.1）
@@ -152964,7 +154868,7 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    var _sfc_main$s = /*@__PURE__*/ defineComponent({
+    var _sfc_main$t = /*@__PURE__*/ defineComponent({
         __name: 'PlotPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -153027,9 +154931,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-plot-page[data-v-1dff2b19] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n@media (max-width: 860px) {\n.acu-v2-plot-page[data-v-1dff2b19] { padding: 14px;\n}\n}\r\n", "src/presentation-v2/pages/PlotPage.vue#style-0-1dff2b19");
     var PlotPage_vue_vue_type_style_index_0_scoped_1dff2b19_lang = null;
 
-    const _hoisted_1$s = { class: "acu-v2-plot-page" };
-    function _sfc_render$s(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$s, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-plot-page__grid" }, {
+    const _hoisted_1$t = { class: "acu-v2-plot-page" };
+    function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$t, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-plot-page__grid" }, {
 		default: withCtx(() => [
 			createVNode($setup["PlotPresetPanel"]),
 			createCommentVNode(" 世界书选择 "),
@@ -153077,9 +154981,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var PlotPage = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-1dff2b19"]]);
+    var PlotPage = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-1dff2b19"]]);
 
-    var _sfc_main$r = /*@__PURE__*/ defineComponent({
+    var _sfc_main$s = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentAdvancedPanel',
         props: {
             open: { type: Boolean },
@@ -153158,8 +155062,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 limits: agentControl.contextSettingsLimits[key],
             }));
             async function onExecutionModeChange(value) {
-                await agentControl.setAgentPlotExecutionMode(value);
-                emit('current-worldbook-changed');
+                if (await agentControl.setAgentPlotExecutionMode(value))
+                    emit('current-worldbook-changed');
             }
             async function onContextChange(key, value) {
                 if (await agentControl.setContextSetting(key, value))
@@ -153266,28 +155170,28 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-agent-advanced[data-v-9f89b5d2] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-9f89b5d2] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-9f89b5d2] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-9f89b5d2] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-9f89b5d2],\n.acu-agent-advanced__prompt-head h5[data-v-9f89b5d2] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-9f89b5d2] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-9f89b5d2] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-9f89b5d2] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-9f89b5d2] .acu-form-row,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-form-row__control,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-input,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-segmented,\n.acu-agent-advanced[data-v-9f89b5d2] .acu-prompt-segs {\n  min-width: 0;\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-9f89b5d2] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-9f89b5d2] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-9f89b5d2] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-9f89b5d2],\n  .acu-agent-advanced__prompt-head[data-v-9f89b5d2] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-9f89b5d2] { padding: 8px;\n}\n}\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-9f89b5d2");
-    var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_9f89b5d2_lang = null;
+    injectSfcStyle("\n.acu-agent-advanced[data-v-5c474c20] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-5c474c20] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-5c474c20] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-5c474c20] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-5c474c20],\n.acu-agent-advanced__prompt-head h5[data-v-5c474c20] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-5c474c20] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-5c474c20] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-5c474c20] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-5c474c20] .acu-form-row,\n.acu-agent-advanced[data-v-5c474c20] .acu-form-row__control,\n.acu-agent-advanced[data-v-5c474c20] .acu-input,\n.acu-agent-advanced[data-v-5c474c20] .acu-segmented,\n.acu-agent-advanced[data-v-5c474c20] .acu-prompt-segs {\n  min-width: 0;\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-5c474c20] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-5c474c20] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-5c474c20] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-5c474c20],\n  .acu-agent-advanced__prompt-head[data-v-5c474c20] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-5c474c20] { padding: 8px;\n}\n}\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-5c474c20");
+    var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_5c474c20_lang = null;
 
-    const _hoisted_1$r = { class: "acu-agent-advanced" };
-    const _hoisted_2$p = { class: "acu-agent-advanced__section" };
-    const _hoisted_3$l = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_4$i = { class: "acu-agent-advanced__section" };
-    const _hoisted_5$h = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_6$g = { class: "acu-agent-advanced__grid" };
-    const _hoisted_7$e = { class: "acu-agent-advanced__section" };
-    const _hoisted_8$e = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_9$c = { class: "acu-agent-advanced__grid" };
-    const _hoisted_10$c = { class: "acu-agent-advanced__section" };
-    const _hoisted_11$b = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_12$b = { class: "acu-agent-advanced__grid" };
-    const _hoisted_13$9 = { class: "acu-agent-advanced__section" };
-    const _hoisted_14$9 = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_15$9 = { class: "acu-agent-advanced__prompt-scope" };
+    const _hoisted_1$s = { class: "acu-agent-advanced" };
+    const _hoisted_2$q = { class: "acu-agent-advanced__section" };
+    const _hoisted_3$m = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_4$j = { class: "acu-agent-advanced__section" };
+    const _hoisted_5$i = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_6$h = { class: "acu-agent-advanced__grid" };
+    const _hoisted_7$f = { class: "acu-agent-advanced__section" };
+    const _hoisted_8$f = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_9$d = { class: "acu-agent-advanced__grid" };
+    const _hoisted_10$d = { class: "acu-agent-advanced__section" };
+    const _hoisted_11$c = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_12$c = { class: "acu-agent-advanced__grid" };
+    const _hoisted_13$a = { class: "acu-agent-advanced__section" };
+    const _hoisted_14$a = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_15$a = { class: "acu-agent-advanced__prompt-scope" };
     const _hoisted_16$9 = { class: "acu-agent-advanced__prompt-actions" };
     const _hoisted_17$8 = { class: "acu-agent-advanced__prompt-head" };
     const _hoisted_18$8 = { class: "acu-agent-advanced__prompt-head" };
-    function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$s(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.open,
 		title: $setup.plotCopy.agentControl.advanced.title,
@@ -153295,7 +155199,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		"before-close": $setup.confirmClose,
 		onClose: _cache[10] || (_cache[10] = ($event) => _ctx.$emit("close"))
 	}, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_1$r, [
+		default: withCtx(() => [createBaseVNode("div", _hoisted_1$s, [
 			createVNode($setup["AcuMessage"], { kind: "info" }, {
 				default: withCtx(() => [createTextVNode(
 					toDisplayString($setup.plotCopy.agentControl.advanced.description),
@@ -153304,7 +155208,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				_: 1
 			}),
-			createBaseVNode("section", _hoisted_2$p, [createBaseVNode("header", _hoisted_3$l, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_2$q, [createBaseVNode("header", _hoisted_3$m, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.executionMode.label),
@@ -153324,7 +155228,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				disabled: !$setup.agentControl.isReady.value,
 				"onUpdate:modelValue": $setup.onExecutionModeChange
 			}, null, 8, ["model-value", "disabled"])]),
-			createBaseVNode("section", _hoisted_4$i, [createBaseVNode("header", _hoisted_5$h, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_4$j, [createBaseVNode("header", _hoisted_5$i, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.contextSettings.title),
@@ -153347,7 +155251,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* TEXT */
 				)]),
 				_: 1
-			}, 8, ["disabled"])]), createBaseVNode("div", _hoisted_6$g, [(openBlock(true), createElementBlock(
+			}, 8, ["disabled"])]), createBaseVNode("div", _hoisted_6$h, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.contextFields, (field) => {
@@ -153377,7 +155281,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				128
 				/* KEYED_FRAGMENT */
 			))])]),
-			createBaseVNode("section", _hoisted_7$e, [createBaseVNode("header", _hoisted_8$e, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_7$f, [createBaseVNode("header", _hoisted_8$f, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.decisionSettings.title),
@@ -153389,7 +155293,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				toDisplayString($setup.plotCopy.agentControl.decisionSettings.description),
 				1
 				/* TEXT */
-			)])]), createBaseVNode("div", _hoisted_9$c, [createVNode($setup["AcuFormRow"], {
+			)])]), createBaseVNode("div", _hoisted_9$d, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.decisionSettings.concurrency.label,
 				hint: $setup.plotCopy.agentControl.decisionSettings.concurrency.hint
 			}, {
@@ -153404,7 +155308,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value", "disabled"])]),
 				_: 1
 			}, 8, ["label", "hint"])])]),
-			createBaseVNode("section", _hoisted_10$c, [createBaseVNode("header", _hoisted_11$b, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_10$d, [createBaseVNode("header", _hoisted_11$c, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.skillifySettings.title),
@@ -153416,7 +155320,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				toDisplayString($setup.plotCopy.agentControl.skillifySettings.description),
 				1
 				/* TEXT */
-			)])]), createBaseVNode("div", _hoisted_12$b, [createVNode($setup["AcuFormRow"], {
+			)])]), createBaseVNode("div", _hoisted_12$c, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.skillifySettings.maxConcurrency.label,
 				hint: $setup.plotCopy.agentControl.skillifySettings.maxConcurrency.hint
 			}, {
@@ -153431,8 +155335,8 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value", "disabled"])]),
 				_: 1
 			}, 8, ["label", "hint"])])]),
-			createBaseVNode("section", _hoisted_13$9, [
-				createBaseVNode("header", _hoisted_14$9, [createBaseVNode("div", null, [
+			createBaseVNode("section", _hoisted_13$a, [
+				createBaseVNode("header", _hoisted_14$a, [createBaseVNode("div", null, [
 					createBaseVNode(
 						"h4",
 						null,
@@ -153449,7 +155353,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					),
 					createBaseVNode(
 						"p",
-						_hoisted_15$9,
+						_hoisted_15$a,
 						toDisplayString($setup.plotCopy.agentControl.prompts.scopeHint),
 						1
 						/* TEXT */
@@ -153594,9 +155498,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-9f89b5d2"]]);
+    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-5c474c20"]]);
 
-    var _sfc_main$q = /*@__PURE__*/ defineComponent({
+    var _sfc_main$r = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentControlBar',
         props: {
             agentControl: {}
@@ -153618,8 +155522,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 ? plotCopy.agentControl.status.active()
                 : plotCopy.agentControl.status.inactive);
             async function onModeChange(value) {
-                await agentControl.setMode(value);
-                emit('current-worldbook-changed');
+                if (await agentControl.setMode(value))
+                    emit('current-worldbook-changed');
             }
             async function runRestore() {
                 if (await agentControl.restore())
@@ -153639,28 +155543,28 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-agent-wb-control[data-v-b1d37101] { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 10px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-v2-agent-wb-control__head[data-v-b1d37101] { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__title[data-v-b1d37101] { font-size: var(--acu-font-size-body-lg, 13px); font-weight: 600; color: var(--acu-text-1);\n}\n.acu-v2-agent-wb-control__desc[data-v-b1d37101] { margin: 3px 0 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); line-height: 1.5;\n}\n.acu-v2-agent-wb-control__body[data-v-b1d37101] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__config-source[data-v-b1d37101] { flex: 1 1 100%; min-width: 0; margin: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-v2-agent-wb-control__api-selects[data-v-b1d37101] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; flex: 1 1 380px; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__actions[data-v-b1d37101] { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-v2-agent-wb-control__api-selects[data-v-b1d37101] { flex-basis: 100%; grid-template-columns: minmax(0, 1fr);\n}\n}\n@media (max-width: 480px) {\n.acu-v2-agent-wb-control__actions[data-v-b1d37101] { width: 100%;\n}\n.acu-v2-agent-wb-control__actions[data-v-b1d37101] .acu-btn { flex: 1 1 100%;\n}\n}\n", "src/presentation-v2/components/WorldbookAgentControlBar.vue#style-0-b1d37101");
-    var WorldbookAgentControlBar_vue_vue_type_style_index_0_scoped_b1d37101_lang = null;
+    injectSfcStyle("\n.acu-v2-agent-wb-control[data-v-f5b99e8a] { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 10px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-v2-agent-wb-control__head[data-v-f5b99e8a] { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__title[data-v-f5b99e8a] { font-size: var(--acu-font-size-body-lg, 13px); font-weight: 600; color: var(--acu-text-1);\n}\n.acu-v2-agent-wb-control__desc[data-v-f5b99e8a] { margin: 3px 0 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); line-height: 1.5;\n}\n.acu-v2-agent-wb-control__body[data-v-f5b99e8a] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__config-source[data-v-f5b99e8a] { flex: 1 1 100%; min-width: 0; margin: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-v2-agent-wb-control__api-selects[data-v-f5b99e8a] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; flex: 1 1 380px; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__actions[data-v-f5b99e8a] { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-v2-agent-wb-control__api-selects[data-v-f5b99e8a] { flex-basis: 100%; grid-template-columns: minmax(0, 1fr);\n}\n}\n@media (max-width: 480px) {\n.acu-v2-agent-wb-control__actions[data-v-f5b99e8a] { width: 100%;\n}\n.acu-v2-agent-wb-control__actions[data-v-f5b99e8a] .acu-btn { flex: 1 1 100%;\n}\n}\n", "src/presentation-v2/components/WorldbookAgentControlBar.vue#style-0-f5b99e8a");
+    var WorldbookAgentControlBar_vue_vue_type_style_index_0_scoped_f5b99e8a_lang = null;
 
-    const _hoisted_1$q = { class: "acu-v2-agent-wb-control" };
-    const _hoisted_2$o = { class: "acu-v2-agent-wb-control__head" };
-    const _hoisted_3$k = { class: "acu-v2-agent-wb-control__title" };
-    const _hoisted_4$h = { class: "acu-v2-agent-wb-control__desc" };
-    const _hoisted_5$g = { class: "acu-v2-agent-wb-control__body" };
-    const _hoisted_6$f = { class: "acu-v2-agent-wb-control__config-source" };
-    const _hoisted_7$d = { class: "acu-v2-agent-wb-control__api-selects" };
-    const _hoisted_8$d = { class: "acu-v2-agent-wb-control__actions" };
-    function _sfc_render$q(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$q, [
-		createBaseVNode("div", _hoisted_2$o, [createBaseVNode("div", null, [createBaseVNode(
+    const _hoisted_1$r = { class: "acu-v2-agent-wb-control" };
+    const _hoisted_2$p = { class: "acu-v2-agent-wb-control__head" };
+    const _hoisted_3$l = { class: "acu-v2-agent-wb-control__title" };
+    const _hoisted_4$i = { class: "acu-v2-agent-wb-control__desc" };
+    const _hoisted_5$h = { class: "acu-v2-agent-wb-control__body" };
+    const _hoisted_6$g = { class: "acu-v2-agent-wb-control__config-source" };
+    const _hoisted_7$e = { class: "acu-v2-agent-wb-control__api-selects" };
+    const _hoisted_8$e = { class: "acu-v2-agent-wb-control__actions" };
+    function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$r, [
+		createBaseVNode("div", _hoisted_2$p, [createBaseVNode("div", null, [createBaseVNode(
 			"div",
-			_hoisted_3$k,
+			_hoisted_3$l,
 			toDisplayString($setup.plotCopy.agentControl.title),
 			1
 			/* TEXT */
 		), createBaseVNode(
 			"p",
-			_hoisted_4$h,
+			_hoisted_4$i,
 			toDisplayString($setup.plotCopy.agentControl.description),
 			1
 			/* TEXT */
@@ -153672,10 +155576,10 @@ Expected function or array of functions, received type ${typeof value}.`
 			)]),
 			_: 1
 		}, 8, ["variant"])]),
-		createBaseVNode("div", _hoisted_5$g, [
+		createBaseVNode("div", _hoisted_5$h, [
 			createBaseVNode(
 				"p",
-				_hoisted_6$f,
+				_hoisted_6$g,
 				toDisplayString($setup.agentControl.configStatusText.value),
 				1
 				/* TEXT */
@@ -153687,7 +155591,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				"aria-label": "Agent 世界书模式",
 				"onUpdate:modelValue": $setup.onModeChange
 			}, null, 8, ["model-value"]),
-			createBaseVNode("div", _hoisted_7$d, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_7$e, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.apiPresets.decisionLabel,
 				hint: $setup.plotCopy.agentControl.apiPresets.decisionHint
 			}, {
@@ -153722,7 +155626,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				])]),
 				_: 1
 			}, 8, ["label", "hint"])]),
-			createBaseVNode("div", _hoisted_8$d, [
+			createBaseVNode("div", _hoisted_8$e, [
 				createVNode($setup["AcuButton"], {
 					size: "sm",
 					onClick: _cache[0] || (_cache[0] = ($event) => $setup.advancedOpen = true)
@@ -153786,7 +155690,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		}, null, 8, ["open", "agent-control"])
 	]);
     }
-    var WorldbookAgentControlBar = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-b1d37101"]]);
+    var WorldbookAgentControlBar = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-f5b99e8a"]]);
 
     function getEntryLabel_ACU(entry) {
         return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);
@@ -153804,11 +155708,20 @@ Expected function or array of functions, received type ${typeof value}.`
         const status = ref('idle');
         const error = ref('');
         const selected = ref(new Map());
+        let loadGeneration = 0;
+        /**
+         * 加载条目列表。返回 null 表示本次调用已被更新的调用取代（不写任何状态），
+         * 调用方应忽略结果；返回 string[] 为解析到的世界书名列表（失败时为 []，status='error'）。
+         */
         async function loadEntries() {
+            const generation = ++loadGeneration;
+            const isStale = () => generation !== loadGeneration;
             status.value = 'loading';
             error.value = '';
             try {
                 const bookNames = await resolveAgentWorldbookScopeBookNames_ACU();
+                if (isStale())
+                    return null;
                 const uniqueBookNames = [...new Set(bookNames.map(name => String(name || '').trim()).filter(Boolean))];
                 if (uniqueBookNames.length === 0) {
                     groups.value = [];
@@ -153817,10 +155730,16 @@ Expected function or array of functions, received type ${typeof value}.`
                     return [];
                 }
                 const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
+                if (isStale())
+                    return null;
                 const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot);
                 const entriesByBook = await getLorebookEntriesByNames_ACU(uniqueBookNames);
+                if (isStale())
+                    return null;
                 const nextGroups = [];
                 const visibleSelections = new Set();
+                // 刷新后保留用户已展开的分组，避免每次保存/删除 Skill 都把列表全部收起。
+                const previousExpandedByBook = new Map(groups.value.map(group => [group.bookName, group.expanded]));
                 for (const bookName of uniqueBookNames) {
                     const entries = Array.isArray(entriesByBook[bookName]) ? entriesByBook[bookName] : [];
                     const items = entries.flatMap((entry) => {
@@ -153847,7 +155766,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             }];
                     });
                     if (items.length > 0)
-                        nextGroups.push({ bookName, entries: items, expanded: false });
+                        nextGroups.push({ bookName, entries: items, expanded: previousExpandedByBook.get(bookName) ?? false });
                 }
                 selected.value = new Map([...selected.value].filter(([key]) => visibleSelections.has(key)));
                 groups.value = nextGroups;
@@ -153856,6 +155775,8 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             catch (cause) {
                 logError_ACU('[ACU-V2] useAgentWorldbookEntries loadEntries failed', cause);
+                if (isStale())
+                    return null;
                 error.value = cause?.message || '加载 Agent 世界书条目失败';
                 status.value = 'error';
                 return [];
@@ -153927,8 +155848,16 @@ Expected function or array of functions, received type ${typeof value}.`
                 logError_ACU('[ACU-V2] sync Agent worldbook takeover after Skill meta change failed', cause);
             }
         }
+        /** 与 agent-worldbook-skill-meta 的 noop 返回语义对齐：内容未变化/本就没有元数据不算失败。 */
+        const SKILL_META_NOOP_REASONS = new Set(['世界书 Skill 元数据未变化', '世界书条目没有 Skill 元数据']);
+        function throwIfSkillMetaWriteFailed(result) {
+            if (!result.updated && result.reason && !SKILL_META_NOOP_REASONS.has(result.reason)) {
+                throw new Error(result.reason);
+            }
+        }
         async function saveEntrySkillMeta(bookName, uid, draft, updatedBy = 'manual') {
             const result = await saveWorldbookEntrySkillMeta_ACU(bookName, uid, draft, updatedBy);
+            throwIfSkillMetaWriteFailed(result);
             if (result.entry && typeof result.entry.comment === 'string') {
                 updateEntrySkillMetaLocal(bookName, uid, result.entry.comment);
             }
@@ -153937,6 +155866,7 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         async function deleteEntrySkillMeta(bookName, uid) {
             const result = await deleteWorldbookEntrySkillMeta_ACU(bookName, uid);
+            throwIfSkillMetaWriteFailed(result);
             if (result.entry && typeof result.entry.comment === 'string') {
                 updateEntrySkillMetaLocal(bookName, uid, result.entry.comment);
             }
@@ -154130,26 +156060,27 @@ Expected function or array of functions, received type ${typeof value}.`
             await refresh();
             return result;
         }
+        /** 返回值表示模式配置是否写入成功；接管/恢复的部分失败不影响返回 true（模式已变，调用方仍需刷新），由 toast 告警。 */
         async function setMode(next) {
             const saved = await writeControlPatch({ mode: next, enabled: next !== 'disabled' });
             if (!saved)
-                return;
+                return false;
             if (next === 'agent') {
                 try {
                     const takeoverResult = await takeoverWorldbookGreenlights_ACU();
                     snapshot.value = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
                     if (takeoverResult.failed > 0 || snapshot.value.active !== true) {
                         toast.warning(`Agent 世界书已切换为接管模式，但物理接管未完全完成：${takeoverResult.reason || 'unknown'}`, { muteable: false });
-                        return;
+                        return true;
                     }
                 }
                 catch (error) {
                     snapshot.value = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
                     toast.warning(`Agent 世界书已切换为接管模式，但物理接管失败：${error?.message || '未知错误'}`, { muteable: false });
-                    return;
+                    return true;
                 }
                 toast.info(plotCopy.agentControl.modeChanged.agent, { muteable: false });
-                return;
+                return true;
             }
             if (next === 'disabled') {
                 try {
@@ -154160,21 +156091,22 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (restoreResult.skipped > 0 || restoreResult.failed > 0) {
                         const message = plotCopy.agentControl.restore.reasons[restoreResult.reason || ''] || `Agent 世界书已关闭，但恢复受控条目未完全完成：${restoreResult.reason || 'unknown'}`;
                         toast.warning(message, { muteable: false });
-                        return;
+                        return true;
                     }
                     toast.info(plotCopy.agentControl.modeChanged.disabled, { muteable: false });
-                    return;
+                    return true;
                 }
                 catch (error) {
                     snapshot.value = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
                     toast.warning(`Agent 世界书已关闭，但恢复受控条目失败：${error?.message || '未知错误'}`, { muteable: false });
-                    return;
+                    return true;
                 }
             }
             toast.info(plotCopy.agentControl.modeChanged[next], { muteable: false });
+            return true;
         }
         async function setAgentPlotExecutionMode(next) {
-            await writeControlPatch({ agentPlotExecutionMode: next === 'concurrent' ? 'concurrent' : 'sequential' });
+            return Boolean(await writeControlPatch({ agentPlotExecutionMode: next === 'concurrent' ? 'concurrent' : 'sequential' }));
         }
         async function setAgentApiPreset(next) {
             await writeControlPatch({ agentApiPreset: normalizeAgentApiPreset_ACU(next) });
@@ -154543,12 +156475,13 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    var _sfc_main$p = /*@__PURE__*/ defineComponent({
+    var _sfc_main$q = /*@__PURE__*/ defineComponent({
         __name: 'AgentPage',
         setup(__props, { expose: __expose }) {
             __expose();
             const worldbook = useWorldbookSelector();
             const agentControl = usePlotWorldbookAgentControl();
+            const toast = useToastStore();
             const entries = useAgentWorldbookEntries({
                 onSkillMetaChanged: agentControl.syncAgentWorldbookTakeoverAfterSkillChange,
             });
@@ -154563,6 +156496,8 @@ Expected function or array of functions, received type ${typeof value}.`
             });
             async function refreshEntries() {
                 const names = await entries.loadEntries();
+                if (names === null)
+                    return; // 本次加载已被更新的调用取代，状态归新调用管
                 entryEmptyText.value = names.length === 0
                     ? (agentControl.worldbookScope.value.source === 'manual' ? '尚未选择 Agent 世界书。' : '未解析到角色卡世界书。')
                     : '当前 Agent 世界书范围内无可 Skill 化的条目。';
@@ -154585,28 +156520,40 @@ Expected function or array of functions, received type ${typeof value}.`
                     await refreshEntries();
             }
             async function onSaveSkill(bookName, uid, draft) {
-                await entries.saveEntrySkillMeta(bookName, uid, draft, 'manual');
+                try {
+                    await entries.saveEntrySkillMeta(bookName, uid, draft, 'manual');
+                }
+                catch (cause) {
+                    toast.error(`保存 Skill 失败：${cause?.message || '未知错误'}`, { muteable: false });
+                    return;
+                }
                 await refreshEntries();
             }
             async function onDeleteSkill(bookName, uid) {
-                await entries.deleteEntrySkillMeta(bookName, uid);
+                try {
+                    await entries.deleteEntrySkillMeta(bookName, uid);
+                }
+                catch (cause) {
+                    toast.error(`删除 Skill 失败：${cause?.message || '未知错误'}`, { muteable: false });
+                    return;
+                }
                 await refreshEntries();
             }
             onMounted(() => { void refreshAll(); });
             watch(useChatChangedTick(), () => { void refreshAll(); });
-            const __returned__ = { worldbook, agentControl, entries, entryFilter, entryEmptyText, currentScopeLabel, refreshEntries, refreshAll, onScopeSourceChange, onScopeBookToggle, onSkillifySelected, onSaveSkill, onDeleteSkill, AcuPanel, AcuPanelGrid, WorldbookAgentControlBar, WorldbookEntryList, WorldbookEntryToolbar, WorldbookSourcePicker };
+            const __returned__ = { worldbook, agentControl, toast, entries, entryFilter, entryEmptyText, currentScopeLabel, refreshEntries, refreshAll, onScopeSourceChange, onScopeBookToggle, onSkillifySelected, onSaveSkill, onDeleteSkill, AcuPanel, AcuPanelGrid, WorldbookAgentControlBar, WorldbookEntryList, WorldbookEntryToolbar, WorldbookSourcePicker };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-agent-page[data-v-02722bdf] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n.acu-v2-agent-page__hint[data-v-02722bdf] { margin: 12px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-agent-page__hint strong[data-v-02722bdf] { color: var(--acu-text-1); font-weight: 500;\n}\n@media (max-width: 860px) {\n.acu-v2-agent-page[data-v-02722bdf] { padding: 14px;\n}\n}\n", "src/presentation-v2/pages/AgentPage.vue#style-0-02722bdf");
-    var AgentPage_vue_vue_type_style_index_0_scoped_02722bdf_lang = null;
+    injectSfcStyle("\n.acu-v2-agent-page[data-v-57b6deb9] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n.acu-v2-agent-page__hint[data-v-57b6deb9] { margin: 12px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-agent-page__hint strong[data-v-57b6deb9] { color: var(--acu-text-1); font-weight: 500;\n}\n@media (max-width: 860px) {\n.acu-v2-agent-page[data-v-57b6deb9] { padding: 14px;\n}\n}\n", "src/presentation-v2/pages/AgentPage.vue#style-0-57b6deb9");
+    var AgentPage_vue_vue_type_style_index_0_scoped_57b6deb9_lang = null;
 
-    const _hoisted_1$p = { class: "acu-v2-agent-page" };
-    const _hoisted_2$n = { class: "acu-v2-agent-page__hint" };
-    function _sfc_render$p(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$p, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-agent-page__grid" }, {
+    const _hoisted_1$q = { class: "acu-v2-agent-page" };
+    const _hoisted_2$o = { class: "acu-v2-agent-page__hint" };
+    function _sfc_render$q(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$q, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-agent-page__grid" }, {
 		default: withCtx(() => [createVNode($setup["AcuPanel"], {
 			title: "Agent 世界书",
 			description: "独立管理 Agent 的世界书范围、Skill 元数据和接管状态。"
@@ -154631,7 +156578,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					"status",
 					"error"
 				]),
-				createBaseVNode("p", _hoisted_2$n, [_cache[5] || (_cache[5] = createTextVNode(
+				createBaseVNode("p", _hoisted_2$o, [_cache[5] || (_cache[5] = createTextVNode(
 					"当前范围: ",
 					-1
 					/* CACHED */
@@ -154655,6 +156602,8 @@ Expected function or array of functions, received type ${typeof value}.`
 					groups: $setup.entries.groups.value,
 					filter: $setup.entryFilter,
 					loading: $setup.entries.status.value === "loading",
+					status: $setup.entries.status.value,
+					error: $setup.entries.error.value,
 					"empty-text": $setup.entryEmptyText,
 					"show-entry-toggle": false,
 					onToggleSkillify: _cache[3] || (_cache[3] = (bookName, uid, checked) => $setup.entries.toggleSkillifyEntry(bookName, uid, checked)),
@@ -154665,6 +156614,8 @@ Expected function or array of functions, received type ${typeof value}.`
 					"groups",
 					"filter",
 					"loading",
+					"status",
+					"error",
 					"empty-text"
 				])
 			]),
@@ -154673,10 +156624,10 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var AgentPage = /*#__PURE__*/ _export_sfc(_sfc_main$p, [["render", _sfc_render$p], ["__scopeId", "data-v-02722bdf"]]);
+    var AgentPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-57b6deb9"]]);
 
     const FOLD_VISIBLE_STEP_ACU = 40;
-    var _sfc_main$o = /*@__PURE__*/ defineComponent({
+    var _sfc_main$p = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationSessionFeed',
         props: {
             entries: {},
@@ -154760,33 +156711,33 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\r\n/* 纵向列表必须用 flex 列而不是 grid：容器带 max-height 时 grid 会把行压缩到最小贡献，\r\n   而卡片（overflow: hidden）的最小贡献是 0——条目会被纵向压扁成一条条细线。\r\n   flex 列 + 子项 flex: none 保证每个条目始终保持内容高度，超出部分滚动。 */\n.acu-v2-session-feed[data-v-1a5b974e] { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed[data-v-1a5b974e] > * { flex: 0 0 auto;\n}\n.acu-v2-session-feed__empty[data-v-1a5b974e] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 折叠横幅：置于列表顶部，提示还有多少更早消息被折叠 */\n.acu-v2-session-feed__fold[data-v-1a5b974e] { padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--acu-text-3) 40%, transparent); border-radius: 8px; background: transparent; color: var(--acu-text-3); font: inherit; font-size: var(--acu-font-size-caption, 11px); cursor: pointer; text-align: center;\n}\n.acu-v2-session-feed__fold[data-v-1a5b974e]:hover { color: var(--acu-text-2); border-color: color-mix(in srgb, var(--acu-text-3) 60%, transparent);\n}\r\n\r\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-1a5b974e] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-1a5b974e]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-1a5b974e] { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-1a5b974e] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-1a5b974e] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-1a5b974e] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-1a5b974e] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-1a5b974e] { display: block; margin: 3px 0 0; text-align: right;\n}\r\n\r\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-1a5b974e] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-1a5b974e] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-1a5b974e] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\r\n\r\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-1a5b974e] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-1a5b974e 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-1a5b974e], .acu-v2-session-feed__card--outline_op[data-v-1a5b974e], .acu-v2-session-feed__card--protocol_retry[data-v-1a5b974e] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-1a5b974e], .acu-v2-session-feed__card--run_completed[data-v-1a5b974e] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-1a5b974e] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-1a5b974e] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\r\n/* 交接报告：琥珀色标出「AI 可见性边界」，与成功/失败/进行中的语义色区分 */\n.acu-v2-session-feed__card--handoff[data-v-1a5b974e] { border-left: 3px solid color-mix(in srgb, #c9963e 75%, transparent); background: color-mix(in srgb, #c9963e 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card-head[data-v-1a5b974e] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-1a5b974e] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-1a5b974e] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-1a5b974e] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-1a5b974e] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-1a5b974e] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-1a5b974e 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-1a5b974e] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-1a5b974e] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-1a5b974e] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-1a5b974e] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-1a5b974e] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-1a5b974e] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-1a5b974e] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-1a5b974e] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-1a5b974e] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-1a5b974e 1.1s ease-in-out infinite;\n}\r\n/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，\r\n   横向空间留给正文；用户气泡放宽到近整行。 */\n@media (max-width: 640px) {\n.acu-v2-session-feed[data-v-1a5b974e] { max-height: 62vh; padding: 8px;\n}\n.acu-v2-session-feed__card--delegation[data-v-1a5b974e], .acu-v2-session-feed__card--outline_op[data-v-1a5b974e], .acu-v2-session-feed__card--protocol_retry[data-v-1a5b974e] { margin-left: 8px;\n}\n.acu-v2-session-feed__card-head[data-v-1a5b974e] { padding: 7px 8px; gap: 6px;\n}\n.acu-v2-session-feed__preview[data-v-1a5b974e] { padding: 0 8px 7px 12px;\n}\n.acu-v2-session-feed__detail[data-v-1a5b974e] { padding: 0 8px 8px 12px;\n}\n.acu-v2-session-feed__user-bubble[data-v-1a5b974e] { max-width: 94%;\n}\n}\n@keyframes acu-v2-session-feed-in-1a5b974e {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-1a5b974e {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-1a5b974e {\nto { transform: rotate(360deg);\n}\n}\r\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-1a5b974e");
     var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_1a5b974e_lang = null;
 
-    const _hoisted_1$o = {
+    const _hoisted_1$p = {
 	ref: "feedElement",
 	class: "acu-v2-session-feed"
     };
-    const _hoisted_2$m = {
+    const _hoisted_2$n = {
 	key: 0,
 	class: "acu-v2-session-feed__empty"
     };
-    const _hoisted_3$j = {
+    const _hoisted_3$k = {
 	key: 0,
 	class: "acu-v2-session-feed__run-divider"
     };
-    const _hoisted_4$g = { class: "acu-v2-session-feed__run-divider-badge" };
-    const _hoisted_5$f = { class: "acu-v2-session-feed__run-divider-title" };
-    const _hoisted_6$e = { class: "acu-v2-session-feed__time" };
-    const _hoisted_7$c = { class: "acu-v2-session-feed__user" };
-    const _hoisted_8$c = { class: "acu-v2-session-feed__user-bubble" };
-    const _hoisted_9$b = { class: "acu-v2-session-feed__user-text" };
-    const _hoisted_10$b = { class: "acu-v2-session-feed__time" };
-    const _hoisted_11$a = { class: "acu-v2-session-feed__thought" };
-    const _hoisted_12$a = { class: "acu-v2-session-feed__thought-label" };
-    const _hoisted_13$8 = {
+    const _hoisted_4$h = { class: "acu-v2-session-feed__run-divider-badge" };
+    const _hoisted_5$g = { class: "acu-v2-session-feed__run-divider-title" };
+    const _hoisted_6$f = { class: "acu-v2-session-feed__time" };
+    const _hoisted_7$d = { class: "acu-v2-session-feed__user" };
+    const _hoisted_8$d = { class: "acu-v2-session-feed__user-bubble" };
+    const _hoisted_9$c = { class: "acu-v2-session-feed__user-text" };
+    const _hoisted_10$c = { class: "acu-v2-session-feed__time" };
+    const _hoisted_11$b = { class: "acu-v2-session-feed__thought" };
+    const _hoisted_12$b = { class: "acu-v2-session-feed__thought-label" };
+    const _hoisted_13$9 = {
 	key: 0,
 	class: "acu-v2-session-feed__thought-text"
     };
-    const _hoisted_14$8 = ["onClick"];
-    const _hoisted_15$8 = {
+    const _hoisted_14$9 = ["onClick"];
+    const _hoisted_15$9 = {
 	key: 0,
 	class: "acu-v2-session-feed__spinner"
     };
@@ -154802,12 +156753,12 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 2,
 	class: "acu-v2-session-feed__running"
     };
-    function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$p(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
-		_hoisted_1$o,
+		_hoisted_1$p,
 		[
-			!$props.entries.length ? (openBlock(), createElementBlock("p", _hoisted_2$m, " 还没有运行记录。点击「继续当前轮次」后，主 Agent 的思考、派工、大纲操作与交付过程会实时显示在这里。 ")) : createCommentVNode("v-if", true),
+			!$props.entries.length ? (openBlock(), createElementBlock("p", _hoisted_2$n, " 还没有运行记录。点击「继续当前轮次」后，主 Agent 的思考、派工、大纲操作与交付过程会实时显示在这里。 ")) : createCommentVNode("v-if", true),
 			$setup.hiddenCount > 0 ? (openBlock(), createElementBlock(
 				"button",
 				{
@@ -154827,24 +156778,24 @@ Expected function or array of functions, received type ${typeof value}.`
 					return openBlock(), createElementBlock(
 						Fragment,
 						{ key: entry.id },
-						[createCommentVNode(" 运行分隔条：一次运行（或恢复）的起点 "), entry.kind === "run_started" || entry.kind === "run_resumed" ? (openBlock(), createElementBlock("div", _hoisted_3$j, [
+						[createCommentVNode(" 运行分隔条：一次运行（或恢复）的起点 "), entry.kind === "run_started" || entry.kind === "run_resumed" ? (openBlock(), createElementBlock("div", _hoisted_3$k, [
 							createBaseVNode(
 								"span",
-								_hoisted_4$g,
+								_hoisted_4$h,
 								toDisplayString(entry.kind === "run_resumed" ? "恢复运行" : "开始运行"),
 								1
 								/* TEXT */
 							),
 							createBaseVNode(
 								"span",
-								_hoisted_5$f,
+								_hoisted_5$g,
 								toDisplayString(entry.title),
 								1
 								/* TEXT */
 							),
 							createBaseVNode(
 								"span",
-								_hoisted_6$e,
+								_hoisted_6$f,
 								toDisplayString($setup.formatTime(entry.at)),
 								1
 								/* TEXT */
@@ -154852,15 +156803,15 @@ Expected function or array of functions, received type ${typeof value}.`
 						])) : entry.kind === "user_message" ? (openBlock(), createElementBlock(
 							Fragment,
 							{ key: 1 },
-							[createCommentVNode(" 用户消息：右对齐气泡，和 coding agent 的对话界面一致 "), createBaseVNode("div", _hoisted_7$c, [createBaseVNode("div", _hoisted_8$c, [createBaseVNode(
+							[createCommentVNode(" 用户消息：右对齐气泡，和 coding agent 的对话界面一致 "), createBaseVNode("div", _hoisted_7$d, [createBaseVNode("div", _hoisted_8$d, [createBaseVNode(
 								"p",
-								_hoisted_9$b,
+								_hoisted_9$c,
 								toDisplayString(entry.detail || entry.title),
 								1
 								/* TEXT */
 							), createBaseVNode(
 								"span",
-								_hoisted_10$b,
+								_hoisted_10$c,
 								toDisplayString($setup.formatTime(entry.at)),
 								1
 								/* TEXT */
@@ -154870,15 +156821,15 @@ Expected function or array of functions, received type ${typeof value}.`
 						)) : entry.kind === "thought" ? (openBlock(), createElementBlock(
 							Fragment,
 							{ key: 2 },
-							[createCommentVNode(" 思考条目：弱化渲染，像 coding agent 的推理气泡 "), createBaseVNode("div", _hoisted_11$a, [createBaseVNode(
+							[createCommentVNode(" 思考条目：弱化渲染，像 coding agent 的推理气泡 "), createBaseVNode("div", _hoisted_11$b, [createBaseVNode(
 								"span",
-								_hoisted_12$a,
+								_hoisted_12$b,
 								toDisplayString(entry.title),
 								1
 								/* TEXT */
 							), entry.detail ? (openBlock(), createElementBlock(
 								"p",
-								_hoisted_13$8,
+								_hoisted_13$9,
 								toDisplayString(entry.detail),
 								1
 								/* TEXT */
@@ -154900,7 +156851,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										createBaseVNode(
 											"span",
 											{ class: normalizeClass(["acu-v2-session-feed__status", `acu-v2-session-feed__status--${entry.status}`]) },
-											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_15$8)) : entry.status === "failed" ? (openBlock(), createElementBlock(
+											[entry.status === "running" ? (openBlock(), createElementBlock("span", _hoisted_15$9)) : entry.status === "failed" ? (openBlock(), createElementBlock(
 												Fragment,
 												{ key: 1 },
 												[createTextVNode("✕")],
@@ -154947,7 +156898,7 @@ Expected function or array of functions, received type ${typeof value}.`
 											2
 											/* CLASS */
 										)) : createCommentVNode("v-if", true)
-									], 8, _hoisted_14$8),
+									], 8, _hoisted_14$9),
 									entry.detail && !$setup.isExpanded(entry) ? (openBlock(), createElementBlock("p", {
 										key: 0,
 										class: "acu-v2-session-feed__preview",
@@ -154990,9 +156941,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-1a5b974e"]]);
+    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$p, [["render", _sfc_render$p], ["__scopeId", "data-v-1a5b974e"]]);
 
-    var _sfc_main$n = /*@__PURE__*/ defineComponent({
+    var _sfc_main$o = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationChat',
         props: {
             task: {},
@@ -155080,25 +157031,25 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-continuation-chat[data-v-600ebb23] { display: grid; gap: 10px;\n}\n.acu-v2-continuation-chat__status[data-v-600ebb23] { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-chat__badge[data-v-600ebb23] { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2);\n}\n.acu-v2-continuation-chat__badge--running[data-v-600ebb23] { background: color-mix(in srgb, var(--acu-primary, #5b8def) 20%, transparent); color: var(--acu-primary, #5b8def);\n}\n.acu-v2-continuation-chat__badge--failed[data-v-600ebb23] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-continuation-chat__status-item[data-v-600ebb23] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-chat__notice[data-v-600ebb23] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-chat__composer[data-v-600ebb23] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2);\n}\n.acu-v2-continuation-chat__input[data-v-600ebb23] { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-chat__input[data-v-600ebb23]:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-continuation-chat__composer-actions[data-v-600ebb23] { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-chat__hint[data-v-600ebb23] { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\r\n\r\n/* 手机窄屏：快捷键提示没有意义直接隐藏；按钮均分整行方便点按；\r\n   输入框字号提到 16px，避免 iOS Safari 聚焦时自动放大页面。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-chat__hint[data-v-600ebb23] { display: none;\n}\n.acu-v2-continuation-chat__composer-actions[data-v-600ebb23] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-chat__input[data-v-600ebb23] { font-size: 16px; min-height: 56px;\n}\n.acu-v2-continuation-chat__composer[data-v-600ebb23] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/ContinuationChat.vue#style-0-600ebb23");
     var ContinuationChat_vue_vue_type_style_index_0_scoped_600ebb23_lang = null;
 
-    const _hoisted_1$n = { class: "acu-v2-continuation-chat" };
-    const _hoisted_2$l = { class: "acu-v2-continuation-chat__status" };
-    const _hoisted_3$i = { class: "acu-v2-continuation-chat__status-item" };
-    const _hoisted_4$f = { class: "acu-v2-continuation-chat__status-item" };
-    const _hoisted_5$e = {
+    const _hoisted_1$o = { class: "acu-v2-continuation-chat" };
+    const _hoisted_2$m = { class: "acu-v2-continuation-chat__status" };
+    const _hoisted_3$j = { class: "acu-v2-continuation-chat__status-item" };
+    const _hoisted_4$g = { class: "acu-v2-continuation-chat__status-item" };
+    const _hoisted_5$f = {
 	key: 0,
 	class: "acu-v2-continuation-chat__status-item"
     };
-    const _hoisted_6$d = { class: "acu-v2-continuation-chat__status-item" };
-    const _hoisted_7$b = {
+    const _hoisted_6$e = { class: "acu-v2-continuation-chat__status-item" };
+    const _hoisted_7$c = {
 	key: 0,
 	class: "acu-v2-continuation-chat__notice"
     };
-    const _hoisted_8$b = { class: "acu-v2-continuation-chat__composer" };
-    const _hoisted_9$a = ["value", "placeholder"];
-    const _hoisted_10$a = { class: "acu-v2-continuation-chat__composer-actions" };
-    function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$n, [
-		createBaseVNode("div", _hoisted_2$l, [
+    const _hoisted_8$c = { class: "acu-v2-continuation-chat__composer" };
+    const _hoisted_9$b = ["value", "placeholder"];
+    const _hoisted_10$b = { class: "acu-v2-continuation-chat__composer-actions" };
+    function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$o, [
+		createBaseVNode("div", _hoisted_2$m, [
 			createBaseVNode(
 				"span",
 				{ class: normalizeClass(["acu-v2-continuation-chat__badge", `acu-v2-continuation-chat__badge--${$setup.statusTone}`]) },
@@ -155108,28 +157059,28 @@ Expected function or array of functions, received type ${typeof value}.`
 			),
 			createBaseVNode(
 				"span",
-				_hoisted_3$i,
+				_hoisted_3$j,
 				toDisplayString($props.stageText),
 				1
 				/* TEXT */
 			),
 			createBaseVNode(
 				"span",
-				_hoisted_4$f,
+				_hoisted_4$g,
 				"已完成 " + toDisplayString($props.completedTurns) + " / " + toDisplayString($props.totalTurns) + " 轮",
 				1
 				/* TEXT */
 			),
 			$props.revisionText ? (openBlock(), createElementBlock(
 				"span",
-				_hoisted_5$e,
+				_hoisted_5$f,
 				"大纲 " + toDisplayString($props.revisionText),
 				1
 				/* TEXT */
 			)) : createCommentVNode("v-if", true),
 			createBaseVNode(
 				"span",
-				_hoisted_6$d,
+				_hoisted_6$e,
 				"倒计时 " + toDisplayString($props.deadlineText),
 				1
 				/* TEXT */
@@ -155141,12 +157092,12 @@ Expected function or array of functions, received type ${typeof value}.`
 		}, null, 8, ["entries", "running"]),
 		$setup.notice ? (openBlock(), createElementBlock(
 			"p",
-			_hoisted_7$b,
+			_hoisted_7$c,
 			toDisplayString($setup.notice),
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true),
-		createBaseVNode("div", _hoisted_8$b, [createBaseVNode("textarea", {
+		createBaseVNode("div", _hoisted_8$c, [createBaseVNode("textarea", {
 			ref: "inputElement",
 			class: "acu-v2-continuation-chat__input",
 			value: $setup.draft,
@@ -155154,7 +157105,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			placeholder: $setup.placeholder,
 			onInput: $setup.onInput,
 			onKeydown: $setup.onKeydown
-		}, null, 40, _hoisted_9$a), createBaseVNode("div", _hoisted_10$a, [
+		}, null, 40, _hoisted_9$b), createBaseVNode("div", _hoisted_10$b, [
 			_cache[7] || (_cache[7] = createBaseVNode(
 				"span",
 				{ class: "acu-v2-continuation-chat__hint" },
@@ -155215,7 +157166,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])])
 	]);
     }
-    var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-600ebb23"]]);
+    var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-600ebb23"]]);
 
     function errorMessage_ACU$1(error) {
         if (error instanceof ContinuationValidationError_ACU)
@@ -155289,7 +157240,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return { snapshot, draft, dirty, error, saving, reload, save, updateDraft };
     }
 
-    var _sfc_main$m = /*@__PURE__*/ defineComponent({
+    var _sfc_main$n = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationMaterialsPanel',
         props: {
             task: {},
@@ -155368,39 +157319,39 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-continuation-materials[data-v-294e98ea] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-294e98ea] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-294e98ea] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-294e98ea] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-294e98ea] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-294e98ea] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-294e98ea] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__editor[data-v-294e98ea] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-294e98ea] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-294e98ea] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-294e98ea] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-294e98ea] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-294e98ea] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-294e98ea] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__list[data-v-294e98ea], .acu-v2-continuation-materials__timeline[data-v-294e98ea] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\r\n/* 带 max-height 的滚动列表不用 grid：行会被压缩到最小贡献导致条目压扁（同会话流的修复）。 */\n.acu-v2-continuation-materials__timeline[data-v-294e98ea] { max-height: 320px; overflow-y: auto;\n}\n.acu-v2-continuation-materials__timeline > li[data-v-294e98ea] { flex: 0 0 auto;\n}\r\n\r\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-294e98ea] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-294e98ea] { display: flex; margin: 8px 0 0;\n}\n}\r\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-294e98ea");
     var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_294e98ea_lang = null;
 
-    const _hoisted_1$m = { class: "acu-v2-continuation-materials" };
-    const _hoisted_2$k = { class: "acu-v2-continuation-materials__tabs" };
-    const _hoisted_3$h = ["onClick"];
-    const _hoisted_4$e = { class: "acu-v2-continuation-materials__tab-actions" };
-    const _hoisted_5$d = {
+    const _hoisted_1$n = { class: "acu-v2-continuation-materials" };
+    const _hoisted_2$l = { class: "acu-v2-continuation-materials__tabs" };
+    const _hoisted_3$i = ["onClick"];
+    const _hoisted_4$f = { class: "acu-v2-continuation-materials__tab-actions" };
+    const _hoisted_5$e = {
 	key: 0,
 	class: "acu-v2-continuation-materials__confirm"
     };
-    const _hoisted_6$c = { class: "acu-v2-continuation-materials__confirm-actions" };
-    const _hoisted_7$a = {
+    const _hoisted_6$d = { class: "acu-v2-continuation-materials__confirm-actions" };
+    const _hoisted_7$b = {
 	key: 0,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_8$a = {
+    const _hoisted_8$b = {
 	key: 0,
 	class: "acu-v2-continuation-materials__editor"
     };
-    const _hoisted_9$9 = { class: "acu-v2-continuation-materials__meta" };
-    const _hoisted_10$9 = {
+    const _hoisted_9$a = { class: "acu-v2-continuation-materials__meta" };
+    const _hoisted_10$a = {
 	key: 0,
 	class: "acu-v2-continuation-materials__error"
     };
-    const _hoisted_11$9 = { class: "acu-v2-continuation-materials__actions" };
-    const _hoisted_12$9 = {
+    const _hoisted_11$a = { class: "acu-v2-continuation-materials__actions" };
+    const _hoisted_12$a = {
 	key: 1,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_13$7 = {
+    const _hoisted_13$8 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
     };
-    const _hoisted_14$7 = { class: "acu-v2-continuation-materials__meta" };
-    const _hoisted_15$7 = { class: "acu-v2-continuation-materials__list" };
+    const _hoisted_14$8 = { class: "acu-v2-continuation-materials__meta" };
+    const _hoisted_15$8 = { class: "acu-v2-continuation-materials__list" };
     const _hoisted_16$7 = {
 	key: 0,
 	class: "acu-v2-continuation-materials__meta"
@@ -155419,9 +157370,9 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-continuation-materials__timeline"
     };
     const _hoisted_21$4 = { key: 0 };
-    function _sfc_render$m(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$m, [
-		createBaseVNode("div", _hoisted_2$k, [(openBlock(), createElementBlock(
+    function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$n, [
+		createBaseVNode("div", _hoisted_2$l, [(openBlock(), createElementBlock(
 			Fragment,
 			null,
 			renderList($setup.TABS, (tab) => {
@@ -155430,11 +157381,11 @@ Expected function or array of functions, received type ${typeof value}.`
 					type: "button",
 					class: normalizeClass(["acu-v2-continuation-materials__tab", { "acu-v2-continuation-materials__tab--active": $setup.activeTab === tab.id }]),
 					onClick: ($event) => $setup.activeTab = tab.id
-				}, toDisplayString(tab.label), 11, _hoisted_3$h);
+				}, toDisplayString(tab.label), 11, _hoisted_3$i);
 			}),
 			64
 			/* STABLE_FRAGMENT */
-		)), createBaseVNode("div", _hoisted_4$e, [createVNode($setup["AcuButton"], {
+		)), createBaseVNode("div", _hoisted_4$f, [createVNode($setup["AcuButton"], {
 			loading: $props.busy,
 			onClick: $setup.reload
 		}, {
@@ -155456,11 +157407,11 @@ Expected function or array of functions, received type ${typeof value}.`
 			)])]),
 			_: 1
 		}, 8, ["loading"])])]),
-		$setup.clearPending ? (openBlock(), createElementBlock("p", _hoisted_5$d, [_cache[5] || (_cache[5] = createTextVNode(
+		$setup.clearPending ? (openBlock(), createElementBlock("p", _hoisted_5$e, [_cache[5] || (_cache[5] = createTextVNode(
 			" 清空会删除当前续写任务、主 Agent 的会话记录与本地资料快照（伏笔、信息差、长期约束）。 小说正文楼层不受影响，清空后可以从当前剧情重新开始规划。 ",
 			-1
 			/* CACHED */
-		)), createBaseVNode("span", _hoisted_6$c, [createVNode($setup["AcuButton"], {
+		)), createBaseVNode("span", _hoisted_6$d, [createVNode($setup["AcuButton"], {
 			variant: "danger",
 			loading: $props.busy,
 			onClick: $setup.confirmClear
@@ -155483,13 +157434,13 @@ Expected function or array of functions, received type ${typeof value}.`
 		$setup.activeTab === "outline" ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 1 },
-			[!$props.task ? (openBlock(), createElementBlock("p", _hoisted_7$a, "还没有续写任务，也就没有阶段大纲。")) : (openBlock(), createElementBlock(
+			[!$props.task ? (openBlock(), createElementBlock("p", _hoisted_7$b, "还没有续写任务，也就没有阶段大纲。")) : (openBlock(), createElementBlock(
 				Fragment,
 				{ key: 1 },
-				[$props.activeRevision ? (openBlock(), createElementBlock("div", _hoisted_8$a, [
+				[$props.activeRevision ? (openBlock(), createElementBlock("div", _hoisted_8$b, [
 					createBaseVNode(
 						"p",
-						_hoisted_9$9,
+						_hoisted_9$a,
 						" 当前：第 " + toDisplayString($props.activeStage?.stageNumber) + " 阶段 · revision " + toDisplayString($props.activeRevision.revision) + " · 已完成 " + toDisplayString($props.activeStage?.completedTurns ?? 0) + " 轮。 已完成轮次与正在执行的轮次不可删除或替换，总轮数必须留在阶段规模范围内。 ",
 						1
 						/* TEXT */
@@ -155501,12 +157452,12 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"]),
 					$setup.outlineError ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_10$9,
+						_hoisted_10$a,
 						toDisplayString($setup.outlineError),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_11$9, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_11$a, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.outlineDirty,
 						onClick: $setup.syncOutlineDraft
 					}, {
@@ -155529,7 +157480,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)])]),
 						_: 1
 					}, 8, ["loading", "disabled"])])
-				])) : (openBlock(), createElementBlock("p", _hoisted_12$9, "当前没有已冻结的阶段大纲可编辑。")), (openBlock(true), createElementBlock(
+				])) : (openBlock(), createElementBlock("p", _hoisted_12$a, "当前没有已冻结的阶段大纲可编辑。")), (openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($props.task.stages, (stage) => {
@@ -155546,7 +157497,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							),
 							stage.chronicleRange ? (openBlock(), createElementBlock(
 								"p",
-								_hoisted_13$7,
+								_hoisted_13$8,
 								"纪要范围：" + toDisplayString(stage.chronicleRange.first) + " → " + toDisplayString(stage.chronicleRange.last),
 								1
 								/* TEXT */
@@ -155557,11 +157508,11 @@ Expected function or array of functions, received type ${typeof value}.`
 								renderList(stage.revisions, (revision) => {
 									return openBlock(), createElementBlock("div", { key: revision.revision }, [createBaseVNode(
 										"p",
-										_hoisted_14$7,
+										_hoisted_14$8,
 										" revision " + toDisplayString(revision.revision) + " · " + toDisplayString(revision.reason) + " · " + toDisplayString(revision.frozen ? "已冻结" : "待确认") + " · " + toDisplayString(revision.outline.title),
 										1
 										/* TEXT */
-									), createBaseVNode("ol", _hoisted_15$7, [(openBlock(true), createElementBlock(
+									), createBaseVNode("ol", _hoisted_15$8, [(openBlock(true), createElementBlock(
 										Fragment,
 										null,
 										renderList(revision.outline.nodes, (node) => {
@@ -155700,7 +157651,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		))
 	]);
     }
-    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-294e98ea"]]);
+    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-294e98ea"]]);
 
     /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
     const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
@@ -156072,7 +158023,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const INHERIT_CHANNEL_VALUE = '__inherit__';
     /** 取出指定提示词组的数组。大纲组在设置根层，六组 Agent 提示词在 agentPrompts 下。 */
-    var _sfc_main$l = /*@__PURE__*/ defineComponent({
+    var _sfc_main$m = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -156498,44 +158449,44 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-continuation-page[data-v-b6bfe8a6] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-b6bfe8a6] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-b6bfe8a6] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-b6bfe8a6] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-b6bfe8a6] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-b6bfe8a6] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-b6bfe8a6] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-b6bfe8a6] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-b6bfe8a6] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-b6bfe8a6] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-b6bfe8a6] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-b6bfe8a6] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-b6bfe8a6] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-b6bfe8a6] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-b6bfe8a6] > * { flex: 1 1 auto;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-b6bfe8a6");
     var ContinuationPage_vue_vue_type_style_index_0_scoped_b6bfe8a6_lang = null;
 
-    const _hoisted_1$l = { class: "acu-v2-continuation-page" };
-    const _hoisted_2$j = {
+    const _hoisted_1$m = { class: "acu-v2-continuation-page" };
+    const _hoisted_2$k = {
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_3$g = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_4$d = { class: "acu-v2-continuation-page__settings-grid" };
-    const _hoisted_5$c = { class: "acu-v2-continuation-page__toggles" };
-    const _hoisted_6$b = {
+    const _hoisted_3$h = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_4$e = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_5$d = { class: "acu-v2-continuation-page__toggles" };
+    const _hoisted_6$c = {
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_7$9 = {
+    const _hoisted_7$a = {
 	key: 1,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_8$9 = { class: "acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start" };
-    const _hoisted_9$8 = {
+    const _hoisted_8$a = { class: "acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start" };
+    const _hoisted_9$9 = {
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_10$8 = {
+    const _hoisted_10$9 = {
 	key: 1,
 	class: "acu-v2-continuation-page__meta"
     };
-    const _hoisted_11$8 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_12$8 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_13$6 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_14$6 = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_15$6 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_11$9 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_12$9 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_13$7 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_14$7 = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_15$7 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_16$6 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_17$5 = { class: "acu-v2-continuation-page__actions" };
     const _hoisted_18$5 = {
 	key: 2,
 	class: "acu-v2-continuation-page__error"
     };
-    function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$l, [
+    function _sfc_render$m(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$m, [
 		createVNode($setup["AcuPanel"], {
 			title: "Agent 会话",
 			description: "像和 coding agent 对话一样使用：随时输入、随时打断。主 Agent 按需派工子代理并管理大纲，最终正文仍由酒馆模型生成。"
@@ -156591,12 +158542,12 @@ Expected function or array of functions, received type ${typeof value}.`
 				}, null, 8, ["model-value"]),
 				$setup.outlineDraftError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_2$j,
+					_hoisted_2$k,
 					toDisplayString($setup.outlineDraftError),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_3$g, [createVNode($setup["AcuButton"], {
+				createBaseVNode("div", _hoisted_3$h, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.acceptOutlineDraft
@@ -156638,7 +158589,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				description: "修改后自动保存；任务运行中也可以改，改动会在本轮空档落盘、下一轮开始时生效。"
 			}, {
 				default: withCtx(() => [
-					createBaseVNode("div", _hoisted_4$d, [
+					createBaseVNode("div", _hoisted_4$e, [
 						createVNode($setup["AcuFormRow"], { label: "阶段规模" }, {
 							default: withCtx(() => [withDirectives(createBaseVNode(
 								"select",
@@ -156866,7 +158817,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							/* STABLE_FRAGMENT */
 						))
 					]),
-					createBaseVNode("div", _hoisted_5$c, [createVNode($setup["AcuCheckbox"], {
+					createBaseVNode("div", _hoisted_5$d, [createVNode($setup["AcuCheckbox"], {
 						modelValue: $setup.settingsDraft.outlinePreview,
 						"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => $setup.settingsDraft.outlinePreview = $event),
 						label: "大纲产出后先预览再执行"
@@ -156887,14 +158838,14 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["modelValue"]),
 					$setup.settingsError ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_6$b,
+						_hoisted_6$c,
 						toDisplayString($setup.settingsError),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true),
 					$setup.settingsNotice ? (openBlock(), createElementBlock(
 						"p",
-						_hoisted_7$9,
+						_hoisted_7$a,
 						toDisplayString($setup.settingsNotice),
 						1
 						/* TEXT */
@@ -156910,7 +158861,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			description: "仅启用段参与内部调用；占位符会按实际出现按需解析。修改后自动保存。"
 		}, {
 			default: withCtx(() => [
-				createBaseVNode("div", _hoisted_8$9, [
+				createBaseVNode("div", _hoisted_8$a, [
 					createVNode($setup["AcuButton"], { onClick: $setup.exportPrompts }, {
 						default: withCtx(() => [..._cache[60] || (_cache[60] = [createTextVNode(
 							"导出提示词 JSON",
@@ -156943,14 +158894,14 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				$setup.promptIoError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_9$8,
+					_hoisted_9$9,
 					toDisplayString($setup.promptIoError),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
 				$setup.promptIoNotice ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_10$8,
+					_hoisted_10$9,
 					toDisplayString($setup.promptIoNotice),
 					1
 					/* TEXT */
@@ -156973,7 +158924,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[25] || (_cache[25] = (index, delta) => $setup.movePrompt("outlinePrompt", index, delta)),
 					onUpdate: _cache[26] || (_cache[26] = (index, patch) => $setup.updatePrompt("outlinePrompt", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_11$8, [createVNode($setup["AcuButton"], { onClick: _cache[27] || (_cache[27] = ($event) => $setup.restorePrompt("outline")) }, {
+				createBaseVNode("div", _hoisted_11$9, [createVNode($setup["AcuButton"], { onClick: _cache[27] || (_cache[27] = ($event) => $setup.restorePrompt("outline")) }, {
 					default: withCtx(() => [..._cache[62] || (_cache[62] = [createTextVNode(
 						"恢复大纲提示词默认值",
 						-1
@@ -157006,7 +158957,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[30] || (_cache[30] = (index, delta) => $setup.movePrompt("main", index, delta)),
 					onUpdate: _cache[31] || (_cache[31] = (index, patch) => $setup.updatePrompt("main", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_12$8, [createVNode($setup["AcuButton"], { onClick: _cache[32] || (_cache[32] = ($event) => $setup.restorePrompt("agent_main")) }, {
+				createBaseVNode("div", _hoisted_12$9, [createVNode($setup["AcuButton"], { onClick: _cache[32] || (_cache[32] = ($event) => $setup.restorePrompt("agent_main")) }, {
 					default: withCtx(() => [..._cache[63] || (_cache[63] = [createTextVNode(
 						"恢复主 Agent 默认值",
 						-1
@@ -157039,7 +158990,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[35] || (_cache[35] = (index, delta) => $setup.movePrompt("arcArchitect", index, delta)),
 					onUpdate: _cache[36] || (_cache[36] = (index, patch) => $setup.updatePrompt("arcArchitect", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_13$6, [createVNode($setup["AcuButton"], { onClick: _cache[37] || (_cache[37] = ($event) => $setup.restorePrompt("agent_arc")) }, {
+				createBaseVNode("div", _hoisted_13$7, [createVNode($setup["AcuButton"], { onClick: _cache[37] || (_cache[37] = ($event) => $setup.restorePrompt("agent_arc")) }, {
 					default: withCtx(() => [..._cache[64] || (_cache[64] = [createTextVNode(
 						"恢复总纲子代理默认值",
 						-1
@@ -157065,7 +159016,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[40] || (_cache[40] = (index, delta) => $setup.movePrompt("maintainer", index, delta)),
 					onUpdate: _cache[41] || (_cache[41] = (index, patch) => $setup.updatePrompt("maintainer", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_14$6, [createVNode($setup["AcuButton"], { onClick: _cache[42] || (_cache[42] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
+				createBaseVNode("div", _hoisted_14$7, [createVNode($setup["AcuButton"], { onClick: _cache[42] || (_cache[42] = ($event) => $setup.restorePrompt("agent_maintainer")) }, {
 					default: withCtx(() => [..._cache[65] || (_cache[65] = [createTextVNode(
 						"恢复维护子代理默认值",
 						-1
@@ -157091,7 +159042,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					onMove: _cache[45] || (_cache[45] = (index, delta) => $setup.movePrompt("mainlinePlanner", index, delta)),
 					onUpdate: _cache[46] || (_cache[46] = (index, patch) => $setup.updatePrompt("mainlinePlanner", index, patch))
 				}, null, 8, ["segments"]),
-				createBaseVNode("div", _hoisted_15$6, [createVNode($setup["AcuButton"], { onClick: _cache[47] || (_cache[47] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
+				createBaseVNode("div", _hoisted_15$7, [createVNode($setup["AcuButton"], { onClick: _cache[47] || (_cache[47] = ($event) => $setup.restorePrompt("agent_mainline")) }, {
 					default: withCtx(() => [..._cache[66] || (_cache[66] = [createTextVNode(
 						"恢复主线策划默认值",
 						-1
@@ -157170,7 +159121,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-b6bfe8a6"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-b6bfe8a6"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
@@ -157562,7 +159513,7 @@ Expected function or array of functions, received type ${typeof value}.`
         },
     };
 
-    var _sfc_main$k = /*@__PURE__*/ defineComponent({
+    var _sfc_main$l = /*@__PURE__*/ defineComponent({
         __name: 'ImportPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -157626,10 +159577,10 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-import-page[data-v-edb6577d] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-import-page__action-grid[data-v-edb6577d] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-import-page__action-grid[data-v-edb6577d] .acu-file-button,\r\n.acu-v2-import-page__action-grid[data-v-edb6577d] .acu-btn {\r\n  width: 100%;\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-import-page[data-v-edb6577d] {\r\n    padding: 14px;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-import-page__action-grid[data-v-edb6577d] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ImportPage.vue#style-0-edb6577d");
     var ImportPage_vue_vue_type_style_index_0_scoped_edb6577d_lang = null;
 
-    const _hoisted_1$k = { class: "acu-v2-import-page" };
-    const _hoisted_2$i = { class: "acu-v2-import-page__action-grid" };
-    function _sfc_render$k(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$k, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-import-page__grid" }, {
+    const _hoisted_1$l = { class: "acu-v2-import-page" };
+    const _hoisted_2$j = { class: "acu-v2-import-page__action-grid" };
+    function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$l, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-import-page__grid" }, {
 		default: withCtx(() => [
 			createVNode($setup["AcuPanel"], {
 				title: $setup.importCopy.panels.worldbookTarget.title,
@@ -157707,7 +159658,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* TEXT */
 					)]),
 					_: 1
-				}, 8, ["kind"]), createBaseVNode("div", _hoisted_2$i, [
+				}, 8, ["kind"]), createBaseVNode("div", _hoisted_2$j, [
 					createVNode($setup["AcuFileButton"], {
 						variant: "primary",
 						block: "",
@@ -157772,9 +159723,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var ImportPage = /*#__PURE__*/ _export_sfc(_sfc_main$k, [["render", _sfc_render$k], ["__scopeId", "data-v-edb6577d"]]);
+    var ImportPage = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-edb6577d"]]);
 
-    var _sfc_main$j = /*@__PURE__*/ defineComponent({
+    var _sfc_main$k = /*@__PURE__*/ defineComponent({
         __name: 'AcuStatsList',
         props: {
             items: {},
@@ -157791,8 +159742,8 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-stats[data-v-249ee71c] {\r\n  margin: 0;\r\n  padding: 2px 0 0;\r\n  background: transparent;\r\n  border-radius: 0;\r\n  display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 16px;\n}\n.acu-stats__item[data-v-249ee71c] {\r\n  min-width: 0;\r\n  padding: 8px 0;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n}\n.acu-stats dt[data-v-249ee71c] {\r\n  margin: 0 0 2px; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-stats dd[data-v-249ee71c] {\r\n  margin: 0; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-1); word-break: break-all;\n}\n.acu-stats--mono code[data-v-249ee71c] {\r\n  display: inline-block; max-width: 100%;\r\n  font-family: var(--acu-font-mono); font-size: var(--acu-font-size-body, 12px);\r\n  background: transparent; color: var(--acu-text-1);\r\n  padding: 0; border-radius: 0;\n}\n@media (max-width: 720px) {\n.acu-stats[data-v-249ee71c] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuStatsList.vue#style-0-249ee71c");
     var AcuStatsList_vue_vue_type_style_index_0_scoped_249ee71c_lang = null;
 
-    const _hoisted_1$j = { key: 0 };
-    function _sfc_render$j(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$k = { key: 0 };
+    function _sfc_render$k(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"dl",
 		{ class: normalizeClass(["acu-stats", { "acu-stats--mono": $props.mono }]) },
@@ -157811,7 +159762,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					/* TEXT */
 				), createBaseVNode("dd", null, [renderSlot(_ctx.$slots, item.key ?? item.label, { item }, () => [$props.mono ? (openBlock(), createElementBlock(
 					"code",
-					_hoisted_1$j,
+					_hoisted_1$k,
 					toDisplayString(item.value ?? "—"),
 					1
 					/* TEXT */
@@ -157834,9 +159785,9 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var AcuStatsList = /*#__PURE__*/ _export_sfc(_sfc_main$j, [["render", _sfc_render$j], ["__scopeId", "data-v-249ee71c"]]);
+    var AcuStatsList = /*#__PURE__*/ _export_sfc(_sfc_main$k, [["render", _sfc_render$k], ["__scopeId", "data-v-249ee71c"]]);
 
-    var _sfc_main$i = /*@__PURE__*/ defineComponent({
+    var _sfc_main$j = /*@__PURE__*/ defineComponent({
         __name: 'VectorIndexPromptDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -157874,9 +159825,9 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-vector-prompt-drawer__toolbar[data-v-75f9cd80] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-vector-prompt-drawer__actions[data-v-75f9cd80] {\r\n  position: sticky;\r\n  bottom: -16px;\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding: 12px 0 0;\r\n  background: var(--acu-bg-1);\n}\r\n", "src/presentation-v2/components/VectorIndexPromptDrawer.vue#style-0-75f9cd80");
     var VectorIndexPromptDrawer_vue_vue_type_style_index_0_scoped_75f9cd80_lang = null;
 
-    const _hoisted_1$i = { class: "acu-vector-prompt-drawer__toolbar" };
-    const _hoisted_2$h = { class: "acu-vector-prompt-drawer__actions" };
-    function _sfc_render$i(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$j = { class: "acu-vector-prompt-drawer__toolbar" };
+    const _hoisted_2$i = { class: "acu-vector-prompt-drawer__actions" };
+    function _sfc_render$j(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: "编辑关键词生成提示词",
@@ -157896,7 +159847,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$i, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_1$j, [createVNode($setup["AcuButton"], {
 				size: "sm",
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("reset"))
 			}, {
@@ -157917,7 +159868,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				onDelete: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("delete", $event)),
 				onUpdate: _cache[3] || (_cache[3] = (index, patch) => _ctx.$emit("update", index, patch))
 			}, null, 8, ["segments", "role-options"]),
-			createBaseVNode("footer", _hoisted_2$h, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
+			createBaseVNode("footer", _hoisted_2$i, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
 				default: withCtx(() => [..._cache[7] || (_cache[7] = [createTextVNode(
 					"关闭",
 					-1
@@ -157940,7 +159891,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open"]);
     }
-    var VectorIndexPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$i, [["render", _sfc_render$i], ["__scopeId", "data-v-75f9cd80"]]);
+    var VectorIndexPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$j, [["render", _sfc_render$j], ["__scopeId", "data-v-75f9cd80"]]);
 
     function createEmptyForm$1() {
         return {
@@ -158597,7 +160548,7 @@ Expected function or array of functions, received type ${typeof value}.`
      * 与保留策略不变。
      */
     const SHOW_LEGACY_VECTOR_MAINTENANCE_UI = false;
-    var _sfc_main$h = /*@__PURE__*/ defineComponent({
+    var _sfc_main$i = /*@__PURE__*/ defineComponent({
         __name: 'VectorIndexPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -158690,23 +160641,23 @@ Expected function or array of functions, received type ${typeof value}.`
     injectSfcStyle("\n.acu-v2-vector-index-page[data-v-faa352f4] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-faa352f4] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-faa352f4] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-faa352f4] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-faa352f4] {\n  min-width: 0;\n  margin: 0;\n  padding: 0 0 18px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-faa352f4]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-faa352f4] {\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-faa352f4] {\n  width: 100%;\n  margin: 0 0 2px;\n  padding: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 700;\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-faa352f4] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-faa352f4] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-faa352f4] {\n  flex: 1 1 auto;\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-faa352f4] {\n  display: flex;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-faa352f4] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-faa352f4] {\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-faa352f4] {\n  width: 100%;\n  min-height: 60px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-faa352f4] {\n  width: 100%;\n  min-height: 72px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: var(--acu-font-size-small, 11px);\n  line-height: 1.5;\n  resize: vertical;\n}\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-faa352f4");
     var VectorIndexPage_vue_vue_type_style_index_0_scoped_faa352f4_lang = null;
 
-    const _hoisted_1$h = { class: "acu-v2-vector-index-page" };
-    const _hoisted_2$g = { class: "acu-v2-vector-index-page__panel-stack" };
-    const _hoisted_3$f = { class: "acu-v2-vector-index-page__actions" };
-    const _hoisted_4$c = { class: "acu-v2-vector-index-page__number-grid" };
-    const _hoisted_5$b = { class: "acu-v2-vector-index-page__panel-stack" };
-    const _hoisted_6$a = { class: "acu-v2-vector-api-form__section" };
-    const _hoisted_7$8 = { class: "acu-v2-vector-api-form__section" };
-    const _hoisted_8$8 = { class: "acu-v2-vector-api-form__actions" };
-    const _hoisted_9$7 = { class: "acu-v2-vector-index-page__prompt-actions" };
-    const _hoisted_10$7 = { class: "acu-v2-vector-index-page__number-grid" };
-    const _hoisted_11$7 = { class: "acu-v2-vector-index-page__number-grid" };
-    const _hoisted_12$7 = ["value"];
-    function _sfc_render$h(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$h, [
+    const _hoisted_1$i = { class: "acu-v2-vector-index-page" };
+    const _hoisted_2$h = { class: "acu-v2-vector-index-page__panel-stack" };
+    const _hoisted_3$g = { class: "acu-v2-vector-index-page__actions" };
+    const _hoisted_4$d = { class: "acu-v2-vector-index-page__number-grid" };
+    const _hoisted_5$c = { class: "acu-v2-vector-index-page__panel-stack" };
+    const _hoisted_6$b = { class: "acu-v2-vector-api-form__section" };
+    const _hoisted_7$9 = { class: "acu-v2-vector-api-form__section" };
+    const _hoisted_8$9 = { class: "acu-v2-vector-api-form__actions" };
+    const _hoisted_9$8 = { class: "acu-v2-vector-index-page__prompt-actions" };
+    const _hoisted_10$8 = { class: "acu-v2-vector-index-page__number-grid" };
+    const _hoisted_11$8 = { class: "acu-v2-vector-index-page__number-grid" };
+    const _hoisted_12$8 = ["value"];
+    function _sfc_render$i(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$i, [
 		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }, null, 8, ["items"]),
 		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-vector-index-page__main-grid" }, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_2$g, [createVNode($setup["AcuPanel"], {
+			default: withCtx(() => [createBaseVNode("div", _hoisted_2$h, [createVNode($setup["AcuPanel"], {
 				id: "vector-index-status-panel",
 				title: $setup.vectorIndexCopy.panels.status.title,
 				description: $setup.vectorIndexCopy.panels.status.description
@@ -158738,7 +160689,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						-1
 						/* CACHED */
 					)),
-					createBaseVNode("div", _hoisted_3$f, [
+					createBaseVNode("div", _hoisted_3$g, [
 						createVNode($setup["AcuButton"], {
 							variant: "primary",
 							disabled: $setup.vector.buildBusy.value || $setup.vector.maintenanceBusy.value,
@@ -158815,7 +160766,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"placeholder"
 					])]),
 					_: 1
-				}), createBaseVNode("div", _hoisted_4$c, [createVNode($setup["AcuFormRow"], {
+				}), createBaseVNode("div", _hoisted_4$d, [createVNode($setup["AcuFormRow"], {
 					label: "上下文读取层数",
 					hint: "关键词生成时读取的最近对话层数；1 层 = 1 条 AI 回复 + 其上方 1 条用户输入。"
 				}, {
@@ -158841,7 +160792,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					_: 1
 				})])]),
 				_: 1
-			}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_5$b, [createVNode($setup["AcuPanel"], {
+			}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_5$c, [createVNode($setup["AcuPanel"], {
 				id: "vector-index-api-panel",
 				title: $setup.vectorIndexCopy.panels.api.title,
 				description: $setup.vectorIndexCopy.panels.api.description
@@ -158853,7 +160804,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						onSubmit: withModifiers($setup.saveVectorApiConfig, ["prevent"])
 					},
 					[
-						createBaseVNode("fieldset", _hoisted_6$a, [
+						createBaseVNode("fieldset", _hoisted_6$b, [
 							_cache[31] || (_cache[31] = createBaseVNode(
 								"legend",
 								null,
@@ -158889,7 +160840,7 @@ Expected function or array of functions, received type ${typeof value}.`
 								_: 1
 							})
 						]),
-						createBaseVNode("fieldset", _hoisted_7$8, [
+						createBaseVNode("fieldset", _hoisted_7$9, [
 							_cache[32] || (_cache[32] = createBaseVNode(
 								"legend",
 								null,
@@ -158964,7 +160915,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							))]),
 							_: 1
 						})) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_8$8, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_8$9, [createVNode($setup["AcuButton"], {
 							variant: "primary",
 							"native-type": "submit"
 						}, {
@@ -159003,7 +160954,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* CACHED */
 					)])]),
 					_: 1
-				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_9$7, [createVNode($setup["AcuButton"], {
+				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_9$8, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					onClick: _cache[10] || (_cache[10] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
@@ -159027,7 +160978,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				title: $setup.vectorIndexCopy.panels.recall.title,
 				description: $setup.vectorIndexCopy.panels.recall.description
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_10$7, [
+				default: withCtx(() => [createBaseVNode("div", _hoisted_10$8, [
 					createVNode($setup["AcuFormRow"], {
 						label: "触发阈值",
 						hint: "纪要有效行数达标后，发送前生成关键词并召回分块，未达标则保留原索引流程。"
@@ -159115,7 +161066,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				description: $setup.vectorIndexCopy.panels.archive.description
 			}, {
 				default: withCtx(() => [
-					createBaseVNode("div", _hoisted_11$7, [
+					createBaseVNode("div", _hoisted_11$8, [
 						createVNode($setup["AcuFormRow"], {
 							label: "分块句数",
 							hint: "纪要概要列每段句数。越小越精细，分片越多。"
@@ -159193,7 +161144,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							spellcheck: "false",
 							placeholder: "每行一个 scope fingerprint",
 							onChange: _cache[21] || (_cache[21] = ($event) => $setup.vector.setV2WriteScopeAllowlist($event.target.value))
-						}, null, 40, _hoisted_12$7)]),
+						}, null, 40, _hoisted_12$8)]),
 						_: 1
 					})) : createCommentVNode("v-if", true)
 				]),
@@ -159223,7 +161174,351 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-faa352f4"]]);
+    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$i, [["render", _sfc_render$i], ["__scopeId", "data-v-faa352f4"]]);
+
+    /**
+     * useDormantData — 休眠数据可见性与唤醒（S3-4）的 UI 编排。
+     *
+     * 职责：为 DormantDataPanel 提供休眠表/休眠列清单状态、刷新与唤醒动作。
+     * 清单读取直连 dormant-data-service（presentation-v2 约定：composable 直连 service）；
+     * 唤醒动作走 dialogStore.confirm 二次确认 → 服务调用 → toast 反馈 → 重新拉取清单。
+     *
+     * 错误语义：清单读取失败进入 error 态（区分「无休眠数据」与「历史读不出」）；
+     * 唤醒失败 toast 透传服务层错误，不改任何本地状态。
+     */
+    function useDormantData() {
+        const dialogStore = useDialogStore();
+        const toast = useToastStore();
+        const dormantTables = ref([]);
+        const dormantColumns = ref([]);
+        /** S3-3 休眠完整性问题（孤儿表等）；审计失败时置空——派生失败已由 listError 呈现，不重复报。 */
+        const integrityIssues = ref([]);
+        /** 清单读取错误（null 表示读取成功）；表/列两个来源任一失败都会填充。 */
+        const listError = ref(null);
+        /** 'refresh' | 'wake:<sheetKey>' | 'wake:<sheetKey>:<hiddenName>' | null */
+        const busyAction = ref(null);
+        const loaded = ref(false);
+        const isEmpty = computed(() => dormantTables.value.length === 0 && dormantColumns.value.length === 0);
+        function refresh() {
+            busyAction.value = 'refresh';
+            try {
+                const tablesResult = listDormantTables_ACU();
+                const columnsResult = listDormantColumns_ACU();
+                const auditResult = auditDormantDataIntegrity_ACU();
+                dormantTables.value = tablesResult.ok ? tablesResult.entries : [];
+                dormantColumns.value = columnsResult.ok ? columnsResult.entries : [];
+                integrityIssues.value = auditResult.ok ? auditResult.issues : [];
+                const errors = [tablesResult, columnsResult]
+                    .filter(result => !result.ok)
+                    .map(result => result.error || '未知错误');
+                listError.value = errors.length > 0 ? errors.join('；') : null;
+                loaded.value = true;
+            }
+            finally {
+                busyAction.value = null;
+            }
+        }
+        async function wakeTable(entry) {
+            if (busyAction.value)
+                return false;
+            if (!entry.canWake) {
+                toast.error(entry.wakeBlockedReason || '该休眠表当前不可唤醒。');
+                return false;
+            }
+            const confirmed = await dialogStore.confirm({
+                title: '唤醒休眠表',
+                message: `将表「${entry.name}」（${entry.rowCount} 行 · ${entry.columnCount} 列）恢复到当前模板？其休眠前的数据将一并复原。`,
+                confirmLabel: '唤醒',
+                confirmVariant: 'primary',
+            });
+            if (!confirmed)
+                return false;
+            busyAction.value = `wake:${entry.sheetKey}`;
+            try {
+                const result = await wakeDormantTable_ACU(entry.sheetKey);
+                if (!result.saved) {
+                    toast.error(result.error || `唤醒表「${entry.name}」失败。`);
+                    return false;
+                }
+                toast.success(`已唤醒表「${entry.name}」。`, { muteable: false });
+                return true;
+            }
+            finally {
+                busyAction.value = null;
+                refresh();
+            }
+        }
+        async function wakeColumn(entry) {
+            if (busyAction.value)
+                return false;
+            const confirmed = await dialogStore.confirm({
+                title: '唤醒休眠列',
+                message: `将表「${entry.sheetName}」的列「${entry.header}」恢复为可见？该列的既有数据将一并复原。`,
+                confirmLabel: '唤醒',
+                confirmVariant: 'primary',
+            });
+            if (!confirmed)
+                return false;
+            busyAction.value = `wake:${entry.sheetKey}:${entry.hiddenName}`;
+            try {
+                const result = await wakeDormantColumn_ACU(entry.sheetKey, entry.hiddenName);
+                if (!result.saved) {
+                    toast.error(result.error || `唤醒列「${entry.header}」失败。`);
+                    return false;
+                }
+                toast.success(`已唤醒表「${entry.sheetName}」的列「${entry.header}」。`, { muteable: false });
+                return true;
+            }
+            finally {
+                busyAction.value = null;
+                refresh();
+            }
+        }
+        return {
+            dormantTables,
+            dormantColumns,
+            integrityIssues,
+            listError,
+            busyAction,
+            loaded,
+            isEmpty,
+            refresh,
+            wakeTable,
+            wakeColumn,
+        };
+    }
+
+    var _sfc_main$h = /*@__PURE__*/ defineComponent({
+        __name: 'DormantDataPanel',
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const dormant = useDormantData();
+            const chatChangedTick = useChatChangedTick();
+            function formatHiddenAt(entry) {
+                if (typeof entry.hiddenAtTime === 'number' && Number.isFinite(entry.hiddenAtTime)) {
+                    const date = new Date(entry.hiddenAtTime);
+                    const pad = (value) => String(value).padStart(2, '0');
+                    return `休眠于 ${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+                }
+                if (typeof entry.hiddenAtMessageIndex === 'number') {
+                    return `休眠于第 ${entry.hiddenAtMessageIndex} 楼`;
+                }
+                return '休眠时间未记录';
+            }
+            function formatSourcePreset(entry) {
+                return entry.sourcePresetName || '未记录';
+            }
+            onMounted(() => dormant.refresh());
+            watch(chatChangedTick, () => dormant.refresh());
+            const __returned__ = { dormant, chatChangedTick, formatHiddenAt, formatSourcePreset, AcuButton, AcuMessage, AcuPanel };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-dormant-panel__integrity-title[data-v-8197ee49] {\r\n  margin: 0 0 4px;\n}\n.acu-v2-dormant-panel__integrity-list[data-v-8197ee49] {\r\n  margin: 0;\r\n  padding-left: 18px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\n}\n.acu-v2-dormant-panel__empty[data-v-8197ee49] {\r\n  margin: 0;\r\n  color: var(--acu-color-text-secondary, #8a8f98);\r\n  font-size: 0.9em;\n}\n.acu-v2-dormant-panel__section[data-v-8197ee49] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  margin-bottom: 12px;\n}\n.acu-v2-dormant-panel__section-title[data-v-8197ee49] {\r\n  margin: 0;\r\n  font-size: 0.95em;\n}\n.acu-v2-dormant-panel__item[data-v-8197ee49] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\r\n  padding: 8px 10px;\r\n  border: 1px solid var(--acu-color-border, rgba(128, 128, 128, 0.3));\r\n  border-radius: 6px;\n}\n.acu-v2-dormant-panel__item-main[data-v-8197ee49] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\r\n  min-width: 0;\n}\n.acu-v2-dormant-panel__item-name[data-v-8197ee49] {\r\n  font-size: 0.95em;\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-dormant-panel__item-meta[data-v-8197ee49] {\r\n  font-size: 0.82em;\r\n  color: var(--acu-color-text-secondary, #8a8f98);\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-dormant-panel__item-blocked[data-v-8197ee49] {\r\n  font-size: 0.82em;\r\n  color: var(--acu-color-warning, #c98a2b);\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-dormant-panel__actions[data-v-8197ee49] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  margin-top: 4px;\n}\r\n", "src/presentation-v2/components/DormantDataPanel.vue#style-0-8197ee49");
+    var DormantDataPanel_vue_vue_type_style_index_0_scoped_8197ee49_lang = null;
+
+    const _hoisted_1$h = { class: "acu-v2-dormant-panel__integrity-title" };
+    const _hoisted_2$g = { class: "acu-v2-dormant-panel__integrity-list" };
+    const _hoisted_3$f = {
+	key: 2,
+	class: "acu-v2-dormant-panel__empty"
+    };
+    const _hoisted_4$c = {
+	key: 3,
+	class: "acu-v2-dormant-panel__section",
+	"aria-labelledby": "acu-dormant-tables-title"
+    };
+    const _hoisted_5$b = {
+	id: "acu-dormant-tables-title",
+	class: "acu-v2-dormant-panel__section-title"
+    };
+    const _hoisted_6$a = { class: "acu-v2-dormant-panel__item-main" };
+    const _hoisted_7$8 = { class: "acu-v2-dormant-panel__item-name" };
+    const _hoisted_8$8 = { class: "acu-v2-dormant-panel__item-meta" };
+    const _hoisted_9$7 = {
+	key: 0,
+	class: "acu-v2-dormant-panel__item-blocked"
+    };
+    const _hoisted_10$7 = {
+	key: 4,
+	class: "acu-v2-dormant-panel__section",
+	"aria-labelledby": "acu-dormant-columns-title"
+    };
+    const _hoisted_11$7 = {
+	id: "acu-dormant-columns-title",
+	class: "acu-v2-dormant-panel__section-title"
+    };
+    const _hoisted_12$7 = { class: "acu-v2-dormant-panel__item-main" };
+    const _hoisted_13$6 = { class: "acu-v2-dormant-panel__item-name" };
+    const _hoisted_14$6 = { class: "acu-v2-dormant-panel__item-meta" };
+    const _hoisted_15$6 = { class: "acu-v2-dormant-panel__actions" };
+    function _sfc_render$h(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createBlock($setup["AcuPanel"], {
+		title: "休眠数据",
+		description: "切换模板时未被新模板包含的表和列会进入休眠：数据保留在聊天历史中并跟随 checkpoint 迁移，不参与填表。在这里可以查看并唤醒它们。"
+	}, {
+		default: withCtx(() => [
+			$setup.dormant.listError.value ? (openBlock(), createBlock($setup["AcuMessage"], {
+				key: 0,
+				kind: "error"
+			}, {
+				default: withCtx(() => [createTextVNode(
+					toDisplayString($setup.dormant.listError.value),
+					1
+					/* TEXT */
+				)]),
+				_: 1
+			})) : createCommentVNode("v-if", true),
+			$setup.dormant.integrityIssues.value.length ? (openBlock(), createBlock($setup["AcuMessage"], {
+				key: 1,
+				kind: "warning"
+			}, {
+				default: withCtx(() => [createBaseVNode(
+					"p",
+					_hoisted_1$h,
+					" 休眠完整性自检发现 " + toDisplayString($setup.dormant.integrityIssues.value.length) + " 项问题： ",
+					1
+					/* TEXT */
+				), createBaseVNode("ul", _hoisted_2$g, [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.dormant.integrityIssues.value, (issue) => {
+						return openBlock(), createElementBlock(
+							"li",
+							{ key: `${issue.sheetKey}:${issue.kind}` },
+							toDisplayString(issue.message),
+							1
+							/* TEXT */
+						);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])]),
+				_: 1
+			})) : createCommentVNode("v-if", true),
+			$setup.dormant.loaded.value && !$setup.dormant.listError.value && $setup.dormant.isEmpty.value ? (openBlock(), createElementBlock("p", _hoisted_3$f, " 当前没有休眠数据。 ")) : createCommentVNode("v-if", true),
+			$setup.dormant.dormantTables.value.length ? (openBlock(), createElementBlock("section", _hoisted_4$c, [createBaseVNode(
+				"h3",
+				_hoisted_5$b,
+				" 休眠表（" + toDisplayString($setup.dormant.dormantTables.value.length) + "） ",
+				1
+				/* TEXT */
+			), (openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($setup.dormant.dormantTables.value, (entry) => {
+					return openBlock(), createElementBlock("div", {
+						key: entry.sheetKey,
+						class: "acu-v2-dormant-panel__item"
+					}, [createBaseVNode("div", _hoisted_6$a, [
+						createBaseVNode(
+							"strong",
+							_hoisted_7$8,
+							toDisplayString(entry.name),
+							1
+							/* TEXT */
+						),
+						createBaseVNode(
+							"span",
+							_hoisted_8$8,
+							toDisplayString(entry.rowCount) + " 行 · " + toDisplayString(entry.columnCount) + " 列 · " + toDisplayString($setup.formatHiddenAt(entry)) + " · 来源模板：" + toDisplayString($setup.formatSourcePreset(entry)),
+							1
+							/* TEXT */
+						),
+						!entry.canWake && entry.wakeBlockedReason ? (openBlock(), createElementBlock(
+							"span",
+							_hoisted_9$7,
+							toDisplayString(entry.wakeBlockedReason),
+							1
+							/* TEXT */
+						)) : createCommentVNode("v-if", true)
+					]), createVNode($setup["AcuButton"], {
+						size: "sm",
+						variant: "primary",
+						disabled: !entry.canWake || !!$setup.dormant.busyAction.value,
+						loading: $setup.dormant.busyAction.value === `wake:${entry.sheetKey}`,
+						onClick: ($event) => $setup.dormant.wakeTable(entry)
+					}, {
+						default: withCtx(() => [..._cache[0] || (_cache[0] = [createTextVNode(
+							" 唤醒 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, [
+						"disabled",
+						"loading",
+						"onClick"
+					])]);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))])) : createCommentVNode("v-if", true),
+			$setup.dormant.dormantColumns.value.length ? (openBlock(), createElementBlock("section", _hoisted_10$7, [createBaseVNode(
+				"h3",
+				_hoisted_11$7,
+				" 休眠列（" + toDisplayString($setup.dormant.dormantColumns.value.length) + "） ",
+				1
+				/* TEXT */
+			), (openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($setup.dormant.dormantColumns.value, (entry) => {
+					return openBlock(), createElementBlock("div", {
+						key: `${entry.sheetKey}:${entry.hiddenName}`,
+						class: "acu-v2-dormant-panel__item"
+					}, [createBaseVNode("div", _hoisted_12$7, [createBaseVNode(
+						"strong",
+						_hoisted_13$6,
+						toDisplayString(entry.header),
+						1
+						/* TEXT */
+					), createBaseVNode(
+						"span",
+						_hoisted_14$6,
+						"所属表：" + toDisplayString(entry.sheetName),
+						1
+						/* TEXT */
+					)]), createVNode($setup["AcuButton"], {
+						size: "sm",
+						variant: "primary",
+						disabled: !!$setup.dormant.busyAction.value,
+						loading: $setup.dormant.busyAction.value === `wake:${entry.sheetKey}:${entry.hiddenName}`,
+						onClick: ($event) => $setup.dormant.wakeColumn(entry)
+					}, {
+						default: withCtx(() => [..._cache[1] || (_cache[1] = [createTextVNode(
+							" 唤醒 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, [
+						"disabled",
+						"loading",
+						"onClick"
+					])]);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))])) : createCommentVNode("v-if", true),
+			createBaseVNode("div", _hoisted_15$6, [createVNode($setup["AcuButton"], {
+				disabled: !!$setup.dormant.busyAction.value,
+				onClick: $setup.dormant.refresh
+			}, {
+				default: withCtx(() => [..._cache[2] || (_cache[2] = [createTextVNode(
+					" 刷新休眠清单 ",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["disabled", "onClick"])])
+		]),
+		_: 1
+	});
+    }
+    var DormantDataPanel = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-8197ee49"]]);
 
     const dataMgmtCopy = {
         panels: {
@@ -159233,7 +161528,7 @@ Expected function or array of functions, received type ${typeof value}.`
             },
             backup: {
                 title: "备份与恢复",
-                description: "控制当前配置备份导入与导出。合并导入覆盖提示词与模板，不直接改写已有楼层。模板覆盖会使用当前聊天生效的模板改写最新 AI 楼层。特殊导出：导出包含聊天填表数据的表格模板，非纯表格数据，可在「表格模板」模块导入。Checkpoint 则用于完整备份和恢复当前聊天当前标识的表格、模板与指导表。需注意：若没有恢复默认模板或切换无数据表格模板，进行其他聊天时可能出现数据污染。",
+                description: "控制当前配置备份导入与导出。合并导入覆盖提示词与模板，不直接改写已有楼层。模板覆盖会使用当前聊天生效的模板改写最新 AI 楼层。特殊导出：导出包含聊天填表数据的表格模板，非纯表格数据，可在「表格模板」模块导入。Checkpoint 则用于完整备份和恢复当前聊天当前标识的表格、模板与指导表。表格数据按 AI 楼层共享：同一楼层的所有 swipe 分支共享同一份表格历史，swipe 切换不会改变表格状态。需注意：若没有恢复默认模板或切换无数据表格模板，进行其他聊天时可能出现数据污染。",
                 sqliteRuntime: {
                     title: "SQLite 运行时诊断",
                     description: "仅显示当前聊天内存运行时的脱敏健康快照。重新初始化只重建内存数据库，不会修改聊天、Checkpoint、模板或世界书。",
@@ -160098,6 +162393,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 });
                 if (!applied)
                     throw new Error('模板结构无效，无法应用到当前全局模板。');
+                if (typeof applied === 'object' && 'saved' in applied && applied.saved === false) {
+                    throw new Error(applied.error || '模板已解析，但应用到当前全局模板失败（当前聊天协调提交被拒绝）。');
+                }
                 refresh();
                 message.value = null;
                 toast.success('合并配置已导入：提示词、合并设置和全局模板已更新。', { muteable: false });
@@ -160430,6 +162728,9 @@ Expected function or array of functions, received type ${typeof value}.`
                     });
                     if (!applied)
                         throw new Error('默认模板应用失败。');
+                    if (typeof applied === 'object' && 'saved' in applied && applied.saved === false) {
+                        throw new Error(applied.error || '默认模板应用失败（当前聊天协调提交被拒绝）。');
+                    }
                 }
                 else if (cleanup.clearTemplateSnapshots) {
                     applyTemplateScopeForCurrentChat_ACU();
@@ -160553,16 +162854,14 @@ Expected function or array of functions, received type ${typeof value}.`
         /**
          * 应用硬清空（purge）结果到 UI（C 方案接线 purge 的收尾）。
          *
-         * 与 applyRangeDeletionOutcome 的收尾刻意不同：
-         * - 不调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider（C2）：
-         *   purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
-         *   clearTableRuntimeWithoutReload_ACU 把运行时置为空态，并明令绝不加载聊天/模板/Guide；
-         *   此处若再 reload 会把刚清空的状态从模板/guide 重新物化回来，且 saved=true 会让用户误以为成功。
+         * 与 applyRangeDeletionOutcome 的收尾差异：
+         * - 不调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider：
+         *   purgeCurrentChatDatabaseState_ACU 内部已在严格保存后回落为当前全局模板的
+         *   header-only 空结构（S1-1，pristine：不写 frame，首次填表才建根），此处只需刷新展示。
          * - 不调用 cleanupWorldbookEntriesAfterDataDeletion_ACU（C3）：purge 内部已做
          *   cleanupDatabaseGeneratedWorldbookEntries_ACU，结果进入 result.cleanupWarnings。
-         * - 不调用 refreshMergedDataAndNotify_ACU（V1 验证结论）：该函数会 loadAllChatMessages_ACU +
-         *   mergeAllIndependentTables_ACU，并在无历史数据时从指导表/模板重建 currentJsonTableData_ACU
-         *   （pipeline.ts:617-629），等价于重新物化。因此只调 refresh() 做 settings/isolation/count 级刷新。
+         * - 调用 refreshMergedDataAndNotify_ACU 让各面板显示回落后的模板空结构（S1-1 语义下
+         *   "从模板重建空结构"是期望行为，不再是需要防御的重新物化）。
          * - 表格页面（FormFill/Dashboard）的显示由 getCurrentTableDisplayData_ACU 纯读取回退到
          *   当前全局模板（stripSeedRows），页面 mount/既有 refresh tick 即可展示，无需重新物化 runtime。
          */
@@ -160572,6 +162871,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 toast.error(result.error || '硬清空失败，详情见运行日志。', { muteable: false });
                 return;
             }
+            await refreshMergedDataAndNotify_ACU();
             refresh();
             if (result.cleanupWarnings?.length) {
                 toast.warning(`本地数据已全部硬清空（${result.clearedMessageCount} 条消息）。警告：${result.cleanupWarnings[0]}`, { muteable: false, durationMs: 6000 });
@@ -160901,14 +163201,14 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             onMounted(refreshAll);
             watch(useChatChangedTick(), refreshAll);
-            const __returned__ = { SHOW_LEGACY_DATA_MGMT_UI, resetDefaultsCleanupOptions, dialogStore, flow, runtimeDiagnostic, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onCommitMixedStorageDecision, onCommitV2Recovery, onReloadSqliteRuntime, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, get dataMgmtCopy() { return dataMgmtCopy; } };
+            const __returned__ = { SHOW_LEGACY_DATA_MGMT_UI, resetDefaultsCleanupOptions, dialogStore, flow, runtimeDiagnostic, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onCommitMixedStorageDecision, onCommitV2Recovery, onReloadSqliteRuntime, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, DormantDataPanel, get dataMgmtCopy() { return dataMgmtCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-3ee0a2bc] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-3ee0a2bc] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-3ee0a2bc] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-3ee0a2bc] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-3ee0a2bc] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-3ee0a2bc] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-3ee0a2bc] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-3ee0a2bc] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-3ee0a2bc] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-3ee0a2bc] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-3ee0a2bc] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-3ee0a2bc] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-3ee0a2bc] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-3ee0a2bc] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-3ee0a2bc] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-3ee0a2bc],\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-3ee0a2bc] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-3ee0a2bc] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-3ee0a2bc] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-3ee0a2bc] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-3ee0a2bc] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3ee0a2bc] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3ee0a2bc] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3ee0a2bc] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-3ee0a2bc] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-3ee0a2bc] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-3ee0a2bc] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-3ee0a2bc] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-3ee0a2bc] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-3ee0a2bc");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_3ee0a2bc_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-db75247f] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-db75247f] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-db75247f] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-db75247f] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-db75247f] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-db75247f] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-db75247f] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-db75247f] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-db75247f] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-db75247f] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-db75247f] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-db75247f] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-db75247f] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-db75247f] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-db75247f] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-db75247f] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-db75247f] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-db75247f],\n.acu-v2-data-mgmt-page__command-grid[data-v-db75247f] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-db75247f] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-db75247f] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-db75247f] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-db75247f] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-db75247f] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-db75247f] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-db75247f] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-db75247f] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-db75247f] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-db75247f] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-db75247f] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-db75247f] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-db75247f] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-db75247f] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-db75247f] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-db75247f] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-db75247f] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-db75247f");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_db75247f_lang = null;
 
     const _hoisted_1$g = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$f = { class: "acu-v2-data-mgmt-page__panel-stack" };
@@ -161556,7 +163856,7 @@ Expected function or array of functions, received type ${typeof value}.`
     				])])) : createCommentVNode("v-if", true)
     			]),
     			_: 1
-    		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_28$1, [createVNode($setup["AcuPanel"], {
+    		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_28$1, [createVNode($setup["DormantDataPanel"]), createVNode($setup["AcuPanel"], {
     			title: $setup.dataMgmtCopy.panels.cleanup.title,
     			description: $setup.dataMgmtCopy.panels.cleanup.description
     		}, {
@@ -161685,7 +163985,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		_: 1
     	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-3ee0a2bc"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-db75247f"]]);
 
     var _sfc_main$f = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',
@@ -165208,6 +167508,31 @@ Expected function or array of functions, received type ${typeof value}.`
             withSheet(sheet => {
                 const previousName = stringValue(sheet.name).trim();
                 sheet.name = nextName;
+                // 表身份靠规范化显示名 + tableAliases 匹配（S1-5）：改名时自动把旧名累积进
+                // 别名链，后续切模板（含切回仍用原名的模板）能按别名认回同一张表，数据继承。
+                // 规则与协调器 accumulateTableAliases_ACU 一致：canonical 去重、剔除新当前名
+                // （当前名本身参与精确匹配，自指别名无意义）、结果为空则删字段。
+                const previousCanonical = canonicalizeDisplayName_ACU(previousName);
+                const nextCanonical = canonicalizeDisplayName_ACU(nextName);
+                if (previousCanonical && previousCanonical !== nextCanonical) {
+                    if (!sheet.sourceData || typeof sheet.sourceData !== 'object' || Array.isArray(sheet.sourceData)) {
+                        sheet.sourceData = {};
+                    }
+                    const existingAliases = Array.isArray(sheet.sourceData.tableAliases) ? sheet.sourceData.tableAliases : [];
+                    const seen = new Set();
+                    const merged = [...existingAliases.map((alias) => String(alias ?? '').trim()), previousName]
+                        .filter(alias => {
+                        const canonical = canonicalizeDisplayName_ACU(alias);
+                        if (!canonical || canonical === nextCanonical || seen.has(canonical))
+                            return false;
+                        seen.add(canonical);
+                        return true;
+                    });
+                    if (merged.length > 0)
+                        sheet.sourceData.tableAliases = merged;
+                    else
+                        delete sheet.sourceData.tableAliases;
+                }
                 const config = ensureEditableExportConfig(sheet);
                 if (!config.entryName || config.entryName === previousName)
                     config.entryName = nextName;
@@ -165498,10 +167823,11 @@ Expected function or array of functions, received type ${typeof value}.`
         sheet.sourceData.ddl = generateDDL(sheet, key);
         return sheet;
     }
-    function buildLockDrafts(orderedKeys) {
+    function buildLockDrafts(orderedKeys, data) {
         const drafts = {};
         orderedKeys.forEach(key => {
-            const locks = getTableLocksForSheet_ACU(key);
+            // 身份锁按载入快照的 content 解析为索引草稿。
+            const locks = getTableLocksForSheet_ACU(key, data?.[key]?.content);
             drafts[key] = {
                 rows: Array.from(locks.rows || []).map(Number).filter(Number.isFinite),
                 cols: Array.from(locks.cols || []).map(Number).filter(Number.isFinite),
@@ -165545,7 +167871,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 const orderedKeys = buildOrderedKeys(data);
                 visualizer.loadSnapshot(data, orderedKeys);
-                visualizer.loadLockDrafts(buildLockDrafts(orderedKeys));
+                visualizer.loadLockDrafts(buildLockDrafts(orderedKeys, data));
                 return true;
             }
             catch (error) {
@@ -166015,15 +168341,16 @@ Expected function or array of functions, received type ${typeof value}.`
             applySpecialIndexSequenceFromDrafts(orderedData, lockDrafts);
         return orderedData;
     }
-    function saveLockDrafts(drafts) {
+    function saveLockDrafts(drafts, tempData) {
         Object.entries(drafts || {}).forEach(([sheetKey, draft]) => {
             if (!sheetKey)
                 return;
+            // 草稿索引指向编辑器工作副本：以它为上下文把索引解析为身份键（row_id/列名）后存储。
             saveTableLocksForSheet_ACU(sheetKey, {
                 rows: new Set(draft.rows || []),
                 cols: new Set(draft.cols || []),
                 cells: new Set(draft.cells || []),
-            });
+            }, tempData?.[sheetKey]?.content);
             setSpecialIndexLockEnabled_ACU(sheetKey, draft.specialIndexLocked !== false);
         });
     }
@@ -166183,6 +168510,11 @@ Expected function or array of functions, received type ${typeof value}.`
         });
         if (!applied)
             throw new Error('模板快照应用失败。');
+        // S1-3：inherit_global 聊天下全局切换经协调器，失败（含破坏性 blockers）时
+        // 全局预设名/生效模板未变，抛错让保存流程按失败收尾。
+        if (typeof applied === 'object' && 'saved' in applied && applied.saved === false) {
+            throw new Error(typeof applied.error === 'string' && applied.error ? applied.error : '模板快照应用失败。');
+        }
         return { status: 'saved', presetName: finalGlobalPresetName };
     }
     async function saveCurrentDataToChat(sheetKeysToSave, deletedSheetKeys) {
@@ -166339,7 +168671,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                 }
                 if (hasLockChanges)
-                    saveLockDrafts(visualizer.tableLockDrafts);
+                    saveLockDrafts(visualizer.tableLockDrafts, visualizer.tempData);
                 try {
                     // 阶段 E：行数据保存路径复用 applyVisualizerPendingDataOps_ACU 已完成的
                     // post-save canonical replay 结果，避免 merged refresh 内部再整链 replay 一次
@@ -166468,7 +168800,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     let lockSaveFailed = false;
                     if (options.hasPendingLocks) {
                         try {
-                            saveLockDrafts(visualizer.tableLockDrafts);
+                            saveLockDrafts(visualizer.tableLockDrafts, visualizer.tempData);
                         }
                         catch (error) {
                             lockSaveFailed = true;
@@ -166533,7 +168865,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (!changes.mateChanged) {
                         // 无 mate 变更时，保持原语义：锁优先，其余提示无变化
                         if (visualizer.pendingLockChanges.length > 0 || visualizer.lockDirty) {
-                            saveLockDrafts(visualizer.tableLockDrafts);
+                            saveLockDrafts(visualizer.tableLockDrafts, visualizer.tempData);
                             visualizer.markSaved('template-chat');
                             toastStore.success('表格锁定设置已保存。', { muteable: false });
                             return true;
@@ -166830,6 +169162,8 @@ Expected function or array of functions, received type ${typeof value}.`
                         syncTemplateScope: true,
                         templateSource: templateScopeSource,
                         presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
+                        // 休眠溯源（S3-4）：结构编辑在当前模板内进行，被 hide 的表的来源模板即当前活跃预设。
+                        hideSourcePresetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }) || undefined,
                         source: 'visualizer_v2_save',
                         reason: 'visualizer_v2_schema_change',
                         baseRevision,
@@ -166870,7 +169204,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const hasPendingLocks = visualizer.lockDirty || visualizer.pendingLockChanges.length > 0;
                 if (hasPendingLocks)
                     try {
-                        saveLockDrafts(visualizer.tableLockDrafts);
+                        saveLockDrafts(visualizer.tableLockDrafts, visualizer.tempData);
                     }
                     catch (error) {
                         lockSaveFailed = true;
@@ -166943,7 +169277,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const globalTemplateResult = await saveGlobalTemplateSnapshot(orderedData, interactions);
                 if (globalTemplateResult.status === 'cancelled')
                     return false;
-                saveLockDrafts(visualizer.tableLockDrafts);
+                saveLockDrafts(visualizer.tableLockDrafts, visualizer.tempData);
                 if (isSqliteMode())
                     await reloadStorageProvider();
                 await refreshMergedDataAndNotify_ACU();

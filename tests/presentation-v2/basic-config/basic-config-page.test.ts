@@ -113,6 +113,7 @@ async function mountBasicConfigPage(settings = createSettings()) {
       runtimeTemplateItem: ref(null),
       runtimeDiffersFromLibrary: ref(false),
       runtimeTemplateAvailable: ref(false),
+      chatSnapshotDiffersFromLibrary: ref(false),
       refresh: vi.fn(),
       selectGlobalPreset: vi.fn(),
       selectChatPreset: vi.fn(),
