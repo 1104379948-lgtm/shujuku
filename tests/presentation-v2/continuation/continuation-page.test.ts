@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { createApp, nextTick, ref } from 'vue';
 
+const mountedApps = new Set<{ unmount: () => void }>();
 const chatTick = ref(0);
 const task = ref<any>(null);
 const activeStage = ref<any>(null);
@@ -71,6 +72,12 @@ async function mountPage() {
   const pinia = createPinia();
   const app = createApp(Page);
   app.use(pinia);
+  const originalUnmount = app.unmount.bind(app);
+  app.unmount = () => {
+    mountedApps.delete(app);
+    originalUnmount();
+  };
+  mountedApps.add(app);
   app.mount(el);
   await nextTick();
   return { app, el };
@@ -106,6 +113,7 @@ beforeEach(() => {
   statusText.value = '尚未创建任务';
   chatTick.value = 0;
   vi.clearAllMocks();
+  sendAgentMessage.mockResolvedValue(true);
 });
 
 function setSettings(): void {
@@ -139,7 +147,11 @@ function setSettings(): void {
   };
 }
 
-afterEach(() => { document.body.innerHTML = ''; });
+afterEach(() => {
+  for (const app of [...mountedApps]) app.unmount();
+  mountedApps.clear();
+  document.body.innerHTML = '';
+});
 
 describe('ContinuationPage', () => {
   it('空态下没有独立的创建入口，第一条消息即交给 runtime 创建任务', async () => {
@@ -153,10 +165,61 @@ describe('ContinuationPage', () => {
     typeInto(chatInput(el), '让主角找到出口');
     await nextTick();
     buttonByText(el, '发送')!.click();
+    await vi.waitFor(() => {
+      expect(sendAgentMessage).toHaveBeenCalledWith('让主角找到出口');
+      expect(chatInput(el).value).toBe('');
+    });
+    app.unmount();
+  });
+
+  it('消息接收失败时保留草稿', async () => {
+    sendAgentMessage.mockResolvedValue(false);
+    const { app, el } = await mountPage();
+    const input = chatInput(el);
+
+    typeInto(input, '持久化失败后保留这句话');
     await nextTick();
-    expect(sendAgentMessage).toHaveBeenCalledWith('让主角找到出口');
-    // 发送后输入框清空，避免重复发送同一句。
-    expect(chatInput(el).value).toBe('');
+    buttonByText(el, '发送')!.click();
+    await vi.waitFor(() => { expect(sendAgentMessage).toHaveBeenCalledWith('持久化失败后保留这句话'); });
+    await vi.waitFor(() => { expect(input.value).toBe('持久化失败后保留这句话'); });
+    app.unmount();
+  });
+
+  it('发送中阻止重复派发，且旧发送成功不清空用户随后改写的草稿', async () => {
+    let resolveSend!: (accepted: boolean) => void;
+    sendAgentMessage.mockImplementationOnce(() => new Promise<boolean>(resolve => { resolveSend = resolve; }));
+    const { app, el } = await mountPage();
+    const input = chatInput(el);
+
+    typeInto(input, '第一条消息');
+    await nextTick();
+    const sendButton = buttonByText(el, '发送')!;
+    sendButton.click();
+    await vi.waitFor(() => { expect(sendAgentMessage).toHaveBeenCalledOnce(); });
+    expect(sendButton.disabled).toBe(true);
+
+    typeInto(input, '用户随后改写的草稿');
+    await nextTick();
+    sendButton.click();
+    expect(sendAgentMessage).toHaveBeenCalledOnce();
+
+    resolveSend(true);
+    await vi.waitFor(() => { expect(input.value).toBe('用户随后改写的草稿'); });
+    app.unmount();
+  });
+
+  it('预算停止时仍允许发送新指令，并显示新的运行窗口提示', async () => {
+    setTask();
+    task.value.stopReason = 'duration_reached';
+    canContinue.value = false;
+    const { app, el } = await mountPage();
+    const input = chatInput(el);
+
+    expect(el.textContent).toContain('输入新指令可从当前进度开始新的运行窗口。');
+    typeInto(input, '从当前进度继续');
+    await nextTick();
+    buttonByText(el, '发送')!.click();
+    await vi.waitFor(() => { expect(sendAgentMessage).toHaveBeenCalledWith('从当前进度继续'); });
     app.unmount();
   });
 

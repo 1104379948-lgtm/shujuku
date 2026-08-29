@@ -249,6 +249,7 @@ export interface ContinuationTask_ACU {
   runStartedAt: number | null;
   deadlineAt: number | null;
   runStageCount: number;
+  stageBudgetBaseCount?: number;
   activeStageId: string | null;
   stages: ContinuationStage_ACU[];
   timeline: ContinuationTimelineEntry_ACU[];

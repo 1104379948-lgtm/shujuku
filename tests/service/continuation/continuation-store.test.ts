@@ -110,6 +110,34 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(chat[0]._qrf_continuation.activeTask.status).toBe('unknown_running_state');
   });
 
+  it('normalizes a missing stage budget baseline from schema v1 and rejects invalid explicit baselines', async () => {
+    const legacy = buildRunningEnvelope_ACU();
+    const chat: any[] = [{ _qrf_continuation: legacy }];
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+
+    const store = new FirstFloorContinuationStore_ACU();
+    const restored = store.readPersisted()!;
+    expect(restored.activeTask?.stageBudgetBaseCount).toBe(0);
+    expect(chat[0]._qrf_continuation.activeTask.stageBudgetBaseCount).toBeUndefined();
+
+    await store.replaceAtomically(restored, { chatIdentity: 'chat-a' });
+    expect(saveChat).toHaveBeenCalledOnce();
+    expect(chat[0]._qrf_continuation.activeTask.stageBudgetBaseCount).toBe(0);
+
+    for (const stageBudgetBaseCount of [-1, 0.5, 2]) {
+      const invalid = buildRunningEnvelope_ACU() as any;
+      invalid.activeTask.stageBudgetBaseCount = stageBudgetBaseCount;
+      _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: invalid }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+      expect(() => new FirstFloorContinuationStore_ACU().readPersisted()).toThrow(ContinuationValidationError_ACU);
+    }
+
+    const current = buildRunningEnvelope_ACU();
+    current.activeTask!.stageBudgetBaseCount = 1;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: current }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().readPersisted()?.activeTask?.stageBudgetBaseCount).toBe(1);
+  });
+
   it('fails closed on persisted prompt segments with an unsupported role or empty content', () => {
     const invalidRole = buildEnvelope_ACU() as any;
     invalidRole.settings.outlinePrompt = [{ role: 'tool', content: 'invalid', deletable: true }];

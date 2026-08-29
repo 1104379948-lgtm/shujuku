@@ -69,7 +69,14 @@ beforeEach(() => {
   harness.acceptOutline.mockResolvedValue(result);
   harness.abandonAndCreate.mockResolvedValue(result);
   harness.replaceSettings.mockResolvedValue(envelope);
-  harness.sendAgentMessage.mockResolvedValue({ ...result, created: false, interrupted: false, shouldContinue: false });
+  harness.sendAgentMessage.mockResolvedValue({
+    ...result,
+    created: false,
+    interrupted: false,
+    disposition: 'accepted_without_resume',
+    detail: '当前状态暂不能恢复。',
+    shouldContinue: false,
+  });
   harness.replaceActiveOutline.mockResolvedValue(result);
   harness.clearContinuationData.mockResolvedValue({ envelope, clearedModules: true, clearedConversation: true });
 });
@@ -203,7 +210,32 @@ describe('useContinuationRuntime', () => {
     expect(harness.toastError).not.toHaveBeenCalled();
   });
 
-  it('会话发送：空白不派发，编排器要求继续时紧接着跑一轮', async () => {
+  it('由消息启动的新动作替换旧动作后，旧动作完成不会提前清除 busy', async () => {
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    harness.continueTask
+      .mockImplementationOnce(() => new Promise(resolve => { releaseFirst = () => resolve(result); }))
+      .mockImplementationOnce(() => new Promise(resolve => { releaseSecond = () => resolve(result); }));
+    harness.sendAgentMessage.mockResolvedValue({ ...result, disposition: 'continue_now', shouldContinue: true });
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+
+    const first = continuation.continueTask();
+    await vi.waitFor(() => { expect(harness.continueTask).toHaveBeenCalledTimes(1); });
+    const message = continuation.sendAgentMessage('用新消息替换旧动作');
+    await vi.waitFor(() => { expect(harness.continueTask).toHaveBeenCalledTimes(2); });
+
+    releaseFirst();
+    await first;
+    expect(continuation.busy.value).toBe(true);
+
+    releaseSecond();
+    await expect(message).resolves.toBe(true);
+    expect(continuation.busy.value).toBe(false);
+  });
+
+  it('会话发送：空白不派发，continue_now 时紧接着跑一轮', async () => {
+    harness.sendAgentMessage.mockResolvedValue({ ...result, created: true, interrupted: false, disposition: 'continue_now', shouldContinue: true });
     const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
     const continuation = useContinuationRuntime();
 
@@ -212,12 +244,38 @@ describe('useContinuationRuntime', () => {
 
     expect(await continuation.sendAgentMessage('别揭穿守门人')).toBe(true);
     expect(harness.sendAgentMessage).toHaveBeenCalledWith({ text: '别揭穿守门人' });
-    // shouldContinue 为假时只记消息，不擅自开跑。
-    expect(harness.continueTask).not.toHaveBeenCalled();
-
-    harness.sendAgentMessage.mockResolvedValue({ ...result, created: true, interrupted: false, shouldContinue: true });
-    expect(await continuation.sendAgentMessage('从这里重新规划')).toBe(true);
     expect(harness.continueTask).toHaveBeenCalledOnce();
+  });
+
+  it('会话发送按 disposition 区分排队、专用状态和未知后续动作', async () => {
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+
+    harness.sendAgentMessage.mockResolvedValue({ ...result, disposition: 'queued_after_host', shouldContinue: false });
+    expect(await continuation.sendAgentMessage('当前正文结束后再收束')).toBe(true);
+    expect(harness.continueTask).not.toHaveBeenCalled();
+    expect(harness.toastInfo).toHaveBeenCalledWith('消息已排队，会在当前正文完成后生效。');
+
+    harness.sendAgentMessage.mockResolvedValue({ ...result, disposition: 'accepted_without_resume', detail: '当前大纲正在等待确认。', shouldContinue: false });
+    expect(await continuation.sendAgentMessage('确认前先放慢节奏')).toBe(true);
+    expect(harness.continueTask).not.toHaveBeenCalled();
+    expect(harness.toastInfo).toHaveBeenCalledWith('当前大纲正在等待确认。');
+
+    harness.sendAgentMessage.mockResolvedValue({ ...result, disposition: 'unexpected_action', shouldContinue: false });
+    expect(await continuation.sendAgentMessage('不接受未知动作')).toBe(false);
+    expect(harness.toastError).toHaveBeenCalledWith('消息已保存，但返回了无法执行的后续动作。', { muteable: false });
+  });
+
+  it('消息已保存但续跑失败时不重复发送消息，并显示准确提示', async () => {
+    harness.sendAgentMessage.mockResolvedValue({ ...result, disposition: 'continue_now', shouldContinue: true });
+    harness.continueTask.mockRejectedValue(new Error('续跑失败'));
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+
+    expect(await continuation.sendAgentMessage('保存后继续')).toBe(true);
+    expect(harness.sendAgentMessage).toHaveBeenCalledOnce();
+    expect(harness.continueTask).toHaveBeenCalledOnce();
+    expect(harness.toastError).toHaveBeenCalledWith('消息已保存，但启动续写失败。', { muteable: false });
   });
 
   it('会话发送失败时不触发续跑', async () => {

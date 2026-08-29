@@ -14,7 +14,6 @@
 
     <div class="acu-v2-continuation-chat__composer">
       <textarea
-        ref="inputElement"
         class="acu-v2-continuation-chat__input"
         :value="draft"
         :rows="3"
@@ -27,14 +26,14 @@
         <AcuButton v-if="canStop" variant="danger" :loading="busy && !running" @click="emit('stop')">停止生成</AcuButton>
         <AcuButton v-if="canContinue" :loading="busy" @click="emit('continue')">继续当前轮次</AcuButton>
         <AcuButton v-if="canRetry" :loading="busy" @click="emit('retry')">重试当前轮次</AcuButton>
-        <AcuButton variant="primary" :loading="busy" :disabled="!draft.trim()" @click="send">发送</AcuButton>
+        <AcuButton variant="primary" :loading="sending" :disabled="!draft.trim() || sending" @click="send">发送</AcuButton>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
 import ContinuationSessionFeed from './ContinuationSessionFeed.vue';
 import type { AgentSessionEntry_ACU } from '../../service/continuation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
@@ -44,6 +43,8 @@ const props = defineProps<{
   task: ContinuationTask_ACU | null;
   entries: AgentSessionEntry_ACU[];
   running: boolean;
+  draft: string;
+  sending: boolean;
   busy: boolean;
   statusText: string;
   stageText: string;
@@ -58,11 +59,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'send', text: string): void;
+  (event: 'update:draft', value: string): void;
   (event: 'stop' | 'continue' | 'retry'): void;
 }>();
-
-const draft = ref('');
-const inputElement = ref<HTMLTextAreaElement | null>(null);
 
 /**
  * 只要「循环真在跑」就给停止。判定用两个信号取或：running 是会话流的实时运行标志
@@ -87,26 +86,23 @@ const placeholder = computed(() => {
 });
 
 const notice = computed(() => {
-  if (props.awaitingHost) return '当前轮次正在等待酒馆的正文生成结束，这期间不能重规划或重复发送。';
+  if (props.awaitingHost) return '当前轮次正在等待酒馆的正文生成结束；现在发送的新消息会在当前正文完成后生效。';
   if (props.task?.stopReason && props.task.stopReason !== 'manual') {
-    // 可恢复停止（正文归属失败、输入不可用、重试耗尽）与终局停止（时长/阶段上限）
-    // 的判定以 canContinue 为准——它与运行时 continueTask 的闸使用同一恢复集合。
     return props.canContinue
       ? `任务已停止：${props.task.stopReason}。可点击「继续」从当前轮次重试恢复。`
-      : `任务已停止：${props.task.stopReason}。这类停止不能直接继续，请清空后重新规划。`;
+      : `任务已停止：${props.task.stopReason}。输入新指令可从当前进度开始新的运行窗口。`;
   }
   if (props.task?.lastError) return `上一次失败：${props.task.lastError.message}`;
   return '';
 });
 
 function onInput(event: Event): void {
-  draft.value = (event.target as HTMLTextAreaElement).value;
+  emit('update:draft', (event.target as HTMLTextAreaElement).value);
 }
 
 function send(): void {
-  const text = draft.value.trim();
-  if (!text || props.busy) return;
-  draft.value = '';
+  const text = props.draft.trim();
+  if (!text || props.sending) return;
   emit('send', text);
 }
 

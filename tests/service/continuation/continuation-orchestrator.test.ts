@@ -153,6 +153,39 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(executionEngine.prepareCurrentTurnInstruction).toHaveBeenCalledTimes(1);
   });
 
+  it('opens a new duration window from a user message without rebuilding the current stage', async () => {
+    let now = 1_000;
+    const { orchestrator, store } = createOrchestrator();
+    (orchestrator as any).dependencies.now = () => now;
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    const persisted = store.readPersisted()!;
+    persisted.settings = { ...persisted.settings, totalDurationMinutes: 1 };
+    await store.replaceAtomically(persisted, { chatIdentity: 'chat-a' });
+    await orchestrator.continueTask();
+    const beforeExpiry = store.readPersisted()!.activeTask!;
+
+    now = 61_001;
+    await orchestrator.continueTask();
+    const stopped = store.readPersisted()!.activeTask!;
+    expect(stopped).toMatchObject({ status: 'paused', stopReason: 'duration_reached', taskId: beforeExpiry.taskId });
+
+    const result = await orchestrator.sendAgentMessage({ text: '从当前阶段继续，但把冲突收束一些' });
+    const resumed = store.readPersisted()!.activeTask!;
+    expect(result).toMatchObject({ created: false, interrupted: false, disposition: 'continue_now', shouldContinue: true });
+    expect(resumed).toMatchObject({
+      taskId: stopped.taskId,
+      status: 'paused',
+      stopReason: null,
+      lastError: null,
+      activeStageId: stopped.activeStageId,
+      runStageCount: stopped.runStageCount,
+      stageBudgetBaseCount: stopped.runStageCount,
+      runStartedAt: now,
+      deadlineAt: now + 60_000,
+    });
+    expect(resumed.stages).toEqual(stopped.stages);
+  });
+
   it('advances only a uniquely current confirmed turn and rejects the same attempt after the cursor moves', async () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
@@ -360,11 +393,37 @@ describe('ContinuationOrchestrator_ACU', () => {
     await store.replaceAtomically(persisted, { chatIdentity: 'chat-a' });
     await orchestrator.continueTask();
     await confirmTurns(orchestrator, store, 6);
-    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'stage_limit_reached', runStageCount: 1 });
+    const stopped = store.readPersisted()!.activeTask!;
+    expect(stopped).toMatchObject({ status: 'paused', stopReason: 'stage_limit_reached', runStageCount: 1 });
     expect(planner).toHaveBeenCalledTimes(1);
 
-    // 阶段上限是用户设定的终局停止：不在恢复集合内，继续仍被拒绝。
+    // 普通继续不重置预算窗口，仍然拒绝。
     await expectCode(() => orchestrator.continueTask(), 'CONTINUATION_TASK_STATE_INVALID');
+
+    const result = await orchestrator.sendAgentMessage({ text: '保留现有进度，继续下一阶段' });
+    const resumed = store.readPersisted()!.activeTask!;
+    expect(result).toMatchObject({ disposition: 'continue_now', shouldContinue: true });
+    expect(resumed).toMatchObject({
+      taskId: stopped.taskId,
+      status: 'paused',
+      stopReason: null,
+      runStageCount: 1,
+      stageBudgetBaseCount: 1,
+    });
+
+    await orchestrator.continueTask();
+    const secondStage = store.readPersisted()!.activeTask!;
+    expect(secondStage.runStageCount).toBe(2);
+    expect(secondStage.stages.at(-1)).toMatchObject({ stageNumber: 2, status: 'running' });
+    expect(planner).toHaveBeenCalledTimes(2);
+
+    await confirmTurns(orchestrator, store, 6);
+    expect(store.readPersisted()!.activeTask).toMatchObject({
+      status: 'paused',
+      stopReason: 'stage_limit_reached',
+      runStageCount: 2,
+      stageBudgetBaseCount: 1,
+    });
   });
 
   it('applies sentence-level outline edits as a frozen next revision without an AI call', async () => {
@@ -582,8 +641,38 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect((await guarded as ContinuationValidationError_ACU).error.code).toBe('CONTINUATION_INTERNAL_REQUEST_STALE');
   });
 
-  it('sendAgentMessage 在等待宿主正文时只记消息，不打断酒馆生成也不请求继续', async () => {
-    const { orchestrator, store, appendAgentConversation } = createOrchestrator();
+  it('sendAgentMessage 在会话持久化返回 false 时不会中断仍在运行的循环', async () => {
+    let resolvePlan: ((value: any) => void) | undefined;
+    const planner = vi.fn().mockImplementationOnce(() => new Promise(resolve => { resolvePlan = resolve; }));
+    const { orchestrator, store } = createOrchestrator({ planner, conversation: vi.fn(async () => false) });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    const running = orchestrator.continueTask();
+    await vi.waitFor(() => { expect(resolvePlan).toBeDefined(); });
+
+    await expectCode(() => orchestrator.sendAgentMessage({ text: '这条消息必须先保存' }), 'CONTINUATION_PERSIST_FAILED');
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'running', stopReason: null });
+
+    resolvePlan!({ outline, attempts: 1, requiresReview: false, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
+    await expect(running).resolves.toMatchObject({ task: { status: 'running' } });
+  });
+
+  it('sendAgentMessage 在会话持久化拒绝时不会中断仍在运行的循环', async () => {
+    let resolvePlan: ((value: any) => void) | undefined;
+    const planner = vi.fn().mockImplementationOnce(() => new Promise(resolve => { resolvePlan = resolve; }));
+    const { orchestrator, store } = createOrchestrator({ planner, conversation: vi.fn(async () => { throw new Error('会话写入失败'); }) });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    const running = orchestrator.continueTask();
+    await vi.waitFor(() => { expect(resolvePlan).toBeDefined(); });
+
+    await expectCode(() => orchestrator.sendAgentMessage({ text: '这条消息必须先保存' }), 'CONTINUATION_PERSIST_FAILED');
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'running', stopReason: null });
+
+    resolvePlan!({ outline, attempts: 1, requiresReview: false, apiPreset: { presetName: 'preset-a', source: 'fixed', reason: 'fixed_preset' } });
+    await expect(running).resolves.toMatchObject({ task: { status: 'running' } });
+  });
+
+  it('sendAgentMessage 在有 live host claim 的等待宿主正文时只排队，不打断酒馆生成', async () => {
+    const { orchestrator, store, appendAgentConversation } = createOrchestrator({ hasLiveHostClaim: () => true });
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
     const task = store.readPersisted()!.activeTask!;
@@ -595,9 +684,41 @@ describe('ContinuationOrchestrator_ACU', () => {
     });
 
     const result = await orchestrator.sendAgentMessage({ text: '下一轮收一点' });
-    expect(result).toMatchObject({ interrupted: false, shouldContinue: false });
+    expect(result).toMatchObject({ interrupted: false, disposition: 'queued_after_host', shouldContinue: false });
     expect(appendAgentConversation.mock.calls[0][0]).toMatchObject([{ kind: 'user', digest: '会话输入' }]);
     expect(store.readPersisted()!.activeTask!.pendingHostTurn).toMatchObject({ status: 'awaiting_generation' });
+  });
+
+  it('sendAgentMessage 清理无 live claim 的滞留等待轮并立即恢复', async () => {
+    const { orchestrator, store } = createOrchestrator({ hasLiveHostClaim: () => false });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const task = store.readPersisted()!.activeTask!;
+    const stage = task.stages[0];
+    const revision = stage.revisions[0];
+    await recordPendingHostTurn(orchestrator, {
+      chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1,
+      nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-stale-message',
+    });
+
+    const result = await orchestrator.sendAgentMessage({ text: '从这一轮重新准备' });
+    expect(result).toMatchObject({ interrupted: false, disposition: 'continue_now', shouldContinue: true });
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', pendingHostTurn: null, stopReason: null });
+  });
+
+  it('sendAgentMessage 接收专用流程状态中的消息但不穿透大纲确认门禁', async () => {
+    const { orchestrator, store } = createOrchestrator({ preview: true });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await expectCode(() => orchestrator.continueTask(), 'CONTINUATION_AGENT_OUTLINE_REPLANNED');
+    expect(store.readPersisted()!.activeTask!.status).toBe('awaiting_outline_review');
+
+    const result = await orchestrator.sendAgentMessage({ text: '确认前先把节奏放慢' });
+    expect(result).toMatchObject({
+      disposition: 'accepted_without_resume',
+      shouldContinue: false,
+      detail: '当前大纲正在等待确认，确认后才能继续执行。',
+    });
+    expect(store.readPersisted()!.activeTask!.status).toBe('awaiting_outline_review');
   });
 
   it('replaceActiveOutline 走与工具编辑相同的校验：改未完成的目标句可以，动当前执行轮不行', async () => {

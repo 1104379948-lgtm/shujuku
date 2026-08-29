@@ -279,9 +279,14 @@ function validatePendingHostTurn_ACU(raw: unknown): ContinuationEnvelope_ACU['ac
 function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): ContinuationEnvelope_ACU['activeTask'] {
   if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'activeTask 必须是对象或 null');
   const requiredKeys = ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'runStartedAt', 'deadlineAt', 'runStageCount', 'activeStageId', 'stages', 'timeline', 'stopReason', 'lastError'];
-  const allowedKeys = [...requiredKeys, 'pendingHostTurn'];
+  const allowedKeys = [...requiredKeys, 'pendingHostTurn', 'stageBudgetBaseCount'];
   for (const key of requiredKeys) if (!Object.prototype.hasOwnProperty.call(raw, key)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `缺少持久化字段：activeTask.${key}`, { path: `activeTask.${key}` });
   for (const key of Object.keys(raw)) if (!allowedKeys.includes(key)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `存在未知持久化字段：activeTask.${key}`, { path: `activeTask.${key}` });
+  const runStageCount = requireInteger_ACU(raw.runStageCount, 'activeTask.runStageCount', 0);
+  const stageBudgetBaseCount = 'stageBudgetBaseCount' in raw ? requireInteger_ACU(raw.stageBudgetBaseCount, 'activeTask.stageBudgetBaseCount', 0) : 0;
+  if (stageBudgetBaseCount > runStageCount) {
+    fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'stageBudgetBaseCount 不能大于 runStageCount', { path: 'activeTask.stageBudgetBaseCount' });
+  }
   const status = requireEnum_ACU(raw.status, TASK_STATUSES_ACU, 'activeTask.status');
   if (!Array.isArray(raw.stages)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'activeTask.stages 必须是数组');
   const stageIds = new Set<string>();
@@ -327,7 +332,7 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
     if ('details' in raw.lastError) { if (!isRecord_ACU(raw.lastError.details)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'lastError.details 必须是对象'); error.details = { ...raw.lastError.details }; }
     return error;
   })();
-  return { taskId: requireString_ACU(raw.taskId, 'activeTask.taskId'), originInstruction: requireString_ACU(raw.originInstruction, 'activeTask.originInstruction'), status, createdAt: requireInteger_ACU(raw.createdAt, 'activeTask.createdAt', 0), updatedAt: requireInteger_ACU(raw.updatedAt, 'activeTask.updatedAt', 0), runStartedAt: raw.runStartedAt === null ? null : requireInteger_ACU(raw.runStartedAt, 'activeTask.runStartedAt', 0), deadlineAt: raw.deadlineAt === null ? null : requireInteger_ACU(raw.deadlineAt, 'activeTask.deadlineAt', 0), runStageCount: requireInteger_ACU(raw.runStageCount, 'activeTask.runStageCount', 0), activeStageId, stages, timeline: validateTimeline_ACU(raw.timeline), stopReason, lastError: lastError as any, ...('pendingHostTurn' in raw ? { pendingHostTurn: validatePendingHostTurn_ACU(raw.pendingHostTurn) } : {}) } as ContinuationEnvelope_ACU['activeTask'];
+  return { taskId: requireString_ACU(raw.taskId, 'activeTask.taskId'), originInstruction: requireString_ACU(raw.originInstruction, 'activeTask.originInstruction'), status, createdAt: requireInteger_ACU(raw.createdAt, 'activeTask.createdAt', 0), updatedAt: requireInteger_ACU(raw.updatedAt, 'activeTask.updatedAt', 0), runStartedAt: raw.runStartedAt === null ? null : requireInteger_ACU(raw.runStartedAt, 'activeTask.runStartedAt', 0), deadlineAt: raw.deadlineAt === null ? null : requireInteger_ACU(raw.deadlineAt, 'activeTask.deadlineAt', 0), runStageCount, stageBudgetBaseCount, activeStageId, stages, timeline: validateTimeline_ACU(raw.timeline), stopReason, lastError: lastError as any, ...('pendingHostTurn' in raw ? { pendingHostTurn: validatePendingHostTurn_ACU(raw.pendingHostTurn) } : {}) } as ContinuationEnvelope_ACU['activeTask'];
 }
 
 export function validateContinuationEnvelope_ACU(raw: unknown, phase: ContinuationErrorPhase_ACU = 'load'): ContinuationEnvelope_ACU {

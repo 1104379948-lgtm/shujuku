@@ -5,6 +5,8 @@
         :task="runtime.task.value"
         :entries="session.entries.value"
         :running="session.running.value"
+        :draft="messageDraft"
+        :sending="messageSending"
         :busy="runtime.busy.value"
         :status-text="runtime.statusText.value"
         :stage-text="stageText"
@@ -16,6 +18,7 @@
         :can-continue="runtime.canContinue.value"
         :can-retry="runtime.task.value?.pendingHostTurn?.status === 'retry_ready'"
         @send="sendMessage"
+        @update:draft="messageDraft = $event"
         @stop="runtime.stopTask"
         @continue="runtime.continueTask"
         @retry="runtime.retryCurrentTurn"
@@ -199,6 +202,8 @@ const session = useContinuationSession();
 const { apiStore, followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
 const settingsDraft = ref<ContinuationSettings_ACU | null>(null);
 const outlineDraft = ref('');
+const messageDraft = ref('');
+const messageSending = ref(false);
 const outlineDraftError = ref('');
 const settingsError = ref('');
 const settingsNotice = ref('');
@@ -351,7 +356,14 @@ async function acceptOutlineDraft(): Promise<void> {
 
 /** 会话发送：没有任务时创建任务，运行中会打断当前迭代并带着这句话重新开始。 */
 async function sendMessage(text: string): Promise<void> {
-  await runtime.sendAgentMessage(text);
+  if (messageSending.value) return;
+  messageSending.value = true;
+  try {
+    const accepted = await runtime.sendAgentMessage(text);
+    if (accepted && messageDraft.value.trim() === text) messageDraft.value = '';
+  } finally {
+    messageSending.value = false;
+  }
 }
 
 /** 用户手动改写的大纲保存成功后刷新资料面板，让它读到新的 revision。 */

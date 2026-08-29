@@ -33,6 +33,7 @@ export function useContinuationRuntime() {
   const busy = ref(false);
   const originInstruction = ref('');
   let initialization: Promise<void> | null = null;
+  let activeAction: Promise<boolean> | null = null;
 
   function refresh(): void {
     try {
@@ -60,11 +61,12 @@ export function useContinuationRuntime() {
     return initialization;
   }
 
-  async function run_ACU(action: () => Promise<ContinuationRuntimeActionResult_ACU>): Promise<boolean> {
-    if (busy.value) return false;
+  function run_ACU(action: () => Promise<ContinuationRuntimeActionResult_ACU>, replaceActive = false, suppressErrorToast = false): Promise<boolean> {
+    if (busy.value && !replaceActive) return Promise.resolve(false);
     busy.value = true;
-    try {
-      const result = await action();
+    const completion = Promise.resolve()
+      .then(action)
+      .then(async result => {
       if ('preparedTurn' in result && result.preparedTurn) {
         const sent = await runtime.bridge.send(result.preparedTurn);
         if (!sent) toast.error('宿主输入不可用，智能续写已暂停。', { muteable: false });
@@ -72,7 +74,12 @@ export function useContinuationRuntime() {
       envelope.value = 'envelope' in result ? result.envelope : result;
       refresh();
       return true;
-    } catch (error) {
+      })
+      .catch(error => {
+      if (suppressErrorToast) {
+        refresh();
+        return false;
+      }
       // STALE 意味着本次操作被更新的意图作废（用户点停止、插话打断、切换聊天）——
       // 这是预期内的中断而不是故障，弹中性提示；其余错误仍按故障弹红。
       if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') {
@@ -82,9 +89,15 @@ export function useContinuationRuntime() {
       }
       refresh();
       return false;
-    } finally {
-      busy.value = false;
-    }
+      })
+      .finally(() => {
+        if (activeAction === completion) {
+          busy.value = false;
+          activeAction = null;
+        }
+      });
+    activeAction = completion;
+    return completion;
   }
 
   const task = computed(() => envelope.value?.activeTask ?? null);
@@ -123,19 +136,35 @@ export function useContinuationRuntime() {
    */
   async function sendAgentMessage(text: string): Promise<boolean> {
     if (!text.trim()) return false;
-    let shouldContinue = false;
-    const sent = await run_ACU(async () => {
+    const actionBeforeMessage = activeAction;
+    try {
       const result = await runtime.orchestrator.sendAgentMessage({ text });
-      shouldContinue = result.shouldContinue;
-      return result;
-    });
-    // 打断后的续跑必须是独立一次租约操作：run_ACU 内嵌套会撞上「操作正在执行」。
-    if (sent && shouldContinue) await continueTask();
-    return sent;
+      envelope.value = result.envelope;
+      refresh();
+      if (result.disposition === 'queued_after_host') {
+        toast.info('消息已排队，会在当前正文完成后生效。');
+        return true;
+      }
+      if (result.disposition === 'accepted_without_resume') {
+        toast.info(result.detail ?? '消息已接收，当前状态暂不能恢复。');
+        return true;
+      }
+      if (result.disposition !== 'continue_now') {
+        toast.error('消息已保存，但返回了无法执行的后续动作。', { muteable: false });
+        return false;
+      }
+      const started = await run_ACU(() => runtime.orchestrator.continueTask(), actionBeforeMessage !== null, true);
+      if (!started) toast.error('消息已保存，但启动续写失败。', { muteable: false });
+      return true;
+    } catch (error) {
+      toast.error(errorMessage_ACU(error), { muteable: false });
+      refresh();
+      return false;
+    }
   }
 
-  async function continueTask(): Promise<void> {
-    await run_ACU(() => runtime.orchestrator.continueTask());
+  function continueTask(): Promise<boolean> {
+    return run_ACU(() => runtime.orchestrator.continueTask());
   }
 
   /**

@@ -13,12 +13,17 @@ import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
 
 export interface ContinuationChronicleSnapshot_ACU { count: number; range: { first: string; last: string } | null; }
 export interface SendAgentMessageInput_ACU { text: string; }
+export type SendAgentMessageDisposition_ACU = 'continue_now' | 'queued_after_host' | 'accepted_without_resume';
 export interface SendAgentMessageResult_ACU extends ContinuationOrchestratorResult_ACU {
   /** 本次发送顺带创建了新任务。 */
   created: boolean;
   /** 本次发送打断了正在进行的 Agent 循环。 */
   interrupted: boolean;
-  /** 调用方应紧接着调用 continueTask 让主 Agent 读到这条消息并继续工作。 */
+  /** 消息接收后的明确后续动作。 */
+  disposition: SendAgentMessageDisposition_ACU;
+  /** disposition 为 accepted_without_resume 时提供给 UI 的可展示原因。 */
+  detail?: string;
+  /** 仅 continue_now 时为 true，兼容旧调用方。 */
   shouldContinue: boolean;
 }
 export interface ReplaceActiveOutlineInput_ACU { outline: StageOutline_ACU; }
@@ -153,6 +158,24 @@ function normalizeOriginInstruction_ACU(value: unknown): string {
   return value.trim();
 }
 
+function automaticStagesInWindow_ACU(task: ContinuationTask_ACU): number {
+  return task.runStageCount - (task.stageBudgetBaseCount ?? 0);
+}
+
+function deadlineForNewRunWindow_ACU(settings: ContinuationSettings_ACU, now: number): number | null {
+  return settings.totalDurationMinutes > 0 ? now + settings.totalDurationMinutes * 60_000 : null;
+}
+
+function userMessageResumeBlockDetail_ACU(task: ContinuationTask_ACU): string | null {
+  if (task.status === 'awaiting_outline_review') return '当前大纲正在等待确认，确认后才能继续执行。';
+  if (task.status === 'stopping_after_inflight') return '当前任务正在等待在途操作结束。';
+  if (!['paused', 'running'].includes(task.status)) return `当前任务状态 ${task.status} 暂不能恢复。`;
+  const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
+  if (!stage || stage.status === 'completed') return null;
+  if (stage.status !== 'running') return '当前阶段尚未具备可执行的大纲。';
+  return getActiveRevision_ACU(stage).frozen ? null : '当前阶段的大纲尚未冻结。';
+}
+
 function stageForOutline_ACU(stageId: string, stageNumber: number, revision: StageRevision_ACU, snapshot: ContinuationChronicleSnapshot_ACU, status: ContinuationStage_ACU['status']): ContinuationStage_ACU {
   return { stageId, stageNumber, status, chronicleStartCount: snapshot.count, chronicleEndCount: null, chronicleAddedCount: null, chronicleRange: null, activeRevision: revision.revision, revisions: [revision], activeNodeIndex: 0, activeTurnIndex: 0, completedTurns: 0 };
 }
@@ -215,7 +238,7 @@ export class ContinuationOrchestrator_ACU {
         settings: base.settings,
         activeTask: {
           taskId, originInstruction, status: 'paused', createdAt: now, updatedAt: now, runStartedAt: null, deadlineAt: null,
-          runStageCount: 0, activeStageId: null, stages: [], timeline: [this.timeline_ACU('task_created', now)], stopReason: null, lastError: null,
+          runStageCount: 0, stageBudgetBaseCount: 0, activeStageId: null, stages: [], timeline: [this.timeline_ACU('task_created', now)], stopReason: null, lastError: null,
         },
       };
       await this.dependencies.store.replaceAtomically(candidate, guardForTask_ACU(chatIdentity, existing));
@@ -539,7 +562,7 @@ export class ContinuationOrchestrator_ACU {
           advanced = this.stopEnvelope_ACU({ ...envelope, activeTask: completedTurn }, 'duration_reached', now);
           return advanced;
         }
-        if (task.runStageCount >= envelope.settings.maxAutomaticStages) {
+        if (automaticStagesInWindow_ACU(task) >= envelope.settings.maxAutomaticStages) {
           advanced = this.stopEnvelope_ACU({ ...envelope, activeTask: completedTurn }, 'stage_limit_reached', now);
           return advanced;
         }
@@ -578,44 +601,113 @@ export class ContinuationOrchestrator_ACU {
    */
   async sendAgentMessage(input: SendAgentMessageInput_ACU): Promise<SendAgentMessageResult_ACU> {
     const text = normalizeOriginInstruction_ACU(input.text);
+    const chatIdentity = this.requireChatIdentity_ACU();
     const existing = this.dependencies.store.readPersisted()?.activeTask ?? null;
     const hasLiveTask = !!existing && !['completed', 'abandoned', 'failed'].includes(existing.status);
     if (!hasLiveTask) {
       const created = await this.createTask({ originInstruction: text });
-      await this.recordUserMessage_ACU(text, '创建续写任务');
-      return { ...created, created: true, interrupted: false, shouldContinue: true };
+      await this.recordUserMessage_ACU(text, '创建续写任务', true);
+      let envelope: ContinuationEnvelope_ACU | null = null;
+      await this.withLease_ACU(async () => {
+        await this.dependencies.store.updatePersistedAtomically(current => {
+          const currentEnvelope = this.requireEnvelope_ACU(current);
+          const task = this.requireTask_ACU(currentEnvelope);
+          if (task.taskId !== created.task.taskId) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_persist', '创建后的续写任务已被其他操作替换', false));
+          }
+          const now = this.dependencies.now();
+          envelope = {
+            ...currentEnvelope,
+            activeTask: {
+              ...task,
+              status: 'paused',
+              updatedAt: now,
+              runStartedAt: now,
+              deadlineAt: deadlineForNewRunWindow_ACU(currentEnvelope.settings, now),
+              stageBudgetBaseCount: task.runStageCount,
+              stopReason: null,
+              lastError: null,
+            },
+          };
+          return envelope;
+        }, guardForTask_ACU(chatIdentity, created.task));
+      });
+      return { ...taskResult_ACU(envelope!), created: true, interrupted: false, disposition: 'continue_now', shouldContinue: true };
     }
 
-    const chatIdentity = this.requireChatIdentity_ACU();
-    // 等待宿主正文期间不能打断：那是酒馆自己的生成，中断它不属于本插件的职责范围。
-    // 消息仍然记入会话，主 Agent 在下一轮开始时就会读到。
-    const awaitingHost = existing!.pendingHostTurn?.status === 'awaiting_generation';
-    const wasRunning = existing!.status === 'running' && !awaitingHost;
+    const initialMessageDigest = existing!.status === 'running' && existing!.pendingHostTurn?.status !== 'awaiting_generation'
+      ? '打断并插话'
+      : '会话输入';
+    await this.recordUserMessage_ACU(text, initialMessageDigest, true);
+    const beforeResume = this.requireTask_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted()));
+    if (beforeResume.taskId !== existing!.taskId) {
+      throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_persist', '用户消息写入期间续写任务已变化', false));
+    }
+    const hasLiveHostClaim = beforeResume.pendingHostTurn?.status === 'awaiting_generation'
+      && this.dependencies.hasLiveHostClaim?.(chatIdentity) === true;
+    if (hasLiveHostClaim) {
+      return { ...taskResult_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted())), created: false, interrupted: false, disposition: 'queued_after_host', shouldContinue: false };
+    }
+    const blockDetail = userMessageResumeBlockDetail_ACU(beforeResume);
+    if (blockDetail) {
+      return { ...taskResult_ACU(this.requireEnvelope_ACU(this.dependencies.store.readPersisted())), created: false, interrupted: false, disposition: 'accepted_without_resume', detail: blockDetail, shouldContinue: false };
+    }
+    const wasRunning = beforeResume.status === 'running' && beforeResume.pendingHostTurn?.status !== 'awaiting_generation';
     if (wasRunning) this.invalidateLease_ACU(chatIdentity);
-    await this.recordUserMessage_ACU(text, wasRunning ? '打断并插话' : '会话输入');
+
 
     let envelope: ContinuationEnvelope_ACU | null = null;
+    let disposition: SendAgentMessageDisposition_ACU = 'continue_now';
+    let detail: string | undefined;
     await this.withLease_ACU(async () => {
       await this.dependencies.store.updatePersistedAtomically(current => {
         const currentEnvelope = this.requireEnvelope_ACU(current);
         const task = this.requireTask_ACU(currentEnvelope);
+        if (task.taskId !== beforeResume.taskId) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_persist', '用户消息恢复前提已失效', false));
+        }
+        const liveHostClaim = task.pendingHostTurn?.status === 'awaiting_generation'
+          && this.dependencies.hasLiveHostClaim?.(chatIdentity) === true;
+        if (liveHostClaim) {
+          disposition = 'queued_after_host';
+          envelope = currentEnvelope;
+          return currentEnvelope;
+        }
+        const currentBlockDetail = userMessageResumeBlockDetail_ACU(task);
+        if (currentBlockDetail) {
+          disposition = 'accepted_without_resume';
+          detail = currentBlockDetail;
+          envelope = currentEnvelope;
+          return currentEnvelope;
+        }
         const now = this.dependencies.now();
-        // 被打断的运行落回 paused 且不设 stopReason：这不是「停止」，而是等着带上新消息重新继续。
-        envelope = wasRunning
-          ? { ...currentEnvelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: null, lastError: null } }
-          : currentEnvelope;
+        const staleAwaitingTurn = task.pendingHostTurn?.status === 'awaiting_generation';
+        envelope = {
+          ...currentEnvelope,
+          activeTask: {
+            ...task,
+            status: 'paused',
+            updatedAt: now,
+            runStartedAt: now,
+            deadlineAt: deadlineForNewRunWindow_ACU(currentEnvelope.settings, now),
+            stageBudgetBaseCount: task.runStageCount,
+            stopReason: null,
+            lastError: null,
+            ...(staleAwaitingTurn ? { pendingHostTurn: null } : {}),
+          },
+        };
         return envelope;
-      }, guardForTask_ACU(chatIdentity, existing));
+      }, guardForTask_ACU(chatIdentity, beforeResume));
     });
 
-    const task = envelope!.activeTask!;
-    const stage = task.activeStageId ? task.stages.find(item => item.stageId === task.activeStageId) ?? null : null;
-    const shouldContinue = !awaitingHost
-      && task.status === 'paused'
-      && (task.stopReason === null || task.stopReason === 'manual')
-      && !task.pendingHostTurn
-      && (!stage || ['running', 'completed'].includes(stage.status));
-    return { ...taskResult_ACU(envelope!), created: false, interrupted: wasRunning, shouldContinue };
+    return {
+      ...taskResult_ACU(envelope!),
+      created: false,
+      interrupted: disposition === 'continue_now' && wasRunning,
+      disposition,
+      ...(detail ? { detail } : {}),
+      shouldContinue: disposition === 'continue_now',
+    };
   }
 
   /**
@@ -841,7 +933,7 @@ export class ContinuationOrchestrator_ACU {
       await this.dependencies.store.replaceAtomically(stopped, guardForTask_ACU(chatIdentity, task));
       return { opResult: { op: 'continue', requiresReview: false, stopped: 'duration_reached', summary: '总时长已到，任务已停止，不再创建下一阶段' }, envelope: stopped };
     }
-    if (task.runStageCount >= envelope.settings.maxAutomaticStages) {
+    if (automaticStagesInWindow_ACU(task) >= envelope.settings.maxAutomaticStages) {
       const stopped = this.stopEnvelope_ACU(envelope, 'stage_limit_reached', now);
       await this.dependencies.store.replaceAtomically(stopped, guardForTask_ACU(chatIdentity, task));
       return { opResult: { op: 'continue', requiresReview: false, stopped: 'stage_limit_reached', summary: '阶段数已达上限，任务已停止，不再创建下一阶段' }, envelope: stopped };
@@ -947,6 +1039,9 @@ export class ContinuationOrchestrator_ACU {
    * 这里只负责把任务落到 paused 并记录 lastError，让用户可以直接再继续。
    */
   private async pauseWithError_ACU(chatIdentity: string, taskId: string, error: unknown, phase: 'turn_call' | 'outline_call', fallbackMessage: string): Promise<void> {
+    if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') {
+      return;
+    }
     const lastError = error instanceof ContinuationValidationError_ACU ? error.error : createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', phase, fallbackMessage, false);
     try {
       await this.dependencies.store.updatePersistedAtomically(current => {
@@ -960,15 +1055,19 @@ export class ContinuationOrchestrator_ACU {
 
   /**
    * 把用户消息同时写进持久会话记录与展示用会话流。
-   * 落盘失败不上抛：消息没能持久化时会话流仍要显示它，用户至少能看到自己说过什么。
+   * 必须持久化的调用不能把未保存消息伪装成已接收。
    * @param text 用户消息正文
    * @param digest 短标签，用于压缩交接报告与 UI 标题
+   * @param requirePersistence 是否要求持久会话写入成功
    */
-  private async recordUserMessage_ACU(text: string, digest: string): Promise<void> {
-    logAgentSession_ACU({ kind: 'user_message', title: digest, detail: text });
+  private async recordUserMessage_ACU(text: string, digest: string, requirePersistence = false): Promise<void> {
     const append = this.dependencies.appendAgentConversation ?? appendAgentConversationToChat_ACU;
     try {
-      await append([{ kind: 'user', text, digest }]);
+      const persisted = await append([{ kind: 'user', text, digest }]);
+      if (!persisted) {
+        throw new Error('用户消息未写入持久会话记录');
+      }
+      logAgentSession_ACU({ kind: 'user_message', title: digest, detail: text });
     } catch (error) {
       logAgentSession_ACU({
         kind: 'run_failed',
@@ -976,6 +1075,9 @@ export class ContinuationOrchestrator_ACU {
         detail: `${error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error)}\n本条消息只存在于当前界面，页面重载后会消失。`,
         ok: false,
       });
+      if (requirePersistence) {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_PERSIST_FAILED', 'agent_persist', '用户消息保存失败', false));
+      }
     }
   }
 
