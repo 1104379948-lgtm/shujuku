@@ -25,6 +25,8 @@ const SEARCH_LINE_SNIPPET_LIMIT_ACU = 300;
 const SEARCH_TOTAL_CHAR_BUDGET_ACU = 20000;
 /** 每条命中的结构开销估算（标签、地址、分隔符）。 */
 const SEARCH_HIT_OVERHEAD_ACU = 60;
+/** isRegex 模式的正则长度上限：模型产出的超长模式几乎必然是错误或病态回溯，直接拒绝并要求修正。 */
+const SEARCH_REGEX_MAX_LENGTH_ACU = 300;
 
 interface AgentSearchLine_ACU {
   /** 人类可读位置，如「楼层12 第3行」「角色表 第5行」。 */
@@ -196,6 +198,9 @@ const SCOPE_LABELS_ACU: Record<AgentSearchScope_ACU, string> = {
  * @returns 结果文本：每条命中一行「[域] 位置：片段｜读取地址」；正则非法/无命中时返回可修正的说明
  */
 export function runAgentSearch_ACU(call: AgentSearchCall_ACU, context: AgentResolveContext_ACU): string {
+  if (call.isRegex && call.query.length > SEARCH_REGEX_MAX_LENGTH_ACU) {
+    return `搜索正则过长（${call.query.length} > ${SEARCH_REGEX_MAX_LENGTH_ACU} 字符），已拒绝执行。请精简正则，或拆分为多次搜索。`;
+  }
   let regex: RegExp;
   try {
     regex = call.isRegex ? new RegExp(call.query, 'i') : new RegExp(escapeRegex_ACU(call.query), 'i');

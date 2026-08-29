@@ -244,13 +244,18 @@ async function skillifySingleEntry_ACU(
   let lastReason = 'AI 未返回内容';
   let meta: Pick<WorldbookSkillMeta_ACU, 'description' | 'triggerWhen' | 'tk'> | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const response = await callAIWithPreset_ACU(messages, presetName);
-    if (!response) {
-      lastReason = 'AI 未返回内容';
-    } else {
-      meta = parseAgentSkillifyResponse_ACU(response, summary.tk);
-      if (meta) break;
-      lastReason = 'AI 返回不是有效 Skill JSON';
+    // AI 调用异常只作为该条目的失败原因参与重试，不允许穿透 runWithConcurrency 拖垮整批 skillify。
+    try {
+      const response = await callAIWithPreset_ACU(messages, presetName);
+      if (!response) {
+        lastReason = 'AI 未返回内容';
+      } else {
+        meta = parseAgentSkillifyResponse_ACU(response, summary.tk);
+        if (meta) break;
+        lastReason = 'AI 返回不是有效 Skill JSON';
+      }
+    } catch (error) {
+      lastReason = `AI 调用异常：${error instanceof Error ? error.message : String(error)}`;
     }
     if (attempt < maxAttempts) {
       options.onProgress?.({
