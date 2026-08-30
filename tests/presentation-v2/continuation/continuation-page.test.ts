@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { createApp, nextTick, ref } from 'vue';
+import { useDialogStore } from '../../../src/presentation-v2/stores/dialog-store';
 
 const mountedApps = new Set<{ unmount: () => void }>();
 const chatTick = ref(0);
@@ -69,7 +70,9 @@ async function mountPage() {
   const Page = (await import('../../../src/presentation-v2/pages/ContinuationPage.vue')).default;
   const el = document.createElement('div');
   document.body.appendChild(el);
+  // 与测试代码共享同一个 pinia 实例，测试里 useDialogStore() 拿到的才是页面用的那个 store。
   const pinia = createPinia();
+  setActivePinia(pinia);
   const app = createApp(Page);
   app.use(pinia);
   const originalUnmount = app.unmount.bind(app);
@@ -95,6 +98,22 @@ function typeInto(textarea: HTMLTextAreaElement, value: string): void {
 /** 会话输入框：页面里还有大纲/资料编辑框，按会话自己的类名定位。 */
 function chatInput(el: Element): HTMLTextAreaElement {
   return el.querySelector<HTMLTextAreaElement>('.acu-v2-continuation-chat__input')!;
+}
+
+/**
+ * 首次发送（task=null）会先弹高 RPM 风险确认框（5 秒倒计时）。
+ * 页面测试不挂 AcuDialogHost，直接驱动 dialog store：推进 5 秒后确认。
+ * 需要调用方已开启 fake timers。
+ */
+async function passFirstSendRpmConfirm(): Promise<void> {
+  const dialog = useDialogStore();
+  expect(dialog.active?.kind).toBe('confirm');
+  // 倒计时未归零时提交被 store 硬性拒绝。
+  dialog.submitActive();
+  expect(dialog.active?.kind).toBe('confirm');
+  await vi.advanceTimersByTimeAsync(5000);
+  dialog.submitActive();
+  expect(dialog.active).toBeNull();
 }
 
 beforeEach(() => {
@@ -155,58 +174,119 @@ afterEach(() => {
 });
 
 describe('ContinuationPage', () => {
-  it('空态下没有独立的创建入口，第一条消息即交给 runtime 创建任务', async () => {
-    const { app, el } = await mountPage();
-    expect(el.textContent).toContain('Agent 会话');
-    expect(initialize).toHaveBeenCalledOnce();
-    // 创建任务不再是一个单独按钮：发送第一句话就是创建。
-    expect(buttonByText(el, '创建续写任务')).toBeUndefined();
-    expect(el.textContent).not.toContain('循环提示词');
+  it('空态下没有独立的创建入口，第一条消息经高 RPM 确认后交给 runtime 创建任务', async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, el } = await mountPage();
+      expect(el.textContent).toContain('Agent 会话');
+      expect(initialize).toHaveBeenCalledOnce();
+      // 创建任务不再是一个单独按钮：发送第一句话就是创建。
+      expect(buttonByText(el, '创建续写任务')).toBeUndefined();
+      expect(el.textContent).not.toContain('循环提示词');
 
-    typeInto(chatInput(el), '让主角找到出口');
+      typeInto(chatInput(el), '让主角找到出口');
+      await nextTick();
+      buttonByText(el, '发送')!.click();
+      await nextTick();
+      // 首次发送先弹确认框，确认前不派发。
+      expect(sendAgentMessage).not.toHaveBeenCalled();
+      await passFirstSendRpmConfirm();
+      await vi.waitFor(() => {
+        expect(sendAgentMessage).toHaveBeenCalledWith('让主角找到出口');
+        expect(chatInput(el).value).toBe('');
+      });
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('首次发送确认框被取消时不派发且保留草稿', async () => {
+    const { app, el } = await mountPage();
+    const input = chatInput(el);
+
+    typeInto(input, '取消后应保留这句话');
     await nextTick();
     buttonByText(el, '发送')!.click();
-    await vi.waitFor(() => {
-      expect(sendAgentMessage).toHaveBeenCalledWith('让主角找到出口');
-      expect(chatInput(el).value).toBe('');
-    });
+    await nextTick();
+
+    const dialog = useDialogStore();
+    expect(dialog.active?.kind).toBe('confirm');
+    // 倒计时期间取消随时可点。
+    dialog.cancelActive();
+    await nextTick();
+    expect(sendAgentMessage).not.toHaveBeenCalled();
+    expect(input.value).toBe('取消后应保留这句话');
+    app.unmount();
+  });
+
+  it('已有任务时发送不弹确认框', async () => {
+    setTask();
+    const { app, el } = await mountPage();
+
+    typeInto(chatInput(el), '继续推进剧情');
+    await nextTick();
+    buttonByText(el, '发送')!.click();
+    await nextTick();
+
+    const dialog = useDialogStore();
+    expect(dialog.active).toBeNull();
+    await vi.waitFor(() => { expect(sendAgentMessage).toHaveBeenCalledWith('继续推进剧情'); });
     app.unmount();
   });
 
   it('消息接收失败时保留草稿', async () => {
-    sendAgentMessage.mockResolvedValue(false);
-    const { app, el } = await mountPage();
-    const input = chatInput(el);
+    vi.useFakeTimers();
+    try {
+      sendAgentMessage.mockResolvedValue(false);
+      const { app, el } = await mountPage();
+      const input = chatInput(el);
 
-    typeInto(input, '持久化失败后保留这句话');
-    await nextTick();
-    buttonByText(el, '发送')!.click();
-    await vi.waitFor(() => { expect(sendAgentMessage).toHaveBeenCalledWith('持久化失败后保留这句话'); });
-    await vi.waitFor(() => { expect(input.value).toBe('持久化失败后保留这句话'); });
-    app.unmount();
+      typeInto(input, '持久化失败后保留这句话');
+      await nextTick();
+      buttonByText(el, '发送')!.click();
+      await nextTick();
+      await passFirstSendRpmConfirm();
+      await vi.waitFor(() => { expect(sendAgentMessage).toHaveBeenCalledWith('持久化失败后保留这句话'); });
+      await vi.waitFor(() => { expect(input.value).toBe('持久化失败后保留这句话'); });
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('发送中阻止重复派发，且旧发送成功不清空用户随后改写的草稿', async () => {
-    let resolveSend!: (accepted: boolean) => void;
-    sendAgentMessage.mockImplementationOnce(() => new Promise<boolean>(resolve => { resolveSend = resolve; }));
-    const { app, el } = await mountPage();
-    const input = chatInput(el);
+    vi.useFakeTimers();
+    try {
+      let resolveSend!: (accepted: boolean) => void;
+      sendAgentMessage.mockImplementationOnce(() => new Promise<boolean>(resolve => { resolveSend = resolve; }));
+      const { app, el } = await mountPage();
+      const input = chatInput(el);
 
-    typeInto(input, '第一条消息');
-    await nextTick();
-    const sendButton = buttonByText(el, '发送')!;
-    sendButton.click();
-    await vi.waitFor(() => { expect(sendAgentMessage).toHaveBeenCalledOnce(); });
-    expect(sendButton.disabled).toBe(true);
+      typeInto(input, '第一条消息');
+      await nextTick();
+      const sendButton = buttonByText(el, '发送')!;
+      sendButton.click();
+      await nextTick();
+      await passFirstSendRpmConfirm();
+      await vi.waitFor(() => { expect(sendAgentMessage).toHaveBeenCalledOnce(); });
+      await nextTick();
+      expect(sendButton.disabled).toBe(true);
 
-    typeInto(input, '用户随后改写的草稿');
-    await nextTick();
-    sendButton.click();
-    expect(sendAgentMessage).toHaveBeenCalledOnce();
+      typeInto(input, '用户随后改写的草稿');
+      await nextTick();
+      sendButton.click();
+      await nextTick();
+      // 发送中：既不弹新确认框，也不重复派发。
+      expect(useDialogStore().active).toBeNull();
+      expect(sendAgentMessage).toHaveBeenCalledOnce();
 
-    resolveSend(true);
-    await vi.waitFor(() => { expect(input.value).toBe('用户随后改写的草稿'); });
-    app.unmount();
+      resolveSend(true);
+      await vi.waitFor(() => { expect(input.value).toBe('用户随后改写的草稿'); });
+      app.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('预算停止时仍允许发送新指令，并显示新的运行窗口提示', async () => {

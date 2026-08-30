@@ -148,6 +148,10 @@ beforeEach(() => {
   mockSettings.tableContextExcludeRules = [];
   mockSettings.streamingEnabled = false;
   mockSettings.promptTemplateSettings = { enabled: true };
+  // strict JSON 相关字段必须逐用例复位，否则前面用例开启后会污染后续用例。
+  mockSettings.strictJsonTableFillEnabled = false;
+  delete mockSettings.strictJsonCharCardPrompt;
+  delete mockSettings.strictJsonSqlCharCardPrompt;
 
   mockApplyExcludeRulesToText.mockImplementation((text: string) => text);
   mockGetApiConfigByPreset.mockReturnValue({
@@ -529,7 +533,7 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
     expect(overrides.stripModelPrefix).toBe(false);
   });
 
-  it('strict JSON 不自动注入 response_format，避免不兼容后端浪费重试', async () => {
+  it('strict JSON 模式下 custom 直连路径把 json_schema response_format 传入请求体组装', async () => {
     mockSettings.strictJsonTableFillEnabled = true;
     mockSettings.strictJsonCharCardPrompt = [
       { role: 'USER', content: '严格 $0' },
@@ -544,8 +548,33 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
     });
     expect(result).toBe('{"format":"table_edit_ops_v1","ops":[]}');
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    const firstBody = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(firstBody.response_format).toBeUndefined();
+    const overrides = mockBuildCustomBody.mock.calls[mockBuildCustomBody.mock.calls.length - 1][2];
+    expect(overrides.responseFormat).toMatchObject({ type: 'json_schema' });
+    expect(overrides.responseFormat.json_schema.name).toBe('table_edit_ops_response');
+    // 目标表的字段名进入了强 schema 分支（0 号业务列 name）。
+    expect(JSON.stringify(overrides.responseFormat)).toContain('"table_edit_ops_v1"');
+  });
+
+  it('非 strict 模式不传 responseFormat', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'fetch回复' } }] }),
+    });
+    await callCustomOpenAI_ACU({ tableDataText: '表格' });
+    const overrides = mockBuildCustomBody.mock.calls[mockBuildCustomBody.mock.calls.length - 1][2];
+    expect(overrides.responseFormat).toBeUndefined();
+  });
+
+  it('strict JSON 但 options 缺表数据时回退 wide schema 而不抛错', async () => {
+    mockSettings.strictJsonTableFillEnabled = true;
+    mockSettings.strictJsonCharCardPrompt = [{ role: 'USER', content: '严格 $0' }];
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: '{"format":"table_edit_ops_v1","ops":[]}' } }] }),
+    });
+    await callCustomOpenAI_ACU({ tableDataText: '表格' }, null, null);
+    const overrides = mockBuildCustomBody.mock.calls[mockBuildCustomBody.mock.calls.length - 1][2];
+    expect(overrides.responseFormat).toMatchObject({ type: 'json_schema' });
   });
 
   it('strict JSON 使用隔离 prompt 且不把旧协议词注入消息', async () => {

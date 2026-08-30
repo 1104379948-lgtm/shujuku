@@ -428,7 +428,8 @@ export async function executeAutoUpdatePlan_ACU(
     setAutoUpdating(false);
     await ops.refreshData();
 
-    // 自动合并总结检测
+    // 【已封存】自动合并纪要功能已遗弃：checkAutoMergeTrigger_ACU 恒返回不触发，
+    // 本块永不进入合并流程，保留为存档（原因见 service/summary/merge-logic.ts 文件头）。
     let autoMergeTriggered = false;
     let autoMergeSuccess = false;
     try {

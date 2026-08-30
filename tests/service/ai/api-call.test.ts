@@ -352,6 +352,41 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body).not.toHaveProperty('parallel_tool_calls');
   });
 
+  it('overrides.responseFormat 序列化为单行 YAML 注入 custom_include_body', () => {
+    const responseFormat = {
+      type: 'json_schema',
+      json_schema: { name: 'table_edit_ops_response', strict: true, schema: { type: 'object' } },
+    };
+    const body = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4' },
+      { responseFormat },
+    );
+    expect(body.custom_include_body).toBe(`response_format: ${JSON.stringify(responseFormat)}`);
+    // response_format 只走 custom_include_body 合并，不直接挂在请求体顶层。
+    expect(body).not.toHaveProperty('response_format');
+  });
+
+  it('overrides.responseFormat 与用户 bodyParams 共存时逐行追加', () => {
+    const responseFormat = { type: 'json_schema', json_schema: { name: 'x', strict: true, schema: {} } };
+    const body = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4', bodyParams: 'temperature:0.3' },
+      { responseFormat },
+    );
+    expect(body.custom_include_body).toBe(`temperature:0.3\nresponse_format: ${JSON.stringify(responseFormat)}`);
+  });
+
+  it('bodyParams 为 JSON 流式写法时跳过 responseFormat 注入，不破坏用户配置', () => {
+    const body = buildCustomApiRequestBody_ACU(
+      [{ role: 'user', content: 'test' }],
+      { url: 'https://api.example.com', model: 'gpt-4', bodyParams: '{"stop": ["</json>"]}' },
+      { responseFormat: { type: 'json_schema', json_schema: { name: 'x', strict: true, schema: {} } } },
+    );
+    expect(body.custom_include_body).toBe('{"stop": ["</json>"]}');
+    expect(body.custom_include_body).not.toContain('response_format');
+  });
+
   it('excludeBodyParams 作为 SillyTavern custom_exclude_body 透传', () => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],

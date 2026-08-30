@@ -7,7 +7,7 @@ export const THEME_CLASSICAL_INK: ACUTheme = {
     id: 'classical-ink',
     name: '古典·墨纸',
     description: '古雅深色纸墨质感，赤褐为饰，宋体排版',
-    author: '星·数据库',
+    author: 'SP·数据库 9.0',
     version: '1.0.0',
     colorScheme: 'dark',
 

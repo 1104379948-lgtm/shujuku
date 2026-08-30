@@ -88,7 +88,9 @@
               :disabled="dialog.confirmDisabled"
               @click="dialog.submitActive()"
             >
-              {{ renderedDialog.confirmLabel || "确认" }}
+              {{ dialog.confirmCountdownRemaining > 0
+                ? `${renderedDialog.confirmLabel || "确认"}（${dialog.confirmCountdownRemaining}s）`
+                : (renderedDialog.confirmLabel || "确认") }}
             </AcuButton>
           </template>
         </footer>

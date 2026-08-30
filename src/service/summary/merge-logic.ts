@@ -1,4 +1,19 @@
 // merge-logic.ts
+//
+// ═══════════════════════════════════════════════════════════════
+// 【已遗弃 · 封存】自动合并纪要（auto merge summary）
+//
+// 本功能已被正式遗弃，仅作代码存档，禁止恢复使用：
+// 1. SQLite 模式下协议断裂：默认 SQL 合并提示词要求模型输出
+//    INSERT INTO chronicle (...)，但本文件的解析器只识别 insertRow(...)，
+//    自动合并在 SQLite 模式下必然失败（重试耗尽）。
+// 2. 手动合并入口早已停用（见 presentation/triggers/update-trigger.ts 的停用壳）。
+// 3. 本路径劫持主填表提示词壳但不做占位符替换，$0/$1/$4 等会原样发给模型。
+//
+// 封存方式：checkAutoMergeTrigger_ACU 无条件返回不触发，
+// 使 update-orchestrator / update-scheduler 的两个调用点永不进入合并流程。
+// 其余函数保留为历史存档，不再有生产调用路径。
+// ═══════════════════════════════════════════════════════════════
 
 import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU } from '../../shared/defaults-json.js';
 import { isSqliteMode } from '../table/storage-mode';
@@ -29,30 +44,36 @@ function getAutoMergedOrder_ACU(summaryKey: string): string[] {
 }
 
 export function checkAutoMergeTrigger_ACU(): { shouldTrigger: boolean; mergeCount?: number; summaryCount?: number; reserve?: number } {
-    if (!settings_ACU.autoMergeEnabled) return { shouldTrigger: false };
+    // 【封存】自动合并纪要已遗弃（原因见文件头横幅），无条件不触发。
+    // 即使用户旧设置里 autoMergeEnabled 为 true 也不再执行。
+    return { shouldTrigger: false };
 
-    const summaryKey = Object.keys(currentJsonTableData_ACU).find(k =>
-        currentJsonTableData_ACU[k].name === '纪要表' ||
-        currentJsonTableData_ACU[k].name === '总结表'
-    );
-
-    if (!summaryKey) return { shouldTrigger: false };
-
-    const summaryCount = (currentJsonTableData_ACU[summaryKey].content || [])
-        .slice(1)
-        .filter((row: any) => !isAutoMergedSummaryRow_ACU(summaryKey, row))
-        .length;
-
-    const threshold = settings_ACU.autoMergeThreshold || 20;
-    const reserve = settings_ACU.autoMergeReserve || 0;
-    const triggerThreshold = threshold + reserve;
-
-    if (summaryCount < triggerThreshold) return { shouldTrigger: false };
-
-    const mergeCount = summaryCount - reserve;
-    if (mergeCount <= 0) return { shouldTrigger: false };
-
-    return { shouldTrigger: true, mergeCount, summaryCount, reserve };
+    // ↓↓↓ 以下为封存前的原始触发逻辑，注释保留为存档 ↓↓↓
+    //
+    // if (!settings_ACU.autoMergeEnabled) return { shouldTrigger: false };
+    //
+    // const summaryKey = Object.keys(currentJsonTableData_ACU).find(k =>
+    //     currentJsonTableData_ACU[k].name === '纪要表' ||
+    //     currentJsonTableData_ACU[k].name === '总结表'
+    // );
+    //
+    // if (!summaryKey) return { shouldTrigger: false };
+    //
+    // const summaryCount = (currentJsonTableData_ACU[summaryKey].content || [])
+    //     .slice(1)
+    //     .filter((row: any) => !isAutoMergedSummaryRow_ACU(summaryKey, row))
+    //     .length;
+    //
+    // const threshold = settings_ACU.autoMergeThreshold || 20;
+    // const reserve = settings_ACU.autoMergeReserve || 0;
+    // const triggerThreshold = threshold + reserve;
+    //
+    // if (summaryCount < triggerThreshold) return { shouldTrigger: false };
+    //
+    // const mergeCount = summaryCount - reserve;
+    // if (mergeCount <= 0) return { shouldTrigger: false };
+    //
+    // return { shouldTrigger: true, mergeCount, summaryCount, reserve };
 }
 
 // ═══ 自动合并纪要：准备批次 ═══

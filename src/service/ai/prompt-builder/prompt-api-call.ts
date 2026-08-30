@@ -13,7 +13,7 @@ import { applyExcludeRulesToText_ACU, getLatestAIMessageContent_ACU, getPlotFrom
 import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
 import { DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU } from '../../../shared/defaults-json.js';
 import { isSqliteMode } from '../../table/storage-mode';
-import { cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
+import { buildStrictJsonTableFillResponseFormatForData_ACU, cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
 
 /**
  * The request reached a provider successfully, but its body contained no
@@ -187,11 +187,33 @@ export class RetryableAiResponseError_ACU extends Error {
         warnIfStrictJsonPromptPolluted_ACU(messages);
     }
 
+    // 严格 JSON 填表：构建 json_schema response_format，让支持 structured outputs 的后端
+    // 在协议层强制输出结构，而不是只靠提示词软约束。
+    // 仅自定义 chat-completions 直连路径能携带（经 custom_include_body 合并进上游请求体）；
+    // tavern 连接预设与主 API（generateRaw）无请求体扩展通道，维持提示词约束。
+    // 后端不支持 response_format 时，用户可在 excludeBodyParams 中填 response_format 剔除。
+    let strictJsonResponseFormat: Record<string, any> | undefined;
+    if (strictJsonFillEnabled) {
+        try {
+            strictJsonResponseFormat = buildStrictJsonTableFillResponseFormatForData_ACU(
+                sqliteMode,
+                options?.tableData,
+                options?.targetSheetKeys,
+            ).responseFormat;
+        } catch (error) {
+            // schema 构建失败不阻断填表：回退到纯提示词约束。
+            logWarn_ACU('[严格JSON填表] response_format schema 构建失败，本次请求不附加：', error);
+        }
+    }
+
     logDebug_ACU('Final messages array being sent to API:', messages);
     logDebug_ACU(`使用API预设: ${effectiveTableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
 
     try {
         if (effectiveApiMode === 'tavern') {
+        if (strictJsonResponseFormat) {
+            logDebug_ACU('[严格JSON填表] 酒馆连接预设路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
+        }
         const profileId = effectiveTavernProfile;
         if (!profileId) {
             throw new Error('未选择酒馆连接预设。');
@@ -284,6 +306,9 @@ export class RetryableAiResponseError_ACU extends Error {
     } else {
         if (effectiveApiConfig.useMainApi && !forceDirectApi) {
             logDebug_ACU('ACU: 通过酒馆主API发送请求（流式传输）...');
+            if (strictJsonResponseFormat) {
+                logDebug_ACU('[严格JSON填表] 主 API（generateRaw）路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
+            }
             if (!isGenerateRawAvailable_ACU()) {
                 throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
             }
@@ -322,7 +347,13 @@ export class RetryableAiResponseError_ACU extends Error {
             
             const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
             
-            const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { stripModelPrefix: false }));
+            const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
+                stripModelPrefix: false,
+                responseFormat: strictJsonResponseFormat,
+            }));
+            if (strictJsonResponseFormat) {
+                logDebug_ACU('[严格JSON填表] 已在请求体附加 json_schema response_format。');
+            }
             
             logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
             const response = await fetch(generateUrl, { method: 'POST', headers, body, signal: abortSignal });

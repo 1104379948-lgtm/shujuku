@@ -211,8 +211,10 @@ import { useApiPresetSelectOptions } from '../composables/useApiPresetSelectOpti
 import { useChatChangedTick } from '../composables/useChatChangedListener';
 import { CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU, useContinuationRuntime } from '../composables/useContinuationRuntime';
 import { useContinuationSession } from '../composables/useContinuationSession';
+import { useDialogStore } from '../stores/dialog-store';
 
 const runtime = useContinuationRuntime();
+const dialog = useDialogStore();
 const session = useContinuationSession();
 const { apiStore, followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
 const settingsDraft = ref<ContinuationSettings_ACU | null>(null);
@@ -370,8 +372,24 @@ async function acceptOutlineDraft(): Promise<void> {
   if (await runtime.acceptOutline(outline)) syncOutlineDraft();
 }
 
+/** 首次发送（即将创建任务）前的高 RPM 风险确认：5 秒倒计时结束前只能取消。 */
+async function confirmFirstSendRpmWarning(): Promise<boolean> {
+  return dialog.confirm({
+    title: '开始智能续写前请确认',
+    message: '本功能单次请求占用的 Token 不多，但 Agent 会连续发起大量请求，需要 API 支持很高的 RPM（每分钟请求数）。',
+    dangerMessage: '禁止使用任何公益站，除非它明确表示允许 coding（本功能的请求模式与 coding 类似）。违规使用可能导致账号被封禁。',
+    confirmLabel: '我已了解，开始',
+    cancelLabel: '取消',
+    confirmVariant: 'danger',
+    confirmCountdownSeconds: 5,
+  });
+}
+
 /** 会话发送：没有任务时创建任务，运行中会打断当前迭代并带着这句话重新开始。 */
 async function sendMessage(text: string): Promise<void> {
+  if (messageSending.value) return;
+  // 仅在本次发送将创建新任务（首次发送）时弹确认框；取消则保留草稿不发送。
+  if (!runtime.task.value && !(await confirmFirstSendRpmWarning())) return;
   if (messageSending.value) return;
   messageSending.value = true;
   try {

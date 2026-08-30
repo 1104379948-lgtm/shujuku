@@ -7,7 +7,7 @@ export const THEME_DEFAULT_DARK: ACUTheme = {
     id: 'default-dark',
     name: '深色科技',
     description: '深色中性背景 + 蓝紫高光，适合暗光环境',
-    author: '星·数据库',
+    author: 'SP·数据库 9.0',
     version: '1.0.0',
     colorScheme: 'dark',
 

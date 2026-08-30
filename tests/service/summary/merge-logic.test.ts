@@ -117,55 +117,33 @@ beforeEach(() => {
   ];
 });
 
-describe('checkAutoMergeTrigger_ACU', () => {
+describe('checkAutoMergeTrigger_ACU（已封存：恒不触发）', () => {
   it('返回 shouldTrigger 对象', () => {
     const result = checkAutoMergeTrigger_ACU();
     expect(result).toHaveProperty('shouldTrigger');
     expect(typeof result.shouldTrigger).toBe('boolean');
   });
-  it('纪要行数超过阈值时触发', () => {
-    // 7 行数据 > threshold 5
+  it('封存后即使启用且行数超过阈值也不触发', () => {
+    // 7 行数据 > threshold 5，autoMergeEnabled = true —— 封存前会触发，封存后恒不触发
     const result = checkAutoMergeTrigger_ACU();
-    expect(result.shouldTrigger).toBe(true);
-    expect(result.mergeCount).toBe(7);
+    expect(result).toEqual({ shouldTrigger: false });
   });
-  it('纪要行数不足阈值时不触发', () => {
-    mockSettings.autoMergeThreshold = 20;
-    const result = checkAutoMergeTrigger_ACU();
-    expect(result.shouldTrigger).toBe(false);
-  });
-  it('自动合并未启用返回不触发', () => {
+  it('自动合并未启用同样不触发', () => {
     mockSettings.autoMergeEnabled = false;
     const result = checkAutoMergeTrigger_ACU();
     expect(result.shouldTrigger).toBe(false);
   });
-  it('无纪要表返回不触发', () => {
+  it('无纪要表同样不触发', () => {
     mockCurrentJsonTableData.sheet_0.name = '背包物品表';
     const result = checkAutoMergeTrigger_ACU();
     expect(result.shouldTrigger).toBe(false);
   });
-  it('reserve 影响触发阈值', () => {
-    mockSettings.autoMergeThreshold = 5;
-    mockSettings.autoMergeReserve = 3;
-    // triggerThreshold = 5 + 3 = 8, summaryCount = 7 < 8
-    const result = checkAutoMergeTrigger_ACU();
-    expect(result.shouldTrigger).toBe(false);
-  });
-  it('autoMergedOrder 中的 row_id 不计入，普通 AM 行仍参与合并', () => {
-    mockSettings.autoMergedOrder = { sheet_0: ['1', '2', '3', '4', '5', '6'] };
-    mockCurrentJsonTableData.sheet_0.content[7][1] = 'AM-普通纪要';
-    const result = checkAutoMergeTrigger_ACU();
-    expect(result).toEqual({ shouldTrigger: false });
+  it('封存后不返回 mergeCount / summaryCount 等触发参数', () => {
     mockSettings.autoMergeThreshold = 1;
-    expect(checkAutoMergeTrigger_ACU()).toMatchObject({ shouldTrigger: true, mergeCount: 1, summaryCount: 1 });
-  });
-  it('已合并行不计入', () => {
-    // 标记所有行为已合并
-    for (let i = 1; i < mockCurrentJsonTableData.sheet_0.content.length; i++) {
-      mockCurrentJsonTableData.sheet_0.content[i][3] = 'auto_merged';
-    }
     const result = checkAutoMergeTrigger_ACU();
-    expect(result.shouldTrigger).toBe(false);
+    expect(result.mergeCount).toBeUndefined();
+    expect(result.summaryCount).toBeUndefined();
+    expect(result.reserve).toBeUndefined();
   });
 });
 

@@ -3,6 +3,14 @@
  * 从 presentation/triggers/update-trigger.ts 的 handleManualMergeSummary_ACU 中提取
  * 
  * 只负责「构建 prompt + 调用 AI + 解析结果 + 累积合并」，不涉及 UI（toast/按钮/进度条）。
+ *
+ * ═══════════════════════════════════════════════════════════════
+ * 【已遗弃 · 封存】合并纪要功能整体已遗弃：
+ * - 手动合并 UI 入口已在 update-trigger.ts 停用（点击只弹「功能已停用」提示）；
+ * - 自动合并触发已在 merge-logic.ts 的 checkAutoMergeTrigger_ACU 封存（恒不触发）；
+ * - 遗弃原因见 merge-logic.ts 文件头横幅（SQLite 协议断裂、占位符未替换等）。
+ * 本文件仅作代码存档，禁止新增生产调用路径。
+ * ═══════════════════════════════════════════════════════════════
  */
 
 import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU } from '../../shared/defaults-json.js';

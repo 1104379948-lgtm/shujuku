@@ -32,6 +32,12 @@ export function buildCustomApiRequestBody_ACU(
     promptCacheKey?: string;
     /** 流式请求时注入 stream_options.include_usage，让流末尾下发 usage 统计 chunk。非流式请求忽略。 */
     includeStreamUsage?: boolean;
+    /**
+     * 注入上游请求体的 response_format（如严格 JSON 填表的 json_schema）。
+     * JSON 是 YAML 的子集，序列化为单行后走 custom_include_body 合并进上游请求体；
+     * 后端不支持时用户可通过 excludeBodyParams 填 response_format 剔除。
+     */
+    responseFormat?: Record<string, any>;
   }
 ): Record<string, any> {
   const opts = overrides || {};
@@ -63,6 +69,9 @@ export function buildCustomApiRequestBody_ACU(
   }
   if (opts.includeStreamUsage && streaming) {
     extraIncludeLines.push('stream_options: {"include_usage": true}');
+  }
+  if (opts.responseFormat && typeof opts.responseFormat === 'object') {
+    extraIncludeLines.push(`response_format: ${JSON.stringify(opts.responseFormat)}`);
   }
   const userBodyIsFlowStyle = /^[{[]/.test(userBodyParams.trim());
   if (extraIncludeLines.length && userBodyIsFlowStyle) {

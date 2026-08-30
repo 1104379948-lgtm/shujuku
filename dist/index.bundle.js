@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         SP·数据库 VII
+// @name         SP·数据库 IX
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      9.0
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
@@ -98,7 +98,7 @@
     function checkAndMarkInstance() {
         const hostWin = getHostWindow();
         if (hostWin[ACU_INSTANCE_FLAG]) {
-            console.warn('[SP·数据库 VII] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
+            console.warn('[SP·数据库 IX] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
             return true; // 已有实例
         }
         hostWin[ACU_INSTANCE_FLAG] = true;
@@ -191,7 +191,7 @@
         uid: "sheet_dCudvUnH",
         name: "全局数据表",
         sourceData: {
-            note: "记录当前主角所在地点及时间相关参数。此表有且仅有一行。\n- 列1: 主角当前所在地点 - 主角当前所在的具体场景名称。\n- 列2: 当前时间 - 游戏世界的当前时间。格式：\u201CYYYY-MM-DD HH:MM\u201D，初始化时如果剧情没有明确具体的日期和时间，则必须根据世界观和设定自行设定一个明确的日期时间。\n- 列3: 上轮场景时间 - 上一轮交互结束时的时间。\n- 列4: 经过的时间 - 根据当前与上轮时间计算得出的文本描述（如：\u201C几分钟\u201D）。",
+            note: "记录当前主角所在地点及时间相关参数。此表有且仅有一行。（列号为 0 基，与表格数据中的列标一致）\n- 列0: 主角当前所在地点 - 主角当前所在的具体场景名称。\n- 列1: 当前时间 - 游戏世界的当前时间。格式：\u201CYYYY-MM-DD HH:MM\u201D，初始化时如果剧情没有明确具体的日期和时间，则必须根据世界观和设定自行设定一个明确的日期时间。\n- 列2: 上轮场景时间 - 上一轮交互结束时的时间。\n- 列3: 经过的时间 - 根据当前与上轮时间计算得出的文本描述（如：\u201C几分钟\u201D）。",
             initNode: "插入一条关于当前世界状态的记录。",
             deleteNode: "禁止删除。",
             updateNode: "当主角从当前所在区域离开时，更新所在地点。每轮必须更新时间。\nSQL示例: UPDATE global_state SET current_location = '新地点', prev_scene_time = cur_time, cur_time = '2024-03-15 16:00', elapsed_time = '约1小时' WHERE row_id = 1;",
@@ -264,7 +264,7 @@
         uid: "sheet_DpKcVGqg",
         name: "主角信息表",
         sourceData: {
-            note: "记录主角的核心身份信息。此表有且仅有一行。\n- 列1: 人物名称 - 主角的名字。\n- 列2: 性别/年龄 - 主角的生理性别和年龄。\n- 列3: 外貌特征 - 对主角外貌的客观文字描写。\n- 列4: 职业/身份 - 主角在社会中的主要角色。\n- 列5: 过往经历 - 记录主角的背景故事和后续的关键经历，随剧情增量更新，不超过300字，超过时需压缩。\n- 列6: 性格特点 - 对主角核心性格的概括。",
+            note: "记录主角的核心身份信息。此表有且仅有一行。（列号为 0 基，与表格数据中的列标一致）\n- 列0: 人物名称 - 主角的名字。\n- 列1: 性别/年龄 - 主角的生理性别和年龄。\n- 列2: 外貌特征 - 对主角外貌的客观文字描写。\n- 列3: 职业/身份 - 主角在社会中的主要角色。\n- 列4: 过往经历 - 记录主角的背景故事和后续的关键经历，随剧情增量更新，不超过300字，超过时需压缩。\n- 列5: 性格特点 - 对主角核心性格的概括。",
             initNode: "游戏初始化时，插入主角的唯一条目。",
             deleteNode: "禁止删除。",
             updateNode: "'过往经历'列会根据剧情发展持续增量更新，当主角各项状态发生改变时更新。\nSQL示例: UPDATE protagonist_info SET past_experience = '更新后的经历内容', occupation = '新职业' WHERE row_id = 1;",
@@ -341,7 +341,7 @@
         uid: "sheet_NcBlYRH5",
         name: "重要角色表",
         sourceData: {
-            note: "记录所有关键NPC的详细信息和动态状态。\n- 列1: 姓名 - NPC的名字。\n- 列2: 性别/年龄 - NPC的生理性别和年龄。\n- 列3: 一句话介绍 \u2013 用不超过15字概括角色身份背景，不含主观评价。\n- 列4: 外貌特征 - 对NPC外貌和当前衣着的详细描述，对女性角色可包含身材描写；对男性角色无需描写。\n- 列5: 持有的重要物品 - NPC拥有的关键重要物品列表，用分号分隔。\n- 列6: 是否离场 - 判断该角色是否能直接与主角互动，填写\u201C是\u201D或\u201C否\u201D。\n- 列7: 过往经历 - 记录角色背景与关键事件，随剧情增量更新，不超过300字，超过时需压缩。",
+            note: "记录所有关键NPC的详细信息和动态状态。（列号为 0 基，与表格数据中的列标一致）\n- 列0: 姓名 - NPC的名字，不得与表中已有角色重名。\n- 列1: 性别/年龄 - NPC的生理性别和年龄。\n- 列2: 一句话介绍 \u2013 用不超过15字概括角色身份背景，不含主观评价。\n- 列3: 外貌特征 - 对NPC外貌和当前衣着的详细描述，对女性角色可包含身材描写；对男性角色无需描写。\n- 列4: 持有的重要物品 - NPC拥有的关键重要物品列表，用分号分隔。\n- 列5: 是否离场 - 判断该角色是否能直接与主角互动，填写\u201C是\u201D或\u201C否\u201D。\n- 列6: 过往经历 - 记录角色背景与关键事件，随剧情增量更新，不超过300字，超过时需压缩。",
             initNode: "游戏初始化时为当前在场的重要人物分别插入一个条目。",
             deleteNode: "禁止删除。",
             updateNode: "已有角色的状态、关系、想法或经历变化时更新；若角色死亡需在姓名旁标注（已死亡）。\nSQL示例: UPDATE important_characters SET is_absent = '是', past_experience = '新增经历...' WHERE name = '角色名';",
@@ -426,7 +426,7 @@
         uid: "sheet_lEARaBa8",
         name: "主角技能表",
         sourceData: {
-            note: "记录主角获得的所有技能项目。\n- 列1: 技能名称 - 技能的名称。\n- 列2: 技能类型 - 技能的类别（如：\u201C被动\u201D、\u201C主动\u201D）。\n- 列3: 等级/阶段 - 技能的当前等级或阶段。\n- 列4: 效果描述 - 技能在当前等级下的具体效果。",
+            note: "记录主角获得的所有技能项目。（列号为 0 基，与表格数据中的列标一致）\n- 列0: 技能名称 - 技能的名称，不得与表中已有技能重名。\n- 列1: 技能类型 - 技能的类别（如：\u201C被动\u201D、\u201C主动\u201D）。\n- 列2: 等级/阶段 - 技能的当前等级或阶段。\n- 列3: 效果描述 - 技能在当前等级下的具体效果。",
             initNode: "游戏初始化时，根据设定为主角添加初始技能。",
             deleteNode: "技能因剧情被剥夺或替换时删除。\nSQL示例: DELETE FROM protagonist_skills WHERE skill_name = '被剥夺的技能';",
             updateNode: "已有技能被升级时更新其等级/阶段和效果描述。\nSQL示例: UPDATE protagonist_skills SET skill_level = 'Lv.3', effect_desc = '新效果描述' WHERE skill_name = '火球术';",
@@ -499,7 +499,7 @@
         uid: "sheet_in05z9vz",
         name: "背包物品表",
         sourceData: {
-            note: "记录主角拥有的所有物品、装备。\n- 列1: 物品名称 - 物品的名称。\n- 列2: 数量 - 拥有的数量。\n- 列3: 描述/效果 - 物品的功能或背景描述。\n- 列4: 类别 - 物品的类别（如：\u201C武器\u201D、\u201C消耗品\u201D、\u201C杂物\u201D）。",
+            note: "记录主角拥有的所有物品、装备。（列号为 0 基，与表格数据中的列标一致）\n- 列0: 物品名称 - 物品的名称，不得与表中已有物品重名。\n- 列1: 数量 - 拥有的数量。\n- 列2: 描述/效果 - 物品的功能或背景描述。\n- 列3: 类别 - 物品的类别（如：\u201C武器\u201D、\u201C消耗品\u201D、\u201C杂物\u201D）。",
             initNode: "游戏初始化时，根据剧情与设定添加主角的初始携带物品。",
             deleteNode: "物品被完全消耗、丢弃或摧毁时删除。\nSQL示例: DELETE FROM inventory WHERE item_name = '已消耗物品';\nSQL示例(批量): DELETE FROM inventory WHERE quantity <= 0;",
             updateNode: "获得已有的物品，使其数量增加时更新，已有物品状态变化时更新。\nSQL示例: UPDATE inventory SET quantity = quantity + 3 WHERE item_name = '治疗药水';\nSQL示例(多列): UPDATE inventory SET quantity = quantity - 1, description = '已损坏' WHERE item_name = '铁剑';",
@@ -572,7 +572,7 @@
         uid: "sheet_etak47Ve",
         name: "任务与事件表",
         sourceData: {
-            note: "记录所有当前正在进行的任务。\n- 列1: 任务名称 - 任务的标题。\n- 列2: 任务类型 - \u201C主线任务\u201D或\u201C支线任务\u201D。\n- 列3: 发布者 - 发布该任务的角色或势力。\n- 列4: 详细描述 - 任务的目标和要求。\n- 列5: 当前进度 - 对任务完成度的简要描述。\n- 列6: 任务时限 - 完成任务的剩余时间。\n- 列7: 奖励 - 完成任务可获得的奖励。\n- 列8: 惩罚 - 任务失败的后果。",
+            note: "记录所有当前正在进行的任务。（列号为 0 基，与表格数据中的列标一致）\n- 列0: 任务名称 - 任务的标题，不得与表中已有任务重名。\n- 列1: 任务类型 - \u201C主线任务\u201D或\u201C支线任务\u201D。\n- 列2: 发布者 - 发布该任务的角色或势力。\n- 列3: 详细描述 - 任务的目标和要求。\n- 列4: 当前进度 - 对任务完成度的简要描述。\n- 列5: 任务时限 - 完成任务的剩余时间。\n- 列6: 奖励 - 完成任务可获得的奖励。\n- 列7: 惩罚 - 任务失败的后果。",
             initNode: "游戏初始化时，根据剧情与设定添加一条主线剧情。",
             deleteNode: "任务完成、失败或过期时删除。\nSQL示例: DELETE FROM quests_events WHERE quest_name = '已完成的任务';",
             updateNode: "任务取得关键进展时进行更新。\nSQL示例: UPDATE quests_events SET current_progress = '已完成第一阶段', time_limit = '剩余3天' WHERE quest_name = '拯救公主';",
@@ -653,7 +653,7 @@
         uid: "sheet_3NoMc1wI",
         name: "纪要表",
         sourceData: {
-            note: "轮次日志，每轮交互后必须立即插入一条新记录。\n- 列1: 时间跨度 - 本轮事件发生的精确时间范围。\n- 列2: 地点 - 本轮事件发生的地点，从大到小描述。\n- 列3: 纪要 - 以第三方视角客观记录本轮事件，不得加入推测、情绪化语言、负面解读或主观判断。内容必须基于正文明确发生的事实，不得补充未出现的情节，不少于300字，结尾部分禁止进行总结或者升华。\n- 列4: 概要 - 30字以内，一句话概括纪要内容。\n- 列5: 编码索引 - 格式为 AMXXXX，XXXX从0001递增。\n",
+            note: "轮次日志，每轮交互后必须立即插入一条新记录。（列号为 0 基，与表格数据中的列标一致）\n- 列0: 时间跨度 - 本轮事件发生的精确时间范围。\n- 列1: 地点 - 本轮事件发生的地点，从大到小描述。\n- 列2: 纪要 - 以第三方视角客观记录本轮事件，不得加入推测、情绪化语言、负面解读或主观判断。内容必须基于正文明确发生的事实，不得补充未出现的情节，不少于300字，结尾部分禁止进行总结或者升华。\n- 列3: 概要 - 30字以内，一句话概括纪要内容。\n- 列4: 编码索引 - 格式为 AMXXXX，XXXX从0001递增，不得与已有编号重复。\n",
             initNode: "故事初始化时，插入一条新记录用于记录初始化剧情。",
             deleteNode: "禁止删除。",
             updateNode: "禁止操作。",
@@ -734,7 +734,7 @@
         uid: "sheet_OptionsNew",
         name: "选项表",
         sourceData: {
-            note: "记录每轮主角可以进行的动作选项。此表有且仅有一行。\n- 列1: 选项一 \u2013 以第三人称描述主角可采取的合理行动，偏向策略或推进剧情。\n- 列2: 选项二 \u2013 以第三人称描述主角可采取的中立行动，不偏向任何立场。\n- 列3: 选项三 \u2013 以第三人称描述主角可采取的善意行动，体现帮助、保护或安抚。\n- 列4: 选项四 \u2013 以第三人称描述主角可采取的 NSFW 相关行动，但必须符合剧情逻辑，不得代替主角说话。\n所有选项必须使用第三人称（如\u201C主角尝试\u2026\u201D，\u201C主角决定\u2026\u201D），不得代替主角发言；必须紧扣当前剧情；四个选项需风格明确、互不重复。",
+            note: "记录每轮主角可以进行的动作选项。此表有且仅有一行。（列号为 0 基，与表格数据中的列标一致）\n- 列0: 选项一 \u2013 以第三人称描述主角可采取的合理行动，偏向策略或推进剧情。\n- 列1: 选项二 \u2013 以第三人称描述主角可采取的中立行动，不偏向任何立场。\n- 列2: 选项三 \u2013 以第三人称描述主角可采取的善意行动，体现帮助、保护或安抚。\n- 列3: 选项四 \u2013 以第三人称描述主角可采取的 NSFW 相关行动，但必须符合剧情逻辑，不得代替主角说话。\n所有选项必须使用第三人称（如\u201C主角尝试\u2026\u201D，\u201C主角决定\u2026\u201D），不得代替主角发言；必须紧扣当前剧情；四个选项需风格明确、互不重复。",
             initNode: "游戏初始化时，生成四个初始选项。",
             deleteNode: "禁止删除。",
             updateNode: "每轮交互后必须更新此表，根据当前剧情生成新的四个选项覆盖原有内容。\nSQL示例: UPDATE options SET option_1 = '新选项一', option_2 = '新选项二', option_3 = '新选项三', option_4 = '新选项四' WHERE row_id = 1;",
@@ -834,7 +834,7 @@
             "uid": "sheet_global_data",
             "name": "全局数据表",
             "sourceData": {
-                "note": "记录当前主角所在地点及时间相关参数。此表有且仅有一行。\n\n【列定义】\n- 列1: 全局状态 story_state\n- 列2: 当前详细地点 current_location\n- 列3: 当前次要地区 current_minor_region\n- 列4: 当前主要地区 current_major_region\n- 列5: 上轮场景时间 prev_scene_time（初始化时为NULL）\n- 列6: 经过的时间 elapsed_time\n- 列7: 当前时间 cur_time\n\n【强制约束】\n全局状态为固定字符串`全局状态`，标题性质。\n\n地点层级从小到大：详细地点 < 次要地区 < 主要地区。\n每个字段只写本级名称，不拼上级前缀。\n√ 当前详细地点填 “御苑”\n× 当前详细地点填 “东京-新宿区-御苑”\n\n时间格式：\nprev_scene_time / cur_time: YYYY-MM-DD HH:MM\nelapsed_time: {数值}{单位}，多单位用空格连。\n单位集合：[纪元,千年,百年,年,月,周,天,小时,分]\n示例：\"3小时20分\" | \"2天\" | \"3年6月\"\n\n时间计算公式：cur_time = prev_scene_time + elapsed_time\n- 初始化时prev_scene_time为NULL，cur_time直接填写初始时间，无需计算\n- 每轮推进时，将上一轮的cur_time赋值给prev_scene_time，然后填写本次的elapsed_time，最后计算得到新的cur_time",
+                "note": "记录当前主角所在地点及时间相关参数。此表有且仅有一行。\n\n【列定义】（列号为 0 基，与表格数据中的列标一致）\n- 列0: 全局状态 story_state\n- 列1: 当前详细地点 current_location\n- 列2: 当前次要地区 current_minor_region\n- 列3: 当前主要地区 current_major_region\n- 列4: 上轮场景时间 prev_scene_time（初始化时为NULL）\n- 列5: 经过的时间 elapsed_time\n- 列6: 当前时间 cur_time\n\n【强制约束】\n全局状态为固定字符串`全局状态`，标题性质。\n\n地点层级从小到大：详细地点 < 次要地区 < 主要地区。\n每个字段只写本级名称，不拼上级前缀。\n√ 当前详细地点填 “御苑”\n× 当前详细地点填 “东京-新宿区-御苑”\n\n时间格式：\nprev_scene_time / cur_time: YYYY-MM-DD HH:MM\nelapsed_time: {数值}{单位}，多单位用空格连。\n单位集合：[纪元,千年,百年,年,月,周,天,小时,分]\n示例：\"3小时20分\" | \"2天\" | \"3年6月\"\n\n时间计算公式：cur_time = prev_scene_time + elapsed_time\n- 初始化时prev_scene_time为NULL，cur_time直接填写初始时间，无需计算\n- 每轮推进时，将上一轮的cur_time赋值给prev_scene_time，然后填写本次的elapsed_time，最后计算得到新的cur_time",
                 "initNode": "故事初始化时，插入唯一条目，记录用户开局初始时间与初始地点。禁止直接照搬示例中的地点和日期。\n\nSQL示例: INSERT INTO global_state (story_state, current_location, current_minor_region, current_major_region, prev_scene_time, elapsed_time, cur_time)\nVALUES ('全局状态', '御苑', '新宿区', '东京都', NULL, '0分', '2026-02-03 09:00');",
                 "deleteNode": "禁止。",
                 "updateNode": "每轮推进时更新 prev_scene_time、elapsed_time 和 cur_time；若地点变动则同步更新三级地点字段。\n\n【更新约束】\n除初始化时 prev_scene_time 可为 NULL 外，其余字段均不可写 NULL 或空串。\n\n【更新SQL示例（同日+跨日+位置变动综合覆盖）】\nSQL示例(同日推进): UPDATE global_state SET prev_scene_time = '2026-02-03 09:00', elapsed_time = '3小时', cur_time = '2026-02-03 12:00' WHERE row_id = 1;\n\nSQL示例(跨日推进): UPDATE global_state SET prev_scene_time = '2026-02-03 23:55', elapsed_time = '20分', cur_time = '2026-02-04 00:15' WHERE row_id = 1;\n\nSQL示例(含位置变动): UPDATE global_state SET current_location = '新宿车站', current_minor_region = '新宿区', current_major_region = '东京都', prev_scene_time = '2026-02-03 12:00', elapsed_time = '30分', cur_time = '2026-02-03 12:30' WHERE row_id = 1;",
@@ -901,7 +901,7 @@
             "uid": "sheet_protagonist",
             "name": "主角信息表",
             "sourceData": {
-                "note": "记录主角的核心身份信息。此表有且仅有一行。\n\n【列定义】\n- 列1: 姓名 name\n- 列2: 性别 gender\n- 列3: 年龄 age\n- 列4: 外貌特征 appearance（含日常穿衣风格，写出整体印象，避免罗列数据）\n- 列5: 身份 identity_text（逗号分隔）\n- 列6: 近况 current_condition\n- 列7: 所在地点 location_name\n- 列8: 随身财物 belongings（可NULL）\n\n【强制约束】\n1. 所在地点只写地点名不带层级前缀。位置变化时同步更新。\n\n2. 近况用一句话描述主角当前的身体感觉、情绪状态或心头惦记的事。\n正常时期填\"一切如常\"，有异常时直接写具体感受，不用标签堆叠。\n√ 昨晚没睡好，脑子有点沉\n√ 刚从雨里跑回来，衣服还湿着\n\n3. 随身财物只写当前身上带着的有意义物品，不写游戏化资源。\n√ 钱包里夹着第一次看电影的票根\n√ 口袋里剩两颗橘子糖",
+                "note": "记录主角的核心身份信息。此表有且仅有一行。\n\n【列定义】（列号为 0 基，与表格数据中的列标一致）\n- 列0: 姓名 name\n- 列1: 性别 gender\n- 列2: 年龄 age\n- 列3: 外貌特征 appearance（含日常穿衣风格，写出整体印象，避免罗列数据）\n- 列4: 身份 identity_text（逗号分隔）\n- 列5: 近况 current_condition\n- 列6: 所在地点 location_name\n- 列7: 随身财物 belongings（可留空）\n\n【强制约束】\n1. 所在地点只写地点名不带层级前缀。位置变化时同步更新。\n\n2. 近况用一句话描述主角当前的身体感觉、情绪状态或心头惦记的事。\n正常时期填\"一切如常\"，有异常时直接写具体感受，不用标签堆叠。\n√ 昨晚没睡好，脑子有点沉\n√ 刚从雨里跑回来，衣服还湿着\n\n3. 随身财物只写当前身上带着的有意义物品，不写游戏化资源。\n√ 钱包里夹着第一次看电影的票根\n√ 口袋里剩两颗橘子糖",
                 "initNode": "故事初始化时，插入主角的唯一条目。",
                 "deleteNode": "禁止。",
                 "updateNode": "已存在的这一行，字段值变化时更新：年龄、外貌、身份、近况、所在地点、随身财物。\n\n【更新SQL示例（近况+位置变化）】\n更新SQL示例(近况变化): UPDATE protagonist_info SET current_condition = '疲劳，左膝擦伤', location_name = '御苑' WHERE row_id = 1;\n\n更新SQL示例(随身财物变化): UPDATE protagonist_info SET belongings = '钱包里夹着第一次看电影的票根，口袋里剩两颗橘子糖' WHERE row_id = 1;",
@@ -969,7 +969,7 @@
             "uid": "sheet_important_non_romance",
             "name": "重要角色表",
             "sourceData": {
-                "note": "记录所有对当前剧情产生作用的重要角色。\n\n【列定义】\n- 列1: 姓名 name（全表唯一）\n- 列2: 性别 gender\n- 列3: 年龄 age\n- 列4: 一句话介绍 brief_intro\n- 列5: 外貌特征 appearance\n- 列6: 穿着打扮 outfit_text\n- 列7: 所在地点 location_name\n- 列8: 在场状态 presence_status（在场/离场）\n- 列9: 人际关系 relation_text\n- 列10: 过往经历 past_experience\n- 列11: 交互选项 interaction_options\n\n【强制约束】\nbrief_intro仅允许客观事实类内容，严禁出现任何性格标签概述，如\"开朗\"\"冷漠\"\"温柔\"等；客观内容范畴包括但不限于：角色核心身份、与剧情强相关的客观行为、与关键人物的客观关联、非性格类核心特征。\n√ 经营城南杂货铺 / 曾救过主角的性命 / 艾莉丝的亲生兄长\n× 性格孤僻的杂货铺老板 / 温柔且救过主角 / 偏执的艾莉丝兄长\n\noutfit_text仅写外在可见的服饰、饰品、妆容、持握物等可视元素，禁止写固有的长相特征、气质、气场等非视觉内容。\n√ 深灰立领风衣配黑皮手套 / 左手无名指戴着一枚银色蛇纹戒\n× 散发出高贵的气场、看起来像个军人\n\ninteraction_options必须同时遵循下述要求\n1.不使用第一人称\"我\"\n2.动作发起方为主角，接收方为角色\n3.必须是具体、有代入感的实际行动，避免干瘪的单词\n√ 向他打听失踪案线索 / 假装偶遇并搭话套取信息 / 故意打翻水杯制造冲突\n× 交谈 / 打听\n\n【relation_text 格式规则】（强制）\n1. 格式必须是：角色名:关系描述\n   - 必须显式写出\"角色名:\"前缀，禁止省略角色名直接写关系内容。\n   - 同一角色有多个关系标签/描述时，标签之间用英文逗号 , 分隔。\n   - 不同角色之间用英文分号 ; 分隔。\n   - 关系描述去除人称，使用简短陈述。\n2. 主要记录该角色与主角及其他重要角色之间的客观关联，至少包含与主角的关系。\n   √ 主角:曾帮其修过自行车,旧识\n   √ 主角:认识;艾莉丝:室友兼闺蜜\n   √ 主角:校长身份,从未直接交谈;艾莉丝:监护人\n   × 曾帮主角修过自行车                    ← 缺少角色名前缀\n   × 主角:认识;室友兼闺蜜                  ← 第二段缺少角色名\n   × 主角:旧识,艾莉丝:室友                 ← 不同角色错用逗号\n   × 主角:曾帮其修过自行车;旧识            ← 同一角色多标签错用分号",
+                "note": "记录所有对当前剧情产生作用的重要角色。\n\n【列定义】（列号为 0 基，与表格数据中的列标一致）\n- 列0: 姓名 name（不得与表中已有角色重名）\n- 列1: 性别 gender\n- 列2: 年龄 age\n- 列3: 一句话介绍 brief_intro\n- 列4: 外貌特征 appearance\n- 列5: 穿着打扮 outfit_text\n- 列6: 所在地点 location_name\n- 列7: 在场状态 presence_status（在场/离场）\n- 列8: 人际关系 relation_text\n- 列9: 过往经历 past_experience\n- 列10: 交互选项 interaction_options\n\n【强制约束】\nbrief_intro仅允许客观事实类内容，严禁出现任何性格标签概述，如\"开朗\"\"冷漠\"\"温柔\"等；客观内容范畴包括但不限于：角色核心身份、与剧情强相关的客观行为、与关键人物的客观关联、非性格类核心特征。\n√ 经营城南杂货铺 / 曾救过主角的性命 / 艾莉丝的亲生兄长\n× 性格孤僻的杂货铺老板 / 温柔且救过主角 / 偏执的艾莉丝兄长\n\noutfit_text仅写外在可见的服饰、饰品、妆容、持握物等可视元素，禁止写固有的长相特征、气质、气场等非视觉内容。\n√ 深灰立领风衣配黑皮手套 / 左手无名指戴着一枚银色蛇纹戒\n× 散发出高贵的气场、看起来像个军人\n\ninteraction_options必须同时遵循下述要求\n1.不使用第一人称\"我\"\n2.动作发起方为主角，接收方为角色\n3.必须是具体、有代入感的实际行动，避免干瘪的单词\n√ 向他打听失踪案线索 / 假装偶遇并搭话套取信息 / 故意打翻水杯制造冲突\n× 交谈 / 打听\n\n【relation_text 格式规则】（强制）\n1. 格式必须是：角色名:关系描述\n   - 必须显式写出\"角色名:\"前缀，禁止省略角色名直接写关系内容。\n   - 同一角色有多个关系标签/描述时，标签之间用英文逗号 , 分隔。\n   - 不同角色之间用英文分号 ; 分隔。\n   - 关系描述去除人称，使用简短陈述。\n2. 主要记录该角色与主角及其他重要角色之间的客观关联，至少包含与主角的关系。\n   √ 主角:曾帮其修过自行车,旧识\n   √ 主角:认识;艾莉丝:室友兼闺蜜\n   √ 主角:校长身份,从未直接交谈;艾莉丝:监护人\n   × 曾帮主角修过自行车                    ← 缺少角色名前缀\n   × 主角:认识;室友兼闺蜜                  ← 第二段缺少角色名\n   × 主角:旧识,艾莉丝:室友                 ← 不同角色错用逗号\n   × 主角:曾帮其修过自行车;旧识            ← 同一角色多标签错用分号",
                 "initNode": "故事开始时为当前已知的重要角色分别插入条目。\n\n【格式约束】\nrelation_text 必须写\"角色名:关系描述\"；同一角色多项描述用英文逗号 , 分隔；不同角色之间用英文分号 ; 分隔。\n\nSQL示例: INSERT INTO important_non_romance (name, gender, age, brief_intro, appearance, outfit_text, location_name, presence_status, relation_text, past_experience, interaction_options) VALUES ('校长', '男', 60, '学院校长', '白发，手持手杖，目光深邃', '深灰立领风衣配黑皮手套', '校长室', '离场', '主角:曾帮其修过自行车,旧识;艾莉丝:监护人', '据说知晓学院的许多秘密，很少露面。', '向他打听失踪案线索');",
                 "deleteNode": "默认禁止删除。已出场但暂时无剧情、暂时离场、关系状态变化、身份变化的角色，都必须保留在本表，只更新 presence_status、relation_text、past_experience、interaction_options 等字段。仅当角色明确永久离开当前剧情，且后续不再需要追踪时，才允许删除。\nSQL示例(永久离开且不再追踪):DELETE FROM important_non_romance WHERE name = '艾莉丝';",
                 "updateNode": "已存在的重要角色，字段变化时更新。\n\n【格式约束】\nrelation_text 必须写\"角色名:关系描述\"；同一角色多项描述用英文逗号 , 分隔；不同角色之间用英文分号 ; 分隔。\n\nSQL示例(普通字段更新): UPDATE important_non_romance SET presence_status = '离场', interaction_options = '向他打听失踪案线索' WHERE name = '校长';\nSQL示例(单角色多描述): UPDATE important_non_romance SET relation_text = '主角:曾帮其修过自行车,近期开始留意主角动向' WHERE name = '校长';\nSQL示例(多角色关系): UPDATE important_non_romance SET relation_text = '主角:旧识,旧情人;艾莉丝:监护人;神田:旧部下' WHERE name = '校长';",
@@ -1046,11 +1046,11 @@
             "uid": "sheet_summary",
             "name": "纪要表",
             "sourceData": {
-                "note": "轮次日志。每轮交互结束后立刻插入一条新记录。\n\n【列定义】\n- 列1: 编码索引 code_index（AM0001起递增，全表唯一）\n- 列2: 时间跨度 time_span\n- 列3: 概览 summary（≤30字）\n- 列4: 纪要 chronicle_text（240-480字）\n- 列5: 重要对话 key_dialogue（可NULL）\n\n【强制约束】\n1.编码索引格式 AMXXXX，从0001开始递增。\n2.时间跨度格式为 \"YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM\"，覆盖本轮事件的实际时间范围。\n3.概览一句话概括本轮纪要内容，≤30字。\n\n4.纪要规范：\n- 以第三方视角中立客观记录正文发生的一切，移除所有修辞与对话。不滥用环境描写、不进行动作细节分析、不加评论，不抒情，不升华。\n- 用词直白生活化，避免正式措辞（如“达成协议”“确立计划”）。\n- 结尾必须开放，在事件自然流动中结束，不得归纳状态或做出封闭式收束。\n违例：故事仍在继续 / 新的篇章开启 / 二人关系迈入新阶段 / 未来等待着他们。\n- 多轮交互整合为一条记录。\n- 禁止内容：极端情绪（崩溃、狂喜、绝望等）、夸张、比喻、升华、情绪总结、支配欲、掌控欲、总结性收尾。\n\n5.重要对话仅摘录直接推动剧情转折、揭示关键信息、改变人物关系/决策或构成承诺/誓约/约定的原文台词，标明说话人。排除寒暄、重复、情绪感叹。通常3句，最多5句，总token不超过150。",
+                "note": "轮次日志。每轮交互结束后立刻插入一条新记录。\n\n【列定义】（列号为 0 基，与表格数据中的列标一致）\n- 列0: 编码索引 code_index（AM0001起递增，不得与已有编号重复）\n- 列1: 时间跨度 time_span\n- 列2: 概览 summary（≤30字）\n- 列3: 纪要 chronicle_text（240-480字）\n- 列4: 重要对话 key_dialogue（可留空）\n\n【强制约束】\n1.编码索引格式 AMXXXX，从0001开始递增。\n2.时间跨度格式为 \"YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM\"，覆盖本轮事件的实际时间范围。\n3.概览一句话概括本轮纪要内容，≤30字。\n\n4.纪要规范：\n- 以第三方视角中立客观记录正文发生的一切，移除所有修辞与对话。不滥用环境描写、不进行动作细节分析、不加评论，不抒情，不升华。\n- 用词直白生活化，避免正式措辞（如“达成协议”“确立计划”）。\n- 结尾必须开放，在事件自然流动中结束，不得归纳状态或做出封闭式收束。\n违例：故事仍在继续 / 新的篇章开启 / 二人关系迈入新阶段 / 未来等待着他们。\n- 多轮交互整合为一条记录。\n- 禁止内容：极端情绪（崩溃、狂喜、绝望等）、夸张、比喻、升华、情绪总结、支配欲、掌控欲、总结性收尾。\n\n5.重要对话仅摘录直接推动剧情转折、揭示关键信息、改变人物关系/决策或构成承诺/誓约/约定的原文台词，标明说话人。排除寒暄、重复、情绪感叹。通常3句，最多5句，总token不超过150。",
                 "initNode": "故事初始化时，插入一条新记录用于记录剧情。",
                 "deleteNode": "禁止。",
                 "updateNode": "禁止。",
-                "insertNode": "每轮交互结束后插入一条新记录。\n\n【强制约束】\ncode_index、time_span、summary、chronicle_text 均 NOT NULL，不可写 NULL 或空串。\ntime_span 格式必须为 YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM。\ncode_index 格式必须为 AM0001 这种四位编号，且全表唯一。\n\nSQL示例：INSERT INTO chronicle (code_index, time_span, summary, chronicle_text, key_dialogue) VALUES ('AM0036', '2026-02-04 08:00 ~ 2026-02-04 08:30', '一句话概括', '本轮纪要内容...', NULL);",
+                "insertNode": "每轮交互结束后插入一条新记录。\n\n【填写规范】\ncode_index、time_span、summary、chronicle_text 必须全部填写，不得留空或写 NULL。\ntime_span 格式必须为 YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM。\ncode_index 格式必须为 AM0001 这种四位编号，且不得与已有编号重复。\n\nSQL示例：INSERT INTO chronicle (code_index, time_span, summary, chronicle_text, key_dialogue) VALUES ('AM0036', '2026-02-04 08:00 ~ 2026-02-04 08:30', '一句话概括', '本轮纪要内容...', NULL);",
                 "ddl": "CREATE TABLE chronicle ( -- 纪要表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  code_index TEXT NOT NULL UNIQUE CHECK(code_index GLOB 'AM[0-9][0-9][0-9][0-9]'), -- 编码索引\n  time_span TEXT NOT NULL CHECK(time_span GLOB '????-??-?? ??:?? ~ ????-??-?? ??:??'), -- 时间跨度\n  summary TEXT NOT NULL, -- 概览\n  chronicle_text TEXT NOT NULL, -- 纪要\n  key_dialogue TEXT -- 重要对话\n);"
             },
             "content": [
@@ -4026,7 +4026,8 @@ $CONTENT
     const AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU = 2000;
     // --- 一次性默认值刷新版本标记 ---
     const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.6.3-keyword-prompt-content-based-refresh';
-    const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv2.1.3-table-template-ddl-relaxed-force-default';
+    // note 列号改 0 基（与 $0 序列化对齐）+ 失效硬约束措辞改为写作规范；仍用默认模板的用户一次性刷新。
+    const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv8.8.5-table-note-zero-based-columns';
     // V2 writer 一次性强制开启迁移：无论用户此前是否显式关闭，
     // 迁移执行一次后写入 marker，之后用户仍可再次手动关闭并被永久保留。
     const SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU = 'spv3.6.10-v2-writer-force-enable';
@@ -66170,10 +66171,28 @@ $CONTENT
         if (strictJsonFillEnabled) {
             warnIfStrictJsonPromptPolluted_ACU(messages);
         }
+        // 严格 JSON 填表：构建 json_schema response_format，让支持 structured outputs 的后端
+        // 在协议层强制输出结构，而不是只靠提示词软约束。
+        // 仅自定义 chat-completions 直连路径能携带（经 custom_include_body 合并进上游请求体）；
+        // tavern 连接预设与主 API（generateRaw）无请求体扩展通道，维持提示词约束。
+        // 后端不支持 response_format 时，用户可在 excludeBodyParams 中填 response_format 剔除。
+        let strictJsonResponseFormat;
+        if (strictJsonFillEnabled) {
+            try {
+                strictJsonResponseFormat = buildStrictJsonTableFillResponseFormatForData_ACU(sqliteMode, options?.tableData, options?.targetSheetKeys).responseFormat;
+            }
+            catch (error) {
+                // schema 构建失败不阻断填表：回退到纯提示词约束。
+                logWarn_ACU('[严格JSON填表] response_format schema 构建失败，本次请求不附加：', error);
+            }
+        }
         logDebug_ACU('Final messages array being sent to API:', messages);
         logDebug_ACU(`使用API预设: ${effectiveTableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
         try {
             if (effectiveApiMode === 'tavern') {
+                if (strictJsonResponseFormat) {
+                    logDebug_ACU('[严格JSON填表] 酒馆连接预设路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
+                }
                 const profileId = effectiveTavernProfile;
                 if (!profileId) {
                     throw new Error('未选择酒馆连接预设。');
@@ -66258,6 +66277,9 @@ $CONTENT
             else {
                 if (effectiveApiConfig.useMainApi && !forceDirectApi) {
                     logDebug_ACU('ACU: 通过酒馆主API发送请求（流式传输）...');
+                    if (strictJsonResponseFormat) {
+                        logDebug_ACU('[严格JSON填表] 主 API（generateRaw）路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
+                    }
                     if (!isGenerateRawAvailable_ACU()) {
                         throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
                     }
@@ -66295,7 +66317,13 @@ $CONTENT
                     }
                     const generateUrl = `/api/backends/chat-completions/generate`;
                     const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
-                    const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { stripModelPrefix: false }));
+                    const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
+                        stripModelPrefix: false,
+                        responseFormat: strictJsonResponseFormat,
+                    }));
+                    if (strictJsonResponseFormat) {
+                        logDebug_ACU('[严格JSON填表] 已在请求体附加 json_schema response_format。');
+                    }
                     logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
                     const response = await fetch(generateUrl, { method: 'POST', headers, body, signal: abortSignal });
                     if (!response.ok) {
@@ -66907,6 +66935,9 @@ $CONTENT
         }
         if (opts.includeStreamUsage && streaming) {
             extraIncludeLines.push('stream_options: {"include_usage": true}');
+        }
+        if (opts.responseFormat && typeof opts.responseFormat === 'object') {
+            extraIncludeLines.push(`response_format: ${JSON.stringify(opts.responseFormat)}`);
         }
         const userBodyIsFlowStyle = /^[{[]/.test(userBodyParams.trim());
         if (extraIncludeLines.length && userBodyIsFlowStyle) {
@@ -72005,7 +72036,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "8.8.4" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.0" || 'unknown';
     /**
      * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
      * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
@@ -88084,6 +88115,21 @@ $CONTENT
     }
 
     // merge-logic.ts
+    //
+    // ═══════════════════════════════════════════════════════════════
+    // 【已遗弃 · 封存】自动合并纪要（auto merge summary）
+    //
+    // 本功能已被正式遗弃，仅作代码存档，禁止恢复使用：
+    // 1. SQLite 模式下协议断裂：默认 SQL 合并提示词要求模型输出
+    //    INSERT INTO chronicle (...)，但本文件的解析器只识别 insertRow(...)，
+    //    自动合并在 SQLite 模式下必然失败（重试耗尽）。
+    // 2. 手动合并入口早已停用（见 presentation/triggers/update-trigger.ts 的停用壳）。
+    // 3. 本路径劫持主填表提示词壳但不做占位符替换，$0/$1/$4 等会原样发给模型。
+    //
+    // 封存方式：checkAutoMergeTrigger_ACU 无条件返回不触发，
+    // 使 update-orchestrator / update-scheduler 的两个调用点永不进入合并流程。
+    // 其余函数保留为历史存档，不再有生产调用路径。
+    // ═══════════════════════════════════════════════════════════════
     // ═══ 自动合并纪要：触发检查 ═══
     function isAutoMergedSummaryRow_ACU(summaryKey, row) {
         if (!Array.isArray(row))
@@ -88098,25 +88144,35 @@ $CONTENT
         return Array.isArray(storedOrder) ? storedOrder.map((id) => String(id)) : [];
     }
     function checkAutoMergeTrigger_ACU() {
-        if (!settings_ACU.autoMergeEnabled)
-            return { shouldTrigger: false };
-        const summaryKey = Object.keys(currentJsonTableData_ACU).find(k => currentJsonTableData_ACU[k].name === '纪要表' ||
-            currentJsonTableData_ACU[k].name === '总结表');
-        if (!summaryKey)
-            return { shouldTrigger: false };
-        const summaryCount = (currentJsonTableData_ACU[summaryKey].content || [])
-            .slice(1)
-            .filter((row) => !isAutoMergedSummaryRow_ACU(summaryKey, row))
-            .length;
-        const threshold = settings_ACU.autoMergeThreshold || 20;
-        const reserve = settings_ACU.autoMergeReserve || 0;
-        const triggerThreshold = threshold + reserve;
-        if (summaryCount < triggerThreshold)
-            return { shouldTrigger: false };
-        const mergeCount = summaryCount - reserve;
-        if (mergeCount <= 0)
-            return { shouldTrigger: false };
-        return { shouldTrigger: true, mergeCount, summaryCount, reserve };
+        // 【封存】自动合并纪要已遗弃（原因见文件头横幅），无条件不触发。
+        // 即使用户旧设置里 autoMergeEnabled 为 true 也不再执行。
+        return { shouldTrigger: false };
+        // ↓↓↓ 以下为封存前的原始触发逻辑，注释保留为存档 ↓↓↓
+        //
+        // if (!settings_ACU.autoMergeEnabled) return { shouldTrigger: false };
+        //
+        // const summaryKey = Object.keys(currentJsonTableData_ACU).find(k =>
+        //     currentJsonTableData_ACU[k].name === '纪要表' ||
+        //     currentJsonTableData_ACU[k].name === '总结表'
+        // );
+        //
+        // if (!summaryKey) return { shouldTrigger: false };
+        //
+        // const summaryCount = (currentJsonTableData_ACU[summaryKey].content || [])
+        //     .slice(1)
+        //     .filter((row: any) => !isAutoMergedSummaryRow_ACU(summaryKey, row))
+        //     .length;
+        //
+        // const threshold = settings_ACU.autoMergeThreshold || 20;
+        // const reserve = settings_ACU.autoMergeReserve || 0;
+        // const triggerThreshold = threshold + reserve;
+        //
+        // if (summaryCount < triggerThreshold) return { shouldTrigger: false };
+        //
+        // const mergeCount = summaryCount - reserve;
+        // if (mergeCount <= 0) return { shouldTrigger: false };
+        //
+        // return { shouldTrigger: true, mergeCount, summaryCount, reserve };
     }
     function prepareAutoMergeBatches_ACU(options) {
         const { startIndex, endIndex, targetCount, batchSize, promptTemplate, isAutoMode } = options;
@@ -90875,10 +90931,10 @@ $CONTENT
     // [V1 收敛] API 配置写权限已迁移至 V2（service 层单一权威）。
     // 旧 popup 不再直接读写 settings_ACU.apiConfig；调用方应跳转 V2 配置面板。
     function saveApiConfig_ACU() {
-        showToastr_ACU('warning', '旧UI的API配置编辑已停用，请使用 扩展菜单 → SP·数据库 VIII 管理API配置。');
+        showToastr_ACU('warning', '旧UI的API配置编辑已停用，请使用 扩展菜单 → SP·数据库 IX 管理API配置。');
     }
     function clearApiConfig_ACU() {
-        showToastr_ACU('warning', '旧UI的API配置清除已停用，请使用 扩展菜单 → SP·数据库 VIII 管理API配置。');
+        showToastr_ACU('warning', '旧UI的API配置清除已停用，请使用 扩展菜单 → SP·数据库 IX 管理API配置。');
     }
     // --- [V1 收敛] API预设管理函数 ---
     // 写权限已收敛到 service 层单一权威。以下函数只做事务式委托与 UI 提示：
@@ -93012,7 +93068,8 @@ $CONTENT
             await new Promise(resolve => setTimeout(resolve, 500));
             setAutoUpdating(false);
             await ops.refreshData();
-            // 自动合并总结检测
+            // 【已封存】自动合并纪要功能已遗弃：checkAutoMergeTrigger_ACU 恒返回不触发，
+            // 本块永不进入合并流程，保留为存档（原因见 service/summary/merge-logic.ts 文件头）。
             let autoMergeTriggered = false;
             let autoMergeSuccess = false;
             try {
@@ -100563,7 +100620,8 @@ $CONTENT
                 logWarn_ACU(`[Manual Update] 手动填表完成，但边界 checkpoint 建立异常: ${checkpointWarning}`);
                 logError_ACU('[Manual Update] 边界 checkpoint 建立异常详情:', error);
             }
-            // 手动更新完成后检测自动合并总结
+            // 【已封存】自动合并纪要功能已遗弃：checkAutoMergeTrigger_ACU 恒返回不触发，
+            // 本块永不进入合并流程，保留为存档（原因见 service/summary/merge-logic.ts 文件头）。
             let autoMergeTriggered = false;
             let autoMergeSuccess = false;
             try {
@@ -122374,7 +122432,7 @@ $CONTENT
         targetWin[ACU_WINDOW_STYLES_INJECTED_FLAG] = true;
         const css = `
       /* ═══════════════════════════════════════════════════════════════
-         星·数据库 独立窗口系统
+         SP·数据库 9.0 独立窗口系统
          古卷双主题：墨色 / 素纱
          ═══════════════════════════════════════════════════════════════ */
       
@@ -122755,7 +122813,7 @@ $CONTENT
         id: 'default-light',
         name: '浅色管理台',
         description: '默认浅色风格，细边框、弱阴影、蓝色主强调，适合日常使用',
-        author: '星·数据库',
+        author: 'SP·数据库 9.0',
         version: '1.0.0',
         colorScheme: 'light',
         variables: {
@@ -122849,7 +122907,7 @@ $CONTENT
         id: 'default-dark',
         name: '深色科技',
         description: '深色中性背景 + 蓝紫高光，适合暗光环境',
-        author: '星·数据库',
+        author: 'SP·数据库 9.0',
         version: '1.0.0',
         colorScheme: 'dark',
         variables: {
@@ -122943,7 +123001,7 @@ $CONTENT
         id: 'classical-ink',
         name: '古典·墨纸',
         description: '古雅深色纸墨质感，赤褐为饰，宋体排版',
-        author: '星·数据库',
+        author: 'SP·数据库 9.0',
         version: '1.0.0',
         colorScheme: 'dark',
         variables: {
@@ -123058,7 +123116,7 @@ $CONTENT
         id: 'classical-silk',
         name: '古典·素纱',
         description: '淡雅浅色纱质感，暖褐色调，宋体排版',
-        author: '星·数据库',
+        author: 'SP·数据库 9.0',
         version: '1.0.0',
         colorScheme: 'light',
         variables: {
@@ -140181,15 +140239,26 @@ Expected function or array of functions, received type ${typeof value}.`
     function makeDialogId() {
         return `dialog-${nextDialogId++}`;
     }
+    // 倒计时定时器放模块级：store state 只存剩余秒数（可序列化），句柄不进 state。
+    let confirmCountdownTimer = null;
+    function clearConfirmCountdownTimer() {
+        if (confirmCountdownTimer !== null) {
+            acuClearInterval(confirmCountdownTimer);
+            confirmCountdownTimer = null;
+        }
+    }
     const useDialogStore = defineStore("acu-v2-dialog", {
         state: () => ({
             active: null,
             queue: [],
             inputValue: "",
             checkedValues: {},
+            confirmCountdownRemaining: 0,
         }),
         getters: {
             confirmDisabled(state) {
+                if (state.confirmCountdownRemaining > 0)
+                    return true;
                 if (state.active?.kind === "prompt") {
                     if (state.active.requireNonEmpty === false)
                         return false;
@@ -140215,6 +140284,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     cancelLabel: options.cancelLabel || "取消",
                     confirmVariant: options.confirmVariant || "primary",
                     requireNonEmpty: false,
+                    confirmCountdownSeconds: options.confirmCountdownSeconds,
                     resolve: () => { },
                 }).then((value) => value === true);
             },
@@ -140280,6 +140350,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 const dialog = this.active;
                 if (!dialog)
                     return;
+                // 倒计时未归零时硬性拒绝提交（UI 禁用只是表现层，这里是真正的 guard）。
+                if (this.confirmCountdownRemaining > 0)
+                    return;
                 if (dialog.kind === "prompt") {
                     const next = String(this.inputValue || "").trim();
                     if (dialog.requireNonEmpty !== false && !next)
@@ -140327,6 +140400,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 this.queue = [];
                 this.inputValue = "";
                 this.checkedValues = {};
+                clearConfirmCountdownTimer();
+                this.confirmCountdownRemaining = 0;
             },
             enqueue(request) {
                 return new Promise((resolve) => {
@@ -140348,6 +140423,19 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 else {
                     this.checkedValues = {};
+                }
+                clearConfirmCountdownTimer();
+                const countdown = Math.max(0, Math.floor(request?.confirmCountdownSeconds || 0));
+                this.confirmCountdownRemaining = countdown;
+                if (countdown > 0) {
+                    confirmCountdownTimer = acuSetInterval(() => {
+                        if (this.confirmCountdownRemaining > 1) {
+                            this.confirmCountdownRemaining -= 1;
+                            return;
+                        }
+                        this.confirmCountdownRemaining = 0;
+                        clearConfirmCountdownTimer();
+                    }, 1000);
                 }
             },
         },
@@ -140660,8 +140748,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-dialog-layer[data-v-2a6a0bee] {\r\n  position: fixed;\r\n  inset: 0;\r\n  z-index: 9600;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  height: 100vh;\r\n  height: 100dvh;\r\n  padding:\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-top, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-right, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-bottom, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-left, 0px));\r\n  background: rgba(0, 0, 0, 0.52);\r\n  pointer-events: auto;\r\n  animation: acu-dialog-layer-in-2a6a0bee 0.16s ease-out both;\n}\n.acu-dialog-layer.is-closing[data-v-2a6a0bee] {\r\n  pointer-events: none;\r\n  animation: acu-dialog-layer-out-2a6a0bee 0.16s ease-in both;\n}\n.acu-dialog[data-v-2a6a0bee] {\r\n  width: min(var(--acu-dialog-width, 440px), 100%);\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100vh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100dvh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-page-gap, 14px);\r\n  padding: var(--acu-panel-padding, 16px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-bg-1);\r\n  color: var(--acu-text-1);\r\n  box-shadow: var(--acu-shadow);\r\n  overflow: auto;\r\n  animation: acu-dialog-panel-in-2a6a0bee 0.16s ease-out both;\n}\n.acu-dialog__header[data-v-2a6a0bee] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: var(--acu-panel-gap, 12px);\n}\n.acu-dialog__header h2[data-v-2a6a0bee] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.35;\r\n  font-weight: 700;\n}\n.acu-dialog__message[data-v-2a6a0bee] {\r\n  margin: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__danger-message[data-v-2a6a0bee] {\r\n  margin: 0;\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 700;\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__field[data-v-2a6a0bee] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-150, 6px);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\n}\n.acu-dialog__checklist[data-v-2a6a0bee] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-250, 10px);\r\n  min-width: 0;\r\n  padding: var(--acu-space-250, 10px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 74%, transparent);\n}\n.acu-dialog__checklist[data-v-2a6a0bee] .acu-checkbox {\r\n  width: 100%;\n}\n.acu-dialog__check-option[data-v-2a6a0bee] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-050, 2px);\r\n  min-width: 0;\n}\n.acu-dialog__check-label[data-v-2a6a0bee] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 600;\n}\n.acu-dialog__check-description[data-v-2a6a0bee] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.45;\n}\n.acu-dialog__actions[data-v-2a6a0bee] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex-wrap: wrap;\r\n  padding-top: var(--acu-space-050, 2px);\n}\n.acu-dialog__actions--stacked[data-v-2a6a0bee] .acu-btn {\r\n  flex: 1 1 var(--acu-dialog-choice-min-width, 128px);\n}\n.acu-dialog-layer.is-closing .acu-dialog[data-v-2a6a0bee] {\r\n  animation: acu-dialog-panel-out-2a6a0bee 0.16s ease-in both;\n}\n@keyframes acu-dialog-layer-in-2a6a0bee {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-dialog-layer-out-2a6a0bee {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-dialog-panel-in-2a6a0bee {\nfrom {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\nto {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\n}\n@keyframes acu-dialog-panel-out-2a6a0bee {\nfrom {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\nto {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\n}\n@media (max-width: 520px) {\n.acu-dialog-layer[data-v-2a6a0bee] {\r\n    align-items: flex-end;\r\n    padding:\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-top, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-right, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-bottom, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-left, 0px));\n}\n.acu-dialog[data-v-2a6a0bee] {\r\n    width: 100%;\r\n    max-height: calc(100vh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n    max-height: calc(100dvh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\n}\n.acu-dialog__actions[data-v-2a6a0bee],\r\n  .acu-dialog__actions--stacked[data-v-2a6a0bee] {\r\n    display: grid;\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuDialogHost.vue#style-0-2a6a0bee");
-    var AcuDialogHost_vue_vue_type_style_index_0_scoped_2a6a0bee_lang = null;
+    injectSfcStyle("\n.acu-dialog-layer[data-v-a832d28c] {\r\n  position: fixed;\r\n  inset: 0;\r\n  z-index: 9600;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  height: 100vh;\r\n  height: 100dvh;\r\n  padding:\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-top, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-right, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-bottom, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-left, 0px));\r\n  background: rgba(0, 0, 0, 0.52);\r\n  pointer-events: auto;\r\n  animation: acu-dialog-layer-in-a832d28c 0.16s ease-out both;\n}\n.acu-dialog-layer.is-closing[data-v-a832d28c] {\r\n  pointer-events: none;\r\n  animation: acu-dialog-layer-out-a832d28c 0.16s ease-in both;\n}\n.acu-dialog[data-v-a832d28c] {\r\n  width: min(var(--acu-dialog-width, 440px), 100%);\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100vh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100dvh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-page-gap, 14px);\r\n  padding: var(--acu-panel-padding, 16px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-bg-1);\r\n  color: var(--acu-text-1);\r\n  box-shadow: var(--acu-shadow);\r\n  overflow: auto;\r\n  animation: acu-dialog-panel-in-a832d28c 0.16s ease-out both;\n}\n.acu-dialog__header[data-v-a832d28c] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: var(--acu-panel-gap, 12px);\n}\n.acu-dialog__header h2[data-v-a832d28c] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.35;\r\n  font-weight: 700;\n}\n.acu-dialog__message[data-v-a832d28c] {\r\n  margin: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__danger-message[data-v-a832d28c] {\r\n  margin: 0;\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 700;\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__field[data-v-a832d28c] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-150, 6px);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\n}\n.acu-dialog__checklist[data-v-a832d28c] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-250, 10px);\r\n  min-width: 0;\r\n  padding: var(--acu-space-250, 10px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 74%, transparent);\n}\n.acu-dialog__checklist[data-v-a832d28c] .acu-checkbox {\r\n  width: 100%;\n}\n.acu-dialog__check-option[data-v-a832d28c] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-050, 2px);\r\n  min-width: 0;\n}\n.acu-dialog__check-label[data-v-a832d28c] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 600;\n}\n.acu-dialog__check-description[data-v-a832d28c] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.45;\n}\n.acu-dialog__actions[data-v-a832d28c] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex-wrap: wrap;\r\n  padding-top: var(--acu-space-050, 2px);\n}\n.acu-dialog__actions--stacked[data-v-a832d28c] .acu-btn {\r\n  flex: 1 1 var(--acu-dialog-choice-min-width, 128px);\n}\n.acu-dialog-layer.is-closing .acu-dialog[data-v-a832d28c] {\r\n  animation: acu-dialog-panel-out-a832d28c 0.16s ease-in both;\n}\n@keyframes acu-dialog-layer-in-a832d28c {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-dialog-layer-out-a832d28c {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-dialog-panel-in-a832d28c {\nfrom {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\nto {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\n}\n@keyframes acu-dialog-panel-out-a832d28c {\nfrom {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\nto {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\n}\n@media (max-width: 520px) {\n.acu-dialog-layer[data-v-a832d28c] {\r\n    align-items: flex-end;\r\n    padding:\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-top, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-right, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-bottom, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-left, 0px));\n}\n.acu-dialog[data-v-a832d28c] {\r\n    width: 100%;\r\n    max-height: calc(100vh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n    max-height: calc(100dvh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\n}\n.acu-dialog__actions[data-v-a832d28c],\r\n  .acu-dialog__actions--stacked[data-v-a832d28c] {\r\n    display: grid;\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuDialogHost.vue#style-0-a832d28c");
+    var AcuDialogHost_vue_vue_type_style_index_0_scoped_a832d28c_lang = null;
 
     const _hoisted_1$15 = { class: "acu-dialog__header" };
     const _hoisted_2$W = { class: "acu-dialog__message" };
@@ -140830,7 +140918,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						onClick: _cache[2] || (_cache[2] = ($event) => $setup.dialog.submitActive())
 					}, {
 						default: withCtx(() => [createTextVNode(
-							toDisplayString($setup.renderedDialog.confirmLabel || "确认"),
+							toDisplayString($setup.dialog.confirmCountdownRemaining > 0 ? `${$setup.renderedDialog.confirmLabel || "确认"}（${$setup.dialog.confirmCountdownRemaining}s）` : $setup.renderedDialog.confirmLabel || "确认"),
 							1
 							/* TEXT */
 						)]),
@@ -140847,7 +140935,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	)) : createCommentVNode("v-if", true)], 8, ["to"])) : createCommentVNode("v-if", true);
     }
-    var AcuDialogHost = /*#__PURE__*/ _export_sfc(_sfc_main$19, [["render", _sfc_render$19], ["__scopeId", "data-v-2a6a0bee"]]);
+    var AcuDialogHost = /*#__PURE__*/ _export_sfc(_sfc_main$19, [["render", _sfc_render$19], ["__scopeId", "data-v-a832d28c"]]);
 
     var _sfc_main$18 = /*@__PURE__*/ defineComponent({
         __name: 'AcuFileButton',
@@ -158972,6 +159060,7 @@ Expected function or array of functions, received type ${typeof value}.`
         setup(__props, { expose: __expose }) {
             __expose();
             const runtime = useContinuationRuntime();
+            const dialog = useDialogStore();
             const session = useContinuationSession();
             const { apiStore, followActiveApiLabel, apiPresetSelectOptions: continuationApiPresetOptions } = useApiPresetSelectOptions();
             const settingsDraft = ref(null);
@@ -159122,8 +159211,25 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (await runtime.acceptOutline(outline))
                     syncOutlineDraft();
             }
+            /** 首次发送（即将创建任务）前的高 RPM 风险确认：5 秒倒计时结束前只能取消。 */
+            async function confirmFirstSendRpmWarning() {
+                return dialog.confirm({
+                    title: '开始智能续写前请确认',
+                    message: '本功能单次请求占用的 Token 不多，但 Agent 会连续发起大量请求，需要 API 支持很高的 RPM（每分钟请求数）。',
+                    dangerMessage: '禁止使用任何公益站，除非它明确表示允许 coding（本功能的请求模式与 coding 类似）。违规使用可能导致账号被封禁。',
+                    confirmLabel: '我已了解，开始',
+                    cancelLabel: '取消',
+                    confirmVariant: 'danger',
+                    confirmCountdownSeconds: 5,
+                });
+            }
             /** 会话发送：没有任务时创建任务，运行中会打断当前迭代并带着这句话重新开始。 */
             async function sendMessage(text) {
+                if (messageSending.value)
+                    return;
+                // 仅在本次发送将创建新任务（首次发送）时弹确认框；取消则保留草稿不发送。
+                if (!runtime.task.value && !(await confirmFirstSendRpmWarning()))
+                    return;
                 if (messageSending.value)
                     return;
                 messageSending.value = true;
@@ -159408,14 +159514,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 scheduleSettingsSave();
             }, { deep: true });
             watch(() => `${runtime.activeStage.value?.stageId ?? ''}:${runtime.activeRevision.value?.revision ?? ''}`, syncOutlineDraft, { immediate: true });
-            const __returned__ = { runtime, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
+            const __returned__ = { runtime, dialog, session, apiStore, followActiveApiLabel, continuationApiPresetOptions, settingsDraft, outlineDraft, messageDraft, messageSending, outlineDraftError, settingsError, settingsNotice, materialsPanel, clock, get countdownTimer() { return countdownTimer; }, set countdownTimer(v) { countdownTimer = v; }, stageText, deadlineText, continuationApiPresetValue, applyContinuationApiPreset, continuationRoleOptions, maxConsecutivePressureTurnsMax, INHERIT_CHANNEL_VALUE, agentChannelRoles, agentChannelOptions, agentChannelValue, applyAgentChannel, saveSettingsImmediately, cloneSettings, syncOutlineDraft, parseOutlineDraft, acceptOutlineDraft, confirmFirstSendRpmWarning, sendMessage, saveOutline, clearData, requiredInteger, requiredBoundedInteger, requiredRangeInteger, normalizedReadBudget, normalizeSettingsDraft, presetExists, get lastPersistedSettingsJson() { return lastPersistedSettingsJson; }, set lastPersistedSettingsJson(v) { lastPersistedSettingsJson = v; }, get settingsSaveTimer() { return settingsSaveTimer; }, set settingsSaveTimer(v) { settingsSaveTimer = v; }, scheduleSettingsSave, saveSettingsNow, promptList, addPrompt, deletePrompt, movePrompt, updatePrompt, restorePrompt, promptImportInput, promptIoError, promptIoNotice, exportPrompts, onImportPromptsFile, refreshAll, AcuButton, AcuCheckbox, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, AcuPromptSegments, AcuRulePairList, AcuSelect, AcuTextarea, ContinuationChat, ContinuationMaterialsPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-456dd029] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-456dd029] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-456dd029] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-456dd029] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-456dd029] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-456dd029] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-456dd029] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-456dd029] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-456dd029] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-456dd029] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-456dd029] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-456dd029] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-456dd029] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-456dd029] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-456dd029] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-456dd029");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_456dd029_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-c3c50410] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-c3c50410] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-c3c50410] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-c3c50410] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-c3c50410] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-c3c50410] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-c3c50410] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-c3c50410] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-c3c50410] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-c3c50410] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-c3c50410] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-c3c50410] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-c3c50410] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-c3c50410] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-c3c50410] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-c3c50410");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_c3c50410_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-continuation-page" };
     const _hoisted_2$k = {
@@ -160145,7 +160251,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-456dd029"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-c3c50410"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
@@ -167865,8 +167971,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-sidebar[data-v-f111a7c6] {\r\n  min-width: 0;\r\n  min-height: 0;\r\n  background: var(--acu-sidebar-bg);\r\n  padding: var(--acu-space-6, 24px) var(--acu-space-3, 12px) var(--acu-panel-padding, 16px);\r\n  overflow-y: auto;\n}\n.acu-v2-sidebar--desktop[data-v-f111a7c6] {\r\n  width: var(--acu-sidebar-width, 220px);\r\n  flex: 0 0 var(--acu-sidebar-width, 220px);\r\n  border-right: 1px solid var(--acu-border-2);\n}\n.acu-v2-sidebar--drawer[data-v-f111a7c6] {\r\n  width: 100%;\r\n  flex: 1 1 auto;\n}\n.acu-v2-sidebar__brand[data-v-f111a7c6] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-1, 4px) var(--acu-space-1, 4px) var(--acu-space-5, 20px);\r\n  margin-bottom: var(--acu-page-gap, 14px);\n}\n.acu-v2-sidebar__brand-mark[data-v-f111a7c6] {\r\n  width: var(--acu-space-850, 34px);\r\n  height: var(--acu-space-850, 34px);\r\n  flex: 0 0 var(--acu-space-850, 34px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 700;\r\n  letter-spacing: 0.04em;\n}\n.acu-v2-sidebar__brand-copy[data-v-f111a7c6] {\r\n  min-width: 0;\r\n  display: block;\n}\n.acu-v2-sidebar__brand-title[data-v-f111a7c6] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.25;\r\n  font-weight: 700;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-sidebar__brand-tag[data-v-f111a7c6] {\r\n  display: block;\r\n  margin-top: var(--acu-space-075, 3px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-sidebar__group[data-v-f111a7c6] {\r\n  margin-bottom: var(--acu-panel-gap, 12px);\n}\n.acu-v2-sidebar__mode[data-v-f111a7c6] {\r\n  width: 100%;\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: var(--acu-space-175, 7px);\r\n  min-height: var(--acu-control-height-md, 32px);\r\n  margin: 0 0 var(--acu-page-gap, 14px);\r\n  padding: var(--acu-space-175, 7px) var(--acu-space-250, 10px);\r\n  border: 1px solid var(--acu-border-2);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-1) 72%, transparent);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n}\n.acu-v2-sidebar__mode[data-v-f111a7c6]:hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\r\n  border-color: var(--acu-border);\n}\n.acu-v2-sidebar__group-title[data-v-f111a7c6] {\r\n  padding: var(--acu-space-175, 7px) var(--acu-space-3, 12px) var(--acu-space-150, 6px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 600;\r\n  letter-spacing: 0.06em;\r\n  color: var(--acu-text-3);\r\n  text-transform: uppercase;\n}\n.acu-v2-sidebar__item[data-v-f111a7c6] {\r\n  display: block;\r\n  width: 100%;\r\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\r\n  border: 0;\r\n  background: transparent;\r\n  text-align: left;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2);\r\n  cursor: pointer;\r\n  border-radius: var(--acu-radius-sm);\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-sidebar__item[data-v-f111a7c6]:not(.acu-v2-sidebar__item--active):hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-sidebar__item--active[data-v-f111a7c6] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-weight: 600;\n}\r\n", "src/presentation-v2/components/Sidebar.vue#style-0-f111a7c6");
-    var Sidebar_vue_vue_type_style_index_0_scoped_f111a7c6_lang = null;
+    injectSfcStyle("\n.acu-v2-sidebar[data-v-f00992ae] {\r\n  min-width: 0;\r\n  min-height: 0;\r\n  background: var(--acu-sidebar-bg);\r\n  padding: var(--acu-space-6, 24px) var(--acu-space-3, 12px) var(--acu-panel-padding, 16px);\r\n  overflow-y: auto;\n}\n.acu-v2-sidebar--desktop[data-v-f00992ae] {\r\n  width: var(--acu-sidebar-width, 220px);\r\n  flex: 0 0 var(--acu-sidebar-width, 220px);\r\n  border-right: 1px solid var(--acu-border-2);\n}\n.acu-v2-sidebar--drawer[data-v-f00992ae] {\r\n  width: 100%;\r\n  flex: 1 1 auto;\n}\n.acu-v2-sidebar__brand[data-v-f00992ae] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-1, 4px) var(--acu-space-1, 4px) var(--acu-space-5, 20px);\r\n  margin-bottom: var(--acu-page-gap, 14px);\n}\n.acu-v2-sidebar__brand-mark[data-v-f00992ae] {\r\n  width: var(--acu-space-850, 34px);\r\n  height: var(--acu-space-850, 34px);\r\n  flex: 0 0 var(--acu-space-850, 34px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 700;\r\n  letter-spacing: 0.04em;\n}\n.acu-v2-sidebar__brand-copy[data-v-f00992ae] {\r\n  min-width: 0;\r\n  display: block;\n}\n.acu-v2-sidebar__brand-title[data-v-f00992ae] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.25;\r\n  font-weight: 700;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-sidebar__brand-tag[data-v-f00992ae] {\r\n  display: block;\r\n  margin-top: var(--acu-space-075, 3px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-sidebar__group[data-v-f00992ae] {\r\n  margin-bottom: var(--acu-panel-gap, 12px);\n}\n.acu-v2-sidebar__mode[data-v-f00992ae] {\r\n  width: 100%;\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: var(--acu-space-175, 7px);\r\n  min-height: var(--acu-control-height-md, 32px);\r\n  margin: 0 0 var(--acu-page-gap, 14px);\r\n  padding: var(--acu-space-175, 7px) var(--acu-space-250, 10px);\r\n  border: 1px solid var(--acu-border-2);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-1) 72%, transparent);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n}\n.acu-v2-sidebar__mode[data-v-f00992ae]:hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\r\n  border-color: var(--acu-border);\n}\n.acu-v2-sidebar__group-title[data-v-f00992ae] {\r\n  padding: var(--acu-space-175, 7px) var(--acu-space-3, 12px) var(--acu-space-150, 6px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 600;\r\n  letter-spacing: 0.06em;\r\n  color: var(--acu-text-3);\r\n  text-transform: uppercase;\n}\n.acu-v2-sidebar__item[data-v-f00992ae] {\r\n  display: block;\r\n  width: 100%;\r\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\r\n  border: 0;\r\n  background: transparent;\r\n  text-align: left;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2);\r\n  cursor: pointer;\r\n  border-radius: var(--acu-radius-sm);\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-sidebar__item[data-v-f00992ae]:not(.acu-v2-sidebar__item--active):hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-sidebar__item--active[data-v-f00992ae] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-weight: 600;\n}\r\n", "src/presentation-v2/components/Sidebar.vue#style-0-f00992ae");
+    var Sidebar_vue_vue_type_style_index_0_scoped_f00992ae_lang = null;
 
     const _hoisted_1$9 = { class: "acu-v2-sidebar__brand" };
     const _hoisted_2$8 = { class: "acu-v2-sidebar__brand-copy" };
@@ -167901,7 +168007,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			)), createBaseVNode("span", _hoisted_2$8, [_cache[0] || (_cache[0] = createBaseVNode(
 				"span",
 				{ class: "acu-v2-sidebar__brand-title" },
-				"SP·数据库 VIII",
+				"SP·数据库 IX",
 				-1
 				/* CACHED */
 			)), createBaseVNode(
@@ -167970,7 +168076,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var Sidebar = /*#__PURE__*/ _export_sfc(_sfc_main$9, [["render", _sfc_render$9], ["__scopeId", "data-v-f111a7c6"]]);
+    var Sidebar = /*#__PURE__*/ _export_sfc(_sfc_main$9, [["render", _sfc_render$9], ["__scopeId", "data-v-f00992ae"]]);
 
     const THEME_DEFAULT_LIGHT = {
         id: "default-light",
@@ -177162,7 +177268,7 @@ Expected function or array of functions, received type ${typeof value}.`
             };
             let themeMenuCloseTimer;
             let mobileNavCloseTimer;
-            const shellTitle = computed(() => visualizer.isActive ? "数据库编辑器" : router.activePage?.title || "SP·数据库 VIII");
+            const shellTitle = computed(() => visualizer.isActive ? "数据库编辑器" : router.activePage?.title || "SP·数据库 IX");
             const uiScaleOptions = computed(() => ACU_UI_SCALE_OPTIONS.map(option => ({
                 value: option.value,
                 label: option.label,
@@ -177349,8 +177455,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n#acu-app-v2 {\n  --acu-safe-top: max(env(safe-area-inset-top, 0px), var(--acu-native-safe-top, 0px));\n  --acu-safe-right: max(env(safe-area-inset-right, 0px), var(--acu-native-safe-right, 0px));\n  --acu-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--acu-native-safe-bottom, 0px));\n  --acu-safe-left: max(env(safe-area-inset-left, 0px), var(--acu-native-safe-left, 0px));\n  box-sizing: border-box;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n#acu-app-v2,#acu-app-v2 * {\n  box-sizing: border-box;\n}\n#acu-app-v2 button {\n  appearance: none;\n  -webkit-appearance: none;\n  -webkit-tap-highlight-color: transparent;\n}\n#acu-app-v2 button:focus:not(:focus-visible) {\n  outline: none;\n  box-shadow: none;\n}\n.acu-v2-app[data-v-ae34b696] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__shell[data-v-ae34b696] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  z-index: 9000;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__header[data-v-ae34b696] {\n  position: relative;\n  z-index: 40;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  min-height: var(--acu-shell-header-height, 50px);\n  padding:\n    var(--acu-space-2, 8px)\n    var(--acu-space-3, 12px)\n    var(--acu-space-2, 8px)\n    var(--acu-space-5, 20px);\n  background: var(--acu-bg-0);\n  border-bottom: 1px solid var(--acu-border-2);\n  flex: 0 0 auto;\n}\n.acu-v2-app__header-left[data-v-ae34b696] {\n  display: flex;\n  align-items: center;\n  min-width: 0;\n  gap: var(--acu-space-2, 8px);\n  flex: 1 1 auto;\n}\n.acu-v2-app__menu[data-v-ae34b696] {\n  display: none;\n  flex: 0 0 auto;\n  font-size: var(--acu-font-size-body-lg, 13px);\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-v2-app__menu[data-v-ae34b696]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-v2-app__page-title[data-v-ae34b696] {\n  min-width: 0;\n  margin: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n  letter-spacing: 0;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__close[data-v-ae34b696] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__close[data-v-ae34b696]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__body[data-v-ae34b696] {\n  flex: 1 1 auto;\n  display: flex;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__content[data-v-ae34b696] {\n  flex: 1 1 auto;\n  display: flex;\n  flex-direction: column;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__mobile-nav-layer[data-v-ae34b696] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9300;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: mobile-nav-layer-in-ae34b696 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing[data-v-ae34b696] {\n  pointer-events: auto;\n  animation: mobile-nav-layer-out-ae34b696 0.15s ease-in both;\n}\n.acu-v2-app__mobile-nav[data-v-ae34b696] {\n  width: var(--acu-mobile-nav-width, 360px);\n  max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 var(--acu-mobile-nav-width, 360px);\n  display: flex;\n  flex-direction: column;\n  background: var(--acu-sidebar-bg);\n  border-right: 0;\n  box-shadow: var(--acu-shadow);\n  overflow: hidden;\n  pointer-events: auto;\n  animation: mobile-nav-drawer-in-ae34b696 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing .acu-v2-app__mobile-nav[data-v-ae34b696] {\n  animation: mobile-nav-drawer-out-ae34b696 0.15s ease-in both;\n}\n@supports (width: min(1px, 100%)) {\n.acu-v2-app__mobile-nav[data-v-ae34b696] {\n    width: min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-v2-app__mobile-nav[data-v-ae34b696] {\n    max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-v2-app__mobile-nav[data-v-ae34b696] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n\n/* ── Theme switcher ── */\n.acu-v2-app__header-right[data-v-ae34b696] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n}\n.acu-v2-app__theme-switcher[data-v-ae34b696] {\n  position: relative;\n}\n.acu-v2-app__theme-btn[data-v-ae34b696] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__theme-btn[data-v-ae34b696]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-menu[data-v-ae34b696] {\n  position: absolute;\n  top: calc(100% + var(--acu-menu-offset, 6px));\n  right: 0;\n  z-index: 10;\n  margin: 0;\n  padding: var(--acu-menu-padding, 4px);\n  width: min(var(--acu-menu-width, 300px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  min-width: min(var(--acu-menu-min-width, 240px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  background: var(--acu-bg-1);\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  box-shadow: var(--acu-shadow);\n  animation: theme-menu-in-ae34b696 0.12s ease-out both;\n}\n.acu-v2-app__theme-menu.is-closing[data-v-ae34b696] {\n  pointer-events: none;\n  animation: theme-menu-out-ae34b696 0.12s ease-in both;\n}\n.acu-v2-app__appearance-section[data-v-ae34b696] {\n  min-width: 0;\n}\n.acu-v2-app__appearance-section + .acu-v2-app__appearance-section[data-v-ae34b696] {\n  margin-top: var(--acu-menu-section-gap, 8px);\n  padding-top: var(--acu-menu-section-gap, 8px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__appearance-section-title[data-v-ae34b696] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 700;\n  letter-spacing: 0;\n}\n.acu-v2-app__theme-list[data-v-ae34b696] {\n  list-style: none;\n  margin: var(--acu-space-1, 4px) 0 0;\n  padding: 0;\n}\n.acu-v2-app__theme-option[data-v-ae34b696] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  padding: var(--acu-menu-option-padding-y, 7px) var(--acu-menu-option-padding-x, 10px);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-2);\n  border-radius: var(--acu-radius-sm);\n  cursor: pointer;\n  user-select: none;\n}\n.acu-v2-app__theme-option[data-v-ae34b696]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active[data-v-ae34b696] {\n  color: var(--acu-on-accent);\n  background: var(--acu-accent);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option-main[data-v-ae34b696] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-2, 8px);\n  min-width: 0;\n  flex: 1 1 auto;\n}\n.acu-v2-app__theme-name[data-v-ae34b696] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__theme-tag[data-v-ae34b696] {\n  flex: 0 0 auto;\n  padding: var(--acu-space-025, 1px) var(--acu-space-125, 5px);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-accent) 12%, transparent);\n  color: var(--acu-accent);\n  font-size: var(--acu-font-size-micro, 10px);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tag[data-v-ae34b696] {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-ae34b696] {\n  display: inline-flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n  opacity: 0.72;\n}\n.acu-v2-app__theme-tools[data-v-ae34b696] .acu-icon-btn {\n  background: transparent;\n  color: inherit;\n}\n.acu-v2-app__theme-tools[data-v-ae34b696] .acu-icon-btn:hover:not(:disabled) {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-ae34b696] .acu-icon-btn:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-ae34b696] .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n  color: var(--acu-danger);\n}\n.acu-v2-app__theme-option:hover .acu-v2-app__theme-tools[data-v-ae34b696],\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-ae34b696] {\n  opacity: 1;\n}\n.acu-v2-app__theme-swatch[data-v-ae34b696] {\n  display: block;\n  width: var(--acu-menu-swatch-size, 18px);\n  height: var(--acu-menu-swatch-size, 18px);\n  border-radius: 999px;\n  flex: 0 0 var(--acu-menu-swatch-size, 18px);\n  background: linear-gradient(\n    135deg,\n    var(--acu-theme-swatch-bg) 0 56%,\n    var(--acu-theme-swatch-accent) 56% 100%\n  );\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-border-2) 72%, transparent);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-swatch[data-v-ae34b696] {\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-on-accent) 62%, transparent);\n}\n.acu-v2-app__theme-menu-footer[data-v-ae34b696] {\n  display: flex;\n  justify-content: stretch;\n  margin-top: var(--acu-space-1, 4px);\n  padding:\n    var(--acu-menu-option-padding-y, 7px)\n    var(--acu-space-150, 6px)\n    var(--acu-space-1, 4px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__theme-menu-footer[data-v-ae34b696] .acu-file-button,\n.acu-v2-app__theme-menu-footer[data-v-ae34b696] .acu-btn {\n  width: 100%;\n}\n.acu-v2-app__scale-heading[data-v-ae34b696] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  margin-bottom: var(--acu-space-175, 7px);\n}\n.acu-v2-app__scale-current[data-v-ae34b696] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-v2-app__scale-control[data-v-ae34b696] {\n  width: 100%;\n}\n@keyframes theme-menu-in-ae34b696 {\nfrom {\n    opacity: 0;\n    transform: translateY(-4px);\n}\nto {\n    opacity: 1;\n    transform: translateY(0);\n}\n}\n@keyframes theme-menu-out-ae34b696 {\nfrom {\n    opacity: 1;\n    transform: translateY(0);\n}\nto {\n    opacity: 0;\n    transform: translateY(-4px);\n}\n}\n@keyframes mobile-nav-layer-in-ae34b696 {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes mobile-nav-drawer-in-ae34b696 {\nfrom { transform: translateX(-100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes mobile-nav-layer-out-ae34b696 {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes mobile-nav-drawer-out-ae34b696 {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(-100%);\n}\n}\n@media (max-width: 720px) {\n.acu-v2-app__header[data-v-ae34b696] {\n    min-height: var(--acu-shell-header-height-compact, 48px);\n    padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\n}\n.acu-v2-app__header-left[data-v-ae34b696] {\n    gap: var(--acu-space-150, 6px);\n}\n.acu-v2-app__menu[data-v-ae34b696] {\n    display: inline-flex;\n}\n.acu-v2-app__page-title[data-v-ae34b696] {\n    font-size: var(--acu-font-size-page-title-compact, 18px);\n}\n.acu-v2-app__desktop-sidebar[data-v-ae34b696] {\n    display: none;\n}\n.acu-v2-app__mobile-nav-layer[data-v-ae34b696] {\n    display: flex;\n}\n}\n", "src/presentation-v2/App.vue#style-0-ae34b696");
-    var App_vue_vue_type_style_index_0_scoped_ae34b696_lang = null;
+    injectSfcStyle("\n#acu-app-v2 {\n  --acu-safe-top: max(env(safe-area-inset-top, 0px), var(--acu-native-safe-top, 0px));\n  --acu-safe-right: max(env(safe-area-inset-right, 0px), var(--acu-native-safe-right, 0px));\n  --acu-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--acu-native-safe-bottom, 0px));\n  --acu-safe-left: max(env(safe-area-inset-left, 0px), var(--acu-native-safe-left, 0px));\n  box-sizing: border-box;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n#acu-app-v2,#acu-app-v2 * {\n  box-sizing: border-box;\n}\n#acu-app-v2 button {\n  appearance: none;\n  -webkit-appearance: none;\n  -webkit-tap-highlight-color: transparent;\n}\n#acu-app-v2 button:focus:not(:focus-visible) {\n  outline: none;\n  box-shadow: none;\n}\n.acu-v2-app[data-v-d9f7df92] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__shell[data-v-d9f7df92] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  z-index: 9000;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__header[data-v-d9f7df92] {\n  position: relative;\n  z-index: 40;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  min-height: var(--acu-shell-header-height, 50px);\n  padding:\n    var(--acu-space-2, 8px)\n    var(--acu-space-3, 12px)\n    var(--acu-space-2, 8px)\n    var(--acu-space-5, 20px);\n  background: var(--acu-bg-0);\n  border-bottom: 1px solid var(--acu-border-2);\n  flex: 0 0 auto;\n}\n.acu-v2-app__header-left[data-v-d9f7df92] {\n  display: flex;\n  align-items: center;\n  min-width: 0;\n  gap: var(--acu-space-2, 8px);\n  flex: 1 1 auto;\n}\n.acu-v2-app__menu[data-v-d9f7df92] {\n  display: none;\n  flex: 0 0 auto;\n  font-size: var(--acu-font-size-body-lg, 13px);\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-v2-app__menu[data-v-d9f7df92]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-v2-app__page-title[data-v-d9f7df92] {\n  min-width: 0;\n  margin: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n  letter-spacing: 0;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__close[data-v-d9f7df92] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__close[data-v-d9f7df92]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__body[data-v-d9f7df92] {\n  flex: 1 1 auto;\n  display: flex;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__content[data-v-d9f7df92] {\n  flex: 1 1 auto;\n  display: flex;\n  flex-direction: column;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__mobile-nav-layer[data-v-d9f7df92] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9300;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: mobile-nav-layer-in-d9f7df92 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing[data-v-d9f7df92] {\n  pointer-events: auto;\n  animation: mobile-nav-layer-out-d9f7df92 0.15s ease-in both;\n}\n.acu-v2-app__mobile-nav[data-v-d9f7df92] {\n  width: var(--acu-mobile-nav-width, 360px);\n  max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 var(--acu-mobile-nav-width, 360px);\n  display: flex;\n  flex-direction: column;\n  background: var(--acu-sidebar-bg);\n  border-right: 0;\n  box-shadow: var(--acu-shadow);\n  overflow: hidden;\n  pointer-events: auto;\n  animation: mobile-nav-drawer-in-d9f7df92 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing .acu-v2-app__mobile-nav[data-v-d9f7df92] {\n  animation: mobile-nav-drawer-out-d9f7df92 0.15s ease-in both;\n}\n@supports (width: min(1px, 100%)) {\n.acu-v2-app__mobile-nav[data-v-d9f7df92] {\n    width: min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-v2-app__mobile-nav[data-v-d9f7df92] {\n    max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-v2-app__mobile-nav[data-v-d9f7df92] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n\n/* ── Theme switcher ── */\n.acu-v2-app__header-right[data-v-d9f7df92] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n}\n.acu-v2-app__theme-switcher[data-v-d9f7df92] {\n  position: relative;\n}\n.acu-v2-app__theme-btn[data-v-d9f7df92] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__theme-btn[data-v-d9f7df92]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-menu[data-v-d9f7df92] {\n  position: absolute;\n  top: calc(100% + var(--acu-menu-offset, 6px));\n  right: 0;\n  z-index: 10;\n  margin: 0;\n  padding: var(--acu-menu-padding, 4px);\n  width: min(var(--acu-menu-width, 300px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  min-width: min(var(--acu-menu-min-width, 240px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  background: var(--acu-bg-1);\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  box-shadow: var(--acu-shadow);\n  animation: theme-menu-in-d9f7df92 0.12s ease-out both;\n}\n.acu-v2-app__theme-menu.is-closing[data-v-d9f7df92] {\n  pointer-events: none;\n  animation: theme-menu-out-d9f7df92 0.12s ease-in both;\n}\n.acu-v2-app__appearance-section[data-v-d9f7df92] {\n  min-width: 0;\n}\n.acu-v2-app__appearance-section + .acu-v2-app__appearance-section[data-v-d9f7df92] {\n  margin-top: var(--acu-menu-section-gap, 8px);\n  padding-top: var(--acu-menu-section-gap, 8px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__appearance-section-title[data-v-d9f7df92] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 700;\n  letter-spacing: 0;\n}\n.acu-v2-app__theme-list[data-v-d9f7df92] {\n  list-style: none;\n  margin: var(--acu-space-1, 4px) 0 0;\n  padding: 0;\n}\n.acu-v2-app__theme-option[data-v-d9f7df92] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  padding: var(--acu-menu-option-padding-y, 7px) var(--acu-menu-option-padding-x, 10px);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-2);\n  border-radius: var(--acu-radius-sm);\n  cursor: pointer;\n  user-select: none;\n}\n.acu-v2-app__theme-option[data-v-d9f7df92]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active[data-v-d9f7df92] {\n  color: var(--acu-on-accent);\n  background: var(--acu-accent);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option-main[data-v-d9f7df92] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-2, 8px);\n  min-width: 0;\n  flex: 1 1 auto;\n}\n.acu-v2-app__theme-name[data-v-d9f7df92] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__theme-tag[data-v-d9f7df92] {\n  flex: 0 0 auto;\n  padding: var(--acu-space-025, 1px) var(--acu-space-125, 5px);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-accent) 12%, transparent);\n  color: var(--acu-accent);\n  font-size: var(--acu-font-size-micro, 10px);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tag[data-v-d9f7df92] {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-d9f7df92] {\n  display: inline-flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n  opacity: 0.72;\n}\n.acu-v2-app__theme-tools[data-v-d9f7df92] .acu-icon-btn {\n  background: transparent;\n  color: inherit;\n}\n.acu-v2-app__theme-tools[data-v-d9f7df92] .acu-icon-btn:hover:not(:disabled) {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-d9f7df92] .acu-icon-btn:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-d9f7df92] .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n  color: var(--acu-danger);\n}\n.acu-v2-app__theme-option:hover .acu-v2-app__theme-tools[data-v-d9f7df92],\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-d9f7df92] {\n  opacity: 1;\n}\n.acu-v2-app__theme-swatch[data-v-d9f7df92] {\n  display: block;\n  width: var(--acu-menu-swatch-size, 18px);\n  height: var(--acu-menu-swatch-size, 18px);\n  border-radius: 999px;\n  flex: 0 0 var(--acu-menu-swatch-size, 18px);\n  background: linear-gradient(\n    135deg,\n    var(--acu-theme-swatch-bg) 0 56%,\n    var(--acu-theme-swatch-accent) 56% 100%\n  );\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-border-2) 72%, transparent);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-swatch[data-v-d9f7df92] {\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-on-accent) 62%, transparent);\n}\n.acu-v2-app__theme-menu-footer[data-v-d9f7df92] {\n  display: flex;\n  justify-content: stretch;\n  margin-top: var(--acu-space-1, 4px);\n  padding:\n    var(--acu-menu-option-padding-y, 7px)\n    var(--acu-space-150, 6px)\n    var(--acu-space-1, 4px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__theme-menu-footer[data-v-d9f7df92] .acu-file-button,\n.acu-v2-app__theme-menu-footer[data-v-d9f7df92] .acu-btn {\n  width: 100%;\n}\n.acu-v2-app__scale-heading[data-v-d9f7df92] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  margin-bottom: var(--acu-space-175, 7px);\n}\n.acu-v2-app__scale-current[data-v-d9f7df92] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-v2-app__scale-control[data-v-d9f7df92] {\n  width: 100%;\n}\n@keyframes theme-menu-in-d9f7df92 {\nfrom {\n    opacity: 0;\n    transform: translateY(-4px);\n}\nto {\n    opacity: 1;\n    transform: translateY(0);\n}\n}\n@keyframes theme-menu-out-d9f7df92 {\nfrom {\n    opacity: 1;\n    transform: translateY(0);\n}\nto {\n    opacity: 0;\n    transform: translateY(-4px);\n}\n}\n@keyframes mobile-nav-layer-in-d9f7df92 {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes mobile-nav-drawer-in-d9f7df92 {\nfrom { transform: translateX(-100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes mobile-nav-layer-out-d9f7df92 {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes mobile-nav-drawer-out-d9f7df92 {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(-100%);\n}\n}\n@media (max-width: 720px) {\n.acu-v2-app__header[data-v-d9f7df92] {\n    min-height: var(--acu-shell-header-height-compact, 48px);\n    padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\n}\n.acu-v2-app__header-left[data-v-d9f7df92] {\n    gap: var(--acu-space-150, 6px);\n}\n.acu-v2-app__menu[data-v-d9f7df92] {\n    display: inline-flex;\n}\n.acu-v2-app__page-title[data-v-d9f7df92] {\n    font-size: var(--acu-font-size-page-title-compact, 18px);\n}\n.acu-v2-app__desktop-sidebar[data-v-d9f7df92] {\n    display: none;\n}\n.acu-v2-app__mobile-nav-layer[data-v-d9f7df92] {\n    display: flex;\n}\n}\n", "src/presentation-v2/App.vue#style-0-d9f7df92");
+    var App_vue_vue_type_style_index_0_scoped_d9f7df92_lang = null;
 
     const _hoisted_1 = { class: "acu-v2-app" };
     const _hoisted_2 = { class: "acu-v2-app__shell" };
@@ -177568,7 +177674,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		/* NEED_PATCH */
     	), [[vShow, $setup.rootShell.isOpen]])]);
     }
-    var App = /*#__PURE__*/ _export_sfc(_sfc_main, [["render", _sfc_render], ["__scopeId", "data-v-ae34b696"]]);
+    var App = /*#__PURE__*/ _export_sfc(_sfc_main, [["render", _sfc_render], ["__scopeId", "data-v-d9f7df92"]]);
 
     const THEME_STYLE_NODE_ID = 'acu-v2-theme';
     const APP_ROOT_ID = 'acu-app-v2';
@@ -177974,7 +178080,7 @@ ${lines.join('\n')}
     /**
      * menu-button — 在 host document 的 #extensionsMenu 中挂 UI v2 按钮（D15）
      *
-     * 与旧菜单按钮（startup.ts 中的 SP·数据库 VII 旧UI）共存，互不影响。
+     * 与旧菜单按钮（startup.ts 中的 SP·数据库 IX 旧UI）共存，互不影响。
      * 依赖 host document 解析（D15.1），因此也只在 host document 上注册按钮。
      */
     const MENU_CONTAINER_ID = 'acu-v2-menu-container';
@@ -178016,9 +178122,9 @@ ${lines.join('\n')}
         }
         const containerHtml = `<div class="extension_container interactable" id="${MENU_CONTAINER_ID}" tabindex="0"></div>`;
         const itemHtml = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID}" ` +
-            `title="打开 SP·数据库 VIII">` +
+            `title="打开 SP·数据库 IX">` +
             `<div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div>` +
-            `<span>SP·数据库 VIII</span>` +
+            `<span>SP·数据库 IX</span>` +
             `</div>`;
         const $container = $(containerHtml);
         const $item = $(itemHtml);
@@ -178119,7 +178225,7 @@ ${lines.join('\n')}
     $(function () {
         // 互斥检测：如果已有实例（插件或另一个油猴脚本）在运行，跳过初始化
         if (checkAndMarkInstance()) {
-            console.warn('[SP·数据库 VII] 油猴脚本检测到已有实例运行，跳过初始化。');
+            console.warn('[SP·数据库 IX] 油猴脚本检测到已有实例运行，跳过初始化。');
             return;
         }
         console.log('ACU_INIT_DEBUG: Document is ready, attempting to initialize ACU script (Userscript mode).');
