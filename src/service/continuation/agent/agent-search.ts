@@ -2,7 +2,7 @@
  * service/continuation/agent/agent-search.ts — 五域 grep 式搜索工具
  *
  * 搜索域即资料域：story（窗口内 AI 正文）、tables（全部表格行）、modules（伏笔/信息差/约束，
- * 含退休条目）、outline（当前修订的大纲文本）、worldbook（已启用条目 + 纪要内容）。
+ * 含退休条目）、outline（当前修订的大纲文本）、worldbook（已启用条目全文）。
  *
  * 核心原则「地址即读法」：每条命中都附带可直接复制进 read 的读取地址。
  * 三层护栏（照抄奶龙code search_in_files 思路）：单行居中截断、maxResults 条数上限、
@@ -166,12 +166,6 @@ function collectWorldbookLines_ACU(context: AgentResolveContext_ACU): AgentSearc
       lines.push({ label: `${head} 第${lineIndex + 1}行`, address, text: line });
     });
   }
-  for (const digest of worldbook.chronicles) {
-    const address = `$CHRONICLES:${digest.codes[0]}-${digest.codes[digest.codes.length - 1]}`;
-    splitLines_ACU(digest.content).forEach((line, lineIndex) => {
-      lines.push({ label: `纪要 ${digest.codes.join(',')} 第${lineIndex + 1}行`, address, text: line });
-    });
-  }
   return lines;
 }
 
@@ -233,7 +227,7 @@ export function runAgentSearch_ACU(call: AgentSearchCall_ACU, context: AgentReso
 
   const scopeText = call.scope.map(scope => SCOPE_LABELS_ACU[scope]).join('、');
   if (!hits.length) {
-    return `搜索「${call.query}」在 ${scopeText} 域内没有命中。可尝试：换更短的关键词、扩大 scope、或改用正则（isRegex: true）。注意正文只能搜到可读窗口内的楼层，更早剧情请经纪要目录回溯。`;
+    return `搜索「${call.query}」在 ${scopeText} 域内没有命中。可尝试：换更短的关键词、扩大 scope、或改用正则（isRegex: true）。注意正文只能搜到可读窗口内的楼层，更早剧情的脉络请查看事件概览或用 $TABLE:纪要表:行区间 精读。`;
   }
   const lines = hits.map(hit => `- [${SCOPE_LABELS_ACU[hit.scope]}] ${hit.label}：${hit.snippet}｜读取地址 ${hit.address}`);
   const tail = truncated

@@ -10,6 +10,21 @@ import { useToastStore } from '../stores/toast-store';
 /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
 export const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
 
+/** 停止原因的中文文案，随状态文案一起展示（时间线 tab 已移除，这里是唯一出口）。 */
+const CONTINUATION_STOP_REASON_LABELS_ACU: Record<string, string> = {
+  manual: '用户手动停止',
+  duration_reached: '总时长已用完',
+  stage_limit_reached: '自动阶段数已达上限',
+  outline_validation_failed: '大纲校验失败',
+  internal_ai_retry_exhausted: '内部 AI 重试次数用尽',
+  generation_retry_exhausted: '正文生成重试次数用尽',
+  host_input_unavailable: '酒馆输入框不可用',
+  api_preset_missing: 'API 预设缺失',
+  state_invalid: '正文归属失败或状态异常',
+  chat_changed: '聊天已切换',
+  completed: '任务完成',
+};
+
 /** 提示词导入导出的文件结构：大纲组 + 六组 Agent 提示词，一次打包全部。 */
 export interface ContinuationPromptBundle_ACU {
   outlinePrompt: ContinuationPromptSegment_ACU[];
@@ -118,9 +133,20 @@ export function useContinuationRuntime() {
     && (task.value.stopReason === null || CONTINUATION_RECOVERABLE_STOP_REASONS_ACU.includes(task.value.stopReason))
     && (!activeStage.value || ['running', 'completed'].includes(activeStage.value.status)));
   const isAwaitingHostResult = computed(() => task.value?.status === 'running' && task.value.pendingHostTurn?.status === 'awaiting_generation');
-  const statusText = computed(() => task.value
-    ? (isAwaitingHostResult.value ? '等待宿主正文' : task.value.status)
-    : '尚未创建任务');
+  // 事件时间线 tab 已移除，暂停/失败原因与最近错误直接并入状态文案，用户不用再翻别处找原因。
+  const statusText = computed(() => {
+    const current = task.value;
+    if (!current) return '尚未创建任务';
+    if (isAwaitingHostResult.value) return '等待宿主正文';
+    const parts: string[] = [current.status];
+    if (current.stopReason && ['paused', 'completed', 'failed', 'abandoned'].includes(current.status)) {
+      parts.push(CONTINUATION_STOP_REASON_LABELS_ACU[current.stopReason] ?? current.stopReason);
+    }
+    if (current.lastError && ['paused', 'failed'].includes(current.status)) {
+      parts.push(`最近错误：${current.lastError.message}`);
+    }
+    return parts.join(' · ');
+  });
 
   async function createTask(): Promise<void> {
     const created = await run_ACU(() => runtime.orchestrator.createTask({ originInstruction: originInstruction.value }));

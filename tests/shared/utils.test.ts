@@ -527,20 +527,21 @@ describe('formatPlotScopeUpdatedAt_ACU', () => {
 // isEntryBlocked_ACU
 // ═══════════════════════════════════════════════════════════════
 describe('isEntryBlocked_ACU', () => {
-  it('包含"规则"关键词返回 true', () => {
-    expect(isEntryBlocked_ACU({ comment: '系统规则' })).toBe(true);
+  // 屏蔽关键词列表已按用户要求清空（机制保留待后续配置），任何标题都不再被屏蔽。
+  it('清空屏蔽列表后，原屏蔽词"规则"不再命中', () => {
+    expect(isEntryBlocked_ACU({ comment: '系统规则' })).toBe(false);
   });
 
-  it('包含"思维链"关键词返回 true', () => {
-    expect(isEntryBlocked_ACU({ comment: '思维链设定' })).toBe(true);
+  it('清空屏蔽列表后，原屏蔽词"思维链"不再命中', () => {
+    expect(isEntryBlocked_ACU({ comment: '思维链设定' })).toBe(false);
   });
 
-  it('包含"cot"关键词返回 true', () => {
-    expect(isEntryBlocked_ACU({ name: 'cot_prompt' })).toBe(true);
+  it('清空屏蔽列表后，原屏蔽词"cot"不再命中', () => {
+    expect(isEntryBlocked_ACU({ name: 'cot_prompt' })).toBe(false);
   });
 
-  it('包含"MVU"关键词返回 true', () => {
-    expect(isEntryBlocked_ACU({ comment: 'MVU系统' })).toBe(true);
+  it('清空屏蔽列表后，原屏蔽词"MVU"不再命中', () => {
+    expect(isEntryBlocked_ACU({ comment: 'MVU系统' })).toBe(false);
   });
 
   it('普通条目返回 false', () => {

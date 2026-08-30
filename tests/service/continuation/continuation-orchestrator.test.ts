@@ -98,7 +98,7 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(planner).toHaveBeenCalledTimes(1);
     const task = store.readPersisted()!.activeTask!;
     expect(task.runStageCount).toBe(1);
-    expect(task.stages[0]).toMatchObject({ status: 'running', activeRevision: 1, chronicleStartCount: 3 });
+    expect(task.stages[0]).toMatchObject({ status: 'running', activeRevision: 1 });
     expect(task.stages[0].revisions[0].frozen).toBe(true);
     expect(task.stages[0].revisions[0].replanInstruction).toBe('按当前要求规划大纲');
   });

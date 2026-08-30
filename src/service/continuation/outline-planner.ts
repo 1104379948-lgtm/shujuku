@@ -40,11 +40,14 @@ export interface ContinuationOutlinePlanningResult_ACU {
 export interface ContinuationOutlinePlannerDependencies_ACU {
   resolveApiPreset: typeof resolveContinuationAgentApiPreset_ACU;
   callInternalAi: (messages: Array<{ role: string; content: string }>, preset: ContinuationResolvedApiPreset_ACU, identity: ContinuationInternalAiRequestIdentity_ACU, signal?: AbortSignal | null, options?: ContinuationInternalAiCallOptions_ACU) => Promise<string | null>;
+  /** 传输错误重试前的延时实现。缺省 setTimeout；测试注入假计时器。 */
+  wait?: (ms: number) => Promise<void>;
 }
 
 const defaultDependencies_ACU: ContinuationOutlinePlannerDependencies_ACU = {
   resolveApiPreset: resolveContinuationAgentApiPreset_ACU,
   callInternalAi: callContinuationInternalAi_ACU,
+  wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
 };
 
 function toPlannerError_ACU(error: unknown): ContinuationError_ACU {
@@ -198,6 +201,12 @@ export class ContinuationOutlinePlanner_ACU {
       } catch (error) {
         lastError = toPlannerError_ACU(error);
         if (!isRetryableOutlineError_ACU(lastError)) throw error;
+        // 传输错误（502/网络抖动）按设置延时后再打，不再瞬间连打；
+        // 大纲结构校验失败仍立即重试——那是模型输出问题，等待只会拖慢自愈。
+        if (lastError.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' && attempt < retries) {
+          const wait = this.dependencies.wait ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
+          await wait(Math.max(0, request.settings.retryDelaySeconds) * 1000);
+        }
       }
     }
 

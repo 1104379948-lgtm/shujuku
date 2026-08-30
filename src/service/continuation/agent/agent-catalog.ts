@@ -29,7 +29,7 @@ export const AGENT_SUBAGENT_DEFINITIONS_ACU: readonly AgentSubagentDefinition_AC
     name: 'arc-architect',
     kind: 'arc',
     description: '维护故事总纲：全书方向、卷级台阶（每卷推到什么高度、收在哪）、禁止提前翻的底牌，以及各卷已由哪些阶段承载的进度',
-    triggers: ['总纲状态显示「还没有故事总纲」时必须先派它', '一个阶段完成后回写进度、必要时把下一卷切成 active', '真实剧情已明显偏离既定方向、需要修订台阶时'],
+    triggers: ['总纲状态显示「还没有故事总纲」时必须先派它', '一个阶段完成后回写进度、必要时把下一卷切成 active', '真实剧情已明显偏离既定方向、需要修订台阶时', '底牌被正文提前翻开、总纲的禁翻清单需要更新时', '当前卷的目标已实际收束或明显提前/推迟，台阶划分需要调整时'],
     promptKey: 'arcArchitect',
   },
   {
@@ -115,7 +115,7 @@ const OUTLINE_AGENT_CATALOG_BLOCK_ACU = [
   '  类型: 大纲',
   '  职责: 管理阶段大纲的完整生命周期——创建（当前没有任何大纲时）、维护（大纲与真实剧情脱节、需要改写剩余部分时）、继续（当前阶段已全部完成、需要下一阶段时）。具体做哪种操作由运行时按任务状态自动判断，你只需给出要求。',
   '  适用时机: 大纲状态显示「还没有阶段大纲」时必须先派它；真实剧情已经明显偏离大纲计划时派它改写；大纲状态显示「阶段已全部完成」时派它继续。',
-  '  读取: 无需指定读集（运行时自动注入故事背景、最近剧情、阶段历史与纪要）',
+  '  读取: 无需指定读集（运行时自动注入故事背景、事件概览、尾部正文、阶段历史与故事总纲）',
   '  写入: 阶段大纲（产出经严格 schema 校验后落盘；改写时已完成的轮次受保护，不会被改掉）',
   '  执行方式: 串行执行且先于同波次其他派工；计入派工预算；prompt 写清你对大纲的要求（走向、节奏、要保留或回收什么）。',
 ].join('\n');
@@ -165,9 +165,9 @@ export function renderAgentReadCatalog_ACU(): string {
     '- $HOOKS_LEDGER / $HOOKS_LEDGER:ID,ID：伏笔账本全部活跃条目，或按 ID 精读（含已退休条目）。',
     '- $INFO_GAP / $INFO_GAP:ID,ID：认知与信息差时间线全部活跃条目，或按 ID 精读。',
     '- $ACTIVE_CONSTRAINTS / $ACTIVE_CONSTRAINTS:ID,ID：长期约束全部条目，或按 ID 精读。',
-    '- $WORLDBOOK:书名:uid,uid：已启用世界书条目全文。地址从世界书目录复制。',
-    '- $CHRONICLES:AM起始码-AM结束码：往期剧情纪要区间（如 $CHRONICLES:AM12-AM18）。可用 AM 码见世界书目录的纪要概要段。',
-    '- $STORY_CATALOG / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：正文目录、完整大纲窗口、未结算正文全量。',
+    '- $WORLDBOOK:书名:uid,uid：已启用世界书条目全文。地址从世界书目录复制，条目行尾标注了 token 数便于估算预算。',
+    '- $STORY_CATALOG / $STORY_OVERVIEW / $STORY_TAIL / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：楼层索引、事件概览、尾部正文全文、完整大纲窗口、未结算正文全量。',
+    '- 早期剧情的详细纪要在纪要表里：$TABLE:纪要表:起始行-结束行 按行区间精读（行号见事件概览与表格目录）。',
     'search 工具：{"action":"search","query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}。',
     '命中行会带上可直接复制进 read 的地址；先 search 定位、再用窄地址精读，比整读省预算。',
   ].join('\n');

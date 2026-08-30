@@ -7,6 +7,12 @@ import { ContinuationOrchestrator_ACU, type ContinuationPlanningContext_ACU } fr
 import { ContinuationOutlinePlanner_ACU } from './outline-planner';
 import { StageExecutionEngine_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
 import { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
+import {
+  extractAgentRecallCodesFromChat_ACU,
+  renderAgentStoryOverview_ACU,
+  renderAgentStoryTail_ACU,
+  type AgentContextRules_ACU,
+} from './agent/agent-placeholder-resolver';
 import { readAgentModuleSnapshot_ACU, renderAgentStoryArc_ACU } from './agent/agent-module-store';
 import { ContinuationWorldbookContext_ACU } from './worldbook-context';
 import { createSillyTavernContinuationHostBridge_ACU } from './sillytavern-host-bridge';
@@ -35,15 +41,6 @@ function allocateContinuationId_ACU(prefix: string): string {
   return `${prefix}-${random}-${idSequence_ACU}`;
 }
 
-function readRecentStory_ACU(limit: number): string {
-  return getChatArray_ACU()
-    .filter(message => message && !message.is_user && message?.extra?.type !== 'narrator')
-    .slice(-Math.max(0, limit))
-    .map(message => String(message.mes ?? '').trim())
-    .filter(Boolean)
-    .join('\n\n');
-}
-
 /** 阶段历史里保留逐轮目标的阶段数（从最新往前数）。更早的阶段只保留节点级摘要。 */
 const STAGE_HISTORY_DETAILED_STAGES_ACU = 2;
 
@@ -62,7 +59,7 @@ export function serializeStageHistory_ACU(task: ContinuationTask_ACU): string {
   const detailedFrom = Math.max(0, task.stages.length - STAGE_HISTORY_DETAILED_STAGES_ACU);
   const sections = task.stages.map((stage, index) => {
     const revision = stage.revisions.find(item => item.revision === stage.activeRevision) ?? null;
-    const head = `## 第 ${stage.stageNumber} 阶段（${stage.status}，已完成 ${stage.completedTurns}/${revision?.outline.totalTurns ?? 0} 轮${stage.chronicleRange ? `，纪要范围 ${stage.chronicleRange.first} → ${stage.chronicleRange.last}` : ''}）`;
+    const head = `## 第 ${stage.stageNumber} 阶段（${stage.status}，已完成 ${stage.completedTurns}/${revision?.outline.totalTurns ?? 0} 轮）`;
     if (!revision) return `${head}\n（该阶段没有可读的大纲。）`;
     const lines = [head, `标题：${revision.outline.title}`, `目标：${revision.outline.goal}`];
     for (const node of revision.outline.nodes) {
@@ -73,11 +70,6 @@ export function serializeStageHistory_ACU(task: ContinuationTask_ACU): string {
     return lines.join('\n');
   });
   return sections.join('\n\n');
-}
-
-function previousStages_ACU(task: ContinuationTask_ACU, activeStage: ContinuationStage_ACU | null): ContinuationStage_ACU[] {
-  if (!activeStage) return [];
-  return task.stages.filter(stage => stage.stageNumber < activeStage.stageNumber && stage.status === 'completed');
 }
 
 /** 已完成前缀渲染为可读文本（不用 JSON，避免诱导模型输出 JSON 而非大纲标签）。 */
@@ -101,19 +93,18 @@ function completedPrefix_ACU(stage: ContinuationStage_ACU | null, revision: Stag
   return parts.join('\n\n');
 }
 
-function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage_ACU | null, revision: StageRevision_ACU | null, worldbook: ContinuationWorldbookContext_ACU, current?: ContinuationExecutionSnapshot_ACU): Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string>>> {
-  const previous = previousStages_ACU(task, stage);
-  const lastStage = previous.length ? previous[previous.length - 1] : null;
-  const earlier = previous.slice(0, -1);
-  const recentStory = () => readRecentStory_ACU(task ? 3 : 0);
-  const background = () => worldbook.readRelevantBackground(`${task.originInstruction}\n${recentStory()}`);
+function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage_ACU | null, revision: StageRevision_ACU | null, worldbook: ContinuationWorldbookContext_ACU, settings: ContinuationSettings_ACU, current?: ContinuationExecutionSnapshot_ACU): Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string>>> {
+  // 大纲侧与主会话共用同一套正文渲染器与参数（尾楼数、可读窗口、提取/排除规则），不再有独立的"最近剧情"概念。
+  const contextRules: AgentContextRules_ACU = { extractRules: settings.contextExtractRules, excludeRules: settings.contextExcludeRules };
+  const storySource = () => ({ chat: getChatArray_ACU(), storyWindowFloors: settings.storyWindowFloors, storyTailFloors: settings.storyTailFloors, contextRules });
+  const storyTail = () => renderAgentStoryTail_ACU(storySource());
+  const background = () => worldbook.readRelevantBackground(`${task.originInstruction}\n${storyTail()}`);
   return {
     $ORIGIN_INSTRUCTION: () => task.originInstruction,
     $1: background,
-    $RECENT_STORY: recentStory,
+    $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ recallCodes: extractAgentRecallCodesFromChat_ACU(getChatArray_ACU()) }),
+    $STORY_TAIL: storyTail,
     $STAGE_HISTORY: () => serializeStageHistory_ACU(task),
-    $LAST_STAGE_CHRONICLES: () => worldbook.readLastStageChronicles(lastStage?.chronicleRange),
-    $EARLIER_STAGE_SUMMARIES: () => worldbook.readEarlierStageSummaries(earlier.map(item => item.chronicleRange)),
     $COMPLETED_STAGE_PART: () => completedPrefix_ACU(stage, revision),
     $REPLAN_INSTRUCTION: () => revision?.replanInstruction ?? '',
     $REMAINING_TURNS: () => revision ? String(revision.outline.totalTurns - (stage?.completedTurns ?? 0)) : '',
@@ -228,11 +219,10 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
     getChatIdentity: getChatIdentity_ACU,
     now: () => Date.now(),
     allocateId: allocateContinuationId_ACU,
-    readChronicleSnapshot: () => worldbook.readChronicleSnapshot(),
     createOutlineResolvers: (context: ContinuationPlanningContext_ACU) => {
       const stage = context.stage;
       const revision = stage?.revisions.find(item => item.revision === stage.activeRevision) ?? null;
-      return buildResolvers_ACU(context.task, stage, revision, worldbook);
+      return buildResolvers_ACU(context.task, stage, revision, worldbook, context.envelope.settings);
     },
     hasLiveHostClaim: chatIdentity => bridgeRef?.hasLiveClaim(chatIdentity) ?? false,
     buildFallbackSettings: buildInitialContinuationSettings_ACU,

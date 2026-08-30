@@ -159,6 +159,8 @@ function harness_ACU(options: {
 
   const settings = buildDefaultContinuationSettings_ACU();
   settings.internalAiRetryLimit = 1;
+  // 运行预算已开放为 UI 设置，规划器以 settings.agentRunBudget 为准；测试注入的预算同步到这里。
+  settings.agentRunBudget = { maxIterations: 4, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 1, ...options.budget };
   settings.apiPresetMode = options.apiPresetMode ?? 'fixed';
   settings.fixedApiPresetName = 'p1';
   if (options.historyTokenBudget !== undefined) settings.agentHistoryTokenBudget = options.historyTokenBudget;
@@ -1030,7 +1032,9 @@ describe('子代理运行时', () => {
     const result = await runtime.run(input_ACU());
 
     const text = calls[0].map(message => message.content).join('\n');
-    expect(text).toContain('【楼层 2｜用户】');
+    // 正文永不含用户楼层：未结算历史只列 AI 楼层（水位 1 之后即楼层 3），用户插话不进上下文。
+    expect(text).toContain('【楼层 3】');
+    expect(text).not.toContain('【楼层 2】');
     expect(text).toContain('$HOOKS_LEDGER 伏笔账本');
     expect(text).toContain('结算未处理正文');
     expect(text).not.toContain('【楼层 0】');

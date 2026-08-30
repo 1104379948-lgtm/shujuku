@@ -64,7 +64,7 @@ describe('continuation prompt templates', () => {
   });
 
   it('uses empty text for absent optional data and rejects invalid custom prompt segments', async () => {
-    await expect(renderContinuationPrompt_ACU([{ role: 'system', content: 'A $RECENT_STORY B' }], {}, 'turn_prompt'))
+    await expect(renderContinuationPrompt_ACU([{ role: 'system', content: 'A $STORY_TAIL B' }], {}, 'turn_prompt'))
       .resolves.toMatchObject({ messages: [{ content: 'A  B' }] });
     await expectAsyncCode_ACU(
       () => renderContinuationPrompt_ACU([{ role: 'tool', content: 'invalid' }], {}, 'outline_prompt'),

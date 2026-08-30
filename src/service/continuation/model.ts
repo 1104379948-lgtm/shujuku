@@ -188,6 +188,25 @@ export interface StageOutline_ACU {
   nodes: StageNode_ACU[];
 }
 
+/**
+ * 主 Agent 规划循环的运行预算。与 agent-model.ts 的 AgentRunBudget_ACU 结构一致；
+ * 在这里独立声明是为了避免 model ↔ agent-model 的循环依赖。
+ */
+export interface ContinuationAgentRunBudgetSettings_ACU {
+  /** 一次规划运行内主 Agent 的最大决策迭代数（工具批次不计入）。 */
+  maxIterations: number;
+  /** 一次规划运行内累计派工上限。 */
+  maxDelegations: number;
+  /** 同一子代理在一次运行内的派工上限。 */
+  maxSameAgent: number;
+  /** 单次 delegate 动作里并发子任务数上限。 */
+  maxConcurrent: number;
+  /** 主 Agent 一次运行内 read/search 调用总数上限。 */
+  maxReads: number;
+  /** 子代理自主补充调阅的工具轮数上限。 */
+  maxExtraReads: number;
+}
+
 export interface ContinuationSettings_ACU {
   stageSize: ContinuationStageSize_ACU;
   customTurnMin: number | null;
@@ -201,7 +220,6 @@ export interface ContinuationSettings_ACU {
   retryDelaySeconds: number;
   generationRetryLimit: number;
   internalAiRetryLimit: number;
-  contextTurnCount: number;
   /**
    * 连续高压轮（pressure + turn）的上限，跨阶段累计，0 表示关闭该校验。
    * 它只兜底「长时间没有任何喘息」这种病态，不规定张弛的周期——周期由阶段形态决定。
@@ -220,6 +238,8 @@ export interface ContinuationSettings_ACU {
   agentReadFallbackTokens: number;
   contextExtractRules: ContinuationRulePair_ACU[];
   contextExcludeRules: ContinuationRulePair_ACU[];
+  /** 主 Agent 规划循环的运行预算，六项全部可在 UI 调整。 */
+  agentRunBudget: ContinuationAgentRunBudgetSettings_ACU;
   apiPresetMode: 'current' | 'fixed';
   fixedApiPresetName: string;
   /**
@@ -262,10 +282,6 @@ export interface ContinuationStage_ACU {
   stageId: string;
   stageNumber: number;
   status: ContinuationStageStatus_ACU;
-  chronicleStartCount: number;
-  chronicleEndCount: number | null;
-  chronicleAddedCount: number | null;
-  chronicleRange: { first: string; last: string } | null;
   activeRevision: number;
   revisions: StageRevision_ACU[];
   activeNodeIndex: number;

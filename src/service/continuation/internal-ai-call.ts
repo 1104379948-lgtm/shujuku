@@ -1,6 +1,6 @@
 import { callAIWithResolvedPreset_ACU, type AiUsageMetadata_ACU } from '../ai/api-call';
 import type { ContinuationResolvedApiPreset_ACU } from './api-preset';
-import type { ContinuationInternalAiRequestIdentity_ACU } from './model';
+import { ContinuationValidationError_ACU, type ContinuationInternalAiRequestIdentity_ACU } from './model';
 import {
   beginContinuationInternalAiMainApiInvocation_ACU,
   beginContinuationInternalAiRequest_ACU,
@@ -88,4 +88,64 @@ export async function callContinuationInternalAi_ACU(
     // An unbound request is removed, so later unrelated events are never claimed.
     settleContinuationInternalAiRequest_ACU(identity.requestId);
   }
+}
+
+/** 传输错误延时重试的配置。wait 可注入：生产用 setTimeout，测试用假计时器。 */
+export interface ContinuationInternalAiRetryOptions_ACU {
+  /** 传输错误（HTTP 非 2xx、网络异常）的额外重试次数。0 表示失败即抛。 */
+  transportRetries: number;
+  /** 每次重试前的延时秒数。0 表示重试但不等待（仍会调用 wait(0)）。 */
+  retryDelaySeconds: number;
+  /** 延时实现。缺省 setTimeout。 */
+  wait?: (ms: number) => Promise<void>;
+  /** 等待结束后的存活检查：返回 false 表示任务已被停止/换轮，立即抛出原错误不再重试。 */
+  isCurrent?: () => boolean;
+}
+
+function defaultWait_ACU(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * 判定一次内部 AI 调用错误是否值得延时重试。
+ * 可重试：HTTP 非 2xx（502 等网关波动）、网络异常等传输层错误。
+ * 不可重试：用户中断（AbortError）、续写自身的校验/状态错误（ContinuationValidationError，
+ * 含 INTERNAL_REQUEST_STALE——重打同一个已失效请求毫无意义）。
+ */
+export function isRetryableContinuationTransportError_ACU(error: unknown): boolean {
+  if (error instanceof ContinuationValidationError_ACU) return false;
+  if (error instanceof DOMException && error.name === 'AbortError') return false;
+  if (error instanceof Error && error.name === 'AbortError') return false;
+  return true;
+}
+
+/**
+ * 带传输错误延时重试的内部 AI 调用。
+ *
+ * 502/网络抖动这类传输错误此前零重试直接停整条自动链；现在按 retryDelaySeconds 延时后
+ * 重打，至多 transportRetries 次。协议解析失败的对话级重试（回灌修正）不走这里——
+ * 那是模型输出问题而非网络问题，立即重试更合适。
+ * @param invoke 执行一次真实调用的闭包（调用方自行组装 messages/preset/identity）
+ * @param options 重试配置
+ * @returns 调用结果；重试耗尽后抛出最后一次的原始错误
+ */
+export async function callContinuationInternalAiWithRetry_ACU<T>(
+  invoke: () => Promise<T>,
+  options: ContinuationInternalAiRetryOptions_ACU,
+): Promise<T> {
+  const wait = options.wait ?? defaultWait_ACU;
+  const retries = Math.max(0, Math.floor(options.transportRetries));
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await invoke();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries || !isRetryableContinuationTransportError_ACU(error)) throw error;
+      await wait(Math.max(0, options.retryDelaySeconds) * 1000);
+      // 等待期间任务可能已被停止/换轮：先查存活再决定是否重打，不做无谓请求。
+      if (options.isCurrent && !options.isCurrent()) throw error;
+    }
+  }
+  throw lastError;
 }

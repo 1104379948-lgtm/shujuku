@@ -5,6 +5,7 @@ import { renderAgentTableByAliases_ACU, renderAgentTableByName_ACU, renderAgentT
 import {
   renderAgentReadMaterials_ACU,
   renderAgentStoryCatalog_ACU,
+  renderAgentStoryOverview_ACU,
   renderAgentUnsettledHistory_ACU,
   resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
@@ -98,10 +99,11 @@ describe('Agent 表格只读投影', () => {
 });
 
 describe('Agent 读写集解析', () => {
-  it('未结算历史从水位之后开始逐楼列出', () => {
+  it('未结算历史从水位之后开始逐楼列出，且只含 AI 楼层（正文永不含用户楼层）', () => {
     const text = renderAgentUnsettledHistory_ACU(context_ACU());
-    expect(text).toContain('【楼层 1｜AI】');
-    expect(text).toContain('【楼层 2｜用户】');
+    expect(text).toContain('【楼层 1】');
+    expect(text).toContain('第一楼');
+    expect(text).not.toContain('第二楼');
     expect(text).not.toContain('第零楼');
   });
 
@@ -152,7 +154,8 @@ describe('Agent 读写集解析', () => {
     expect(catalog).toContain('$STORY_RANGE:');
     expect(catalog).toContain('$TABLE:表名:起始行-结束行');
     expect(catalog).toContain('$WORLDBOOK:书名:uid');
-    expect(catalog).toContain('$CHRONICLES:AM');
+    expect(catalog).toContain('$TABLE:纪要表:起始行-结束行');
+    expect(catalog).not.toContain('$CHRONICLES');
     expect(catalog).toContain('search');
   });
 });
@@ -181,10 +184,10 @@ describe('正文窗口与区间读取', () => {
     expect(catalog).not.toContain('第一楼正文内容');
   });
 
-  it('$STORY_RANGE 只放行窗口内楼层，窗口外指引 $CHRONICLES', () => {
+  it('$STORY_RANGE 只放行窗口内楼层，窗口外指引事件概览与纪要表行区间', () => {
     const context = storyContext_ACU(2, 1);
     expect(resolveAgentReadToken_ACU('$STORY_RANGE:3-4', context).text).toContain('第三楼正文内容');
-    expect(resolveAgentReadToken_ACU('$STORY_RANGE:1-1', context).text).toContain('$CHRONICLES');
+    expect(resolveAgentReadToken_ACU('$STORY_RANGE:1-1', context).text).toContain('$TABLE:纪要表');
     expect(resolveAgentReadToken_ACU('$STORY_RANGE:xx', context).text).toContain('不合法');
   });
 
@@ -200,5 +203,62 @@ describe('正文窗口与区间读取', () => {
     const text = resolveAgentReadToken_ACU('$HOOKS_LEDGER:H999', context_ACU()).text;
     expect(text).toContain('H999');
     expect(text).toContain('不存在');
+  });
+});
+
+describe('事件概览渲染与截断', () => {
+  const chronicleData_ACU = {
+    s0: {
+      name: '纪要表',
+      content: [
+        ['编码索引', '概览', '纪要'],
+        ['AM0001', '第一轮概览', '第一轮纪要全文'],
+        ['AM0002', '第二轮概览', ''],
+        ['AM0003', '第三轮概览', '第三轮纪要全文'],
+        ['AM0004', '第四轮概览', '第四轮纪要全文'],
+        ['AM0005', '第五轮概览', '第五轮纪要全文'],
+        ['AM0006', '第六轮概览', '第六轮纪要全文'],
+      ],
+    },
+  };
+
+  it('无上限时全量渲染，召回命中行就地展开为纪要全文', () => {
+    const text = renderAgentStoryOverview_ACU({ tableData: chronicleData_ACU, recallCodes: ['AM0003'] });
+    expect(text).toContain('- AM0001｜第一轮概览');
+    expect(text).toContain('- AM0006｜第六轮概览');
+    expect(text).toContain('- AM0003｜【纪要全文】第三轮纪要全文');
+    expect(text).not.toContain('已省略');
+  });
+
+  it('maxRows 大于等于总行数时输出与全量渲染一致', () => {
+    const full = renderAgentStoryOverview_ACU({ tableData: chronicleData_ACU, recallCodes: ['AM0003'] });
+    const capped = renderAgentStoryOverview_ACU({ tableData: chronicleData_ACU, recallCodes: ['AM0003'] }, { maxRows: 6 });
+    expect(capped).toBe(full);
+  });
+
+  it('截断时只保留尾部窗口，并给出被省略行区间的回溯地址', () => {
+    const text = renderAgentStoryOverview_ACU({ tableData: chronicleData_ACU }, { maxRows: 2 });
+    expect(text).toContain('更早的 4 轮概览已省略（对应「纪要表」第 1-4 行）');
+    expect(text).toContain('$TABLE:纪要表:行区间');
+    expect(text).toContain('- AM0005｜第五轮概览');
+    expect(text).toContain('- AM0006｜第六轮概览');
+    expect(text).not.toContain('第三轮概览');
+  });
+
+  it('窗口外的召回命中行不被截断：以纪要全文按行序前置展示', () => {
+    const text = renderAgentStoryOverview_ACU({ tableData: chronicleData_ACU, recallCodes: ['AM0001', 'AM0003', 'AM0006'] }, { maxRows: 2 });
+    expect(text).toContain('以下为本轮召回命中的更早轮次');
+    expect(text).toContain('- AM0001｜【纪要全文】第一轮纪要全文');
+    expect(text).toContain('- AM0003｜【纪要全文】第三轮纪要全文');
+    expect(text.indexOf('AM0001')).toBeLessThan(text.indexOf('AM0003'));
+    expect(text.indexOf('AM0003')).toBeLessThan(text.indexOf('AM0005'));
+    // 窗口内的命中行仍是就地展开，不进前置小节。
+    expect(text).toContain('- AM0006｜【纪要全文】第六轮纪要全文');
+  });
+
+  it('窗口外召回命中但纪要列为空时退回概览文本，不静默丢弃', () => {
+    const text = renderAgentStoryOverview_ACU({ tableData: chronicleData_ACU, recallCodes: ['AM0002'] }, { maxRows: 2 });
+    expect(text).toContain('以下为本轮召回命中的更早轮次');
+    expect(text).toContain('- AM0002｜第二轮概览');
   });
 });

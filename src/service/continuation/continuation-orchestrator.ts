@@ -11,7 +11,6 @@ import { clearAgentRunState_ACU } from './agent/agent-run-cache';
 import { clearAgentSessionLog_ACU, logAgentSession_ACU } from './agent/agent-session-log';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
 
-export interface ContinuationChronicleSnapshot_ACU { count: number; range: { first: string; last: string } | null; }
 export interface SendAgentMessageInput_ACU { text: string; }
 export type SendAgentMessageDisposition_ACU = 'continue_now' | 'queued_after_host' | 'accepted_without_resume';
 export interface SendAgentMessageResult_ACU extends ContinuationOrchestratorResult_ACU {
@@ -45,7 +44,6 @@ export interface ContinuationOrchestratorDependencies_ACU {
   getChatIdentity: () => string;
   now: () => number;
   allocateId: (prefix: string) => string;
-  readChronicleSnapshot: () => Promise<ContinuationChronicleSnapshot_ACU>;
   createOutlineResolvers: (context: ContinuationPlanningContext_ACU) => Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
   /** 桥内存中是否持有该聊天的活认领。缺省视为无认领（测试注入场景）。 */
   hasLiveHostClaim?: (chatIdentity: string) => boolean;
@@ -176,8 +174,8 @@ function userMessageResumeBlockDetail_ACU(task: ContinuationTask_ACU): string | 
   return getActiveRevision_ACU(stage).frozen ? null : '当前阶段的大纲尚未冻结。';
 }
 
-function stageForOutline_ACU(stageId: string, stageNumber: number, revision: StageRevision_ACU, snapshot: ContinuationChronicleSnapshot_ACU, status: ContinuationStage_ACU['status']): ContinuationStage_ACU {
-  return { stageId, stageNumber, status, chronicleStartCount: snapshot.count, chronicleEndCount: null, chronicleAddedCount: null, chronicleRange: null, activeRevision: revision.revision, revisions: [revision], activeNodeIndex: 0, activeTurnIndex: 0, completedTurns: 0 };
+function stageForOutline_ACU(stageId: string, stageNumber: number, revision: StageRevision_ACU, status: ContinuationStage_ACU['status']): ContinuationStage_ACU {
+  return { stageId, stageNumber, status, activeRevision: revision.revision, revisions: [revision], activeNodeIndex: 0, activeTurnIndex: 0, completedTurns: 0 };
 }
 
 function identityMatchesCurrentTurn_ACU(task: ContinuationTask_ACU, identity: TurnAttemptIdentity_ACU): boolean {
@@ -197,7 +195,7 @@ function identityMatchesCurrentTurn_ACU(task: ContinuationTask_ACU, identity: Tu
   );
 }
 
-function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, snapshot: ContinuationChronicleSnapshot_ACU | null, now: number, timeline: (kind: ContinuationTask_ACU['timeline'][number]['kind'], at: number, fields?: Omit<ContinuationTask_ACU['timeline'][number], 'id' | 'at' | 'kind'>) => ContinuationTask_ACU['timeline'][number]): ContinuationTask_ACU {
+function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, now: number, timeline: (kind: ContinuationTask_ACU['timeline'][number]['kind'], at: number, fields?: Omit<ContinuationTask_ACU['timeline'][number], 'id' | 'at' | 'kind'>) => ContinuationTask_ACU['timeline'][number]): ContinuationTask_ACU {
   const stage = getActiveStage_ACU(task);
   const revision = getActiveRevision_ACU(stage);
   const node = revision.outline.nodes[stage.activeNodeIndex];
@@ -206,7 +204,7 @@ function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, snapshot: Continua
   const completedTurns = stage.completedTurns + 1;
   const isFinalTurn = completedTurns === revision.outline.totalTurns;
   const nextStage = isFinalTurn
-    ? { ...stage, status: 'completed' as const, completedTurns, chronicleEndCount: snapshot?.count ?? stage.chronicleEndCount, chronicleAddedCount: snapshot ? snapshot.count - stage.chronicleStartCount : stage.chronicleAddedCount, chronicleRange: snapshot?.range ?? stage.chronicleRange }
+    ? { ...stage, status: 'completed' as const, completedTurns }
     : stage.activeTurnIndex + 1 < node.turns.length
       ? { ...stage, activeTurnIndex: stage.activeTurnIndex + 1, completedTurns }
       : { ...stage, activeNodeIndex: stage.activeNodeIndex + 1, activeTurnIndex: 0, completedTurns };
@@ -536,10 +534,6 @@ export class ContinuationOrchestrator_ACU {
       if (preTask.status !== 'running' || preTask.pendingHostTurn?.status !== 'awaiting_generation' || !identityMatchesCurrentTurn_ACU(preTask, identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文结果已不属于当前轮次', false));
       }
-      const preStage = getActiveStage_ACU(preTask);
-      const preRevision = getActiveRevision_ACU(preStage);
-      const isFinalTurn = preStage.completedTurns + 1 === preRevision.outline.totalTurns;
-      const chronicleSnapshot = isFinalTurn ? await this.dependencies.readChronicleSnapshot() : null;
       this.assertLeaseCurrent_ACU(chatIdentity, lease);
       let advanced: ContinuationEnvelope_ACU | null = null;
       await this.dependencies.store.updatePersistedAtomically(current => {
@@ -551,7 +545,7 @@ export class ContinuationOrchestrator_ACU {
         const now = this.dependencies.now();
         const stage = getActiveStage_ACU(task);
         const isLastTurn = stage.completedTurns + 1 === getActiveRevision_ACU(stage).outline.totalTurns;
-        const progressed = advanceConfirmedTurn_ACU(task, chronicleSnapshot, now, this.timeline_ACU.bind(this));
+        const progressed = advanceConfirmedTurn_ACU(task, now, this.timeline_ACU.bind(this));
         const completedTurn: ContinuationTask_ACU = { ...progressed, pendingHostTurn: null };
         if (!isLastTurn) {
           // 轮边界统一落 paused：自动续写从这个可判定状态出发，页面重载后也能手动恢复。
@@ -902,7 +896,6 @@ export class ContinuationOrchestrator_ACU {
     const stageId = this.dependencies.allocateId('stage');
     const context: ContinuationPlanningContext_ACU = { envelope, task, stage: null, reason: 'initial', replanInstruction: instruction };
     const planned = await this.planOutline_ACU(context, chatIdentity, lease, stageId, 1);
-    const snapshot = await this.dependencies.readChronicleSnapshot();
     this.assertLeaseCurrent_ACU(chatIdentity, lease);
     const stageNumber = task.runStageCount + 1;
     let result: ContinuationEnvelope_ACU | null = null;
@@ -914,7 +907,7 @@ export class ContinuationOrchestrator_ACU {
       }
       const now = this.dependencies.now();
       const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'initial', instruction, now);
-      const nextStage = stageForOutline_ACU(stageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), snapshot, planned.requiresReview ? 'awaiting_review' : 'running');
+      const nextStage = stageForOutline_ACU(stageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), planned.requiresReview ? 'awaiting_review' : 'running');
       result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: now, activeStageId: stageId, runStageCount: stageNumber, stages: [...t.stages, nextStage], lastError: null, timeline: [...t.timeline, this.timeline_ACU('outline_ready', now, { stageId, revision: 1 })] } };
       return result;
     }, guardForTask_ACU(chatIdentity, task));
@@ -941,7 +934,6 @@ export class ContinuationOrchestrator_ACU {
     const nextStageId = this.dependencies.allocateId('stage');
     const context: ContinuationPlanningContext_ACU = { envelope, task, stage: null, reason: 'auto_next_stage', replanInstruction: instruction };
     const planned = await this.planOutline_ACU(context, chatIdentity, lease, nextStageId, 1);
-    const snapshot = await this.dependencies.readChronicleSnapshot();
     this.assertLeaseCurrent_ACU(chatIdentity, lease);
     const stageNumber = task.runStageCount + 1;
     let result: ContinuationEnvelope_ACU | null = null;
@@ -954,7 +946,7 @@ export class ContinuationOrchestrator_ACU {
       }
       const at = this.dependencies.now();
       const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'auto_next_stage', instruction, at);
-      const nextStage = stageForOutline_ACU(nextStageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), snapshot, planned.requiresReview ? 'awaiting_review' : 'running');
+      const nextStage = stageForOutline_ACU(nextStageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), planned.requiresReview ? 'awaiting_review' : 'running');
       result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: at, activeStageId: nextStageId, runStageCount: stageNumber, stages: [...t.stages, nextStage], lastError: null, timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStageId, revision: 1 })] } };
       return result;
     }, guardForTask_ACU(chatIdentity, task));

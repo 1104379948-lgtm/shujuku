@@ -84,9 +84,6 @@
           <AcuFormRow label="总时长（分钟，0 为不设总时长）">
             <AcuInput v-model="settingsDraft.totalDurationMinutes" type="number" :min="0" />
           </AcuFormRow>
-          <AcuFormRow label="最近剧情轮数">
-            <AcuInput v-model="settingsDraft.contextTurnCount" type="number" :min="0" />
-          </AcuFormRow>
           <AcuFormRow label="正文可读窗口楼数：只有最近这么多 AI 楼层能被 Agent 读取/搜索，更早剧情走纪要回溯（0 为不开放正文读取）">
             <AcuInput v-model="settingsDraft.storyWindowFloors" type="number" :min="0" />
           </AcuFormRow>
@@ -101,6 +98,24 @@
           </AcuFormRow>
           <AcuFormRow label="精读兜底额度（token）：上下文临近总结阈值时，仍放行不超过该大小的小额精准读取">
             <AcuInput v-model="settingsDraft.agentReadFallbackTokens" type="number" :min="1" />
+          </AcuFormRow>
+          <AcuFormRow label="主 Agent 迭代上限：一次规划内最多做多少次决策（派工/改大纲/交付各算一次；read/search 工具批次不计入）">
+            <AcuInput v-model="settingsDraft.agentRunBudget.maxIterations" type="number" :min="1" :max="30" />
+          </AcuFormRow>
+          <AcuFormRow label="派工总数上限：一次规划内最多派出多少个子代理任务（0 为禁止派工）">
+            <AcuInput v-model="settingsDraft.agentRunBudget.maxDelegations" type="number" :min="0" :max="20" />
+          </AcuFormRow>
+          <AcuFormRow label="单代理派工上限：同一个子代理在一次规划内最多被派几次">
+            <AcuInput v-model="settingsDraft.agentRunBudget.maxSameAgent" type="number" :min="1" :max="10" />
+          </AcuFormRow>
+          <AcuFormRow label="并发派工上限：同一波次最多同时运行几个子代理">
+            <AcuInput v-model="settingsDraft.agentRunBudget.maxConcurrent" type="number" :min="1" :max="6" />
+          </AcuFormRow>
+          <AcuFormRow label="读取批次上限：主 Agent 一次规划内 read/search 工具批次的次数上限（0 为禁止读取）">
+            <AcuInput v-model="settingsDraft.agentRunBudget.maxReads" type="number" :min="0" :max="30" />
+          </AcuFormRow>
+          <AcuFormRow label="子代理工具轮上限：子代理首轮之外还允许几轮 read/search 追加读取（0 为只靠固定注入与派工种子）">
+            <AcuInput v-model="settingsDraft.agentRunBudget.maxExtraReads" type="number" :min="0" :max="10" />
           </AcuFormRow>
           <AcuFormRow label="循环标签">
             <AcuInput v-model="settingsDraft.loopTags" type="text" />
@@ -144,12 +159,12 @@
       <h3>大纲子代理（outline-architect）提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.outlinePrompt" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('outlinePrompt', position)" @delete="index => deletePrompt('outlinePrompt', index)" @move="(index, delta) => movePrompt('outlinePrompt', index, delta)" @update="(index, patch) => updatePrompt('outlinePrompt', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('outline')">恢复大纲提示词默认值</AcuButton></div>
-      <p class="acu-v2-continuation-page__meta">大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$LAST_STAGE_CHRONICLES、$EARLIER_STAGE_SUMMARIES、$RECENT_STORY、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$PACING_CONTEXT（跨阶段节奏状态：上一阶段形态与已连续高压轮数）、$VALIDATION_ERRORS。</p>
+      <p class="acu-v2-continuation-page__meta">大纲可用占位符：$ORIGIN_INSTRUCTION、$1、$STORY_OVERVIEW（事件概览：纪要表概览全量 + 召回 AM 码展开纪要）、$STORY_TAIL（尾部楼层全文）、$STAGE_HISTORY、$COMPLETED_STAGE_PART、$REPLAN_INSTRUCTION、$TURN_RANGE、$REMAINING_TURNS、$STORY_ARC（故事总纲）、$STAGE_WORD_BUDGET（本阶段字数容量）、$PACING_CONTEXT（跨阶段节奏状态：上一阶段形态与已连续高压轮数）、$VALIDATION_ERRORS。</p>
 
       <h3>主 Agent 提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.agentPrompts.main" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('main', position)" @delete="index => deletePrompt('main', index)" @move="(index, delta) => movePrompt('main', index, delta)" @update="(index, patch) => updatePrompt('main', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_main')">恢复主 Agent 默认值</AcuButton></div>
-      <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。目录与状态占位符：$STORY_CATALOG（正文楼层目录，尾部若干楼带全文）、$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$CURRENT_TURN_PACING（本轮节奏与写作约束）、$STORY_ARC_STATE（总纲状态）、$UNSETTLED_RANGE、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $STORY_TEXT、$OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。</p>
+      <p class="acu-v2-continuation-page__meta">$HISTORY_ANCHOR 标记主 Agent 自己的会话记录（用户输入、它历次迭代的输出、回灌的工具结果与调阅到的资料）插入位置，该段本身不发送；删掉它会让会话记录退回到序列最前面。正文三层注入：$STORY_OVERVIEW（事件概览：纪要表概览全量，召回 AM 码展开对应纪要）、$STORY_TAIL（尾部楼层全文）、$STORY_CATALOG（楼层纯索引：楼号、字数、开头摘录、读取地址）。目录与状态占位符：$OUTLINE_STATE（大纲单行状态）、$WORLDBOOK_CATALOG（已启用世界书目录，含 token 估算）、$WORLDBOOK_HITS（本轮语境命中的世界书条目提示）、$AGENT_READ_CATALOG（read/search 地址词汇表）。其余可用占位符：$USER_INTENT、$CURRENT_TURN_GOAL、$CURRENT_TURN_PACING（本轮节奏与写作约束）、$STORY_ARC_STATE（总纲状态）、$HISTORY_UNSETTLED（未结算正文全量，仅 AI 楼层）、$AGENT_CATALOG、$MODULE_CATALOG、$TABLE_CATALOG、$BUDGET；旧版的 $OUTLINE_WINDOW、$ACTIVE_CONSTRAINTS、$TOOL_RESULTS 仍可在自定义提示词中使用。</p>
 
       <h3>故事总纲子代理（arc-architect）提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.agentPrompts.arcArchitect" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('arcArchitect', position)" @delete="index => deletePrompt('arcArchitect', index)" @move="(index, delta) => movePrompt('arcArchitect', index, delta)" @update="(index, patch) => updatePrompt('arcArchitect', index, patch)" />
@@ -170,7 +185,7 @@
       <h3>连续性审查子代理提示词</h3>
       <AcuPromptSegments :segments="settingsDraft.agentPrompts.reviewer" :role-options="continuationRoleOptions" :show-slot="false" :show-enabled="true" :allow-move="true" @add="position => addPrompt('reviewer', position)" @delete="index => deletePrompt('reviewer', index)" @move="(index, delta) => movePrompt('reviewer', index, delta)" @update="(index, patch) => updatePrompt('reviewer', index, patch)" />
       <div class="acu-v2-continuation-page__actions"><AcuButton @click="restorePrompt('agent_reviewer')">恢复审查子代理默认值</AcuButton></div>
-      <p class="acu-v2-continuation-page__meta">子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG（各资料目录）。</p>
+      <p class="acu-v2-continuation-page__meta">子代理可用占位符：$AGENT_READ_MATERIALS（派工种子读集解析出的资料）、$AGENT_TASK（本次派工任务）、$AGENT_WRITE_SCOPE（职责固定的写入范围）、$AGENT_READ_CATALOG（read/search 地址词汇表）、$STORY_OVERVIEW / $STORY_TAIL / $HISTORY_UNSETTLED（按角色固定注入的正文语境）、$HOOKS_LEDGER / $INFO_GAP / $ACTIVE_CONSTRAINTS / $STORY_ARC（本地资料）、$STORY_CATALOG、$TABLE_CATALOG、$WORLDBOOK_CATALOG、$WORLDBOOK_HITS（各资料目录与命中提示）。</p>
       <p v-if="settingsError" class="acu-v2-continuation-page__error">{{ settingsError }}</p>
     </AcuPanel>
   </section>
@@ -309,6 +324,7 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
     ...settings,
     contextExtractRules: settings.contextExtractRules.map(rule => ({ ...rule })),
     contextExcludeRules: settings.contextExcludeRules.map(rule => ({ ...rule })),
+    agentRunBudget: { ...settings.agentRunBudget },
     agentApiPresets: {
       main: { ...settings.agentApiPresets.main },
       outline: { ...settings.agentApiPresets.outline },
@@ -383,8 +399,13 @@ function requiredInteger(value: unknown, label: string): number {
 
 /** 有上界的整数设置；空串与 NaN 会让落盘校验报「字段必须是整数」，在这里先拦成可读提示。 */
 function requiredBoundedInteger(value: unknown, label: string, maximum: number): number {
+  return requiredRangeInteger(value, label, 0, maximum);
+}
+
+/** 上下界俱全的整数设置，用于 Agent 运行预算等有护栏的字段。 */
+function requiredRangeInteger(value: unknown, label: string, minimum: number, maximum: number): number {
   const numeric = typeof value === 'number' ? value : Number(String(value ?? '').trim());
-  if (!Number.isInteger(numeric) || numeric < 0 || numeric > maximum) throw new Error(`${label} 必须是 0 到 ${maximum} 之间的整数`);
+  if (!Number.isInteger(numeric) || numeric < minimum || numeric > maximum) throw new Error(`${label} 必须是 ${minimum} 到 ${maximum} 之间的整数`);
   return numeric;
 }
 
@@ -420,15 +441,22 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     loopDelaySeconds: requiredInteger(source.loopDelaySeconds, '轮次延迟'),
     retryDelaySeconds: requiredInteger(source.retryDelaySeconds, '重试延迟'),
     totalDurationMinutes: requiredInteger(source.totalDurationMinutes, '总时长'),
-    contextTurnCount: requiredInteger(source.contextTurnCount, '最近剧情轮数'),
     maxConsecutivePressureTurns: requiredBoundedInteger(source.maxConsecutivePressureTurns, '连续高压轮上限', CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU),
     storyWindowFloors: requiredInteger(source.storyWindowFloors, '正文可读窗口楼数'),
     storyTailFloors: requiredInteger(source.storyTailFloors, '正文目录尾部全文楼数'),
     agentHistoryTokenBudget: requiredInteger(source.agentHistoryTokenBudget, '会话自动总结阈值'),
     agentReadTokenBudget: normalizedReadBudget(source.agentReadTokenBudget),
     agentReadFallbackTokens: requiredInteger(source.agentReadFallbackTokens, '精读兜底额度'),
+    agentRunBudget: {
+      maxIterations: requiredRangeInteger(source.agentRunBudget.maxIterations, '主 Agent 迭代上限', 1, 30),
+      maxDelegations: requiredRangeInteger(source.agentRunBudget.maxDelegations, '派工总数上限', 0, 20),
+      maxSameAgent: requiredRangeInteger(source.agentRunBudget.maxSameAgent, '单代理派工上限', 1, 10),
+      maxConcurrent: requiredRangeInteger(source.agentRunBudget.maxConcurrent, '并发派工上限', 1, 6),
+      maxReads: requiredRangeInteger(source.agentRunBudget.maxReads, '读取批次上限', 0, 30),
+      maxExtraReads: requiredRangeInteger(source.agentRunBudget.maxExtraReads, '子代理工具轮上限', 0, 10),
+    },
   };
-  if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.contextTurnCount < 0 || normalized.storyWindowFloors < 0 || normalized.storyTailFloors < 0 || normalized.agentHistoryTokenBudget < 0 || normalized.agentReadFallbackTokens < 1) {
+  if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.storyWindowFloors < 0 || normalized.storyTailFloors < 0 || normalized.agentHistoryTokenBudget < 0 || normalized.agentReadFallbackTokens < 1) {
     throw new Error('续写设置中的数值不能低于允许范围');
   }
   if (normalized.apiPresetMode === 'fixed') {

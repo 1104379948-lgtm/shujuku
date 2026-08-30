@@ -51,7 +51,6 @@ function stage_ACU(stageNumber: number, turnCount: number): any {
   return {
     stageId: `stage-${stageNumber}`, stageNumber, status: 'completed', activeRevision: 2,
     completedTurns: turnCount, activeNodeIndex: 0, activeTurnIndex: 0,
-    chronicleRange: { first: `AM${stageNumber}`, last: `AM${stageNumber}` },
     revisions: [
       // 作废的旧 revision 不该出现在阶段历史里。
       { revision: 1, reason: 'initial', frozen: true, replanInstruction: '', outline: { schemaVersion: 1, title: `第 ${stageNumber} 阶段旧计划`, goal: '作废目标', totalTurns: turnCount, nodes: [] } },
@@ -88,7 +87,9 @@ describe('阶段历史渲染', () => {
     expect(text).toContain('阶段 3 第 2 轮目标');
     // 输出是可读文本而不是 JSON，避免诱导大纲模型用 JSON 回话。
     expect(text).not.toContain('"totalTurns"');
-    expect(text).toContain('已完成 2/2 轮，纪要范围 AM3 → AM3');
+    // 阶段纪要范围随 chronicleRange 字段一起退役，标题只保留完成进度。
+    expect(text).toContain('已完成 2/2 轮');
+    expect(text).not.toContain('纪要范围');
   });
 });
 

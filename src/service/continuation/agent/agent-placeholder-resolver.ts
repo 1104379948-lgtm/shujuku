@@ -20,25 +20,26 @@ import {
   renderAgentInfoGapByIds_ACU,
   renderAgentStoryArcByIds_ACU,
 } from './agent-module-store';
-import { renderAgentTableByAliases_ACU, renderAgentTableByName_ACU, type AgentTableRowRange_ACU } from './agent-tables';
+import { AGENT_TABLE_ALIASES_ACU, findAgentSheetsByAliases_ACU, renderAgentTableByAliases_ACU, renderAgentTableByName_ACU, type AgentTableRowRange_ACU } from './agent-tables';
 import {
   buildEmptyAgentWorldbookSnapshot_ACU,
-  renderAgentChronicleRange_ACU,
   renderAgentWorldbookEntries_ACU,
   type AgentWorldbookSnapshot_ACU,
 } from './agent-worldbook-read';
+import { normalizeAmCode_ACU } from '../worldbook-context';
+import { applyContextTagFilters_ACU } from '../../runtime/helpers-context-tags';
 
 export const AGENT_TABLE_TOKEN_PREFIX_ACU = '$TABLE:';
 export const AGENT_STORY_RANGE_TOKEN_PREFIX_ACU = '$STORY_RANGE:';
 export const AGENT_WORLDBOOK_TOKEN_PREFIX_ACU = '$WORLDBOOK:';
-export const AGENT_CHRONICLES_TOKEN_PREFIX_ACU = '$CHRONICLES:';
 
 /** 每条虚拟/模块/表占位符对应的人类可读标题，进入材料块的分节标题。 */
 const READ_TOKEN_TITLES_ACU: Record<string, string> = {
   $STORY_TEXT: '已经发生的小说正文（只含 AI 楼层）',
-  $STORY_CATALOG: '正文楼层目录',
+  $STORY_CATALOG: '正文楼层索引',
+  $STORY_OVERVIEW: '事件概览（纪要表逐轮）',
+  $STORY_TAIL: '最近正文（尾部全文楼层）',
   $HISTORY_UNSETTLED: '尚未结算的真实历史',
-  $HISTORY_RECENT: '最近已被采用的真实剧情',
   $OUTLINE_WINDOW: '当前大纲窗口',
   $CURRENT_TURN_GOAL: '本轮目标',
   $CURRENT_TURN_PACING: '本轮节奏',
@@ -52,31 +53,49 @@ const READ_TOKEN_TITLES_ACU: Record<string, string> = {
   $TABLE_CHRONICLES: '纪要表',
 };
 
+/** 续写侧的上下文标签提取/排除规则（与剧情推进共用 applyContextTagFilters_ACU 语义）。 */
+export interface AgentContextRules_ACU {
+  extractRules: { start: string; end: string }[];
+  excludeRules: { start: string; end: string }[];
+}
+
 export interface AgentResolveContext_ACU {
   chat: any[];
   moduleSnapshot: AgentModuleSnapshot_ACU;
   settledThroughIndex: number;
   execution: ContinuationAgentExecutionContext_ACU;
   originInstruction: string;
-  recentTurnCount: number;
   /**
    * Agent 可读/可搜正文窗口：只有最近这么多 AI 楼层可以 read/search，
-   * 更早的正文只能经纪要（$CHRONICLES）回溯。缺省用 AGENT_STORY_WINDOW_DEFAULT_ACU。
+   * 更早的剧情脉络经事件概览与 $TABLE:纪要表 回溯。缺省用 AGENT_STORY_WINDOW_DEFAULT_ACU。
    */
   storyWindowFloors?: number;
-  /** 正文目录尾部注入全文的楼数；缺省用 AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU。 */
+  /** 固定注入全文的末尾 AI 楼层数（$STORY_TAIL）；缺省用 AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU。 */
   storyTailFloors?: number;
   tableData?: unknown;
   /** 运行起点预取的世界书快照；缺省为不可用空快照（如测试环境）。 */
   worldbook?: AgentWorldbookSnapshot_ACU;
+  /** 上下文提取/排除规则；缺省不做任何过滤。 */
+  contextRules?: AgentContextRules_ACU;
+  /** 本轮召回的 AM 码（取自最后一个用户楼层）；缺省为空。 */
+  recallCodes?: readonly string[];
 }
 
-function messageRole_ACU(message: any): string {
-  return message && message.is_user ? '用户' : 'AI';
+/** 正文渲染的最小入参：AgentResolveContext 结构性满足，大纲侧可用轻量对象直接调用。 */
+export interface AgentStoryFloorSource_ACU {
+  chat: any[];
+  storyWindowFloors?: number;
+  storyTailFloors?: number;
+  contextRules?: AgentContextRules_ACU;
 }
 
-function messageText_ACU(message: any): string {
-  return String(message?.mes ?? '').trim();
+function applyAgentContextRules_ACU(text: string, rules?: AgentContextRules_ACU): string {
+  if (!rules || (!rules.extractRules.length && !rules.excludeRules.length)) return text;
+  return applyContextTagFilters_ACU(text, { extractTags: '', extractRules: rules.extractRules, excludeTags: '', excludeRules: rules.excludeRules }).trim();
+}
+
+function messageText_ACU(message: any, rules?: AgentContextRules_ACU): string {
+  return applyAgentContextRules_ACU(String(message?.mes ?? '').trim(), rules);
 }
 
 interface AgentStoryFloor_ACU {
@@ -84,21 +103,41 @@ interface AgentStoryFloor_ACU {
   text: string;
 }
 
-function listAgentStoryFloors_ACU(context: AgentResolveContext_ACU): AgentStoryFloor_ACU[] {
-  const chat = Array.isArray(context.chat) ? context.chat : [];
+function listAgentStoryFloors_ACU(source: AgentStoryFloorSource_ACU): AgentStoryFloor_ACU[] {
+  const chat = Array.isArray(source.chat) ? source.chat : [];
   return chat
-    .map((message, index) => ({ index, text: messageText_ACU(message) }))
+    .map((message, index) => ({ index, text: messageText_ACU(message, source.contextRules) }))
     .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
 }
 
-function agentStoryWindowSize_ACU(context: AgentResolveContext_ACU): number {
-  return Math.max(0, context.storyWindowFloors ?? AGENT_STORY_WINDOW_DEFAULT_ACU);
+function agentStoryWindowSize_ACU(source: AgentStoryFloorSource_ACU): number {
+  return Math.max(0, source.storyWindowFloors ?? AGENT_STORY_WINDOW_DEFAULT_ACU);
 }
 
 /** Agent 可读/可搜的正文窗口：最近 storyWindowFloors 个 AI 楼层。同时供搜索工具划定 story 域。 */
-export function listAgentStoryWindowFloors_ACU(context: AgentResolveContext_ACU): AgentStoryFloor_ACU[] {
-  const window = agentStoryWindowSize_ACU(context);
-  return window > 0 ? listAgentStoryFloors_ACU(context).slice(-window) : [];
+export function listAgentStoryWindowFloors_ACU(source: AgentStoryFloorSource_ACU): AgentStoryFloor_ACU[] {
+  const window = agentStoryWindowSize_ACU(source);
+  return window > 0 ? listAgentStoryFloors_ACU(source).slice(-window) : [];
+}
+
+/**
+ * 从最后一个用户楼层提取本轮召回的 AM 码。
+ * 剧情推进 AI 的召回结果（<recall>AMxxxx</recall> 等）就落在这层文本里，直接复用即可，
+ * 不需要续写侧再发一次召回调用。取原始文本而非过滤后的文本：召回码可能位于会被规则剥掉的标签内。
+ * @param chat 聊天数组
+ * @returns 去重后的规范化 AM 码列表；没有用户楼层或无命中时为空数组
+ */
+export function extractAgentRecallCodesFromChat_ACU(chat: readonly any[]): string[] {
+  const list = Array.isArray(chat) ? chat : [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const message = list[index];
+    if (!message || !message.is_user) continue;
+    const matches = String(message.mes ?? '').match(/AM\d+/gi) ?? [];
+    return [...new Set(matches
+      .map(code => normalizeAmCode_ACU(code))
+      .filter((code): code is string => code !== null))];
+  }
+  return [];
 }
 
 function renderStoryFloors_ACU(floors: readonly AgentStoryFloor_ACU[]): string {
@@ -110,37 +149,134 @@ function storyOpening_ACU(text: string): string {
   return flat.length <= 40 ? flat : `${flat.slice(0, 40)}…`;
 }
 
-/**
- * 渲染正文楼层目录：窗口内每楼一行（楼层号 + 约字数 + 开头摘要 + 读取地址），
- * 尾部若干楼直接给全文。窗口之前的剧情已压缩为纪要，指引走纪要目录。
- * @param context 解析上下文
- * @returns 目录文本，进入主 Agent 骨架的 $STORY_CATALOG
- */
-export function renderAgentStoryCatalog_ACU(context: AgentResolveContext_ACU): string {
-  const allFloors = listAgentStoryFloors_ACU(context);
-  if (!allFloors.length) return '当前聊天还没有 AI 产出的正文楼层。';
-  const windowFloors = listAgentStoryWindowFloors_ACU(context);
-  if (!windowFloors.length) return '正文可读窗口设置为 0 楼：所有正文都只能经纪要目录（$CHRONICLES）回溯。';
-  const tailCount = Math.max(0, context.storyTailFloors ?? AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU);
-  const tailFloors = tailCount > 0 ? windowFloors.slice(-tailCount) : [];
-  const catalogFloors = windowFloors.slice(0, windowFloors.length - tailFloors.length);
-  const hiddenCount = allFloors.length - windowFloors.length;
+/** 事件概览的最小入参。 */
+export interface AgentStoryOverviewSource_ACU {
+  tableData?: unknown;
+  recallCodes?: readonly string[];
+}
 
-  const sections: string[] = [];
-  const headNote = hiddenCount > 0
-    ? `更早的 ${hiddenCount} 个 AI 楼层不在可读窗口内，其剧情已压缩为纪要，请经世界书目录的纪要概要段（$CHRONICLES 地址）回溯。`
-    : '当前全部 AI 楼层都在可读窗口内。';
-  if (catalogFloors.length) {
-    const lines = catalogFloors.map(floor =>
-      `- 楼层 ${floor.index}｜约 ${floor.text.length} 字｜开头：${storyOpening_ACU(floor.text)}｜读取地址 $STORY_RANGE:${floor.index}-${floor.index}`);
-    sections.push(`${headNote}\n可读窗口内的楼层目录（区间读取写 $STORY_RANGE:起始楼-结束楼）：\n${lines.join('\n')}`);
-  } else {
-    sections.push(headNote);
+/** 定位纪要表的一列：按表头包含关系匹配候选名，命中第一个。 */
+function findColumnIndex_ACU(header: readonly string[], candidates: readonly string[]): number {
+  for (const candidate of candidates) {
+    const index = header.findIndex(cell => cell.includes(candidate));
+    if (index >= 0) return index;
   }
-  sections.push(tailFloors.length
-    ? `最近 ${tailFloors.length} 楼全文：\n${renderStoryFloors_ACU(tailFloors)}`
-    : '（未注入任何楼层全文，需要正文时用 $STORY_RANGE 读取。）');
-  return sections.join('\n\n');
+  return -1;
+}
+
+/** 事件概览的渲染选项。 */
+export interface AgentStoryOverviewOptions_ACU {
+  /**
+   * 只保留最新的 N 行概览（按纪要表行序取尾部）。窗口外被本轮召回码命中的行不受截断
+   * 影响——它们以纪要全文按行序前置展示，保证召回机制在截断下仍然完整。
+   * 缺省为不限（主会话/大纲子代理/read 工具路径全量注入）。
+   */
+  maxRows?: number;
+}
+
+/**
+ * 渲染事件概览：纪要表逐轮的「概览」列注入，命中本轮召回 AM 码的行升级为「纪要」全文。
+ *
+ * 这是主会话与策划类子代理掌握全局剧情脉络的固定来源——概览按剧情轮记录（每轮一行），
+ * 与楼层号没有一一映射，精确正文要走 $STORY_RANGE 或楼层索引。
+ * @param source 表格数据与本轮召回码
+ * @param options 渲染选项；maxRows 见 AgentStoryOverviewOptions_ACU
+ * @returns 概览文本；纪要表缺失/为空时如实说明
+ */
+export function renderAgentStoryOverview_ACU(source: AgentStoryOverviewSource_ACU, options?: AgentStoryOverviewOptions_ACU): string {
+  const sheets = findAgentSheetsByAliases_ACU(AGENT_TABLE_ALIASES_ACU.chronicles, source.tableData);
+  if (!sheets.length) {
+    return '当前聊天没有纪要表，无法提供事件概览。剧情脉络只能依靠楼层索引与正文楼层本身。';
+  }
+  const recall = new Set((source.recallCodes ?? []).map(code => normalizeAmCode_ACU(code)).filter(Boolean));
+  const maxRows = options?.maxRows && options.maxRows > 0 ? Math.floor(options.maxRows) : null;
+  let anyExpanded = false;
+  const sections = sheets.map(sheet => {
+    if (!sheet.rows.length) return `表「${sheet.name}」存在但没有数据行。`;
+    const codeColumn = findColumnIndex_ACU(sheet.header, ['编码索引', '编码']);
+    const overviewColumn = findColumnIndex_ACU(sheet.header, ['概览', '概要']);
+    const digestColumn = sheet.header.findIndex(cell => cell.includes('纪要') && !cell.includes('概'));
+    const renderRow = (row: readonly string[], rowIndex: number): string => {
+      const code = codeColumn >= 0 ? normalizeAmCode_ACU(row[codeColumn]) : null;
+      const overview = overviewColumn >= 0 ? row[overviewColumn] : '';
+      const digest = digestColumn >= 0 ? row[digestColumn] : '';
+      const label = code ?? `第 ${rowIndex + 1} 行`;
+      if (code && recall.has(code) && digest) {
+        anyExpanded = true;
+        return `- ${label}｜【纪要全文】${digest}`;
+      }
+      return `- ${label}｜${overview || digest || '（空行）'}`;
+    };
+    const windowStart = maxRows !== null ? Math.max(0, sheet.rows.length - maxRows) : 0;
+    const windowLines = sheet.rows.slice(windowStart).map((row, offset) => renderRow(row, windowStart + offset));
+    const parts: string[] = [];
+    if (windowStart > 0) {
+      parts.push(`更早的 ${windowStart} 轮概览已省略（对应「${sheet.name}」第 1-${windowStart} 行），需要时用 $TABLE:${sheet.name}:行区间 精读。`);
+      // 窗口外被召回命中的行按行序前置：召回命中说明与本轮直接相关，不能被截断静默丢掉。
+      const recalledEarlier = sheet.rows.slice(0, windowStart)
+        .map((row, rowIndex) => ({ row, rowIndex }))
+        .filter(({ row }) => {
+          const code = codeColumn >= 0 ? normalizeAmCode_ACU(row[codeColumn]) : null;
+          return code !== null && recall.has(code);
+        });
+      if (recalledEarlier.length) {
+        parts.push(`以下为本轮召回命中的更早轮次（不受截断影响）：\n${recalledEarlier.map(({ row, rowIndex }) => renderRow(row, rowIndex)).join('\n')}`);
+      }
+    }
+    parts.push(windowLines.join('\n'));
+    const head = sheets.length > 1 ? `## 表「${sheet.name}」\n` : '';
+    return `${head}${parts.join('\n\n')}`;
+  });
+  const expandedNote = anyExpanded
+    ? '带【纪要全文】标记的行已按本轮召回码展开为详细纪要。'
+    : '';
+  return [
+    '以下是纪要表的逐轮事件概览（每行对应一轮剧情，与楼层号无一一映射；需要某轮的详细纪要时用 $TABLE:纪要表:行区间 精读）：',
+    ...sections,
+    expandedNote,
+  ].filter(Boolean).join('\n\n');
+}
+
+/**
+ * 渲染最近正文：末尾 storyTailFloors 个 AI 楼层的全文（已过上下文提取/排除规则）。
+ * 这是承接锚点——续写必须无缝衔接的最新正文。
+ * @param source 正文楼层来源
+ * @returns 逐楼全文；storyTailFloors=0 或无 AI 楼层时如实标注
+ */
+export function renderAgentStoryTail_ACU(source: AgentStoryFloorSource_ACU): string {
+  const windowFloors = listAgentStoryWindowFloors_ACU(source);
+  if (!windowFloors.length) return '当前没有可注入的正文楼层（聊天里还没有 AI 正文，或可读窗口为 0）。';
+  const tailCount = Math.max(0, source.storyTailFloors ?? AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU);
+  if (tailCount === 0) return '未注入正文楼层全文（尾部楼层数设置为 0）。需要正文时用 $STORY_RANGE:起始楼-结束楼 读取。';
+  const tailFloors = windowFloors.slice(-tailCount);
+  return `最近 ${tailFloors.length} 楼全文（续写必须无缝衔接这里的结尾）：\n${renderStoryFloors_ACU(tailFloors)}`;
+}
+
+/**
+ * 渲染正文楼层索引：纯索引，不含任何正文全文（全文见 $STORY_TAIL，脉络见 $STORY_OVERVIEW）。
+ * 每楼一行「楼层号 + 约字数 + 读取地址」；纪要表缺失时退回附带开头摘要的形式以保底可导航。
+ * @param source 正文楼层来源 + 表格数据（用于判断纪要表是否存在）
+ * @returns 索引文本，进入主 Agent 骨架的 $STORY_CATALOG
+ */
+export function renderAgentStoryCatalog_ACU(source: AgentStoryFloorSource_ACU & { tableData?: unknown }): string {
+  const allFloors = listAgentStoryFloors_ACU(source);
+  if (!allFloors.length) return '当前聊天还没有 AI 产出的正文楼层。';
+  const windowFloors = listAgentStoryWindowFloors_ACU(source);
+  if (!windowFloors.length) return '正文可读窗口设置为 0 楼：正文楼层不可直接读取；剧情脉络请依靠事件概览与 $TABLE:纪要表。';
+  const hiddenCount = allFloors.length - windowFloors.length;
+  const headNote = hiddenCount > 0
+    ? `更早的 ${hiddenCount} 个 AI 楼层不在可读窗口内；其剧情脉络请查看事件概览，或用 $TABLE:纪要表:行区间 精读对应纪要。`
+    : '当前全部 AI 楼层都在可读窗口内。';
+  const hasChronicleRows = findAgentSheetsByAliases_ACU(AGENT_TABLE_ALIASES_ACU.chronicles, source.tableData)
+    .some(sheet => sheet.rows.length > 0);
+  const lines = windowFloors.map(floor => hasChronicleRows
+    ? `- 楼层 ${floor.index}｜约 ${floor.text.length} 字｜读取地址 $STORY_RANGE:${floor.index}-${floor.index}`
+    : `- 楼层 ${floor.index}｜约 ${floor.text.length} 字｜开头：${storyOpening_ACU(floor.text)}｜读取地址 $STORY_RANGE:${floor.index}-${floor.index}`);
+  return [
+    `${headNote}\n可读窗口内的楼层索引（区间读取写 $STORY_RANGE:起始楼-结束楼；按内容找楼层用 search story）：`,
+    lines.join('\n'),
+    '注意：事件概览按剧情轮记录，与楼层号无一一映射；需要精确正文时按本索引区间读取。',
+  ].join('\n');
 }
 
 /**
@@ -157,12 +293,12 @@ export function renderAgentStoryRange_ACU(context: AgentResolveContext_ACU, star
     return `楼层区间「${startRaw}-${endRaw}」不合法：写法为 $STORY_RANGE:起始楼-结束楼（两端都是楼层号，起始不大于结束）。可用楼层见正文目录。`;
   }
   const windowFloors = listAgentStoryWindowFloors_ACU(context);
-  if (!windowFloors.length) return '正文可读窗口当前为空，无法读取正文；早期剧情请经纪要目录（$CHRONICLES 地址）回溯。';
+  if (!windowFloors.length) return '正文可读窗口当前为空，无法读取正文；早期剧情脉络请查看事件概览或用 $TABLE:纪要表:行区间 精读。';
   const hit = windowFloors.filter(floor => floor.index >= start && floor.index <= end);
   if (!hit.length) {
     const first = windowFloors[0].index;
     const last = windowFloors[windowFloors.length - 1].index;
-    return `区间 ${start}-${end} 内没有可读的 AI 楼层。可读窗口目前覆盖楼层 ${first}-${last}（只含 AI 楼）；更早的剧情已压缩为纪要，请改用世界书目录里的 $CHRONICLES 地址回溯。`;
+    return `区间 ${start}-${end} 内没有可读的 AI 楼层。可读窗口目前覆盖楼层 ${first}-${last}（只含 AI 楼）；更早的剧情脉络请查看事件概览或用 $TABLE:纪要表:行区间 精读。`;
   }
   return renderStoryFloors_ACU(hit);
 }
@@ -183,7 +319,7 @@ export function renderAgentStoryText_ACU(context: AgentResolveContext_ACU): stri
   // 删楼后残留的水位可能指向已不存在的楼层，必须钳制，否则未结算段起点会越过末楼输出空段。
   const settledThrough = Math.min(context.settledThroughIndex, highestIndex);
   const floors = chat
-    .map((message, index) => ({ index, text: messageText_ACU(message) }))
+    .map((message, index) => ({ index, text: messageText_ACU(message, context.contextRules) }))
     .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
   if (!floors.length) return '当前聊天还没有 AI 产出的正文楼层。';
 
@@ -207,7 +343,9 @@ export function renderAgentStoryText_ACU(context: AgentResolveContext_ACU): stri
 }
 
 /**
- * 渲染尚未结算的真实历史。
+ * 渲染尚未结算的真实历史。只含 AI 楼层——正文域永远不含用户楼层，
+ * 用户楼层的唯一职责是承载召回码（见 extractAgentRecallCodesFromChat_ACU）。
+ * 该区间不做任何截断：结算子代理必须看到全部未结算正文，否则水位推进会吞掉未处理的楼层。
  * @param context 解析上下文
  * @returns 逐楼文本；无未结算楼层时如实标注
  */
@@ -215,24 +353,27 @@ export function renderAgentUnsettledHistory_ACU(context: AgentResolveContext_ACU
   const start = context.settledThroughIndex + 1;
   const lines: string[] = [];
   for (let index = start; index < context.chat.length; index += 1) {
-    const text = messageText_ACU(context.chat[index]);
-    if (text) lines.push(`【楼层 ${index}｜${messageRole_ACU(context.chat[index])}】\n${text}`);
+    const message = context.chat[index];
+    if (!message || message.is_user) continue;
+    const text = messageText_ACU(message, context.contextRules);
+    if (text) lines.push(`【楼层 ${index}】\n${text}`);
   }
   return lines.length ? lines.join('\n\n') : '没有尚未结算的真实历史；上一轮已结算到当前最后一楼。';
 }
 
 /**
- * 渲染最近已被采用的真实剧情。
+ * 拼装世界书关键词命中的扫描文本：本轮目标 + 未结算正文 + 尾部全文楼层 + 用户初始要求。
+ * 主循环与子代理运行时共用，保证命中提示在两侧口径一致。
  * @param context 解析上下文
- * @returns 最近若干轮 AI 楼层正文
+ * @returns 扫描文本
  */
-export function renderAgentRecentHistory_ACU(context: AgentResolveContext_ACU): string {
-  const aiFloors = context.chat
-    .map((message, index) => ({ message, index }))
-    .filter(item => item.message && !item.message.is_user && messageText_ACU(item.message));
-  const recent = aiFloors.slice(-Math.max(1, context.recentTurnCount));
-  if (!recent.length) return '当前聊天还没有可用的历史正文。';
-  return recent.map(item => `【楼层 ${item.index}】\n${messageText_ACU(item.message)}`).join('\n\n');
+export function buildAgentWorldbookScanText_ACU(context: AgentResolveContext_ACU): string {
+  return [
+    context.originInstruction,
+    context.execution.turn?.goal ?? '',
+    renderAgentUnsettledHistory_ACU(context),
+    renderAgentStoryTail_ACU(context),
+  ].filter(Boolean).join('\n');
 }
 
 /** 四档节奏标签的语义与写作指导。低压轮的约束写成禁令，否则模型会习惯性地往每一轮里塞冲突。 */
@@ -342,24 +483,15 @@ function resolveWorldbookToken_ACU(token: string, context: AgentResolveContext_A
   return { title: `世界书「${bookName}」条目 ${uids.join('、')}`, text: renderAgentWorldbookEntries_ACU(worldbook, bookName, uids) };
 }
 
-function resolveChroniclesToken_ACU(token: string, context: AgentResolveContext_ACU): { title: string; text: string } {
-  const worldbook = context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
-  const body = token.slice(AGENT_CHRONICLES_TOKEN_PREFIX_ACU.length).trim();
-  const matched = /^(AM\d+)-(AM\d+)$/i.exec(body);
-  if (!matched) {
-    return { title: '纪要', text: `纪要地址「${token}」不合法：写法为 $CHRONICLES:AM起始码-AM结束码（如 $CHRONICLES:AM12-AM18），地址请从纪要目录复制。` };
-  }
-  return { title: `纪要 ${matched[1].toUpperCase()}-${matched[2].toUpperCase()}`, text: renderAgentChronicleRange_ACU(worldbook, matched[1], matched[2]) };
-}
-
 /**
  * 解析一个读集 token 的内容。
  *
  * 支持的地址体系（与各资料目录里给出的读取地址一一对应）：
- * - `$STORY_RANGE:a-b` 窗口内正文楼层区间；`$STORY_CATALOG` 楼层目录
+ * - `$STORY_RANGE:a-b` 窗口内正文楼层区间；`$STORY_CATALOG` 楼层索引
+ * - `$STORY_OVERVIEW` 事件概览；`$STORY_TAIL` 尾部全文楼层
  * - `$TABLE:表名` / `$TABLE:表名:a-b` 整表或行区间
  * - `$STORY_ARC[:ID,ID]` / `$HOOKS_LEDGER[:ID,ID]` / `$INFO_GAP[:ID,ID]` / `$ACTIVE_CONSTRAINTS[:ID,ID]` 模块全量或按 ID 精读
- * - `$WORLDBOOK:书名:uid[,uid]` 已启用世界书条目全文；`$CHRONICLES:AMa-AMb` 纪要区间
+ * - `$WORLDBOOK:书名:uid[,uid]` 已启用世界书条目全文
  * - 旧固定 token（$STORY_TEXT / $OUTLINE_WINDOW 等）保留兼容
  * @param token 读集标识符
  * @param context 解析上下文
@@ -369,7 +501,6 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
   const normalized = String(token ?? '').trim();
   if (normalized.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU)) return resolveTableToken_ACU(normalized, context);
   if (normalized.startsWith(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU)) return resolveWorldbookToken_ACU(normalized, context);
-  if (normalized.startsWith(AGENT_CHRONICLES_TOKEN_PREFIX_ACU)) return resolveChroniclesToken_ACU(normalized, context);
   if (normalized.startsWith(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU)) {
     const body = normalized.slice(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU.length).trim();
     const matched = /^(\d+)-(\d+)$/.exec(body);
@@ -402,8 +533,9 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
   switch (normalized) {
     case '$STORY_TEXT': return { title, text: renderAgentStoryText_ACU(context) };
     case '$STORY_CATALOG': return { title, text: renderAgentStoryCatalog_ACU(context) };
+    case '$STORY_OVERVIEW': return { title, text: renderAgentStoryOverview_ACU(context) };
+    case '$STORY_TAIL': return { title, text: renderAgentStoryTail_ACU(context) };
     case '$HISTORY_UNSETTLED': return { title, text: renderAgentUnsettledHistory_ACU(context) };
-    case '$HISTORY_RECENT': return { title, text: renderAgentRecentHistory_ACU(context) };
     case '$OUTLINE_WINDOW': return { title, text: renderAgentOutlineWindow_ACU(context) };
     case '$CURRENT_TURN_GOAL': return { title, text: context.execution.turn?.goal || '（尚无可执行的大纲轮次，本轮目标待大纲创建或继续后确定）' };
     case '$CURRENT_TURN_PACING': return { title, text: renderAgentTurnPacingGuidance_ACU(context.execution.turn?.pacing ?? null) };

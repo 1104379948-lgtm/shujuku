@@ -6,6 +6,7 @@ import {
   AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
   AGENT_STORY_WINDOW_DEFAULT_ACU,
+  DEFAULT_AGENT_RUN_BUDGET_ACU,
 } from './agent/agent-model';
 
 export const CONTINUATION_TURN_RANGES_ACU: Readonly<Record<Exclude<ContinuationStageSize_ACU, 'custom'>, ContinuationTurnRange_ACU>> = {
@@ -53,7 +54,7 @@ const DEFAULT_OUTLINE_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n上一阶段纪要：\n$LAST_STAGE_CHRONICLES\n\n更早阶段概要：\n$EARLIER_STAGE_SUMMARIES\n\n最近剧情：\n$RECENT_STORY\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。',
+    content: '初始要求：\n$ORIGIN_INSTRUCTION\n\n【故事总纲】（本阶段必须落在当前 active 卷的台阶之内；标注为禁止提前释放的底牌，本阶段一律不许翻）：\n$STORY_ARC\n\n【节奏状态】（决定本阶段能选哪些形态、开头还剩多少高压余量）：\n$PACING_CONTEXT\n\n阶段轮数范围：\n$TURN_RANGE\n\n当前任务阶段历史：\n$STAGE_HISTORY\n\n当前阶段已完成的部分（仅供衔接参考，严禁在标签中重新输出这些内容，只规划其后的剩余轮次）：\n$COMPLETED_STAGE_PART\n\n重规划补充要求：\n$REPLAN_INSTRUCTION\n\n剩余轮数参考（可按剧情需要增减，只需保证全阶段总轮数在范围内）：\n$REMAINING_TURNS\n\n相关世界书背景：\n$1\n\n【事件概览】（纪要表逐轮概览，命中召回码的轮已展开为纪要全文；概览按轮记录、与楼层无一一映射）：\n$STORY_OVERVIEW\n\n【最近正文】（尾部全文楼层，只含 AI 正文）：\n$STORY_TAIL\n\n上次校验错误：\n$VALIDATION_ERRORS\n\n请严格基于上述上下文，规划当前阶段的后续剧情大纲，并按规定标签输出。',
     enabled: true,
     deletable: true,
   },
@@ -105,6 +106,13 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V15_ACU = 'spv2.3-continu
  * 命中厂商的 prompt 缓存。旧提示词的段排布会让缓存在运行时数据段处断开，必须强制刷新。
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU = 'spv2.4-continuation-cache-prefix-v16';
+/**
+ * 三层正文注入版本：正文改为 $STORY_OVERVIEW（事件概览，纪要召回精化）+ $STORY_TAIL（尾部
+ * 全文楼层）+ $STORY_CATALOG（纯楼层索引）三正交占位符；世界书目录改 token 标注并新增
+ * $WORLDBOOK_HITS 命中提示；子代理按角色矩阵固定注入；$CHRONICLES / $HISTORY_RECENT /
+ * $RECENT_STORY / 阶段纪要链全部退役。旧提示词描述的上下文排布与运行时不再一致，必须强制刷新。
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU = 'spv2.5-continuation-story-layers-v17';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -146,7 +154,6 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     retryDelaySeconds: 3,
     generationRetryLimit: 3,
     internalAiRetryLimit: 3,
-    contextTurnCount: 3,
     maxConsecutivePressureTurns: CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU,
     storyWindowFloors: AGENT_STORY_WINDOW_DEFAULT_ACU,
     agentHistoryTokenBudget: AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
@@ -155,13 +162,14 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentReadFallbackTokens: AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
     contextExtractRules: [],
     contextExcludeRules: [],
+    agentRunBudget: { ...DEFAULT_AGENT_RUN_BUDGET_ACU },
     apiPresetMode: 'current',
     fixedApiPresetName: '',
     promptCacheEnabled: true,
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU,
   };
 }
 

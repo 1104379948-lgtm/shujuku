@@ -35,8 +35,7 @@ function context_ACU(): AgentResolveContext_ACU {
     tableData: { s1: { name: '角色表', content: [['姓名', '状态'], ['林瑶', '右臂有伤，随身带黑色晶屑']] } },
     worldbook: {
       available: true,
-      entries: [{ bookName: '设定集', uid: '7', title: '晶屑设定', keys: ['晶屑'], constant: false, content: '黑色晶屑是禁区核心的碎片。\n接触过久会侵蚀心智。' }],
-      chronicles: [{ codes: ['AM1', 'AM2'], content: '主角初次听说黑色晶屑的传闻。' }],
+      entries: [{ bookName: '设定集', uid: '7', title: '晶屑设定', keys: ['晶屑'], constant: false, content: '黑色晶屑是禁区核心的碎片。\n接触过久会侵蚀心智。', tokens: 20 }],
     },
   };
 }
@@ -54,7 +53,6 @@ describe('五域搜索', () => {
     expect(result).toContain('读取地址 $HOOKS_LEDGER:H1');
     expect(result).toContain('读取地址 $OUTLINE_WINDOW');
     expect(result).toContain('读取地址 $WORLDBOOK:设定集:7');
-    expect(result).toContain('读取地址 $CHRONICLES:AM1-AM2');
     // 用户楼层不是正文，不进搜索。
     expect(result).not.toContain('我要进禁区');
   });
@@ -88,7 +86,9 @@ describe('五域搜索', () => {
   it('无命中时给出可执行的调整建议', () => {
     const result = runAgentSearch_ACU(call_ACU({ query: '不存在的词汇' }), context_ACU());
     expect(result).toContain('没有命中');
-    expect(result).toContain('纪要目录回溯');
+    // 无命中指引：更早剧情走事件概览与纪要表行区间，不再有独立的纪要域。
+    expect(result).toContain('事件概览');
+    expect(result).toContain('$TABLE:纪要表');
   });
 
   it('达到条数上限时停止收集并如实标注截断', () => {

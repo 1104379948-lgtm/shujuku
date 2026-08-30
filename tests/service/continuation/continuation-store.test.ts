@@ -195,7 +195,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: stale }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.4-continuation-cache-prefix-v16');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.5-continuation-story-layers-v17');
     expect(loaded.settings.agentPrompts.arcArchitect[0].content).toContain('故事总纲子代理');
     expect(loaded.settings.outlinePrompt.some(segment => segment.content.includes('<stage_tempo>'))).toBe(true);
     expect(loaded.settings.agentPrompts.main[0].content).not.toBe('用户改过的旧提示词');
@@ -393,7 +393,9 @@ describe('FirstFloorContinuationStore_ACU', () => {
     };
     const migration = buildLegacyContinuationMigration_ACU(legacy);
 
-    expect(migration.settings).toMatchObject({ loopTags: '<tag>', loopDelaySeconds: 7, retryDelaySeconds: 4, totalDurationMinutes: 9, generationRetryLimit: 5, contextTurnCount: 8 });
+    // contextTurnCount 已随 V17 退役：旧值不再迁入新设置。
+    expect(migration.settings).toMatchObject({ loopTags: '<tag>', loopDelaySeconds: 7, retryDelaySeconds: 4, totalDurationMinutes: 9, generationRetryLimit: 5 });
+    expect(migration.settings).not.toHaveProperty('contextTurnCount');
     expect(migration.settings).not.toHaveProperty('quickReplyContent');
     expect(stripLegacyContinuationLoopFields_ACU(legacy)).toEqual({ loopSettings: { loopTags: '<tag>', loopDelay: 7, retryDelay: 4, loopTotalDuration: 9, maxRetries: 5 }, contextTurnCount: 8, contextExtractRules: [{ start: '<a>', end: '</a>' }], contextExcludeRules: [{ start: '<b>', end: '</b>' }] });
 

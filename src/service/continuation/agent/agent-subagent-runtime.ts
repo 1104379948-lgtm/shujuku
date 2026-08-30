@@ -13,7 +13,7 @@
  */
 
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
-import { callContinuationInternalAi_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
+import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
 import { resolveContinuationApiPreset_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import {
@@ -33,11 +33,15 @@ import {
   parseAgentSubagentToolCalls_ACU,
 } from './agent-protocol';
 import {
+  buildAgentWorldbookScanText_ACU,
   renderAgentStoryCatalog_ACU,
+  renderAgentStoryOverview_ACU,
+  renderAgentStoryTail_ACU,
+  renderAgentUnsettledHistory_ACU,
   resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
-import { buildEmptyAgentWorldbookSnapshot_ACU, renderAgentWorldbookCatalog_ACU } from './agent-worldbook-read';
+import { buildEmptyAgentWorldbookSnapshot_ACU, renderAgentWorldbookCatalog_ACU, renderAgentWorldbookHits_ACU } from './agent-worldbook-read';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { runAgentSearch_ACU } from './agent-search';
 import {
@@ -58,6 +62,19 @@ import type {
   AgentToolCall_ACU,
   AgentWritableModule_ACU,
 } from './agent-model';
+
+/**
+ * 子代理事件概览的行数上限（按角色）。子代理每次派工都是全新上下文、无提示词缓存，
+ * 概览随纪要表线性增长会让长对话里每次派工的固定成本失控，因此按尾部窗口截断。
+ * 召回命中的更早轮次不受截断影响（渲染器会将其前置展示），窗口外脉络可用
+ * $TABLE:纪要表:行区间 精读，截断说明里带有回溯地址。
+ */
+export const AGENT_SUBAGENT_OVERVIEW_ROWS_ACU = {
+  /** mainline-planner 每轮必派，只需近期脉络与召回命中的关键旧轮。 */
+  mainlinePlanner: 50,
+  /** 其余子代理（含 arc-architect 的全局校准）给更宽的窗口。 */
+  default: 100,
+} as const;
 
 /** 一次子代理执行的结果。写集事务留给主循环应用，这里只交出解析后的输出。 */
 export interface AgentSubagentRunResult_ACU {
@@ -216,15 +233,28 @@ export class AgentSubagentRuntime_ACU {
 
     // 捕获与渲染必须同一时刻取自同一份快照，否则并发校验的基准就不是子代理真正读到的版本。
     const readRevisions: AgentModuleRevisions_ACU = { ...input.resolveContext.moduleSnapshot.revisions };
+    // 概览行数按角色裁剪：mainline-planner 每轮必派、只需近期脉络，取最近 50 轮；其余子代理
+    // （含 arc-architect）取最近 100 轮。召回命中的更早轮次不受截断影响（前置展示纪要全文）。
+    const overviewMaxRows = definition.promptKey === 'mainlinePlanner'
+      ? AGENT_SUBAGENT_OVERVIEW_ROWS_ACU.mainlinePlanner
+      : AGENT_SUBAGENT_OVERVIEW_ROWS_ACU.default;
     const rendered = await renderContinuationPrompt_ACU(selectPromptSegments_ACU(input.settings, definition), {
       $AGENT_READ_MATERIALS: () => materials,
       $AGENT_TASK: () => input.delegation.prompt,
       $AGENT_WRITE_SCOPE: () => describeWriteScope_ACU(writes),
-      // 资料目录：默认提示词引用它们给子代理提供可复制的读取地址；未引用时不产生开销。
+      // 资料目录与固定注入：默认提示词按角色矩阵引用；未引用的占位符不产生开销（惰性渲染）。
       $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
       $STORY_CATALOG: () => renderAgentStoryCatalog_ACU(input.resolveContext),
       $TABLE_CATALOG: () => renderAgentTableCatalog_ACU(input.resolveContext.tableData),
       $WORLDBOOK_CATALOG: () => renderAgentWorldbookCatalog_ACU(input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false)),
+      $WORLDBOOK_HITS: () => renderAgentWorldbookHits_ACU(input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false), buildAgentWorldbookScanText_ACU(input.resolveContext)),
+      $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ tableData: input.resolveContext.tableData, recallCodes: input.resolveContext.recallCodes }, { maxRows: overviewMaxRows }),
+      $STORY_TAIL: () => renderAgentStoryTail_ACU(input.resolveContext),
+      $HISTORY_UNSETTLED: () => renderAgentUnsettledHistory_ACU(input.resolveContext),
+      $HOOKS_LEDGER: () => resolveAgentReadToken_ACU('$HOOKS_LEDGER', input.resolveContext).text,
+      $INFO_GAP: () => resolveAgentReadToken_ACU('$INFO_GAP', input.resolveContext).text,
+      $ACTIVE_CONSTRAINTS: () => resolveAgentReadToken_ACU('$ACTIVE_CONSTRAINTS', input.resolveContext).text,
+      $STORY_ARC: () => resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
     }, 'agent_delegate');
 
     const prefill = PROMPT_KEY_PREFILLS_ACU[definition.promptKey];
@@ -262,7 +292,15 @@ export class AgentSubagentRuntime_ACU {
       if (!input.isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理请求已失效', false));
       }
-      const raw = await this.dependencies.callInternalAi([...rendered.messages, ...transcript], input.preset, identity, input.signal, callOptions);
+      // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
+      const raw = await callContinuationInternalAiWithRetry_ACU(
+        () => this.dependencies.callInternalAi([...rendered.messages, ...transcript], input.preset, identity, input.signal, callOptions),
+        {
+          transportRetries: retries,
+          retryDelaySeconds: input.settings.retryDelaySeconds,
+          isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
+        },
+      );
       if (!input.isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '子代理结果已失效', false));
       }

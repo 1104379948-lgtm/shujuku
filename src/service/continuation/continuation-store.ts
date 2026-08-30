@@ -1,6 +1,6 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU } from './defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU } from './defaults';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
@@ -8,6 +8,7 @@ import {
   AGENT_READ_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
   AGENT_STORY_WINDOW_DEFAULT_ACU,
+  DEFAULT_AGENT_RUN_BUDGET_ACU,
 } from './agent/agent-model';
 import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, CONTINUATION_AGENT_PROMPT_KEYS_ACU } from './model';
 import { resolveContinuationTurnRange_ACU, validateStageOutline_ACU } from './outline-schema';
@@ -155,6 +156,29 @@ function validateReadTokenBudget_ACU(raw: unknown): number | string {
 }
 
 /**
+ * 校验 Agent 运行预算。六项各有边界：上界防止「设个大数等于关闭护栏」，
+ * 下界区分「必须至少一次」（迭代/同代理/并发）与「0 即显式关闭」（派工/读取/工具轮）。
+ */
+function validateAgentRunBudget_ACU(raw: unknown): ContinuationSettings_ACU['agentRunBudget'] {
+  if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings.agentRunBudget 必须是对象');
+  requireKeys_ACU(raw, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], 'settings.agentRunBudget');
+  const bounded = (value: unknown, path: string, minimum: number, maximum: number): number => {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < minimum || value > maximum) {
+      fail_ACU('CONTINUATION_ENVELOPE_INVALID', `字段必须是 ${minimum} 到 ${maximum} 之间的整数：${path}`, { path });
+    }
+    return value;
+  };
+  return {
+    maxIterations: bounded(raw.maxIterations, 'settings.agentRunBudget.maxIterations', 1, 30),
+    maxDelegations: bounded(raw.maxDelegations, 'settings.agentRunBudget.maxDelegations', 0, 20),
+    maxSameAgent: bounded(raw.maxSameAgent, 'settings.agentRunBudget.maxSameAgent', 1, 10),
+    maxConcurrent: bounded(raw.maxConcurrent, 'settings.agentRunBudget.maxConcurrent', 1, 6),
+    maxReads: bounded(raw.maxReads, 'settings.agentRunBudget.maxReads', 0, 30),
+    maxExtraReads: bounded(raw.maxExtraReads, 'settings.agentRunBudget.maxExtraReads', 0, 10),
+  };
+}
+
+/**
  * 校验一份独立的续写设置（信封之外的来源，如全局设置副本）。
  * 复用信封同一套校验：含历史字段无感迁移与提示词版本强刷，旧格式副本读出来即是当前版本。
  * @param raw 待校验的设置对象（会被就地迁移，调用方应传入深拷贝）
@@ -188,7 +212,11 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (!Object.prototype.hasOwnProperty.call(raw, 'maxConsecutivePressureTurns')) raw.maxConsecutivePressureTurns = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU;
   // 缓存前缀优化（V16）之前的信封没有该开关；缺失即默认开启，与新建默认一致。
   if (!Object.prototype.hasOwnProperty.call(raw, 'promptCacheEnabled')) raw.promptCacheEnabled = true;
-  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'contextTurnCount', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
+  // contextTurnCount 在续写链路里从未被任何渲染消费（V17 起彻底退役）；直接丢掉即无感迁移。
+  if (Object.prototype.hasOwnProperty.call(raw, 'contextTurnCount')) delete raw.contextTurnCount;
+  // Agent 运行预算开放为设置（V17）之前的信封没有该字段；补默认即无感迁移。
+  if (!Object.prototype.hasOwnProperty.call(raw, 'agentRunBudget')) raw.agentRunBudget = { ...DEFAULT_AGENT_RUN_BUDGET_ACU };
+  const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
   requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
   if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
   const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
@@ -200,10 +228,10 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   let outlinePrompt = raw.outlinePrompt;
   let agentPrompts = raw.agentPrompts;
   let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU) {
+  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU;
   }
   
   return {
@@ -211,10 +239,11 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     outlinePreview: requireBoolean_ACU(raw.outlinePreview, 'settings.outlinePreview'), autoNextStage: requireBoolean_ACU(raw.autoNextStage, 'settings.autoNextStage'),
     maxAutomaticStages: requireInteger_ACU(raw.maxAutomaticStages, 'settings.maxAutomaticStages', 1), loopTags: requireString_ACU(raw.loopTags, 'settings.loopTags'),
     loopDelaySeconds: requireInteger_ACU(raw.loopDelaySeconds, 'settings.loopDelaySeconds', 0), totalDurationMinutes: requireInteger_ACU(raw.totalDurationMinutes, 'settings.totalDurationMinutes', 0), retryDelaySeconds: requireInteger_ACU(raw.retryDelaySeconds, 'settings.retryDelaySeconds', 0),
-    generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), contextTurnCount: requireInteger_ACU(raw.contextTurnCount, 'settings.contextTurnCount', 0), maxConsecutivePressureTurns: requireBoundedInteger_ACU(raw.maxConsecutivePressureTurns, 'settings.maxConsecutivePressureTurns', CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU),
+    generationRetryLimit: requireInteger_ACU(raw.generationRetryLimit, 'settings.generationRetryLimit', 0), internalAiRetryLimit: requireInteger_ACU(raw.internalAiRetryLimit, 'settings.internalAiRetryLimit', 0), maxConsecutivePressureTurns: requireBoundedInteger_ACU(raw.maxConsecutivePressureTurns, 'settings.maxConsecutivePressureTurns', CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU),
     storyWindowFloors: requireInteger_ACU(raw.storyWindowFloors, 'settings.storyWindowFloors', 0), agentHistoryTokenBudget: requireInteger_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', 0),
     storyTailFloors: requireInteger_ACU(raw.storyTailFloors, 'settings.storyTailFloors', 0), agentReadTokenBudget: validateReadTokenBudget_ACU(raw.agentReadTokenBudget), agentReadFallbackTokens: requireInteger_ACU(raw.agentReadFallbackTokens, 'settings.agentReadFallbackTokens', 1),
     contextExtractRules: validateRules_ACU(raw.contextExtractRules, 'settings.contextExtractRules'), contextExcludeRules: validateRules_ACU(raw.contextExcludeRules, 'settings.contextExcludeRules'),
+    agentRunBudget: validateAgentRunBudget_ACU(raw.agentRunBudget),
     apiPresetMode: raw.apiPresetMode as ContinuationSettings_ACU['apiPresetMode'], fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
     promptCacheEnabled: requireBoolean_ACU(raw.promptCacheEnabled, 'settings.promptCacheEnabled'),
     agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),
@@ -293,7 +322,11 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
   const stages = raw.stages.map((stage, index) => {
     const path = `activeTask.stages[${index}]`;
     if (!isRecord_ACU(stage)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `阶段必须是对象：${path}`);
-    const stageKeys = ['stageId', 'stageNumber', 'status', 'chronicleStartCount', 'chronicleEndCount', 'chronicleAddedCount', 'chronicleRange', 'activeRevision', 'revisions', 'activeNodeIndex', 'activeTurnIndex', 'completedTurns'];
+    // 阶段纪要统计链（chronicle*）在 V17 彻底退役；旧信封先就地丢弃再进入严格键校验。
+    for (const legacyKey of ['chronicleStartCount', 'chronicleEndCount', 'chronicleAddedCount', 'chronicleRange']) {
+      if (Object.prototype.hasOwnProperty.call(stage, legacyKey)) delete stage[legacyKey];
+    }
+    const stageKeys = ['stageId', 'stageNumber', 'status', 'activeRevision', 'revisions', 'activeNodeIndex', 'activeTurnIndex', 'completedTurns'];
     requireKeys_ACU(stage, stageKeys, path);
     const stageId = requireString_ACU(stage.stageId, `${path}.stageId`);
     if (stageIds.has(stageId)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `阶段 ID 重复：${stageId}`);
@@ -312,8 +345,7 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
     });
     const activeRevision = requireInteger_ACU(stage.activeRevision, `${path}.activeRevision`, 1);
     if (!revisionNumbers.has(activeRevision)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `activeRevision 未指向现有 revision：${path}`);
-    const chronicleRange = stage.chronicleRange === null ? null : (() => { if (!isRecord_ACU(stage.chronicleRange)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `chronicleRange 必须是对象：${path}`); requireKeys_ACU(stage.chronicleRange, ['first', 'last'], `${path}.chronicleRange`); return { first: requireString_ACU(stage.chronicleRange.first, `${path}.chronicleRange.first`), last: requireString_ACU(stage.chronicleRange.last, `${path}.chronicleRange.last`) }; })();
-    return { stageId, stageNumber: requireInteger_ACU(stage.stageNumber, `${path}.stageNumber`, 1), status: stageStatus, chronicleStartCount: requireInteger_ACU(stage.chronicleStartCount, `${path}.chronicleStartCount`, 0), chronicleEndCount: stage.chronicleEndCount === null ? null : requireInteger_ACU(stage.chronicleEndCount, `${path}.chronicleEndCount`, 0), chronicleAddedCount: stage.chronicleAddedCount === null ? null : requireInteger_ACU(stage.chronicleAddedCount, `${path}.chronicleAddedCount`, 0), chronicleRange, activeRevision, revisions, activeNodeIndex: requireInteger_ACU(stage.activeNodeIndex, `${path}.activeNodeIndex`, 0), activeTurnIndex: requireInteger_ACU(stage.activeTurnIndex, `${path}.activeTurnIndex`, 0), completedTurns: requireInteger_ACU(stage.completedTurns, `${path}.completedTurns`, 0) };
+    return { stageId, stageNumber: requireInteger_ACU(stage.stageNumber, `${path}.stageNumber`, 1), status: stageStatus, activeRevision, revisions, activeNodeIndex: requireInteger_ACU(stage.activeNodeIndex, `${path}.activeNodeIndex`, 0), activeTurnIndex: requireInteger_ACU(stage.activeTurnIndex, `${path}.activeTurnIndex`, 0), completedTurns: requireInteger_ACU(stage.completedTurns, `${path}.completedTurns`, 0) };
   });
   const activeStageId = raw.activeStageId === null ? null : requireString_ACU(raw.activeStageId, 'activeTask.activeStageId');
   if (activeStageId !== null && !stageIds.has(activeStageId)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'activeStageId 未指向现有阶段');
@@ -514,7 +546,6 @@ export function buildLegacyContinuationMigration_ACU(legacyPlotSettings: unknown
   settings.retryDelaySeconds = readLegacyNonNegativeInteger_ACU(loopSettings.retryDelay, settings.retryDelaySeconds);
   settings.totalDurationMinutes = readLegacyNonNegativeInteger_ACU(loopSettings.loopTotalDuration, settings.totalDurationMinutes);
   settings.generationRetryLimit = readLegacyNonNegativeInteger_ACU(loopSettings.maxRetries, settings.generationRetryLimit);
-  settings.contextTurnCount = readLegacyNonNegativeInteger_ACU(legacyPlotSettings.contextTurnCount, settings.contextTurnCount);
   settings.contextExtractRules = readLegacyRules_ACU(legacyPlotSettings.contextExtractRules);
   settings.contextExcludeRules = readLegacyRules_ACU(legacyPlotSettings.contextExcludeRules);
   return { settings, didMigrate: true };

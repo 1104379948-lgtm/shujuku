@@ -389,9 +389,10 @@ export   function cloneScopedConfigData_ACU(value: any, fallback: any = null) {
   }
 
 
+  /** 世界书条目屏蔽词判定。屏蔽词列表当前为空（用户要求全部放开），判定逻辑保留供日后配置。 */
   export function isEntryBlocked_ACU(entry: any) {
     if (!entry) return false;
-    const blockedKeywords = ["规则", "思维链", "cot", "MVU", "mvu", "变量", "状态", "Status", "Rule", "rule", "检定", "判断", "叙事", "文风", "InitVar", "格式"];
+    const blockedKeywords: string[] = [];
     const name = String(entry.comment || entry.name || '');
     return blockedKeywords.some(keyword => name.includes(keyword));
   }

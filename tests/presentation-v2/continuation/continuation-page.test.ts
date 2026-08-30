@@ -51,7 +51,7 @@ function setTask(status = 'paused', pending = false): void {
     taskId: 'task-1', originInstruction: '让主角找到出口', status, stopReason: null,
     activeStageId: 'stage-1', stages: [{
       stageId: 'stage-1', stageNumber: 1, status: 'running', activeRevision: 2,
-      completedTurns: 3, chronicleRange: null, revisions: [{
+      completedTurns: 3, revisions: [{
         revision: 2, reason: 'initial', frozen: true,
         outline: { title: '逃离计划', goal: '让主角找到出口', totalTurns: 6, nodes: [] },
       }],
@@ -122,8 +122,9 @@ function setSettings(): void {
     outlinePreview: false, autoNextStage: true, maxAutomaticStages: 6,
     loopTags: '', loopDelaySeconds: 5, totalDurationMinutes: 0,
     retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3,
-    contextTurnCount: 3, storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
+    storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
     agentReadTokenBudget: '30%', agentReadFallbackTokens: 6000,
+    agentRunBudget: { maxIterations: 8, maxDelegations: 6, maxSameAgent: 2, maxConcurrent: 3, maxReads: 8, maxExtraReads: 3 },
     contextExtractRules: [], contextExcludeRules: [],
     apiPresetMode: 'current', fixedApiPresetName: '', promptCacheEnabled: true,
     agentApiPresets: {

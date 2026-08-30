@@ -61,16 +61,24 @@ describe('Agent 资料快照存储', () => {
     expect(validated!.infoGap[0].revealIndex).toBeNull();
   });
 
-  it('写盘成功后水位落在目标楼层', async () => {
+  it('写盘保留快照自带的水位（钳制在 0 与目标楼层之间），不再自动顶到目标楼层', async () => {
     const chat: any[] = [{ mes: 'a' }, { mes: 'b' }];
     const saveChat = vi.fn().mockResolvedValue(undefined);
     _set_SillyTavern_API_ACU({ chat, saveChat } as any);
 
+    // 水位只由结算子代理成功交付时显式推进：写盘时快照声明多少就是多少。
     await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt_ACU(0, { hooks: [hook_ACU('H1') as any] }));
-
     expect(saveChat).toHaveBeenCalledOnce();
-    expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(1);
+    expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(0);
     expect(readAgentModuleSnapshot_ACU(chat).hooks).toHaveLength(1);
+
+    // 显式声明的水位如实落盘；越界声明（超过目标楼层 / 负值）被钳制回合法区间。
+    await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt_ACU(1));
+    expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(1);
+    await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt_ACU(9));
+    expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(1);
+    await writeAgentModuleSnapshot_ACU(chat, 1, snapshotAt_ACU(-1));
+    expect(chat[1][AGENT_MODULE_FIELD_ACU].settledThroughIndex).toBe(0);
   });
 
   it('写盘失败时还原楼层字段而不留下半成品', async () => {

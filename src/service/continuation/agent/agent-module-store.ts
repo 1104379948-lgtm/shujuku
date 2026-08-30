@@ -187,8 +187,12 @@ export function readAgentModuleSnapshot_ACU(chat?: any[]): AgentModuleSnapshot_A
 
 /**
  * 把快照写入指定楼层并真实提交到宿主。
+ *
+ * 结算水位以快照自带的 settledThroughIndex 为准，只做合法性钳制（0 ≤ 水位 ≤ 承载楼层）：
+ * 写盘不推水位——立总纲、用户手动保存都不代表未结算正文被结算过，水位推进只由
+ * 结算派工成功后显式设置。
  * @param chat 聊天数组
- * @param targetIndex 承载快照的楼层下标，通常是被结算范围的最后一楼
+ * @param targetIndex 承载快照的楼层下标，通常是当前末楼
  * @param snapshot 待写入的全量快照
  */
 export async function writeAgentModuleSnapshot_ACU(chat: any[], targetIndex: number, snapshot: AgentModuleSnapshot_ACU): Promise<void> {
@@ -199,8 +203,9 @@ export async function writeAgentModuleSnapshot_ACU(chat: any[], targetIndex: num
   const container = message as Record<string, unknown>;
   const hadPrevious = Object.prototype.hasOwnProperty.call(container, AGENT_MODULE_FIELD_ACU);
   const previous = container[AGENT_MODULE_FIELD_ACU];
+  const settledThroughIndex = Math.min(Math.max(snapshot.settledThroughIndex, 0), targetIndex);
   try {
-    container[AGENT_MODULE_FIELD_ACU] = { ...snapshot, settledThroughIndex: targetIndex, updatedAt: Date.now() };
+    container[AGENT_MODULE_FIELD_ACU] = { ...snapshot, settledThroughIndex, updatedAt: Date.now() };
     await saveChatToHostStrict_ACU();
   } catch (error) {
     if (hadPrevious) container[AGENT_MODULE_FIELD_ACU] = previous;
@@ -233,7 +238,9 @@ export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: 
     ...current,
     ...raw,
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
-    settledThroughIndex: targetIndex,
+    // 手动保存不推进结算水位：用户改资料不代表未结算正文被结算过。保留现有水位，
+    // 新聊天的 -1 钳制为 0（校验器拒绝负值），上限钳制交给写盘函数。
+    settledThroughIndex: Math.max(current.settledThroughIndex, 0),
     // 手动编辑同样推进修订号：否则携带旧修订号的子代理写集会通过并覆盖用户刚保存的内容。
     revisions: {
       hooks: current.revisions.hooks + 1,
