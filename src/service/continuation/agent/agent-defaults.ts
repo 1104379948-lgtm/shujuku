@@ -3,12 +3,10 @@
  *
  * 装配约定（各部分的相对位置是刻意的）：
  * 伪 role 规则组 → 正文楼层目录（$STORY_CATALOG，同一轮内稳定）→
- * 主 Agent 自己的会话记录（$HISTORY_ANCHOR，含它历次调阅到的资料，只在尾部追加）→
- * 本回合运行时数据（$BUDGET 等每次迭代必变的状态）→ 尾部预填充。
- * 排序原则是「按变化频率从低到高」：厂商的 prompt 缓存按字节级前缀命中，
- * 每迭代必变的运行时数据一旦排在会话记录之前，历史里调阅到的大量资料就永远进不了缓存前缀。
- * 因此运行时数据必须放在历史之后——前缀（规则组 + 目录 + 全部历史）在迭代间保持字节级稳定，
- * 每次迭代只有尾部的运行时数据段需要重新计算。
+ * 主 Agent 自己的会话记录（$HISTORY_ANCHOR，含它历次调阅到的资料、
+ * 以及系统在目录/状态变化时追加的运行时快照，只在尾部追加）→ 尾部预填充。
+ * Codex 兼容渠道按严格 append-only 衔接轮次：已经发出的前缀不能改写或删除。
+ * $BUDGET 等每迭代必变的状态因此不能再作为骨架尾段重算，必须作为会话快照追加。
  *
  * 资料获取模型：骨架只给目录和状态，正文/表格/模块/世界书/纪要都由 Agent 自己用
  * read / search 工具按地址调阅，结果落在会话记录里跨迭代保留。
@@ -28,6 +26,24 @@ export const AGENT_HISTORY_READ_RULE_V17_ACU = '已经调阅到的资料就在�
 
 /** V18 append-only 会话规则：同址重读由靠后的新消息声明快照关系，旧消息保持原文。 */
 export const AGENT_HISTORY_READ_RULE_V18_ACU = '同一地址多次出现时，靠后的工具结果是最新快照，较早结果仅代表产生时状态；';
+
+/** V20 会话规则补充：运行时目录与状态也走追加快照，靠后覆盖较早。 */
+export const AGENT_HISTORY_RUNTIME_RULE_V20_ACU = '靠后的运行时快照覆盖较早快照，旧快照只代表当时状态；';
+
+/**
+ * V19 默认【本回合运行时数据】骨架段。V20 已从默认提示词删除；
+ * 定向迁移用全文比对识别未改写的默认段，避免误删用户定制。
+ */
+export const V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU = '【本回合运行时数据】\n以上会话记录到此为止。以下是系统在本次迭代刷新的目录与状态——它们反映你此前动作造成的最新结果，比会话记录里的旧陈述更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。这里没有任何资料正文——需要内容就按地址 read，需要定位就 search。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
+
+/** V19 默认历史导语。V20 增补了运行时快照规则，迁移时只替换这份未改写原文。 */
+export const V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU = `【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。${AGENT_HISTORY_READ_RULE_V18_ACU}已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。`;
+
+/** V19 默认上下文排布问答的 assistant 答。V20 改为快照在会话内追加，迁移时只替换这份未改写原文。 */
+export const V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU = '我收到的上下文分三层：\n1. 正文注入（三节正交）：【事件概览】是纪要表逐轮的事件脉络（每轮一行，本轮召回命中的行会展开为纪要全文），我靠它掌握全局剧情走向；【最近正文】是尾部若干楼的全文，续写必须无缝衔接它的结尾，这几楼不要再 read；【楼层索引】是纯地址索引（楼层号、字数、读取地址），目录行不能代替读正文——需要哪几楼的原文就用 $STORY_RANGE 调阅，需要某几轮的详细纪要就用 $TABLE:纪要表:行区间。注意概览按剧情轮记录、与楼层号没有一一映射，定位具体楼层用 search 的 story 域。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果。我调阅过的资料就留在这里，跨迭代有效，不必重读；标着「内容已过期」的旧调阅说明资料后来变了，需要时按地址重读最新版。\n3. 本回合运行时数据（排在会话记录之后、我的输出之前）：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、世界书命中提示、读取地址词汇表、预算状态。这一层每次迭代都刷新为最新值——它反映我此前动作（派工、结算、大纲编辑）造成的最新状态，比会话记录里的旧陈述更新。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。';
+
+/** 主循环渲染并追加到会话的运行时快照模板。占位符由 renderMainPrompt 同一套 resolvers 解析。 */
+export const AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU = '【本回合运行时数据】\n以下是系统在目录或状态变化时追加的快照——靠后的快照比早先的更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。这里没有任何资料正文——需要内容就按地址 read，需要定位就 search。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
 
 /** 各请求尾段预填充文本。解析器会在必要时把它拼回模型输出前再解析。 */
 export const AGENT_PREFILLS_ACU = {
@@ -104,7 +120,7 @@ const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'assistant',
-    content: '我收到的上下文分三层：\n1. 正文注入（三节正交）：【事件概览】是纪要表逐轮的事件脉络（每轮一行，本轮召回命中的行会展开为纪要全文），我靠它掌握全局剧情走向；【最近正文】是尾部若干楼的全文，续写必须无缝衔接它的结尾，这几楼不要再 read；【楼层索引】是纯地址索引（楼层号、字数、读取地址），目录行不能代替读正文——需要哪几楼的原文就用 $STORY_RANGE 调阅，需要某几轮的详细纪要就用 $TABLE:纪要表:行区间。注意概览按剧情轮记录、与楼层号没有一一映射，定位具体楼层用 search 的 story 域。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果。我调阅过的资料就留在这里，跨迭代有效，不必重读；标着「内容已过期」的旧调阅说明资料后来变了，需要时按地址重读最新版。\n3. 本回合运行时数据（排在会话记录之后、我的输出之前）：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、世界书命中提示、读取地址词汇表、预算状态。这一层每次迭代都刷新为最新值——它反映我此前动作（派工、结算、大纲编辑）造成的最新状态，比会话记录里的旧陈述更新。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。',
+    content: '我收到的上下文分三层：\n1. 正文注入（三节正交）：【事件概览】是纪要表逐轮的事件脉络（每轮一行，本轮召回命中的行会展开为纪要全文），我靠它掌握全局剧情走向；【最近正文】是尾部若干楼的全文，续写必须无缝衔接它的结尾，这几楼不要再 read；【楼层索引】是纯地址索引（楼层号、字数、读取地址），目录行不能代替读正文——需要哪几楼的原文就用 $STORY_RANGE 调阅，需要某几轮的详细纪要就用 $TABLE:纪要表:行区间。注意概览按剧情轮记录、与楼层号没有一一映射，定位具体楼层用 search 的 story 域。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果，以及系统在目录或状态变化时追加的运行时快照。会话只在尾部追加，已经发出去的前缀不会被改写。我调阅过的资料就留在这里，跨迭代有效，不必重读；同一地址多次出现时，靠后的工具结果是最新快照，较早结果仅代表产生时状态。\n3. 运行时快照也在会话记录里：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、世界书命中提示、读取地址词汇表、预算状态。系统只在这些内容相对上一条快照发生变化时追加一条新快照；靠后的快照覆盖较早快照，旧快照仍保留原文，不要把它当最新状态。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 较新的运行时快照 > 较早的会话记录。用户在会话里的最新指令优先于我此前的计划。',
     enabled: true,
     deletable: true,
   },
@@ -148,22 +164,13 @@ const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'user',
-    content: `【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。${AGENT_HISTORY_READ_RULE_V18_ACU}已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。`,
+    content: `【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，以及系统在状态变化时追加的运行时快照，按真实发生顺序排列，跨轮次持续累积。${AGENT_HISTORY_READ_RULE_V18_ACU}${AGENT_HISTORY_RUNTIME_RULE_V20_ACU}已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。`,
     enabled: true,
     deletable: true,
   },
   {
     role: 'user',
     content: AGENT_HISTORY_ANCHOR_TOKEN_ACU,
-    enabled: true,
-    deletable: false,
-    pinned: true,
-  },
-  // 运行时数据放在会话记录之后：这一段（尤其 $BUDGET）每次迭代都变，若排在历史之前，
-  // 厂商按字节级前缀命中的 prompt 缓存会在此处断开，历史里调阅到的大量资料永远进不了缓存。
-  {
-    role: 'user',
-    content: '【本回合运行时数据】\n以上会话记录到此为止。以下是系统在本次迭代刷新的目录与状态——它们反映你此前动作造成的最新结果，比会话记录里的旧陈述更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。这里没有任何资料正文——需要内容就按地址 read，需要定位就 search。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET',
     enabled: true,
     deletable: false,
     pinned: true,
@@ -440,13 +447,47 @@ const V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU = new Set([
 ]);
 
 /**
+ * V18 非根 system 段在 V19 时的默认正文。V20 改写了历史导语并删除了运行时段，
+ * 因此不能再拿当前 MAIN_AGENT_PROMPT_ACU 做全文比对。
+ */
+function v19DefaultMainAgentNonRootSystemContents_ACU(): string[] {
+  return [
+    ...MAIN_AGENT_PROMPT_ACU
+      .filter(segment => segment.role === 'user' && [...V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU].some(heading => heading !== '【本回合运行时数据】' && heading !== '【以下是你自己的会话记录】' && segment.content.startsWith(heading)))
+      .map(segment => segment.content),
+    V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU,
+    V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU,
+  ];
+}
+
+/**
  * V18 → V19 定向迁移只转换内容未被用户改写的默认 system 段。
- * V19 默认中这些段已是 user；用完整内容比对避免误改用户自定义提示词。
+ * 比对冻结的 V19 原文，避免 V20 改写默认提示词后把旧默认段当成用户定制而跳过。
  */
 export function isV18DefaultMainAgentNonRootSystemSegment_ACU(content: unknown): content is string {
-  return typeof content === 'string'
-    && [...V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU].some(heading => content.startsWith(heading))
-    && MAIN_AGENT_PROMPT_ACU.some(segment => segment.role === 'user' && segment.content === content);
+  return typeof content === 'string' && v19DefaultMainAgentNonRootSystemContents_ACU().includes(content);
+}
+
+export function isV19DefaultMainAgentRuntimeSegment_ACU(content: unknown): content is string {
+  return content === V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU;
+}
+
+export function isV19DefaultMainAgentHistoryGuide_ACU(content: unknown): content is string {
+  return content === V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU;
+}
+
+export function isV19DefaultMainAgentLayoutAnswer_ACU(content: unknown): content is string {
+  return content === V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU;
+}
+
+export function currentDefaultMainAgentHistoryGuide_ACU(): string {
+  const segment = MAIN_AGENT_PROMPT_ACU.find(item => item.content.startsWith('【以下是你自己的会话记录】'));
+  return segment?.content ?? V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU;
+}
+
+export function currentDefaultMainAgentLayoutAnswer_ACU(): string {
+  const segment = MAIN_AGENT_PROMPT_ACU.find(item => item.content.startsWith('我收到的上下文分三层：'));
+  return segment?.content ?? V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU;
 }
 
 export function buildDefaultAgentMainPrompt_ACU(): ContinuationPromptSegment_ACU[] {

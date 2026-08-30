@@ -1,7 +1,7 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU } from './defaults';
-import { AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, buildDefaultContinuationAgentPrompts_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU } from './agent/agent-defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU } from './defaults';
+import { AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU } from './agent/agent-defaults';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -158,6 +158,34 @@ function migrateV18AgentPromptsToV19_ACU(raw: unknown): unknown {
 }
 
 /**
+ * V19 → V20 把未改写的运行时骨架段挪出提示词（改由会话追加快照），
+ * 并定向更新未改写的排布问答与历史导语。用户定制正文保持原样。
+ */
+function migrateV19AgentPromptsToV20_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw) || !Array.isArray(raw.main)) return raw;
+  let changed = false;
+  const layoutAnswer = currentDefaultMainAgentLayoutAnswer_ACU();
+  const historyGuide = currentDefaultMainAgentHistoryGuide_ACU();
+  const main = raw.main.flatMap(segment => {
+    if (!isRecord_ACU(segment) || typeof segment.content !== 'string') return [segment];
+    if (isV19DefaultMainAgentRuntimeSegment_ACU(segment.content)) {
+      changed = true;
+      return [];
+    }
+    if (isV19DefaultMainAgentLayoutAnswer_ACU(segment.content) && segment.content !== layoutAnswer) {
+      changed = true;
+      return [{ ...segment, content: layoutAnswer }];
+    }
+    if (isV19DefaultMainAgentHistoryGuide_ACU(segment.content) && segment.content !== historyGuide) {
+      changed = true;
+      return [{ ...segment, content: historyGuide }];
+    }
+    return [segment];
+  });
+  return changed ? { ...raw, main } : raw;
+}
+
+/**
  * 校验七个角色的 AI 渠道配置。
  * @param raw 持久化里的 agentApiPresets 字段
  * @returns 逐角色校验后的渠道配置
@@ -275,14 +303,19 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU) {
     agentPrompts = migrateV17AgentPromptsToV18_ACU(agentPrompts);
     agentPrompts = migrateV18AgentPromptsToV19_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU;
+    agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU;
   } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU) {
     agentPrompts = migrateV18AgentPromptsToV19_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU;
-  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU) {
+    agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU;
+  } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU) {
+    agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU;
+  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU;
   }
   
   return {

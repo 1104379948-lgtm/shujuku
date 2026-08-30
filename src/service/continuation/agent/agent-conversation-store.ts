@@ -40,6 +40,7 @@ const KIND_PREFIXES_ACU: Record<AgentConversationMessageKind_ACU, string> = {
   user: '【用户】',
   agent: '',
   tool: '【工具结果】',
+  runtime: '【运行时快照】',
   turn: '【新的一轮】',
   handoff: '【早期会话交接报告】',
 };
@@ -317,7 +318,7 @@ export function appendAgentConversation_ACU(snapshot: AgentConversationSnapshot_
     const message: AgentConversationMessage_ACU = {
       id: nextId++,
       kind: item.kind,
-      text: truncateText_ACU(String(item.text)),
+      text: item.kind === 'runtime' ? String(item.text) : truncateText_ACU(String(item.text)),
       digest: String(item.digest ?? ''),
       turnKey: String(item.turnKey ?? ''),
       at,
@@ -369,6 +370,17 @@ export function renderAgentConversationMessages_ACU(snapshot: AgentConversationS
 export function lastAnnouncedTurnKey_ACU(snapshot: AgentConversationSnapshot_ACU): string {
   for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
     if (snapshot.messages[index].kind === 'turn') return snapshot.messages[index].turnKey;
+  }
+  return '';
+}
+
+/**
+ * 投影视图里最近一条运行时快照的正文。压缩掉旧快照后返回空串，
+ * 调用方据此重新追加当前快照，避免模型只剩过期目录。
+ */
+export function lastRuntimeSnapshotText_ACU(snapshot: AgentConversationSnapshot_ACU): string {
+  for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
+    if (snapshot.messages[index].kind === 'runtime') return snapshot.messages[index].text;
   }
   return '';
 }

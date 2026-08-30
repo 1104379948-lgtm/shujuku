@@ -4,13 +4,15 @@
  * 主 Agent 每次迭代只做一件事：读证据、输出一个协议动作。运行时执行该动作后把结果
  * 回灌成新的证据，再进入下一次迭代，直到 finalize / block / 预算耗尽。
  *
- * 装配顺序：伪 role 提示词 → Agent 自己的会话记录 → 本回合运行时证据 → 尾部预填充。
+ * 装配顺序：伪 role 提示词 → Agent 自己的会话记录（含运行时快照）→ 尾部预填充。
  * 会话记录插在 `$HISTORY_ANCHOR` 段的位置上，该段本身不发送。
+ * 目录与预算不再作为骨架尾段重算，只在内容变化时追加为 runtime 会话消息，
+ * 保证相邻请求对 Codex 兼容渠道是严格的前缀延伸。
  *
  * 正文经三个正交占位符注入骨架：`$STORY_OVERVIEW`（纪要表事件概览，召回行升级纪要全文）、
  * `$STORY_TAIL`（尾部若干 AI 楼层全文）、`$STORY_CATALOG`（纯楼层索引）；`$HISTORY_ANCHOR`
- * 承载主 Agent 自己的对话——用户输入、它历次迭代的原始输出、运行时回灌的工具结果，
- * 按真实 role 跨轮持久累积。这样它才看得见自己走到哪了。
+ * 承载主 Agent 自己的对话——用户输入、它历次迭代的原始输出、运行时回灌的工具结果与
+ * 运行时快照，按真实 role 跨轮持久累积。这样它才看得见自己走到哪了。
  */
 
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
@@ -24,7 +26,7 @@ import {
   type ContinuationInternalAiRequestIdentity_ACU,
   type ContinuationSettings_ACU,
 } from '../model';
-import { AGENT_PREFILLS_ACU } from './agent-defaults';
+import { AGENT_PREFILLS_ACU, AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from './agent-defaults';
 import { beginAgentSessionRun_ACU, logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log';
 import { clearAgentRunState_ACU, readAgentRunState_ACU, saveAgentRunState_ACU } from './agent-run-cache';
 import { findAgentSubagentDefinition_ACU, renderAgentModuleCatalog_ACU, renderAgentReadCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
@@ -33,6 +35,7 @@ import {
   appendAgentConversation_ACU,
   appendPreparedAgentConversationMessages_ACU,
   lastAnnouncedTurnKey_ACU,
+  lastRuntimeSnapshotText_ACU,
   readAgentConversation_ACU,
   renderAgentConversationMessages_ACU,
   writeAgentConversationCompactionMark_ACU,
@@ -424,6 +427,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         currentIteration = iteration;
         persistRunState(iteration);
         const allowDelegate = iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations;
+        await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig);
         const round = await this.callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig);
         totalAttempts += round.attempts;
         const action = round.action;
@@ -676,10 +680,9 @@ export class ContinuationAgentTurnPlanner_ACU {
   }
 
   /**
-   * 渲染主 Agent 的提示词消息序列（历史锚点仍是哨兵，尚未拼入会话历史）。
-   * 每次迭代的实际请求与运行开始时的上下文开销测量共用此路径，保证量到的就是发出去的。
+   * 主 Agent 骨架与运行时快照共用同一套占位符解析，避免两边目录/预算各算各的。
    */
-  private async renderMainPrompt_ACU(
+  private buildMainPromptResolvers_ACU(
     request: ContinuationAgentTurnPlanRequest_ACU,
     context: AgentResolveContext_ACU,
     ledger: AgentRunLedger_ACU,
@@ -687,8 +690,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     iteration: number,
     toolUsage: AgentToolUsage_ACU,
     gateConfig: AgentReadGateConfig_ACU,
-  ): Promise<Array<{ role: string; content: string }>> {
-    const rendered = await renderContinuationPrompt_ACU(request.settings.agentPrompts.main, {
+  ) {
+    return {
       $HISTORY_ANCHOR: () => HISTORY_SENTINEL_ACU,
       // 三层正文注入（轮内稳定段）：事件概览（召回行升级纪要全文）、尾部全文楼层、纯楼层索引。
       $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ tableData: context.tableData, recallCodes: context.recallCodes }),
@@ -719,8 +722,53 @@ export class ContinuationAgentTurnPlanner_ACU {
       $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(context),
       $ACTIVE_CONSTRAINTS: () => renderAgentConstraints_ACU(context.moduleSnapshot),
       $TOOL_RESULTS: () => renderAgentToolResults_ACU(ledger.outcomes),
-    }, 'agent_loop');
+    };
+  }
+
+  /**
+   * 渲染主 Agent 的提示词消息序列（历史锚点仍是哨兵，尚未拼入会话历史）。
+   * 每次迭代的实际请求与运行开始时的上下文开销测量共用此路径，保证量到的就是发出去的。
+   */
+  private async renderMainPrompt_ACU(
+    request: ContinuationAgentTurnPlanRequest_ACU,
+    context: AgentResolveContext_ACU,
+    ledger: AgentRunLedger_ACU,
+    budget: AgentRunBudget_ACU,
+    iteration: number,
+    toolUsage: AgentToolUsage_ACU,
+    gateConfig: AgentReadGateConfig_ACU,
+  ): Promise<Array<{ role: string; content: string }>> {
+    const rendered = await renderContinuationPrompt_ACU(
+      request.settings.agentPrompts.main,
+      this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig),
+      'agent_loop',
+    );
     return rendered.messages;
+  }
+
+  /**
+   * 把当前目录与预算渲染成一条运行时快照。内容相对上一条快照未变则不追加，
+   * 保证会话只在尾部增长，已发出的前缀字节级不变。
+   */
+  private async ensureRuntimeSnapshot_ACU(
+    request: ContinuationAgentTurnPlanRequest_ACU,
+    session: AgentConversationHandle_ACU,
+    context: AgentResolveContext_ACU,
+    ledger: AgentRunLedger_ACU,
+    budget: AgentRunBudget_ACU,
+    iteration: number,
+    toolUsage: AgentToolUsage_ACU,
+    gateConfig: AgentReadGateConfig_ACU,
+  ): Promise<void> {
+    const rendered = await renderContinuationPrompt_ACU(
+      [{ role: 'user', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }],
+      this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig),
+      'agent_loop',
+    );
+    const text = rendered.messages[0]?.content?.trim() ?? '';
+    if (!text || text === lastRuntimeSnapshotText_ACU(session.snapshot())) return;
+    session.record([{ kind: 'runtime', text, digest: '运行时快照', turnKey: session.turnKey }]);
+    await session.flush();
   }
 
   /**

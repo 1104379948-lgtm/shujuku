@@ -115234,10 +115234,11 @@ $CONTENT
      * - user：人类在 Agent 会话里的输入（初始要求、中途插话、重规划说明）
      * - agent：主 Agent 某次迭代的原始输出（含 thought 与动作 JSON）
      * - tool：运行时回灌给主 Agent 的结果或拒绝原因
+     * - runtime：目录与状态快照（只在内容相对上一条快照变化时追加，不替换旧快照）
      * - turn：新轮次开始通告（相当于人类下发新任务）
      * - handoff：token 预算压缩时生成的交接报告
      */
-    const AGENT_CONVERSATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'turn', 'handoff'];
+    const AGENT_CONVERSATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'runtime', 'turn', 'handoff'];
     /** Agent 可读/可搜正文窗口的默认楼数。未结算楼层始终在窗口内，不受此值限制。 */
     const AGENT_STORY_WINDOW_DEFAULT_ACU = 20;
     /** 骨架里固定注入全文的末尾 AI 楼层数默认值（承接锚点）。 */
@@ -115304,12 +115305,10 @@ $CONTENT
      *
      * 装配约定（各部分的相对位置是刻意的）：
      * 伪 role 规则组 → 正文楼层目录（$STORY_CATALOG，同一轮内稳定）→
-     * 主 Agent 自己的会话记录（$HISTORY_ANCHOR，含它历次调阅到的资料，只在尾部追加）→
-     * 本回合运行时数据（$BUDGET 等每次迭代必变的状态）→ 尾部预填充。
-     * 排序原则是「按变化频率从低到高」：厂商的 prompt 缓存按字节级前缀命中，
-     * 每迭代必变的运行时数据一旦排在会话记录之前，历史里调阅到的大量资料就永远进不了缓存前缀。
-     * 因此运行时数据必须放在历史之后——前缀（规则组 + 目录 + 全部历史）在迭代间保持字节级稳定，
-     * 每次迭代只有尾部的运行时数据段需要重新计算。
+     * 主 Agent 自己的会话记录（$HISTORY_ANCHOR，含它历次调阅到的资料、
+     * 以及系统在目录/状态变化时追加的运行时快照，只在尾部追加）→ 尾部预填充。
+     * Codex 兼容渠道按严格 append-only 衔接轮次：已经发出的前缀不能改写或删除。
+     * $BUDGET 等每迭代必变的状态因此不能再作为骨架尾段重算，必须作为会话快照追加。
      *
      * 资料获取模型：骨架只给目录和状态，正文/表格/模块/世界书/纪要都由 Agent 自己用
      * read / search 工具按地址调阅，结果落在会话记录里跨迭代保留。
@@ -115323,6 +115322,19 @@ $CONTENT
     const AGENT_HISTORY_READ_RULE_V17_ACU = '已经调阅到的资料就在这里，不要重复调阅；';
     /** V18 append-only 会话规则：同址重读由靠后的新消息声明快照关系，旧消息保持原文。 */
     const AGENT_HISTORY_READ_RULE_V18_ACU = '同一地址多次出现时，靠后的工具结果是最新快照，较早结果仅代表产生时状态；';
+    /** V20 会话规则补充：运行时目录与状态也走追加快照，靠后覆盖较早。 */
+    const AGENT_HISTORY_RUNTIME_RULE_V20_ACU = '靠后的运行时快照覆盖较早快照，旧快照只代表当时状态；';
+    /**
+     * V19 默认【本回合运行时数据】骨架段。V20 已从默认提示词删除；
+     * 定向迁移用全文比对识别未改写的默认段，避免误删用户定制。
+     */
+    const V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU = '【本回合运行时数据】\n以上会话记录到此为止。以下是系统在本次迭代刷新的目录与状态——它们反映你此前动作造成的最新结果，比会话记录里的旧陈述更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。这里没有任何资料正文——需要内容就按地址 read，需要定位就 search。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
+    /** V19 默认历史导语。V20 增补了运行时快照规则，迁移时只替换这份未改写原文。 */
+    const V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU = `【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。${AGENT_HISTORY_READ_RULE_V18_ACU}已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。`;
+    /** V19 默认上下文排布问答的 assistant 答。V20 改为快照在会话内追加，迁移时只替换这份未改写原文。 */
+    const V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU = '我收到的上下文分三层：\n1. 正文注入（三节正交）：【事件概览】是纪要表逐轮的事件脉络（每轮一行，本轮召回命中的行会展开为纪要全文），我靠它掌握全局剧情走向；【最近正文】是尾部若干楼的全文，续写必须无缝衔接它的结尾，这几楼不要再 read；【楼层索引】是纯地址索引（楼层号、字数、读取地址），目录行不能代替读正文——需要哪几楼的原文就用 $STORY_RANGE 调阅，需要某几轮的详细纪要就用 $TABLE:纪要表:行区间。注意概览按剧情轮记录、与楼层号没有一一映射，定位具体楼层用 search 的 story 域。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果。我调阅过的资料就留在这里，跨迭代有效，不必重读；标着「内容已过期」的旧调阅说明资料后来变了，需要时按地址重读最新版。\n3. 本回合运行时数据（排在会话记录之后、我的输出之前）：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、世界书命中提示、读取地址词汇表、预算状态。这一层每次迭代都刷新为最新值——它反映我此前动作（派工、结算、大纲编辑）造成的最新状态，比会话记录里的旧陈述更新。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。';
+    /** 主循环渲染并追加到会话的运行时快照模板。占位符由 renderMainPrompt 同一套 resolvers 解析。 */
+    const AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU = '【本回合运行时数据】\n以下是系统在目录或状态变化时追加的快照——靠后的快照比早先的更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。这里没有任何资料正文——需要内容就按地址 read，需要定位就 search。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET';
     /** 各请求尾段预填充文本。解析器会在必要时把它拼回模型输出前再解析。 */
     const AGENT_PREFILLS_ACU = {
         main: '{\n  "thought": "',
@@ -115396,7 +115408,7 @@ $CONTENT
         },
         {
             role: 'assistant',
-            content: '我收到的上下文分三层：\n1. 正文注入（三节正交）：【事件概览】是纪要表逐轮的事件脉络（每轮一行，本轮召回命中的行会展开为纪要全文），我靠它掌握全局剧情走向；【最近正文】是尾部若干楼的全文，续写必须无缝衔接它的结尾，这几楼不要再 read；【楼层索引】是纯地址索引（楼层号、字数、读取地址），目录行不能代替读正文——需要哪几楼的原文就用 $STORY_RANGE 调阅，需要某几轮的详细纪要就用 $TABLE:纪要表:行区间。注意概览按剧情轮记录、与楼层号没有一一映射，定位具体楼层用 search 的 story 域。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果。我调阅过的资料就留在这里，跨迭代有效，不必重读；标着「内容已过期」的旧调阅说明资料后来变了，需要时按地址重读最新版。\n3. 本回合运行时数据（排在会话记录之后、我的输出之前）：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、世界书命中提示、读取地址词汇表、预算状态。这一层每次迭代都刷新为最新值——它反映我此前动作（派工、结算、大纲编辑）造成的最新状态，比会话记录里的旧陈述更新。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 运行时数据 > 我自己的会话记录。用户在会话里的最新指令优先于我此前的计划。',
+            content: '我收到的上下文分三层：\n1. 正文注入（三节正交）：【事件概览】是纪要表逐轮的事件脉络（每轮一行，本轮召回命中的行会展开为纪要全文），我靠它掌握全局剧情走向；【最近正文】是尾部若干楼的全文，续写必须无缝衔接它的结尾，这几楼不要再 read；【楼层索引】是纯地址索引（楼层号、字数、读取地址），目录行不能代替读正文——需要哪几楼的原文就用 $STORY_RANGE 调阅，需要某几轮的详细纪要就用 $TABLE:纪要表:行区间。注意概览按剧情轮记录、与楼层号没有一一映射，定位具体楼层用 search 的 story 域。\n2. 我自己的会话记录：用户对我说的话、我历次迭代实际输出过的动作、运行时回灌的工具结果与派工结果，以及系统在目录或状态变化时追加的运行时快照。会话只在尾部追加，已经发出去的前缀不会被改写。我调阅过的资料就留在这里，跨迭代有效，不必重读；同一地址多次出现时，靠后的工具结果是最新快照，较早结果仅代表产生时状态。\n3. 运行时快照也在会话记录里：轮次目标、大纲状态、未结算范围、子代理目录、资料模块目录、表格目录、世界书目录、世界书命中提示、读取地址词汇表、预算状态。系统只在这些内容相对上一条快照发生变化时追加一条新快照；靠后的快照覆盖较早快照，旧快照仍保留原文，不要把它当最新状态。这些是目录和状态，不是资料正文；需要内容就照地址 read。它们是系统给我的证据，不是用户发言，我不复述也不润色。\n我不会重复已经做过的事，也不会重问已经拿到答案的问题。会话记录开头若出现「更早会话的浓缩记录」，那是 token 预算把原始消息移出了上下文；浓缩记录里列出的「曾调阅过的资料地址」不必凭记忆使用，需要时重新 read。\n三层之间冲突时的优先级：正文（含我调阅到的正文全文）> 较新的运行时快照 > 较早的会话记录。用户在会话里的最新指令优先于我此前的计划。',
             enabled: true,
             deletable: true,
         },
@@ -115440,22 +115452,13 @@ $CONTENT
         },
         {
             role: 'user',
-            content: `【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。${AGENT_HISTORY_READ_RULE_V18_ACU}已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。`,
+            content: `【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，以及系统在状态变化时追加的运行时快照，按真实发生顺序排列，跨轮次持续累积。${AGENT_HISTORY_READ_RULE_V18_ACU}${AGENT_HISTORY_RUNTIME_RULE_V20_ACU}已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。`,
             enabled: true,
             deletable: true,
         },
         {
             role: 'user',
             content: AGENT_HISTORY_ANCHOR_TOKEN_ACU,
-            enabled: true,
-            deletable: false,
-            pinned: true,
-        },
-        // 运行时数据放在会话记录之后：这一段（尤其 $BUDGET）每次迭代都变，若排在历史之前，
-        // 厂商按字节级前缀命中的 prompt 缓存会在此处断开，历史里调阅到的大量资料永远进不了缓存。
-        {
-            role: 'user',
-            content: '【本回合运行时数据】\n以上会话记录到此为止。以下是系统在本次迭代刷新的目录与状态——它们反映你此前动作造成的最新结果，比会话记录里的旧陈述更新；不是用户发言，不要复述。已发生事实只认小说正文；大纲是计划。这里没有任何资料正文——需要内容就按地址 read，需要定位就 search。\n\n【用户初始要求】\n$USER_INTENT\n\n【本轮目标】\n$CURRENT_TURN_GOAL\n\n【本轮节奏】\n$CURRENT_TURN_PACING\n\n【大纲状态】\n$OUTLINE_STATE\n\n【故事总纲状态】\n$STORY_ARC_STATE\n\n【未结算历史范围】\n$UNSETTLED_RANGE\n\n【子代理能力目录】\n$AGENT_CATALOG\n\n【资料模块目录】\n$MODULE_CATALOG\n\n【表格目录】\n$TABLE_CATALOG\n\n【已启用世界书目录】\n$WORLDBOOK_CATALOG\n\n【本轮语境命中的世界书条目】\n$WORLDBOOK_HITS\n\n【读取地址词汇表】\n$AGENT_READ_CATALOG\n\n【本轮预算状态】\n$BUDGET',
             enabled: true,
             deletable: false,
             pinned: true,
@@ -115725,13 +115728,41 @@ $CONTENT
         '【本回合运行时数据】',
     ]);
     /**
+     * V18 非根 system 段在 V19 时的默认正文。V20 改写了历史导语并删除了运行时段，
+     * 因此不能再拿当前 MAIN_AGENT_PROMPT_ACU 做全文比对。
+     */
+    function v19DefaultMainAgentNonRootSystemContents_ACU() {
+        return [
+            ...MAIN_AGENT_PROMPT_ACU
+                .filter(segment => segment.role === 'user' && [...V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU].some(heading => heading !== '【本回合运行时数据】' && heading !== '【以下是你自己的会话记录】' && segment.content.startsWith(heading)))
+                .map(segment => segment.content),
+            V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU,
+            V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU,
+        ];
+    }
+    /**
      * V18 → V19 定向迁移只转换内容未被用户改写的默认 system 段。
-     * V19 默认中这些段已是 user；用完整内容比对避免误改用户自定义提示词。
+     * 比对冻结的 V19 原文，避免 V20 改写默认提示词后把旧默认段当成用户定制而跳过。
      */
     function isV18DefaultMainAgentNonRootSystemSegment_ACU(content) {
-        return typeof content === 'string'
-            && [...V18_MAIN_AGENT_NON_ROOT_SYSTEM_HEADINGS_ACU].some(heading => content.startsWith(heading))
-            && MAIN_AGENT_PROMPT_ACU.some(segment => segment.role === 'user' && segment.content === content);
+        return typeof content === 'string' && v19DefaultMainAgentNonRootSystemContents_ACU().includes(content);
+    }
+    function isV19DefaultMainAgentRuntimeSegment_ACU(content) {
+        return content === V19_DEFAULT_MAIN_AGENT_RUNTIME_SEGMENT_ACU;
+    }
+    function isV19DefaultMainAgentHistoryGuide_ACU(content) {
+        return content === V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU;
+    }
+    function isV19DefaultMainAgentLayoutAnswer_ACU(content) {
+        return content === V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU;
+    }
+    function currentDefaultMainAgentHistoryGuide_ACU() {
+        const segment = MAIN_AGENT_PROMPT_ACU.find(item => item.content.startsWith('【以下是你自己的会话记录】'));
+        return segment?.content ?? V19_DEFAULT_MAIN_AGENT_HISTORY_GUIDE_ACU;
+    }
+    function currentDefaultMainAgentLayoutAnswer_ACU() {
+        const segment = MAIN_AGENT_PROMPT_ACU.find(item => item.content.startsWith('我收到的上下文分三层：'));
+        return segment?.content ?? V19_DEFAULT_MAIN_AGENT_LAYOUT_ANSWER_ACU;
     }
     function buildDefaultAgentMainPrompt_ACU() {
         return cloneAgentPromptSegments_ACU(MAIN_AGENT_PROMPT_ACU);
@@ -115881,6 +115912,13 @@ $CONTENT
      */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU = 'spv2.7-continuation-single-system-prefix-v19';
     /**
+     * Append-only runtime snapshot version: the main Agent no longer re-renders
+     * 【本回合运行时数据】as a skeleton tail segment. Changing catalogs and
+     * $BUDGET are appended as conversation snapshots so Codex-compatible
+     * gateways see a strict prefix extension between iterations.
+     */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU = 'spv2.8-continuation-runtime-snapshot-v20';
+    /**
      * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
      * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
      */
@@ -115930,7 +115968,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -116495,6 +116533,35 @@ $CONTENT
         return changed ? { ...raw, main } : raw;
     }
     /**
+     * V19 → V20 把未改写的运行时骨架段挪出提示词（改由会话追加快照），
+     * 并定向更新未改写的排布问答与历史导语。用户定制正文保持原样。
+     */
+    function migrateV19AgentPromptsToV20_ACU(raw) {
+        if (!isRecord_ACU$6(raw) || !Array.isArray(raw.main))
+            return raw;
+        let changed = false;
+        const layoutAnswer = currentDefaultMainAgentLayoutAnswer_ACU();
+        const historyGuide = currentDefaultMainAgentHistoryGuide_ACU();
+        const main = raw.main.flatMap(segment => {
+            if (!isRecord_ACU$6(segment) || typeof segment.content !== 'string')
+                return [segment];
+            if (isV19DefaultMainAgentRuntimeSegment_ACU(segment.content)) {
+                changed = true;
+                return [];
+            }
+            if (isV19DefaultMainAgentLayoutAnswer_ACU(segment.content) && segment.content !== layoutAnswer) {
+                changed = true;
+                return [{ ...segment, content: layoutAnswer }];
+            }
+            if (isV19DefaultMainAgentHistoryGuide_ACU(segment.content) && segment.content !== historyGuide) {
+                changed = true;
+                return [{ ...segment, content: historyGuide }];
+            }
+            return [segment];
+        });
+        return changed ? { ...raw, main } : raw;
+    }
+    /**
      * 校验七个角色的 AI 渠道配置。
      * @param raw 持久化里的 agentApiPresets 字段
      * @returns 逐角色校验后的渠道配置
@@ -116634,16 +116701,22 @@ $CONTENT
         if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU) {
             agentPrompts = migrateV17AgentPromptsToV18_ACU(agentPrompts);
             agentPrompts = migrateV18AgentPromptsToV19_ACU(agentPrompts);
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU;
+            agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU;
         }
         else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU) {
             agentPrompts = migrateV18AgentPromptsToV19_ACU(agentPrompts);
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU;
+            agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU;
         }
-        else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU) {
+        else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU) {
+            agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU;
+        }
+        else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU;
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -117420,6 +117493,15 @@ $CONTENT
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(request.settings.internalAiRetryLimit);
             const pacingContext = request.pacingContext ?? { previousTempo: null, leadingPressureStreak: 0 };
             let lastError = null;
+            const resolvers = { ...request.resolvers };
+            // $TURN_RANGE 由 planner 权威注入：只有这里同时知道范围与重规划约束。
+            resolvers.$TURN_RANGE = () => renderContinuationTurnRange_ACU(range, request.replanConstraints);
+            resolvers.$STAGE_WORD_BUDGET = () => renderContinuationStageWordBudget_ACU(range, request.replanConstraints);
+            resolvers.$PACING_CONTEXT = () => renderContinuationPacingContext_ACU(pacingContext, request.settings.maxConsecutivePressureTurns);
+            // 校验错误不再写回骨架占位符：重试只追加 transcript，前缀保持字节级稳定以便命中缓存。
+            const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
+            const transcript = [];
+            let lastRaw = '';
             for (let attempt = 0; attempt <= retries; attempt += 1) {
                 try {
                     const identity = request.createInternalRequestIdentity(attempt);
@@ -117427,18 +117509,11 @@ $CONTENT
                     if (!isCurrent(identity)) {
                         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
                     }
-                    const resolvers = { ...request.resolvers };
-                    // $TURN_RANGE 由 planner 权威注入：只有这里同时知道范围与重规划约束。
-                    resolvers.$TURN_RANGE = () => renderContinuationTurnRange_ACU(range, request.replanConstraints);
-                    resolvers.$STAGE_WORD_BUDGET = () => renderContinuationStageWordBudget_ACU(range, request.replanConstraints);
-                    resolvers.$PACING_CONTEXT = () => renderContinuationPacingContext_ACU(pacingContext, request.settings.maxConsecutivePressureTurns);
-                    if (attempt > 0 && lastError)
-                        resolvers.$VALIDATION_ERRORS = () => compactValidationError_ACU(lastError);
-                    const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
-                    const raw = await this.dependencies.callInternalAi(rendered.messages, preset, identity, undefined, {
+                    const raw = await this.dependencies.callInternalAi([...rendered.messages, ...transcript], preset, identity, undefined, {
                         promptCacheEnabled: request.settings.promptCacheEnabled,
                         cacheScope: 'outline',
                     });
+                    lastRaw = String(raw ?? '');
                     if (!isCurrent(identity)) {
                         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部结果已失效', false));
                     }
@@ -117467,11 +117542,18 @@ $CONTENT
                     lastError = toPlannerError_ACU(error);
                     if (!isRetryableOutlineError_ACU(lastError))
                         throw error;
-                    // 传输错误（502/网络抖动）按设置延时后再打，不再瞬间连打；
-                    // 大纲结构校验失败仍立即重试——那是模型输出问题，等待只会拖慢自愈。
-                    if (lastError.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED' && attempt < retries) {
-                        const wait = this.dependencies.wait ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
-                        await wait(Math.max(0, request.settings.retryDelaySeconds) * 1000);
+                    // 传输错误（502/网络抖动）按设置延时后再打同一前缀，不伪造 assistant 消息。
+                    // 大纲结构校验失败把原文和错误追加到 transcript，前缀保持不变。
+                    if (lastError.code === 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED') {
+                        if (attempt < retries) {
+                            const wait = this.dependencies.wait ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+                            await wait(Math.max(0, request.settings.retryDelaySeconds) * 1000);
+                        }
+                        continue;
+                    }
+                    if (attempt < retries) {
+                        transcript.push({ role: 'assistant', content: lastRaw.trim() || '(空输出)' });
+                        transcript.push({ role: 'user', content: `上次输出未通过校验，请按下列错误修正后重新输出完整标签。\n${compactValidationError_ACU(lastError)}` });
                     }
                 }
             }
@@ -117521,6 +117603,7 @@ $CONTENT
         user: '【用户】',
         agent: '',
         tool: '【工具结果】',
+        runtime: '【运行时快照】',
         turn: '【新的一轮】',
         handoff: '【早期会话交接报告】',
     };
@@ -117817,7 +117900,7 @@ $CONTENT
             const message = {
                 id: nextId++,
                 kind: item.kind,
-                text: truncateText_ACU(String(item.text)),
+                text: item.kind === 'runtime' ? String(item.text) : truncateText_ACU(String(item.text)),
                 digest: String(item.digest ?? ''),
                 turnKey: String(item.turnKey ?? ''),
                 at,
@@ -117870,6 +117953,17 @@ $CONTENT
         for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
             if (snapshot.messages[index].kind === 'turn')
                 return snapshot.messages[index].turnKey;
+        }
+        return '';
+    }
+    /**
+     * 投影视图里最近一条运行时快照的正文。压缩掉旧快照后返回空串，
+     * 调用方据此重新追加当前快照，避免模型只剩过期目录。
+     */
+    function lastRuntimeSnapshotText_ACU(snapshot) {
+        for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
+            if (snapshot.messages[index].kind === 'runtime')
+                return snapshot.messages[index].text;
         }
         return '';
     }
@@ -120091,6 +120185,7 @@ $CONTENT
             const announcements = group.filter(message => message.kind === 'turn').map(message => quote_ACU(message.digest || message.text));
             const actions = group.filter(message => message.kind === 'agent').map(message => message.digest || '（未标注动作）');
             const results = group.filter(message => message.kind === 'tool').map(message => message.digest).filter(Boolean);
+            const snapshots = group.filter(message => message.kind === 'runtime').map(message => message.digest).filter(Boolean);
             if (announcements.length)
                 lines.push(`  轮次：${announcements.join('；')}`);
             if (instructions.length)
@@ -120099,6 +120194,8 @@ $CONTENT
                 lines.push(`  我的动作：${actions.join(' → ')}`);
             if (results.length)
                 lines.push(`  运行时结果：${results.join('；')}`);
+            if (snapshots.length)
+                lines.push(`  运行时快照：${snapshots.join('；')}`);
             if (!lines.length)
                 continue;
             sections.push(`- ${group[0].turnKey || '未编号轮次'}\n${lines.join('\n')}`);
@@ -122724,13 +122821,15 @@ $CONTENT
      * 主 Agent 每次迭代只做一件事：读证据、输出一个协议动作。运行时执行该动作后把结果
      * 回灌成新的证据，再进入下一次迭代，直到 finalize / block / 预算耗尽。
      *
-     * 装配顺序：伪 role 提示词 → Agent 自己的会话记录 → 本回合运行时证据 → 尾部预填充。
+     * 装配顺序：伪 role 提示词 → Agent 自己的会话记录（含运行时快照）→ 尾部预填充。
      * 会话记录插在 `$HISTORY_ANCHOR` 段的位置上，该段本身不发送。
+     * 目录与预算不再作为骨架尾段重算，只在内容变化时追加为 runtime 会话消息，
+     * 保证相邻请求对 Codex 兼容渠道是严格的前缀延伸。
      *
      * 正文经三个正交占位符注入骨架：`$STORY_OVERVIEW`（纪要表事件概览，召回行升级纪要全文）、
      * `$STORY_TAIL`（尾部若干 AI 楼层全文）、`$STORY_CATALOG`（纯楼层索引）；`$HISTORY_ANCHOR`
-     * 承载主 Agent 自己的对话——用户输入、它历次迭代的原始输出、运行时回灌的工具结果，
-     * 按真实 role 跨轮持久累积。这样它才看得见自己走到哪了。
+     * 承载主 Agent 自己的对话——用户输入、它历次迭代的原始输出、运行时回灌的工具结果与
+     * 运行时快照，按真实 role 跨轮持久累积。这样它才看得见自己走到哪了。
      */
     /** 会话记录插入位置的内部哨兵。用不可见字符避免与提示词正文撞车。 */
     const HISTORY_SENTINEL_ACU = '\u0000__QRF_AGENT_HISTORY__\u0000';
@@ -122990,6 +123089,7 @@ $CONTENT
                     currentIteration = iteration;
                     persistRunState(iteration);
                     const allowDelegate = iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations;
+                    await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig);
                     const round = await this.callMainAgent(request, preset, session, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig);
                     totalAttempts += round.attempts;
                     const action = round.action;
@@ -123214,11 +123314,10 @@ $CONTENT
             failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', `主 Agent 连续 ${retries + 1} 次返回不符合协议：${lastReason}`, { lastReason });
         }
         /**
-         * 渲染主 Agent 的提示词消息序列（历史锚点仍是哨兵，尚未拼入会话历史）。
-         * 每次迭代的实际请求与运行开始时的上下文开销测量共用此路径，保证量到的就是发出去的。
+         * 主 Agent 骨架与运行时快照共用同一套占位符解析，避免两边目录/预算各算各的。
          */
-        async renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig) {
-            const rendered = await renderContinuationPrompt_ACU(request.settings.agentPrompts.main, {
+        buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig) {
+            return {
                 $HISTORY_ANCHOR: () => HISTORY_SENTINEL_ACU,
                 // 三层正文注入（轮内稳定段）：事件概览（召回行升级纪要全文）、尾部全文楼层、纯楼层索引。
                 $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ tableData: context.tableData, recallCodes: context.recallCodes }),
@@ -123249,8 +123348,27 @@ $CONTENT
                 $OUTLINE_WINDOW: () => renderAgentOutlineWindow_ACU(context),
                 $ACTIVE_CONSTRAINTS: () => renderAgentConstraints_ACU(context.moduleSnapshot),
                 $TOOL_RESULTS: () => renderAgentToolResults_ACU(ledger.outcomes),
-            }, 'agent_loop');
+            };
+        }
+        /**
+         * 渲染主 Agent 的提示词消息序列（历史锚点仍是哨兵，尚未拼入会话历史）。
+         * 每次迭代的实际请求与运行开始时的上下文开销测量共用此路径，保证量到的就是发出去的。
+         */
+        async renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig) {
+            const rendered = await renderContinuationPrompt_ACU(request.settings.agentPrompts.main, this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig), 'agent_loop');
             return rendered.messages;
+        }
+        /**
+         * 把当前目录与预算渲染成一条运行时快照。内容相对上一条快照未变则不追加，
+         * 保证会话只在尾部增长，已发出的前缀字节级不变。
+         */
+        async ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig) {
+            const rendered = await renderContinuationPrompt_ACU([{ role: 'user', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }], this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig), 'agent_loop');
+            const text = rendered.messages[0]?.content?.trim() ?? '';
+            if (!text || text === lastRuntimeSnapshotText_ACU(session.snapshot()))
+                return;
+            session.record([{ kind: 'runtime', text, digest: '运行时快照', turnKey: session.turnKey }]);
+            await session.flush();
         }
         /**
          * 执行大纲句级编辑工具。校验失败拒绝回灌，让主 Agent 自己修正而不是中止本轮；
@@ -166881,6 +166999,8 @@ Expected function or array of functions, received type ${typeof value}.`
             return { kind: 'handoff', title: message.digest || '早期会话交接报告', detail: message.text };
         if (message.kind === 'tool')
             return { kind: 'delegation', title: message.digest || '运行时结果', detail: message.text };
+        if (message.kind === 'runtime')
+            return { kind: 'delegation', title: message.digest || '运行时快照', detail: message.text };
         return { kind: 'main_action', title: message.digest || '主 Agent 输出', detail: message.text };
     }
     /**

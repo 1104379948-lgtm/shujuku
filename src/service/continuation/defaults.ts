@@ -125,6 +125,13 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU = 'spv2.6-continu
  * remains ordered user/assistant conversation content.
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU = 'spv2.7-continuation-single-system-prefix-v19';
+/**
+ * Append-only runtime snapshot version: the main Agent no longer re-renders
+ * 【本回合运行时数据】as a skeleton tail segment. Changing catalogs and
+ * $BUDGET are appended as conversation snapshots so Codex-compatible
+ * gateways see a strict prefix extension between iterations.
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU = 'spv2.8-continuation-runtime-snapshot-v20';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -181,7 +188,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU,
   };
 }
 
