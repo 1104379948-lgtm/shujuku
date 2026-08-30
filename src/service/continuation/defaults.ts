@@ -118,6 +118,13 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU = 'spv2.5-continu
  * 从 V17 升级时只定向替换已知默认句，保留用户定制提示词；更老版本继续整体刷新。
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU = 'spv2.6-continuation-append-only-history-v18';
+/**
+ * System-message cache compatibility version: OpenAI-compatible Codex gateways
+ * can lift every system message into the provider instruction prefix. The main
+ * Agent therefore retains only a static root system message; all later context
+ * remains ordered user/assistant conversation content.
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU = 'spv2.7-continuation-single-system-prefix-v19';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -174,7 +181,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU,
   };
 }
 

@@ -216,7 +216,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.6-continuation-append-only-history-v18');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.7-continuation-single-system-prefix-v19');
     expect(loaded.settings.agentPrompts).toEqual(expectedPrompts);
     expect(loaded.settings.outlinePrompt).toEqual(expectedOutlinePrompt);
   });
@@ -241,9 +241,58 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.6-continuation-append-only-history-v18');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.7-continuation-single-system-prefix-v19');
     expect(loaded.settings.agentPrompts).toEqual(expectedPrompts);
     expect(loaded.settings.outlinePrompt).toEqual(expectedOutlinePrompt);
+  });
+
+  it('V18 默认主 Agent 的非根 system 段迁移为 user，保留唯一静态 system 根规则', () => {
+    const v18 = buildEnvelope_ACU() as any;
+    v18.settings.promptForceDefaultVersion = 'spv2.6-continuation-append-only-history-v18';
+    const migratedHeadings = ['【文本协议规范】', '【子代理使用规则】', '【模式边界】', '【已经发生的小说正文】', '【以下是你自己的会话记录】', '$HISTORY_ANCHOR', '【本回合运行时数据】'];
+    v18.settings.agentPrompts.main = v18.settings.agentPrompts.main.map((segment: any) => (
+      migratedHeadings.some(heading => String(segment.content).startsWith(heading))
+        ? { ...segment, role: 'system' }
+        : segment
+    ));
+    const runtimeIndex = v18.settings.agentPrompts.main.findIndex((segment: any) =>
+      String(segment.content).startsWith('【本回合运行时数据】'),
+    );
+    expect(runtimeIndex).toBeGreaterThanOrEqual(0);
+    v18.settings.agentPrompts.main[runtimeIndex] = {
+      ...v18.settings.agentPrompts.main[runtimeIndex],
+      role: 'system',
+    };
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: v18 }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+
+    const loaded = new FirstFloorContinuationStore_ACU().read()!;
+
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.7-continuation-single-system-prefix-v19');
+    expect(loaded.settings.agentPrompts.main[runtimeIndex].role).toBe('user');
+    expect(loaded.settings.agentPrompts.main.filter(segment => segment.role === 'system')).toHaveLength(1);
+    expect(loaded.settings.agentPrompts.main[0].role).toBe('system');
+  });
+
+  it('V18 用户自定义的 system 段不会被缓存兼容迁移改写', () => {
+    const v18 = buildEnvelope_ACU() as any;
+    v18.settings.promptForceDefaultVersion = 'spv2.6-continuation-append-only-history-v18';
+    const runtimeIndex = v18.settings.agentPrompts.main.findIndex((segment: any) =>
+      String(segment.content).startsWith('【本回合运行时数据】'),
+    );
+    v18.settings.agentPrompts.main[runtimeIndex] = {
+      ...v18.settings.agentPrompts.main[runtimeIndex],
+      role: 'system',
+      content: '【本回合运行时数据】\n这是用户定制的运行时提示词。',
+    };
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: v18 }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+
+    const loaded = new FirstFloorContinuationStore_ACU().read()!;
+
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.7-continuation-single-system-prefix-v19');
+    expect(loaded.settings.agentPrompts.main[runtimeIndex]).toMatchObject({
+      role: 'system',
+      content: '【本回合运行时数据】\n这是用户定制的运行时提示词。',
+    });
   });
 
   it('V16 及更早提示词版本仍整体强刷，存量信封因此拿到总纲子代理提示词组', () => {
@@ -254,7 +303,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: stale }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.6-continuation-append-only-history-v18');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.7-continuation-single-system-prefix-v19');
     expect(loaded.settings.agentPrompts.arcArchitect[0].content).toContain('故事总纲子代理');
     expect(loaded.settings.outlinePrompt.some(segment => segment.content.includes('<stage_tempo>'))).toBe(true);
     expect(loaded.settings.agentPrompts.main[0].content).not.toBe('用户改过的旧提示词');

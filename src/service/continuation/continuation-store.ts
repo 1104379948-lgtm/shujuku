@@ -1,7 +1,7 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU } from './defaults';
-import { AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU } from './defaults';
+import { AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, buildDefaultContinuationAgentPrompts_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU } from './agent/agent-defaults';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -136,6 +136,28 @@ function migrateV17AgentPromptsToV18_ACU(raw: unknown): unknown {
 }
 
 /**
+ * V18 → V19 converts only unchanged default non-root system segments to user.
+ * Some Codex-compatible gateways consolidate system messages ahead of chat
+ * history; retaining one static root system segment protects the cache prefix.
+ */
+function migrateV18AgentPromptsToV19_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw) || !Array.isArray(raw.main)) return raw;
+  let changed = false;
+  const main = raw.main.map(segment => {
+    if (
+      !isRecord_ACU(segment)
+      || segment.role !== 'system'
+      || !isV18DefaultMainAgentNonRootSystemSegment_ACU(segment.content)
+    ) {
+      return segment;
+    }
+    changed = true;
+    return { ...segment, role: 'user' };
+  });
+  return changed ? { ...raw, main } : raw;
+}
+
+/**
  * 校验七个角色的 AI 渠道配置。
  * @param raw 持久化里的 agentApiPresets 字段
  * @returns 逐角色校验后的渠道配置
@@ -252,11 +274,15 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
   if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU) {
     agentPrompts = migrateV17AgentPromptsToV18_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU;
-  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU) {
+    agentPrompts = migrateV18AgentPromptsToV19_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU;
+  } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU) {
+    agentPrompts = migrateV18AgentPromptsToV19_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU;
+  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU;
   }
   
   return {
