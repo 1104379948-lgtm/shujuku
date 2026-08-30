@@ -73,6 +73,7 @@ import {
   type AgentReadGateState_ACU,
 } from './agent-read-gate';
 import { AgentSubagentRuntime_ACU, type AgentSubagentRunResult_ACU } from './agent-subagent-runtime';
+import { trackAgentPromptDrift_ACU } from './agent-prompt-drift';
 import {
   AGENT_HISTORY_EMERGENCY_FACTOR_ACU,
   AGENT_OUTLINE_AGENT_NAME_ACU,
@@ -629,6 +630,9 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
       const rendered = await this.renderMainPrompt_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig);
       const messages = this.spliceHistory_ACU(rendered, session.history());
+      // 缓存前缀诊断：主 Agent 相邻请求应共享大前缀，服务商缓存 0 命中时用这行定位分歧点。
+      // 必须无条件输出（logDebug/logWarn 默认关闭），确认问题后可降级或移除。
+      console.info('[SP·数据库][缓存诊断][agent-main]', trackAgentPromptDrift_ACU('agent-main', messages));
       // 显式擦除上一次尝试的用量，防止回调未触发时把旧值当成本次调用的用量。
       callUsage = null as AiUsageMetadata_ACU | null;
       // 传输错误（502/网络抖动）按设置延时重试，不再一次失败就停整条自动链；
