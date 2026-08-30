@@ -68,4 +68,21 @@ describe('fix-generated-whitespace', () => {
     expect(result.fixedIndentLineCount).toBe(1);
     expect(result.fixedClosingLineCount).toBe(0);
   });
+
+  it('在带引号正则字面量后清理普通代码行尾空白', () => {
+    const input = [
+      'const res = "\'" + value.replace(/\'/g, "\'\'").replace(/\\n+/g, `$&\\n${indent}`) + "\'";',
+      'const { onAnchor } = createNodeAnchors(this, ',
+      '',
+    ].join('\n');
+
+    const result = normalizeGeneratedWhitespace_ACU(input);
+
+    expect(result.text).toBe([
+      'const res = "\'" + value.replace(/\'/g, "\'\'").replace(/\\n+/g, `$&\\n${indent}`) + "\'";',
+      'const { onAnchor } = createNodeAnchors(this,',
+      '',
+    ].join('\n'));
+    expect(result.fixedTrailingWhitespaceLineCount).toBe(1);
+  });
 });

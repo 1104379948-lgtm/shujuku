@@ -1,7 +1,7 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
-import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU } from './defaults';
-import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
+import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU } from './defaults';
+import { AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -111,6 +111,28 @@ function validateAgentPrompts_ACU(raw: unknown): ContinuationSettings_ACU['agent
     beatPlanner: validateContinuationPromptSegments_ACU(raw.beatPlanner, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     reviewer: validateContinuationPromptSegments_ACU(raw.reviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
   };
+}
+
+/**
+ * V17 → V18 只迁移已知的默认会话规则句。无法识别的结构或用户文本保持原样，
+ * 随后仍由 validateAgentPrompts_ACU 执行完整持久化校验。
+ */
+function migrateV17AgentPromptsToV18_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw)) return raw;
+  const currentMain = raw.main;
+  if (!Array.isArray(currentMain)) return raw;
+  let changed = false;
+  const main = currentMain.map(segment => {
+    if (!isRecord_ACU(segment) || typeof segment.content !== 'string' || !segment.content.includes(AGENT_HISTORY_READ_RULE_V17_ACU)) {
+      return segment;
+    }
+    changed = true;
+    return {
+      ...segment,
+      content: segment.content.split(AGENT_HISTORY_READ_RULE_V17_ACU).join(AGENT_HISTORY_READ_RULE_V18_ACU),
+    };
+  });
+  return changed ? { ...raw, main } : raw;
 }
 
 /**
@@ -228,10 +250,13 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   let outlinePrompt = raw.outlinePrompt;
   let agentPrompts = raw.agentPrompts;
   let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-  if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU) {
+  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU) {
+    agentPrompts = migrateV17AgentPromptsToV18_ACU(agentPrompts);
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU;
+  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU;
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU;
   }
   
   return {

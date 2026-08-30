@@ -2342,4 +2342,141 @@ describe('runPlotTasksRuntime_ACU', () => {
     ))).toBe(false);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
   });
+  it('长度达标但缺少配置标签时重试，并复用成功尝试的提取结果', async () => {
+    const plotSettings = {
+      tasks: [{
+        id: 'tag-retry', name: '标签重试任务', stage: 1, order: 1, maxRetries: 2, minLength: 1,
+        extractTags: 'plot', promptGroup: [{ role: 'user', content: 'tag-retry-prompt' }],
+      }],
+    };
+    mockCallApiWithPlotPreset
+      .mockResolvedValueOnce('第一次没有标签')
+      .mockResolvedValueOnce('<plot>有效剧情</plot>');
+    mockExtractPlotTagsFromResponse.mockImplementation((rawText: string) => (
+      String(rawText).includes('<plot>')
+        ? {
+            tagNames: ['plot'],
+            extractedTags: { plot: '有效剧情' },
+            injectedFragments: ['<plot>有效剧情</plot>'],
+            injectOnlyTags: {},
+            injectOnlyFragments: [],
+            injectOnlyTagNames: [],
+          }
+        : {
+            tagNames: ['plot'],
+            extractedTags: {},
+            injectedFragments: [],
+            injectOnlyTags: {},
+            injectOnlyFragments: [],
+            injectOnlyTagNames: [],
+          }
+    ));
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
+    expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(2);
+    expect(mockAbortableDelay).toHaveBeenCalledTimes(1);
+    expect(result.successfulResults).toEqual([
+      expect.objectContaining({
+        taskId: 'tag-retry',
+        rawResponse: '<plot>有效剧情</plot>',
+        extractedTags: { plot: '有效剧情' },
+      }),
+    ]);
+  });
+
+  it('配置标签重试耗尽时失败并阻断后续阶段', async () => {
+    const plotSettings = {
+      tasks: [
+        {
+          id: 'tag-fail', name: '标签失败任务', stage: 1, order: 1, maxRetries: 2,
+          extractTags: 'plot', promptGroup: [{ role: 'user', content: 'stage-1-tag-fail' }],
+        },
+        {
+          id: 'tag-never', name: '不应执行任务', stage: 2, order: 1, maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-2-should-not-run' }],
+        },
+      ],
+    };
+    mockCallApiWithPlotPreset.mockResolvedValue('始终无标签');
+    mockExtractPlotTagsFromResponse.mockReturnValue({
+      tagNames: ['plot'],
+      extractedTags: {},
+      injectedFragments: [],
+      injectOnlyTags: {},
+      injectOnlyFragments: [],
+      injectOnlyTagNames: [],
+    });
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(result.abortedByStageFailure).toBe(true);
+    expect(result.failedStage).toBe(1);
+    expect(result.failedResults).toEqual([
+      expect.objectContaining({
+        taskId: 'tag-fail',
+        error: expect.stringContaining('未提取到任何配置标签（plot）'),
+      }),
+    ]);
+    expect(result.failedResults[0].error).not.toContain('始终无标签');
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
+    expect(mockCallApiWithPlotPreset.mock.calls.some((call: any[]) => call[0][0].content === 'stage-2-should-not-run')).toBe(false);
+  });
+
+  it('仅配置 extractInjectTags 且未提取标签时进入失败路径', async () => {
+    const plotSettings = {
+      tasks: [{
+        id: 'inject-tag-fail', name: '注入标签失败任务', stage: 1, order: 1, maxRetries: 1,
+        extractInjectTags: 'memory', promptGroup: [{ role: 'user', content: 'inject-tag-fail-prompt' }],
+      }],
+    };
+    mockCallApiWithPlotPreset.mockResolvedValue('没有注入标签');
+    mockExtractPlotTagsFromResponse.mockReturnValue({
+      tagNames: ['memory'],
+      extractedTags: {},
+      injectedFragments: [],
+      injectOnlyTags: {},
+      injectOnlyFragments: [],
+      injectOnlyTagNames: [],
+    });
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(result.abortedByStageFailure).toBe(true);
+    expect(result.failedResults).toEqual([
+      expect.objectContaining({
+        taskId: 'inject-tag-fail',
+        error: expect.stringContaining('未提取到任何配置标签（memory）'),
+      }),
+    ]);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+  });
+
+  it('未配置提取标签时维持长度达标即成功', async () => {
+    const plotSettings = {
+      tasks: [{
+        id: 'no-tag-config', name: '无标签配置任务', stage: 1, order: 1, maxRetries: 1, minLength: 2,
+        promptGroup: [{ role: 'user', content: 'no-tag-config-prompt' }],
+      }],
+    };
+    mockCallApiWithPlotPreset.mockResolvedValue('正常输出');
+    mockExtractPlotTagsFromResponse.mockReturnValue({
+      tagNames: [],
+      extractedTags: {},
+      injectedFragments: [],
+      injectOnlyTags: {},
+      injectOnlyFragments: [],
+      injectOnlyTagNames: [],
+    });
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(result.successfulResults).toEqual([
+      expect.objectContaining({ taskId: 'no-tag-config', rawResponse: '正常输出' }),
+    ]);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(1);
+  });
+
 });

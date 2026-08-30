@@ -42,7 +42,7 @@ export interface AgentConversationMessage_ACU {
   /** 产生该消息时的大纲游标指纹（stageId#revision#turnId），用于按轮分组与压缩。 */
   turnKey: string;
   at: number;
-  /** 工具消息专用：本条承载的读取地址（如 $STORY_RANGE:12-15）。同地址重读时旧条目在渲染层投影为过期占位。 */
+  /** 工具消息专用：本条承载的读取地址（如 $STORY_RANGE:12-15），用于本轮读取去重、重读识别与压缩元数据。 */
   readKey?: string;
 }
 

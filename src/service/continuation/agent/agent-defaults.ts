@@ -23,6 +23,12 @@ import { cloneAgentPromptSegments_ACU } from './agent-model';
 /** 主 Agent 提示词里标记会话记录插入位置的段。装配器遇到该段时插入会话消息而不发送本段。 */
 export const AGENT_HISTORY_ANCHOR_TOKEN_ACU = '$HISTORY_ANCHOR';
 
+/** V17 会话记录默认规则；仅用于从已知默认文本定向迁移，不能匹配时必须保留用户文本。 */
+export const AGENT_HISTORY_READ_RULE_V17_ACU = '已经调阅到的资料就在这里，不要重复调阅；';
+
+/** V18 append-only 会话规则：同址重读由靠后的新消息声明快照关系，旧消息保持原文。 */
+export const AGENT_HISTORY_READ_RULE_V18_ACU = '同一地址多次出现时，靠后的工具结果是最新快照，较早结果仅代表产生时状态；';
+
 /** 各请求尾段预填充文本。解析器会在必要时把它拼回模型输出前再解析。 */
 export const AGENT_PREFILLS_ACU = {
   main: '{\n  "thought": "',
@@ -139,7 +145,7 @@ const MAIN_AGENT_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
   },
   {
     role: 'system',
-    content: '【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。已经调阅到的资料就在这里，不要重复调阅；已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。',
+    content: `【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。${AGENT_HISTORY_READ_RULE_V18_ACU}已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。`,
     enabled: true,
     deletable: true,
   },

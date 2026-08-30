@@ -187,7 +187,66 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(() => new FirstFloorContinuationStore_ACU().read()).toThrow(ContinuationValidationError_ACU);
   });
 
-  it('提示词版本落后时整体强刷，存量信封因此拿到总纲子代理提示词组', () => {
+  it('V17 仅定向更新已知会话快照规则，并保留其余提示词与段字段', () => {
+    const v17 = buildEnvelope_ACU() as any;
+    v17.settings.promptForceDefaultVersion = 'spv2.5-continuation-story-layers-v17';
+    const historyIndex = v17.settings.agentPrompts.main.findIndex((segment: any) =>
+      String(segment.content).includes('【以下是你自己的会话记录】'),
+    );
+    expect(historyIndex).toBeGreaterThanOrEqual(0);
+    v17.settings.agentPrompts.main[historyIndex] = {
+      ...v17.settings.agentPrompts.main[historyIndex],
+      content: '【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。已经调阅到的资料就在这里，不要重复调阅；已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。',
+      enabled: false,
+      deletable: true,
+    };
+    v17.settings.agentPrompts.main.splice(historyIndex + 1, 0, {
+      role: 'assistant',
+      content: '用户定制的附加提示词段',
+      enabled: false,
+      deletable: true,
+    });
+    const expectedPrompts = JSON.parse(JSON.stringify(v17.settings.agentPrompts));
+    expectedPrompts.main[historyIndex].content = expectedPrompts.main[historyIndex].content.replace(
+      '已经调阅到的资料就在这里，不要重复调阅；',
+      '同一地址多次出现时，靠后的工具结果是最新快照，较早结果仅代表产生时状态；',
+    );
+    const expectedOutlinePrompt = JSON.parse(JSON.stringify(v17.settings.outlinePrompt));
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: v17 }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+
+    const loaded = new FirstFloorContinuationStore_ACU().read()!;
+
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.6-continuation-append-only-history-v18');
+    expect(loaded.settings.agentPrompts).toEqual(expectedPrompts);
+    expect(loaded.settings.outlinePrompt).toEqual(expectedOutlinePrompt);
+  });
+
+  it('V17 自定义提示词未包含已知旧句时逐字保留，只推进契约版本', () => {
+    const customized = buildEnvelope_ACU() as any;
+    customized.settings.promptForceDefaultVersion = 'spv2.5-continuation-story-layers-v17';
+    const historyIndex = customized.settings.agentPrompts.main.findIndex((segment: any) =>
+      String(segment.content).includes('【以下是你自己的会话记录】'),
+    );
+    expect(historyIndex).toBeGreaterThanOrEqual(0);
+    customized.settings.agentPrompts.main[historyIndex] = {
+      role: 'system',
+      content: '【自定义会话规则】只采用我明确标记为当前版本的资料。',
+      enabled: false,
+      deletable: true,
+      pinned: false,
+    };
+    const expectedPrompts = JSON.parse(JSON.stringify(customized.settings.agentPrompts));
+    const expectedOutlinePrompt = JSON.parse(JSON.stringify(customized.settings.outlinePrompt));
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: customized }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+
+    const loaded = new FirstFloorContinuationStore_ACU().read()!;
+
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.6-continuation-append-only-history-v18');
+    expect(loaded.settings.agentPrompts).toEqual(expectedPrompts);
+    expect(loaded.settings.outlinePrompt).toEqual(expectedOutlinePrompt);
+  });
+
+  it('V16 及更早提示词版本仍整体强刷，存量信封因此拿到总纲子代理提示词组', () => {
     const stale = buildEnvelope_ACU() as any;
     stale.settings.promptForceDefaultVersion = 'spv2.2-continuation-v13';
     stale.settings.agentPrompts = { ...stale.settings.agentPrompts, main: [{ role: 'user', content: '用户改过的旧提示词', enabled: true, deletable: true }] };
@@ -195,7 +254,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: stale }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
-    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.5-continuation-story-layers-v17');
+    expect(loaded.settings.promptForceDefaultVersion).toBe('spv2.6-continuation-append-only-history-v18');
     expect(loaded.settings.agentPrompts.arcArchitect[0].content).toContain('故事总纲子代理');
     expect(loaded.settings.outlinePrompt.some(segment => segment.content.includes('<stage_tempo>'))).toBe(true);
     expect(loaded.settings.agentPrompts.main[0].content).not.toBe('用户改过的旧提示词');

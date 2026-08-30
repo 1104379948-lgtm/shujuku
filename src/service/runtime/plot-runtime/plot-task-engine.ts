@@ -620,6 +620,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
 
       let rawResponse = '';
       let lastErrorMessage = '';
+      let acceptedTagExtraction: ReturnType<typeof extractPlotTagsFromResponse_ACU> | null = null;
 
       for (let attemptIndex = 0; attemptIndex < maxRetries; attemptIndex++) {
         checkPlotAbortRequested_ACU();
@@ -646,13 +647,26 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         checkPlotAbortRequested_ACU();
 
         if (!apiError && tempMessage) {
-          if (minLength <= 0 || tempMessage.length >= minLength) {
-            rawResponse = tempMessage;
-            logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 在第 ${attemptIndex + 1} 次尝试中成功完成。`);
-            break;
+          if (minLength > 0 && tempMessage.length < minLength) {
+            lastErrorMessage = `回复长度不足（${tempMessage.length}/${minLength}）`;
+            logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次回复过短: ${tempMessage.length}/${minLength}`);
+          } else {
+            const candidateTagExtraction = extractPlotTagsFromResponse_ACU(
+              tempMessage,
+              normalizedTask.extractTags,
+              normalizedTask.extractInjectTags,
+            );
+            if (candidateTagExtraction.tagNames.length > 0 && Object.keys(candidateTagExtraction.extractedTags).length === 0) {
+              const expectedTagNames = candidateTagExtraction.tagNames.join(', ');
+              lastErrorMessage = `未提取到任何配置标签（${expectedTagNames}）`;
+              logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次回复未包含任何配置标签: ${expectedTagNames}`);
+            } else {
+              rawResponse = tempMessage;
+              acceptedTagExtraction = candidateTagExtraction;
+              logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 在第 ${attemptIndex + 1} 次尝试中成功完成。`);
+              break;
+            }
           }
-          lastErrorMessage = `回复长度不足（${tempMessage.length}/${minLength}）`;
-          logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次回复过短: ${tempMessage.length}/${minLength}`);
         }
 
         if (attemptIndex < maxRetries - 1) {
@@ -661,7 +675,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         }
       }
 
-      if (!rawResponse) {
+      if (!rawResponse || !acceptedTagExtraction) {
         return {
           taskId: normalizedTask.id,
           taskName: taskLabel,
@@ -675,7 +689,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         };
       }
 
-      const { tagNames, extractedTags, injectedFragments, injectOnlyTags, injectOnlyFragments, injectOnlyTagNames } = extractPlotTagsFromResponse_ACU(rawResponse, normalizedTask.extractTags, normalizedTask.extractInjectTags);
+      const { tagNames, extractedTags, injectedFragments, injectOnlyTags, injectOnlyFragments, injectOnlyTagNames } = acceptedTagExtraction;
       if (tagNames.length > 0 && Object.keys(extractedTags).length > 0) {
         logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 成功摘取标签: ${Object.keys(extractedTags).join(', ')}`);
       }

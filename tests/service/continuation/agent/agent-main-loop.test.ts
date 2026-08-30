@@ -388,8 +388,31 @@ describe('主 Agent read/search 工具批次', () => {
     expect(toolMessages[0].readKey).toBe('$HOOKS_LEDGER');
     expect(toolMessages[0].text).toContain('伏笔账本');
     expect(toolMessages[1].text).toContain('不再重注');
+    expect(toolMessages.every(message => !message.text.includes('最新快照'))).toBe(true);
     // 第二次迭代读到第一次的调阅内容。
     expect(h.mainCalls[1].some(message => message.content.includes('伏笔账本'))).toBe(true);
+  });
+
+  it('资料变化后重读同一地址时，只在新工具消息自身标记最新快照', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        '{"action":"read","reads":["$OUTLINE_WINDOW"]}',
+        '{"action":"edit_outline","thought":"更新轮次目标","edits":[{"op":"set_turn_goal","turnId":"turn-2","goal":"守门人先露破绽"}]}',
+        '{"action":"read","reads":["$OUTLINE_WINDOW"]}',
+        '{"action":"finalize","instruction":"按最新快照写"}',
+      ],
+      applyOutlineEdits: () => ({ summary: '已按工具编辑改写大纲（1 处）' }),
+    });
+
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('按最新快照写');
+
+    const reads = h.conversation().messages.filter(
+      message => message.kind === 'tool' && message.readKey === '$OUTLINE_WINDOW',
+    );
+    expect(reads).toHaveLength(2);
+    expect(reads[0].text).not.toContain('最新快照');
+    expect(reads[1].text).toContain('最新快照');
   });
 
   it('工具批次超过 maxReads 上限时回灌用尽提示，不再执行读取', async () => {

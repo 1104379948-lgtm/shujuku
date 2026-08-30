@@ -151,16 +151,17 @@ interface AgentRunLedger_ACU {
   outcomes: AgentDelegationOutcome_ACU[];
 }
 
-/** 一次运行内 read/search 工具的累计状态：批次计数、门禁账本、放行地址去重集合。 */
+/** 一次运行内 read/search 工具的累计状态：批次计数、门禁账本、放行地址与失效地址集合。 */
 interface AgentToolUsage_ACU {
   batchesUsed: number;
   gateState: AgentReadGateState_ACU;
   /**
    * 本次运行已放行的读取地址（read token 或 search 指纹）。重复调阅返回一行提示而不重注内容、
-   * 不计门禁账。资料可能变化的节点（派工结算、大纲变更）整体清空，允许重读最新版——
-   * 此时旧工具消息由渲染层按 readKey 投影成过期占位。
+   * 不计门禁账。资料可能变化的节点（派工结算、大纲变更）整体清空，允许重读最新版。
    */
   granted: Set<string>;
+  /** 已放行但随后可能因资料变化而失效的地址；成功重读时消费并在新消息自身标记最新快照。 */
+  invalidated: Set<string>;
 }
 
 function failLoop_ACU(
@@ -329,7 +330,12 @@ export class ContinuationAgentTurnPlanner_ACU {
     };
     // 中断恢复不复播门禁账本：工具结果已持久在会话里，恢复后重读同一地址会被去重挡下，
     // 账本从零起算只是给恢复后的运行一份完整的读取额度。
-    const toolUsage: AgentToolUsage_ACU = { batchesUsed: 0, gateState: createAgentReadGateState_ACU(), granted: new Set() };
+    const toolUsage: AgentToolUsage_ACU = {
+      batchesUsed: 0,
+      gateState: createAgentReadGateState_ACU(),
+      granted: new Set(),
+      invalidated: new Set(),
+    };
     const identitySeed = request.createInternalRequestIdentity(0);
     const cursorKeyOf = (): string => {
       const execution = request.readContext();
@@ -435,7 +441,8 @@ export class ContinuationAgentTurnPlanner_ACU {
 
         if (action.kind === 'edit_outline') {
           await this.runOutlineEdits(action.edits, request, context, ledger);
-          // 大纲可能已变化：清空放行地址，允许重读最新版（旧工具消息由渲染层投影成过期占位）。
+          // 大纲可能已变化：记录既有读取地址后清空放行集合，允许重读并只在新消息标记最新快照。
+          for (const key of toolUsage.granted) toolUsage.invalidated.add(key);
           toolUsage.granted.clear();
           await commitOutcomes(outcomesBefore);
           iteration += 1;
@@ -486,7 +493,8 @@ export class ContinuationAgentTurnPlanner_ACU {
         }
 
         snapshot = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies);
-        // 派工可能结算模块或改写大纲：清空放行地址，允许重读最新版。
+        // 派工可能结算模块或改写大纲：记录既有读取地址后允许重读最新版。
+        for (const key of toolUsage.granted) toolUsage.invalidated.add(key);
         toolUsage.granted.clear();
         await commitOutcomes(outcomesBefore);
         iteration += 1;
@@ -803,8 +811,12 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (decision.allowed) {
         toolUsage.gateState.grantedTokens += decision.batchTokens;
         for (const material of fresh) {
+          const isLatestSnapshot = toolUsage.invalidated.delete(material.key);
           toolUsage.granted.add(material.key);
-          appends.push({ kind: 'tool', text: `### ${material.title}（${material.label}）\n${material.text}`, digest: `调阅 ${material.label}`, turnKey: session.turnKey, readKey: material.key });
+          const latestSnapshotNotice = isLatestSnapshot
+            ? '\n\n【最新快照】该地址的资料在上次调阅后可能已变化；本条是重新调阅所得的最新快照，较早结果仅代表产生时状态。'
+            : '';
+          appends.push({ kind: 'tool', text: `### ${material.title}（${material.label}）\n${material.text}${latestSnapshotNotice}`, digest: `调阅 ${material.label}`, turnKey: session.turnKey, readKey: material.key });
         }
         logAgentSession_ACU({
           kind: 'tool_read',

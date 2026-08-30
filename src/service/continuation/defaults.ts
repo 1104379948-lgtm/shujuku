@@ -113,6 +113,11 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V16_ACU = 'spv2.4-continu
  * $RECENT_STORY / 阶段纪要链全部退役。旧提示词描述的上下文排布与运行时不再一致，必须强制刷新。
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU = 'spv2.5-continuation-story-layers-v17';
+/**
+ * Append-only 会话契约版本：同址重读不再动态投影旧工具消息，最新快照关系由新消息自身说明。
+ * 从 V17 升级时只定向替换已知默认句，保留用户定制提示词；更老版本继续整体刷新。
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU = 'spv2.6-continuation-append-only-history-v18';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -169,7 +174,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU,
   };
 }
 

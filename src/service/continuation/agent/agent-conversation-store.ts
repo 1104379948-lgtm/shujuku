@@ -344,32 +344,19 @@ export async function appendAgentConversationToChat_ACU(appends: readonly AgentC
   return appendPreparedAgentConversationMessages_ACU(messages, next.messages.slice(snapshot.messages.length));
 }
 
-/** 同一读取地址被重读后，旧工具结果在发送给模型时投影成的占位说明。 */
-function staleReadPlaceholder_ACU(readKey: string): string {
-  return `（此前读取的 ${readKey} 内容已过期并被移出上下文，最新内容见后文的工具结果。）`;
-}
-
 /**
  * 渲染会话消息为发送给模型的消息序列。
  *
- * 携带相同 readKey 的工具消息只保留最后一条的完整内容，更早的投影成一行过期占位——
- * 资料被重读说明旧版本已失效，继续占用上下文只会误导模型。持久化内容不受影响，
- * 楼层回退后投影自动按剩余消息重算。
+ * 渲染严格使用每条消息自身的持久化文本；向尾部追加消息不得反向改写既有渲染前缀。
  * @param snapshot 当前会话视图
  * @returns `{ role, content }` 数组；主 Agent 自己的输出是 assistant，其余一律 user
  */
 export function renderAgentConversationMessages_ACU(snapshot: AgentConversationSnapshot_ACU): Array<{ role: string; content: string }> {
-  const latestByReadKey = new Map<string, number>();
-  snapshot.messages.forEach((message, index) => {
-    if (message.kind === 'tool' && message.readKey) latestByReadKey.set(message.readKey, index);
-  });
-  return snapshot.messages.map((message, index) => {
+  return snapshot.messages.map((message) => {
     const prefix = KIND_PREFIXES_ACU[message.kind];
-    const stale = message.kind === 'tool' && message.readKey && latestByReadKey.get(message.readKey) !== index;
-    const text = stale ? staleReadPlaceholder_ACU(message.readKey!) : message.text;
     return {
       role: message.kind === 'agent' ? 'assistant' : 'user',
-      content: prefix ? `${prefix}\n${text}` : text,
+      content: prefix ? `${prefix}\n${message.text}` : message.text,
     };
   });
 }

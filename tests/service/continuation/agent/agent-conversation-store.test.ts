@@ -265,16 +265,20 @@ describe('会话追加与渲染', () => {
     ]);
   });
 
-  it('同一 readKey 被重读后，旧工具结果投影成过期占位，只保留最新一条全文', () => {
-    const snapshot = appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+  it('追加同一 readKey 的新快照后，既有渲染前缀保持逐字不变', () => {
+    const before = appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
       { kind: 'tool', text: '旧版角色表内容', digest: '', turnKey: 't1', readKey: '$TABLE:角色表' },
       { kind: 'agent', text: '中间输出', digest: '', turnKey: 't1' },
+    ]);
+    const renderedBefore = renderAgentConversationMessages_ACU(before);
+    const after = appendAgentConversation_ACU(before, [
       { kind: 'tool', text: '新版角色表内容', digest: '', turnKey: 't2', readKey: '$TABLE:角色表' },
     ]);
-    const rendered = renderAgentConversationMessages_ACU(snapshot);
-    expect(rendered[0].content).toContain('已过期');
-    expect(rendered[0].content).not.toContain('旧版角色表内容');
-    expect(rendered[2].content).toContain('新版角色表内容');
+    const renderedAfter = renderAgentConversationMessages_ACU(after);
+
+    expect(renderedAfter.slice(0, renderedBefore.length)).toEqual(renderedBefore);
+    expect(renderedBefore[0].content).toBe('【工具结果】\n旧版角色表内容');
+    expect(renderedAfter[2].content).toBe('【工具结果】\n新版角色表内容');
   });
 
   it('最后一次换轮通告的游标可被查出，没有通告时为空串', () => {

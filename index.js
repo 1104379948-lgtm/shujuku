@@ -8166,44 +8166,44 @@ $CONTENT
     var commonjsGlobal = typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : typeof global !== 'undefined' ? global : typeof self !== 'undefined' ? self : {};
 
     function getDefaultExportFromCjs (x) {
-    	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
+	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
     }
 
     function getDefaultExportFromNamespaceIfPresent (n) {
-    	return n && Object.prototype.hasOwnProperty.call(n, 'default') ? n['default'] : n;
+	return n && Object.prototype.hasOwnProperty.call(n, 'default') ? n['default'] : n;
     }
 
     function getDefaultExportFromNamespaceIfNotNamed (n) {
-    	return n && Object.prototype.hasOwnProperty.call(n, 'default') && Object.keys(n).length === 1 ? n['default'] : n;
+	return n && Object.prototype.hasOwnProperty.call(n, 'default') && Object.keys(n).length === 1 ? n['default'] : n;
     }
 
     function getAugmentedNamespace(n) {
       if (Object.prototype.hasOwnProperty.call(n, '__esModule')) return n;
       var f = n.default;
-    	if (typeof f == "function") {
-    		var a = function a () {
-    			var isInstance = false;
+	if (typeof f == "function") {
+		var a = function a () {
+			var isInstance = false;
           try {
             isInstance = this instanceof a;
           } catch (e) {}
-    			if (isInstance) {
+			if (isInstance) {
             return Reflect.construct(f, arguments, this.constructor);
-    			}
-    			return f.apply(this, arguments);
-    		};
-    		a.prototype = f.prototype;
+			}
+			return f.apply(this, arguments);
+		};
+		a.prototype = f.prototype;
       } else a = {};
       Object.defineProperty(a, '__esModule', {value: true});
-    	Object.keys(n).forEach(function (k) {
-    		var d = Object.getOwnPropertyDescriptor(n, k);
-    		Object.defineProperty(a, k, d.get ? d : {
-    			enumerable: true,
-    			get: function () {
-    				return n[k];
-    			}
-    		});
-    	});
-    	return a;
+	Object.keys(n).forEach(function (k) {
+		var d = Object.getOwnPropertyDescriptor(n, k);
+		Object.defineProperty(a, k, d.get ? d : {
+			enumerable: true,
+			get: function () {
+				return n[k];
+			}
+		});
+	});
+	return a;
     }
 
     var sqlWasm$1 = {exports: {}};
@@ -8233,105 +8233,105 @@ $CONTENT
     var hasRequiredSqlWasm;
 
     function requireSqlWasm () {
-    	if (hasRequiredSqlWasm) return sqlWasm$1.exports;
-    	hasRequiredSqlWasm = 1;
-    	(function (module, exports) {
-    		// We are modularizing this manually because the current modularize setting in Emscripten has some issues:
-    		// https://github.com/kripken/emscripten/issues/5820
-    		// In addition, When you use emcc's modularization, it still expects to export a global object called `Module`,
-    		// which is able to be used/called before the WASM is loaded.
-    		// The modularization below exports a promise that loads and resolves to the actual sql.js module.
-    		// That way, this module can't be used before the WASM is finished loading.
+	if (hasRequiredSqlWasm) return sqlWasm$1.exports;
+	hasRequiredSqlWasm = 1;
+	(function (module, exports) {
+		// We are modularizing this manually because the current modularize setting in Emscripten has some issues:
+		// https://github.com/kripken/emscripten/issues/5820
+		// In addition, When you use emcc's modularization, it still expects to export a global object called `Module`,
+		// which is able to be used/called before the WASM is loaded.
+		// The modularization below exports a promise that loads and resolves to the actual sql.js module.
+		// That way, this module can't be used before the WASM is finished loading.
 
-    		// We are going to define a function that a user will call to start loading initializing our Sql.js library
-    		// However, that function might be called multiple times, and on subsequent calls, we don't actually want it to instantiate a new instance of the Module
-    		// Instead, we want to return the previously loaded module
+		// We are going to define a function that a user will call to start loading initializing our Sql.js library
+		// However, that function might be called multiple times, and on subsequent calls, we don't actually want it to instantiate a new instance of the Module
+		// Instead, we want to return the previously loaded module
 
-    		// TODO: Make this not declare a global if used in the browser
-    		var initSqlJsPromise = undefined;
+		// TODO: Make this not declare a global if used in the browser
+		var initSqlJsPromise = undefined;
 
-    		var initSqlJs = function (moduleConfig) {
+		var initSqlJs = function (moduleConfig) {
 
-    		    if (initSqlJsPromise){
-    		      return initSqlJsPromise;
-    		    }
-    		    // If we're here, we've never called this function before
-    		    initSqlJsPromise = new Promise(function (resolveModule, reject) {
+		    if (initSqlJsPromise){
+		      return initSqlJsPromise;
+		    }
+		    // If we're here, we've never called this function before
+		    initSqlJsPromise = new Promise(function (resolveModule, reject) {
 
-    		        // We are modularizing this manually because the current modularize setting in Emscripten has some issues:
-    		        // https://github.com/kripken/emscripten/issues/5820
+		        // We are modularizing this manually because the current modularize setting in Emscripten has some issues:
+		        // https://github.com/kripken/emscripten/issues/5820
 
-    		        // The way to affect the loading of emcc compiled modules is to create a variable called `Module` and add
-    		        // properties to it, like `preRun`, `postRun`, etc
-    		        // We are using that to get notified when the WASM has finished loading.
-    		        // Only then will we return our promise
+		        // The way to affect the loading of emcc compiled modules is to create a variable called `Module` and add
+		        // properties to it, like `preRun`, `postRun`, etc
+		        // We are using that to get notified when the WASM has finished loading.
+		        // Only then will we return our promise
 
-    		        // If they passed in a moduleConfig object, use that
-    		        // Otherwise, initialize Module to the empty object
-    		        var Module = typeof moduleConfig !== 'undefined' ? moduleConfig : {};
+		        // If they passed in a moduleConfig object, use that
+		        // Otherwise, initialize Module to the empty object
+		        var Module = typeof moduleConfig !== 'undefined' ? moduleConfig : {};
 
-    		        // EMCC only allows for a single onAbort function (not an array of functions)
-    		        // So if the user defined their own onAbort function, we remember it and call it
-    		        var originalOnAbortFunction = Module['onAbort'];
-    		        Module['onAbort'] = function (errorThatCausedAbort) {
-    		            reject(new Error(errorThatCausedAbort));
-    		            if (originalOnAbortFunction){
-    		              originalOnAbortFunction(errorThatCausedAbort);
-    		            }
-    		        };
+		        // EMCC only allows for a single onAbort function (not an array of functions)
+		        // So if the user defined their own onAbort function, we remember it and call it
+		        var originalOnAbortFunction = Module['onAbort'];
+		        Module['onAbort'] = function (errorThatCausedAbort) {
+		            reject(new Error(errorThatCausedAbort));
+		            if (originalOnAbortFunction){
+		              originalOnAbortFunction(errorThatCausedAbort);
+		            }
+		        };
 
-    		        Module['postRun'] = Module['postRun'] || [];
-    		        Module['postRun'].push(function () {
-    		            // When Emscripted calls postRun, this promise resolves with the built Module
-    		            resolveModule(Module);
-    		        });
+		        Module['postRun'] = Module['postRun'] || [];
+		        Module['postRun'].push(function () {
+		            // When Emscripted calls postRun, this promise resolves with the built Module
+		            resolveModule(Module);
+		        });
 
-    		        // There is a section of code in the emcc-generated code below that looks like this:
-    		        // (Note that this is lowercase `module`)
-    		        // if (typeof module !== 'undefined') {
-    		        //     module['exports'] = Module;
-    		        // }
-    		        // When that runs, it's going to overwrite our own modularization export efforts in shell-post.js!
-    		        // The only way to tell emcc not to emit it is to pass the MODULARIZE=1 or MODULARIZE_INSTANCE=1 flags,
-    		        // but that carries with it additional unnecessary baggage/bugs we don't want either.
-    		        // So, we have three options:
-    		        // 1) We undefine `module`
-    		        // 2) We remember what `module['exports']` was at the beginning of this function and we restore it later
-    		        // 3) We write a script to remove those lines of code as part of the Make process.
-    		        //
-    		        // Since those are the only lines of code that care about module, we will undefine it. It's the most straightforward
-    		        // of the options, and has the side effect of reducing emcc's efforts to modify the module if its output were to change in the future.
-    		        // That's a nice side effect since we're handling the modularization efforts ourselves
-    		        module = undefined;
+		        // There is a section of code in the emcc-generated code below that looks like this:
+		        // (Note that this is lowercase `module`)
+		        // if (typeof module !== 'undefined') {
+		        //     module['exports'] = Module;
+		        // }
+		        // When that runs, it's going to overwrite our own modularization export efforts in shell-post.js!
+		        // The only way to tell emcc not to emit it is to pass the MODULARIZE=1 or MODULARIZE_INSTANCE=1 flags,
+		        // but that carries with it additional unnecessary baggage/bugs we don't want either.
+		        // So, we have three options:
+		        // 1) We undefine `module`
+		        // 2) We remember what `module['exports']` was at the beginning of this function and we restore it later
+		        // 3) We write a script to remove those lines of code as part of the Make process.
+		        //
+		        // Since those are the only lines of code that care about module, we will undefine it. It's the most straightforward
+		        // of the options, and has the side effect of reducing emcc's efforts to modify the module if its output were to change in the future.
+		        // That's a nice side effect since we're handling the modularization efforts ourselves
+		        module = undefined;
 
-    		        // The emcc-generated code and shell-post.js code goes below,
-    		        // meaning that all of it runs inside of this promise. If anything throws an exception, our promise will abort
-    		var k;k||=typeof Module != 'undefined' ? Module : {};var aa=!!globalThis.window,ba=!!globalThis.WorkerGlobalScope,ca=globalThis.process?.versions?.node&&"renderer"!=globalThis.process?.type;
-    		k.onRuntimeInitialized=function(){function a(f,l){switch(typeof l){case "boolean":bc(f,l?1:0);break;case "number":cc(f,l);break;case "string":dc(f,l,-1,-1);break;case "object":if(null===l)lb(f);else if(null!=l.length){var n=da(l.length);m.set(l,n);ec(f,n,l.length,-1);ea(n);}else sa(f,"Wrong API use : tried to return a value of an unknown type ("+l+").",-1);break;default:lb(f);}}function b(f,l){for(var n=[],p=0;p<f;p+=1){var u=r(l+4*p,"i32"),v=fc(u);if(1===v||2===v)u=gc(u);else if(3===v)u=hc(u);else if(4===
-    		v){v=u;u=ic(v);v=jc(v);for(var K=new Uint8Array(u),I=0;I<u;I+=1)K[I]=m[v+I];u=K;}else u=null;n.push(u);}return n}function c(f,l){this.Qa=f;this.db=l;this.Oa=1;this.mb=[];}function d(f,l){this.db=l;this.fb=fa(f);if(null===this.fb)throw Error("Unable to allocate memory for the SQL string");this.lb=this.fb;this.$a=this.sb=null;}function e(f){this.filename="dbfile_"+(4294967295*Math.random()>>>0);if(null!=f){var l=this.filename,n="/",p=l;n&&(n="string"==typeof n?n:ha(n),p=l?ia(n+"/"+l):n);l=ja(!0,!0);p=ka(p,
-    		l);if(f){if("string"==typeof f){n=Array(f.length);for(var u=0,v=f.length;u<v;++u)n[u]=f.charCodeAt(u);f=n;}la(p,l|146);n=ma(p,577);na(n,f,0,f.length,0);oa(n);la(p,l);}}this.handleError(q(this.filename,g));this.db=r(g,"i32");ob(this.db);this.gb={};this.Sa={};}var g=y(4),h=k.cwrap,q=h("sqlite3_open","number",["string","number"]),w=h("sqlite3_close_v2","number",["number"]),t=h("sqlite3_exec","number",["number","string","number","number","number"]),x=h("sqlite3_changes","number",["number"]),D=h("sqlite3_prepare_v2",
-    		"number",["number","string","number","number","number"]),pb=h("sqlite3_sql","string",["number"]),lc=h("sqlite3_normalized_sql","string",["number"]),qb=h("sqlite3_prepare_v2","number",["number","number","number","number","number"]),mc=h("sqlite3_bind_text","number",["number","number","number","number","number"]),rb=h("sqlite3_bind_blob","number",["number","number","number","number","number"]),nc=h("sqlite3_bind_double","number",["number","number","number"]),oc=h("sqlite3_bind_int","number",["number",
-    		"number","number"]),pc=h("sqlite3_bind_parameter_index","number",["number","string"]),qc=h("sqlite3_step","number",["number"]),rc=h("sqlite3_errmsg","string",["number"]),sc=h("sqlite3_column_count","number",["number"]),tc=h("sqlite3_data_count","number",["number"]),uc=h("sqlite3_column_double","number",["number","number"]),sb=h("sqlite3_column_text","string",["number","number"]),vc=h("sqlite3_column_blob","number",["number","number"]),wc=h("sqlite3_column_bytes","number",["number","number"]),xc=h("sqlite3_column_type",
-    		"number",["number","number"]),yc=h("sqlite3_column_name","string",["number","number"]),zc=h("sqlite3_reset","number",["number"]),Ac=h("sqlite3_clear_bindings","number",["number"]),Bc=h("sqlite3_finalize","number",["number"]),tb=h("sqlite3_create_function_v2","number","number string number number number number number number number".split(" ")),fc=h("sqlite3_value_type","number",["number"]),ic=h("sqlite3_value_bytes","number",["number"]),hc=h("sqlite3_value_text","string",["number"]),jc=h("sqlite3_value_blob",
-    		"number",["number"]),gc=h("sqlite3_value_double","number",["number"]),cc=h("sqlite3_result_double","",["number","number"]),lb=h("sqlite3_result_null","",["number"]),dc=h("sqlite3_result_text","",["number","string","number","number"]),ec=h("sqlite3_result_blob","",["number","number","number","number"]),bc=h("sqlite3_result_int","",["number","number"]),sa=h("sqlite3_result_error","",["number","string","number"]),ub=h("sqlite3_aggregate_context","number",["number","number"]),ob=h("RegisterExtensionFunctions",
-    		"number",["number"]),vb=h("sqlite3_update_hook","number",["number","number","number"]);c.prototype.bind=function(f){if(!this.Qa)throw "Statement closed";this.reset();return Array.isArray(f)?this.Gb(f):null!=f&&"object"===typeof f?this.Hb(f):!0};c.prototype.step=function(){if(!this.Qa)throw "Statement closed";this.Oa=1;var f=qc(this.Qa);switch(f){case 100:return !0;case 101:return !1;default:throw this.db.handleError(f);}};c.prototype.Ab=function(f){null==f&&(f=this.Oa,this.Oa+=1);return uc(this.Qa,f)};
-    		c.prototype.Ob=function(f){null==f&&(f=this.Oa,this.Oa+=1);f=sb(this.Qa,f);if("function"!==typeof BigInt)throw Error("BigInt is not supported");return BigInt(f)};c.prototype.Tb=function(f){null==f&&(f=this.Oa,this.Oa+=1);return sb(this.Qa,f)};c.prototype.getBlob=function(f){null==f&&(f=this.Oa,this.Oa+=1);var l=wc(this.Qa,f);f=vc(this.Qa,f);for(var n=new Uint8Array(l),p=0;p<l;p+=1)n[p]=m[f+p];return n};c.prototype.get=function(f,l){l=l||{};null!=f&&this.bind(f)&&this.step();f=[];for(var n=tc(this.Qa),
-    		p=0;p<n;p+=1)switch(xc(this.Qa,p)){case 1:var u=l.useBigInt?this.Ob(p):this.Ab(p);f.push(u);break;case 2:f.push(this.Ab(p));break;case 3:f.push(this.Tb(p));break;case 4:f.push(this.getBlob(p));break;default:f.push(null);}return f};c.prototype.qb=function(){for(var f=[],l=sc(this.Qa),n=0;n<l;n+=1)f.push(yc(this.Qa,n));return f};c.prototype.zb=function(f,l){f=this.get(f,l);l=this.qb();for(var n={},p=0;p<l.length;p+=1)n[l[p]]=f[p];return n};c.prototype.Sb=function(){return pb(this.Qa)};c.prototype.Pb=
-    		function(){return lc(this.Qa)};c.prototype.run=function(f){null!=f&&this.bind(f);this.step();return this.reset()};c.prototype.wb=function(f,l){null==l&&(l=this.Oa,this.Oa+=1);f=fa(f);this.mb.push(f);this.db.handleError(mc(this.Qa,l,f,-1,0));};c.prototype.Fb=function(f,l){null==l&&(l=this.Oa,this.Oa+=1);var n=da(f.length);m.set(f,n);this.mb.push(n);this.db.handleError(rb(this.Qa,l,n,f.length,0));};c.prototype.vb=function(f,l){null==l&&(l=this.Oa,this.Oa+=1);this.db.handleError((f===(f|0)?oc:nc)(this.Qa,
-    		l,f));};c.prototype.Ib=function(f){null==f&&(f=this.Oa,this.Oa+=1);rb(this.Qa,f,0,0,0);};c.prototype.xb=function(f,l){null==l&&(l=this.Oa,this.Oa+=1);switch(typeof f){case "string":this.wb(f,l);return;case "number":this.vb(f,l);return;case "bigint":this.wb(f.toString(),l);return;case "boolean":this.vb(f+0,l);return;case "object":if(null===f){this.Ib(l);return}if(null!=f.length){this.Fb(f,l);return}}throw "Wrong API use : tried to bind a value of an unknown type ("+f+").";};c.prototype.Hb=function(f){var l=
-    		this;Object.keys(f).forEach(function(n){var p=pc(l.Qa,n);0!==p&&l.xb(f[n],p);});return !0};c.prototype.Gb=function(f){for(var l=0;l<f.length;l+=1)this.xb(f[l],l+1);return !0};c.prototype.reset=function(){this.freemem();return 0===Ac(this.Qa)&&0===zc(this.Qa)};c.prototype.freemem=function(){for(var f;void 0!==(f=this.mb.pop());)ea(f);};c.prototype.Ya=function(){this.freemem();var f=0===Bc(this.Qa);delete this.db.gb[this.Qa];this.Qa=0;return f};d.prototype.next=function(){if(null===this.fb)return {done:!0};
-    		null!==this.$a&&(this.$a.Ya(),this.$a=null);if(!this.db.db)throw this.ob(),Error("Database closed");var f=pa(),l=y(4);qa(g);qa(l);try{this.db.handleError(qb(this.db.db,this.lb,-1,g,l));this.lb=r(l,"i32");var n=r(g,"i32");if(0===n)return this.ob(),{done:!0};this.$a=new c(n,this.db);this.db.gb[n]=this.$a;return {value:this.$a,done:!1}}catch(p){throw this.sb=z(this.lb),this.ob(),p;}finally{ra(f);}};d.prototype.ob=function(){ea(this.fb);this.fb=null;};d.prototype.Qb=function(){return null!==this.sb?this.sb:
-    		z(this.lb)};"function"===typeof Symbol&&"symbol"===typeof Symbol.iterator&&(d.prototype[Symbol.iterator]=function(){return this});e.prototype.run=function(f,l){if(!this.db)throw "Database closed";if(l){f=this.tb(f,l);try{f.step();}finally{f.Ya();}}else this.handleError(t(this.db,f,0,0,g));return this};e.prototype.exec=function(f,l,n){if(!this.db)throw "Database closed";var p=null,u=null,v=null;try{v=u=fa(f);var K=y(4);for(f=[];0!==r(v,"i8");){qa(g);qa(K);this.handleError(qb(this.db,v,-1,g,K));var I=r(g,
-    		"i32");v=r(K,"i32");if(0!==I){var H=null;p=new c(I,this);for(null!=l&&p.bind(l);p.step();)null===H&&(H={columns:p.qb(),values:[]},f.push(H)),H.values.push(p.get(null,n));p.Ya();}}return f}catch(L){throw p&&p.Ya(),L;}finally{u&&ea(u);}};e.prototype.Mb=function(f,l,n,p,u){"function"===typeof l&&(p=n,n=l,l=void 0);f=this.tb(f,l);try{for(;f.step();)n(f.zb(null,u));}finally{f.Ya();}if("function"===typeof p)return p()};e.prototype.tb=function(f,l){qa(g);this.handleError(D(this.db,f,-1,g,0));f=r(g,"i32");if(0===
-    		f)throw "Nothing to prepare";var n=new c(f,this);null!=l&&n.bind(l);return this.gb[f]=n};e.prototype.Ub=function(f){return new d(f,this)};e.prototype.Nb=function(){Object.values(this.gb).forEach(function(l){l.Ya();});Object.values(this.Sa).forEach(A);this.Sa={};this.handleError(w(this.db));var f=ta(this.filename);this.handleError(q(this.filename,g));this.db=r(g,"i32");ob(this.db);return f};e.prototype.close=function(){null!==this.db&&(Object.values(this.gb).forEach(function(f){f.Ya();}),Object.values(this.Sa).forEach(A),
-    		this.Sa={},this.Za&&(A(this.Za),this.Za=void 0),this.handleError(w(this.db)),ua("/"+this.filename),this.db=null);};e.prototype.handleError=function(f){if(0===f)return null;f=rc(this.db);throw Error(f);};e.prototype.Rb=function(){return x(this.db)};e.prototype.Kb=function(f,l){Object.prototype.hasOwnProperty.call(this.Sa,f)&&(A(this.Sa[f]),delete this.Sa[f]);var n=va(function(p,u,v){u=b(u,v);try{var K=l.apply(null,u);}catch(I){sa(p,I,-1);return}a(p,K);},"viii");this.Sa[f]=n;this.handleError(tb(this.db,
-    		f,l.length,1,0,n,0,0,0));return this};e.prototype.Jb=function(f,l){var n=l.init||function(){return null},p=l.finalize||function(H){return H},u=l.step;if(!u)throw "An aggregate function must have a step function in "+f;var v={};Object.hasOwnProperty.call(this.Sa,f)&&(A(this.Sa[f]),delete this.Sa[f]);l=f+"__finalize";Object.hasOwnProperty.call(this.Sa,l)&&(A(this.Sa[l]),delete this.Sa[l]);var K=va(function(H,L,Pa){var V=ub(H,1);Object.hasOwnProperty.call(v,V)||(v[V]=n());L=b(L,Pa);L=[v[V]].concat(L);
-    		try{v[V]=u.apply(null,L);}catch(Dc){delete v[V],sa(H,Dc,-1);}},"viii"),I=va(function(H){var L=ub(H,1);try{var Pa=p(v[L]);}catch(V){delete v[L];sa(H,V,-1);return}a(H,Pa);delete v[L];},"vi");this.Sa[f]=K;this.Sa[l]=I;this.handleError(tb(this.db,f,u.length-1,1,0,0,K,I,0));return this};e.prototype.Zb=function(f){this.Za&&(vb(this.db,0,0),A(this.Za),this.Za=void 0);if(!f)return this;this.Za=va(function(l,n,p,u,v){switch(n){case 18:l="insert";break;case 23:l="update";break;case 9:l="delete";break;default:throw "unknown operationCode in updateHook callback: "+
-    		n;}p=z(p);u=z(u);if(v>Number.MAX_SAFE_INTEGER)throw "rowId too big to fit inside a Number";f(l,p,u,Number(v));},"viiiij");vb(this.db,this.Za,0);return this};c.prototype.bind=c.prototype.bind;c.prototype.step=c.prototype.step;c.prototype.get=c.prototype.get;c.prototype.getColumnNames=c.prototype.qb;c.prototype.getAsObject=c.prototype.zb;c.prototype.getSQL=c.prototype.Sb;c.prototype.getNormalizedSQL=c.prototype.Pb;c.prototype.run=c.prototype.run;c.prototype.reset=c.prototype.reset;c.prototype.freemem=
-    		c.prototype.freemem;c.prototype.free=c.prototype.Ya;d.prototype.next=d.prototype.next;d.prototype.getRemainingSQL=d.prototype.Qb;e.prototype.run=e.prototype.run;e.prototype.exec=e.prototype.exec;e.prototype.each=e.prototype.Mb;e.prototype.prepare=e.prototype.tb;e.prototype.iterateStatements=e.prototype.Ub;e.prototype["export"]=e.prototype.Nb;e.prototype.close=e.prototype.close;e.prototype.handleError=e.prototype.handleError;e.prototype.getRowsModified=e.prototype.Rb;e.prototype.create_function=e.prototype.Kb;
-    		e.prototype.create_aggregate=e.prototype.Jb;e.prototype.updateHook=e.prototype.Zb;k.Database=e;};var wa="./this.program",xa=(a,b)=>{throw b;},ya=globalThis.document?.currentScript?.src;"undefined"!=typeof __filename?ya=__filename:ba&&(ya=self.location.href);var za="",Aa,Ba;
-    		if(ca){var fs=require$$0;za=__dirname+"/";Ba=a=>{a=Ca(a)?new URL(a):a;return fs.readFileSync(a)};Aa=async a=>{a=Ca(a)?new URL(a):a;return fs.readFileSync(a,void 0)};1<process.argv.length&&(wa=process.argv[1].replace(/\\/g,"/"));process.argv.slice(2);"undefined"!='object'&&(module.exports=k);xa=(a,b)=>{process.exitCode=a;throw b;};}else if(aa||ba){try{za=(new URL(".",ya)).href;}catch{}ba&&(Ba=a=>{var b=new XMLHttpRequest;b.open("GET",a,!1);b.responseType="arraybuffer";b.send(null);return new Uint8Array(b.response)});
-    		Aa=async a=>{if(Ca(a))return new Promise((c,d)=>{var e=new XMLHttpRequest;e.open("GET",a,!0);e.responseType="arraybuffer";e.onload=()=>{200==e.status||0==e.status&&e.response?c(e.response):d(e.status);};e.onerror=d;e.send(null);});var b=await fetch(a,{credentials:"same-origin"});if(b.ok)return b.arrayBuffer();throw Error(b.status+" : "+b.url);};}var Da=console.log.bind(console),B=console.error.bind(console),Ea,Fa=!1,Ga,Ca=a=>a.startsWith("file://"),m,C,Ha,E,F,Ia,Ja,G;
+		        // The emcc-generated code and shell-post.js code goes below,
+		        // meaning that all of it runs inside of this promise. If anything throws an exception, our promise will abort
+		var k;k||=typeof Module != 'undefined' ? Module : {};var aa=!!globalThis.window,ba=!!globalThis.WorkerGlobalScope,ca=globalThis.process?.versions?.node&&"renderer"!=globalThis.process?.type;
+		k.onRuntimeInitialized=function(){function a(f,l){switch(typeof l){case "boolean":bc(f,l?1:0);break;case "number":cc(f,l);break;case "string":dc(f,l,-1,-1);break;case "object":if(null===l)lb(f);else if(null!=l.length){var n=da(l.length);m.set(l,n);ec(f,n,l.length,-1);ea(n);}else sa(f,"Wrong API use : tried to return a value of an unknown type ("+l+").",-1);break;default:lb(f);}}function b(f,l){for(var n=[],p=0;p<f;p+=1){var u=r(l+4*p,"i32"),v=fc(u);if(1===v||2===v)u=gc(u);else if(3===v)u=hc(u);else if(4===
+		v){v=u;u=ic(v);v=jc(v);for(var K=new Uint8Array(u),I=0;I<u;I+=1)K[I]=m[v+I];u=K;}else u=null;n.push(u);}return n}function c(f,l){this.Qa=f;this.db=l;this.Oa=1;this.mb=[];}function d(f,l){this.db=l;this.fb=fa(f);if(null===this.fb)throw Error("Unable to allocate memory for the SQL string");this.lb=this.fb;this.$a=this.sb=null;}function e(f){this.filename="dbfile_"+(4294967295*Math.random()>>>0);if(null!=f){var l=this.filename,n="/",p=l;n&&(n="string"==typeof n?n:ha(n),p=l?ia(n+"/"+l):n);l=ja(!0,!0);p=ka(p,
+		l);if(f){if("string"==typeof f){n=Array(f.length);for(var u=0,v=f.length;u<v;++u)n[u]=f.charCodeAt(u);f=n;}la(p,l|146);n=ma(p,577);na(n,f,0,f.length,0);oa(n);la(p,l);}}this.handleError(q(this.filename,g));this.db=r(g,"i32");ob(this.db);this.gb={};this.Sa={};}var g=y(4),h=k.cwrap,q=h("sqlite3_open","number",["string","number"]),w=h("sqlite3_close_v2","number",["number"]),t=h("sqlite3_exec","number",["number","string","number","number","number"]),x=h("sqlite3_changes","number",["number"]),D=h("sqlite3_prepare_v2",
+		"number",["number","string","number","number","number"]),pb=h("sqlite3_sql","string",["number"]),lc=h("sqlite3_normalized_sql","string",["number"]),qb=h("sqlite3_prepare_v2","number",["number","number","number","number","number"]),mc=h("sqlite3_bind_text","number",["number","number","number","number","number"]),rb=h("sqlite3_bind_blob","number",["number","number","number","number","number"]),nc=h("sqlite3_bind_double","number",["number","number","number"]),oc=h("sqlite3_bind_int","number",["number",
+		"number","number"]),pc=h("sqlite3_bind_parameter_index","number",["number","string"]),qc=h("sqlite3_step","number",["number"]),rc=h("sqlite3_errmsg","string",["number"]),sc=h("sqlite3_column_count","number",["number"]),tc=h("sqlite3_data_count","number",["number"]),uc=h("sqlite3_column_double","number",["number","number"]),sb=h("sqlite3_column_text","string",["number","number"]),vc=h("sqlite3_column_blob","number",["number","number"]),wc=h("sqlite3_column_bytes","number",["number","number"]),xc=h("sqlite3_column_type",
+		"number",["number","number"]),yc=h("sqlite3_column_name","string",["number","number"]),zc=h("sqlite3_reset","number",["number"]),Ac=h("sqlite3_clear_bindings","number",["number"]),Bc=h("sqlite3_finalize","number",["number"]),tb=h("sqlite3_create_function_v2","number","number string number number number number number number number".split(" ")),fc=h("sqlite3_value_type","number",["number"]),ic=h("sqlite3_value_bytes","number",["number"]),hc=h("sqlite3_value_text","string",["number"]),jc=h("sqlite3_value_blob",
+		"number",["number"]),gc=h("sqlite3_value_double","number",["number"]),cc=h("sqlite3_result_double","",["number","number"]),lb=h("sqlite3_result_null","",["number"]),dc=h("sqlite3_result_text","",["number","string","number","number"]),ec=h("sqlite3_result_blob","",["number","number","number","number"]),bc=h("sqlite3_result_int","",["number","number"]),sa=h("sqlite3_result_error","",["number","string","number"]),ub=h("sqlite3_aggregate_context","number",["number","number"]),ob=h("RegisterExtensionFunctions",
+		"number",["number"]),vb=h("sqlite3_update_hook","number",["number","number","number"]);c.prototype.bind=function(f){if(!this.Qa)throw "Statement closed";this.reset();return Array.isArray(f)?this.Gb(f):null!=f&&"object"===typeof f?this.Hb(f):!0};c.prototype.step=function(){if(!this.Qa)throw "Statement closed";this.Oa=1;var f=qc(this.Qa);switch(f){case 100:return !0;case 101:return !1;default:throw this.db.handleError(f);}};c.prototype.Ab=function(f){null==f&&(f=this.Oa,this.Oa+=1);return uc(this.Qa,f)};
+		c.prototype.Ob=function(f){null==f&&(f=this.Oa,this.Oa+=1);f=sb(this.Qa,f);if("function"!==typeof BigInt)throw Error("BigInt is not supported");return BigInt(f)};c.prototype.Tb=function(f){null==f&&(f=this.Oa,this.Oa+=1);return sb(this.Qa,f)};c.prototype.getBlob=function(f){null==f&&(f=this.Oa,this.Oa+=1);var l=wc(this.Qa,f);f=vc(this.Qa,f);for(var n=new Uint8Array(l),p=0;p<l;p+=1)n[p]=m[f+p];return n};c.prototype.get=function(f,l){l=l||{};null!=f&&this.bind(f)&&this.step();f=[];for(var n=tc(this.Qa),
+		p=0;p<n;p+=1)switch(xc(this.Qa,p)){case 1:var u=l.useBigInt?this.Ob(p):this.Ab(p);f.push(u);break;case 2:f.push(this.Ab(p));break;case 3:f.push(this.Tb(p));break;case 4:f.push(this.getBlob(p));break;default:f.push(null);}return f};c.prototype.qb=function(){for(var f=[],l=sc(this.Qa),n=0;n<l;n+=1)f.push(yc(this.Qa,n));return f};c.prototype.zb=function(f,l){f=this.get(f,l);l=this.qb();for(var n={},p=0;p<l.length;p+=1)n[l[p]]=f[p];return n};c.prototype.Sb=function(){return pb(this.Qa)};c.prototype.Pb=
+		function(){return lc(this.Qa)};c.prototype.run=function(f){null!=f&&this.bind(f);this.step();return this.reset()};c.prototype.wb=function(f,l){null==l&&(l=this.Oa,this.Oa+=1);f=fa(f);this.mb.push(f);this.db.handleError(mc(this.Qa,l,f,-1,0));};c.prototype.Fb=function(f,l){null==l&&(l=this.Oa,this.Oa+=1);var n=da(f.length);m.set(f,n);this.mb.push(n);this.db.handleError(rb(this.Qa,l,n,f.length,0));};c.prototype.vb=function(f,l){null==l&&(l=this.Oa,this.Oa+=1);this.db.handleError((f===(f|0)?oc:nc)(this.Qa,
+		l,f));};c.prototype.Ib=function(f){null==f&&(f=this.Oa,this.Oa+=1);rb(this.Qa,f,0,0,0);};c.prototype.xb=function(f,l){null==l&&(l=this.Oa,this.Oa+=1);switch(typeof f){case "string":this.wb(f,l);return;case "number":this.vb(f,l);return;case "bigint":this.wb(f.toString(),l);return;case "boolean":this.vb(f+0,l);return;case "object":if(null===f){this.Ib(l);return}if(null!=f.length){this.Fb(f,l);return}}throw "Wrong API use : tried to bind a value of an unknown type ("+f+").";};c.prototype.Hb=function(f){var l=
+		this;Object.keys(f).forEach(function(n){var p=pc(l.Qa,n);0!==p&&l.xb(f[n],p);});return !0};c.prototype.Gb=function(f){for(var l=0;l<f.length;l+=1)this.xb(f[l],l+1);return !0};c.prototype.reset=function(){this.freemem();return 0===Ac(this.Qa)&&0===zc(this.Qa)};c.prototype.freemem=function(){for(var f;void 0!==(f=this.mb.pop());)ea(f);};c.prototype.Ya=function(){this.freemem();var f=0===Bc(this.Qa);delete this.db.gb[this.Qa];this.Qa=0;return f};d.prototype.next=function(){if(null===this.fb)return {done:!0};
+		null!==this.$a&&(this.$a.Ya(),this.$a=null);if(!this.db.db)throw this.ob(),Error("Database closed");var f=pa(),l=y(4);qa(g);qa(l);try{this.db.handleError(qb(this.db.db,this.lb,-1,g,l));this.lb=r(l,"i32");var n=r(g,"i32");if(0===n)return this.ob(),{done:!0};this.$a=new c(n,this.db);this.db.gb[n]=this.$a;return {value:this.$a,done:!1}}catch(p){throw this.sb=z(this.lb),this.ob(),p;}finally{ra(f);}};d.prototype.ob=function(){ea(this.fb);this.fb=null;};d.prototype.Qb=function(){return null!==this.sb?this.sb:
+		z(this.lb)};"function"===typeof Symbol&&"symbol"===typeof Symbol.iterator&&(d.prototype[Symbol.iterator]=function(){return this});e.prototype.run=function(f,l){if(!this.db)throw "Database closed";if(l){f=this.tb(f,l);try{f.step();}finally{f.Ya();}}else this.handleError(t(this.db,f,0,0,g));return this};e.prototype.exec=function(f,l,n){if(!this.db)throw "Database closed";var p=null,u=null,v=null;try{v=u=fa(f);var K=y(4);for(f=[];0!==r(v,"i8");){qa(g);qa(K);this.handleError(qb(this.db,v,-1,g,K));var I=r(g,
+		"i32");v=r(K,"i32");if(0!==I){var H=null;p=new c(I,this);for(null!=l&&p.bind(l);p.step();)null===H&&(H={columns:p.qb(),values:[]},f.push(H)),H.values.push(p.get(null,n));p.Ya();}}return f}catch(L){throw p&&p.Ya(),L;}finally{u&&ea(u);}};e.prototype.Mb=function(f,l,n,p,u){"function"===typeof l&&(p=n,n=l,l=void 0);f=this.tb(f,l);try{for(;f.step();)n(f.zb(null,u));}finally{f.Ya();}if("function"===typeof p)return p()};e.prototype.tb=function(f,l){qa(g);this.handleError(D(this.db,f,-1,g,0));f=r(g,"i32");if(0===
+		f)throw "Nothing to prepare";var n=new c(f,this);null!=l&&n.bind(l);return this.gb[f]=n};e.prototype.Ub=function(f){return new d(f,this)};e.prototype.Nb=function(){Object.values(this.gb).forEach(function(l){l.Ya();});Object.values(this.Sa).forEach(A);this.Sa={};this.handleError(w(this.db));var f=ta(this.filename);this.handleError(q(this.filename,g));this.db=r(g,"i32");ob(this.db);return f};e.prototype.close=function(){null!==this.db&&(Object.values(this.gb).forEach(function(f){f.Ya();}),Object.values(this.Sa).forEach(A),
+		this.Sa={},this.Za&&(A(this.Za),this.Za=void 0),this.handleError(w(this.db)),ua("/"+this.filename),this.db=null);};e.prototype.handleError=function(f){if(0===f)return null;f=rc(this.db);throw Error(f);};e.prototype.Rb=function(){return x(this.db)};e.prototype.Kb=function(f,l){Object.prototype.hasOwnProperty.call(this.Sa,f)&&(A(this.Sa[f]),delete this.Sa[f]);var n=va(function(p,u,v){u=b(u,v);try{var K=l.apply(null,u);}catch(I){sa(p,I,-1);return}a(p,K);},"viii");this.Sa[f]=n;this.handleError(tb(this.db,
+		f,l.length,1,0,n,0,0,0));return this};e.prototype.Jb=function(f,l){var n=l.init||function(){return null},p=l.finalize||function(H){return H},u=l.step;if(!u)throw "An aggregate function must have a step function in "+f;var v={};Object.hasOwnProperty.call(this.Sa,f)&&(A(this.Sa[f]),delete this.Sa[f]);l=f+"__finalize";Object.hasOwnProperty.call(this.Sa,l)&&(A(this.Sa[l]),delete this.Sa[l]);var K=va(function(H,L,Pa){var V=ub(H,1);Object.hasOwnProperty.call(v,V)||(v[V]=n());L=b(L,Pa);L=[v[V]].concat(L);
+		try{v[V]=u.apply(null,L);}catch(Dc){delete v[V],sa(H,Dc,-1);}},"viii"),I=va(function(H){var L=ub(H,1);try{var Pa=p(v[L]);}catch(V){delete v[L];sa(H,V,-1);return}a(H,Pa);delete v[L];},"vi");this.Sa[f]=K;this.Sa[l]=I;this.handleError(tb(this.db,f,u.length-1,1,0,0,K,I,0));return this};e.prototype.Zb=function(f){this.Za&&(vb(this.db,0,0),A(this.Za),this.Za=void 0);if(!f)return this;this.Za=va(function(l,n,p,u,v){switch(n){case 18:l="insert";break;case 23:l="update";break;case 9:l="delete";break;default:throw "unknown operationCode in updateHook callback: "+
+		n;}p=z(p);u=z(u);if(v>Number.MAX_SAFE_INTEGER)throw "rowId too big to fit inside a Number";f(l,p,u,Number(v));},"viiiij");vb(this.db,this.Za,0);return this};c.prototype.bind=c.prototype.bind;c.prototype.step=c.prototype.step;c.prototype.get=c.prototype.get;c.prototype.getColumnNames=c.prototype.qb;c.prototype.getAsObject=c.prototype.zb;c.prototype.getSQL=c.prototype.Sb;c.prototype.getNormalizedSQL=c.prototype.Pb;c.prototype.run=c.prototype.run;c.prototype.reset=c.prototype.reset;c.prototype.freemem=
+		c.prototype.freemem;c.prototype.free=c.prototype.Ya;d.prototype.next=d.prototype.next;d.prototype.getRemainingSQL=d.prototype.Qb;e.prototype.run=e.prototype.run;e.prototype.exec=e.prototype.exec;e.prototype.each=e.prototype.Mb;e.prototype.prepare=e.prototype.tb;e.prototype.iterateStatements=e.prototype.Ub;e.prototype["export"]=e.prototype.Nb;e.prototype.close=e.prototype.close;e.prototype.handleError=e.prototype.handleError;e.prototype.getRowsModified=e.prototype.Rb;e.prototype.create_function=e.prototype.Kb;
+		e.prototype.create_aggregate=e.prototype.Jb;e.prototype.updateHook=e.prototype.Zb;k.Database=e;};var wa="./this.program",xa=(a,b)=>{throw b;},ya=globalThis.document?.currentScript?.src;"undefined"!=typeof __filename?ya=__filename:ba&&(ya=self.location.href);var za="",Aa,Ba;
+		if(ca){var fs=require$$0;za=__dirname+"/";Ba=a=>{a=Ca(a)?new URL(a):a;return fs.readFileSync(a)};Aa=async a=>{a=Ca(a)?new URL(a):a;return fs.readFileSync(a,void 0)};1<process.argv.length&&(wa=process.argv[1].replace(/\\/g,"/"));process.argv.slice(2);"undefined"!='object'&&(module.exports=k);xa=(a,b)=>{process.exitCode=a;throw b;};}else if(aa||ba){try{za=(new URL(".",ya)).href;}catch{}ba&&(Ba=a=>{var b=new XMLHttpRequest;b.open("GET",a,!1);b.responseType="arraybuffer";b.send(null);return new Uint8Array(b.response)});
+		Aa=async a=>{if(Ca(a))return new Promise((c,d)=>{var e=new XMLHttpRequest;e.open("GET",a,!0);e.responseType="arraybuffer";e.onload=()=>{200==e.status||0==e.status&&e.response?c(e.response):d(e.status);};e.onerror=d;e.send(null);});var b=await fetch(a,{credentials:"same-origin"});if(b.ok)return b.arrayBuffer();throw Error(b.status+" : "+b.url);};}var Da=console.log.bind(console),B=console.error.bind(console),Ea,Fa=!1,Ga,Ca=a=>a.startsWith("file://"),m,C,Ha,E,F,Ia,Ja,G;
 		function Ka(){var a=La.buffer;m=new Int8Array(a);Ha=new Int16Array(a);C=new Uint8Array(a);new Uint16Array(a);E=new Int32Array(a);F=new Uint32Array(a);Ia=new Float32Array(a);Ja=new Float64Array(a);G=new BigInt64Array(a);new BigUint64Array(a);}function Ma(a){k.onAbort?.(a);a="Aborted("+a+")";B(a);Fa=!0;throw new WebAssembly.RuntimeError(a+". Build with -sASSERTIONS for more info.");}var Na;
 		async function Oa(a){if(!Ea)try{var b=await Aa(a);return new Uint8Array(b)}catch{}if(a==Na&&Ea)a=new Uint8Array(Ea);else if(Ba)a=Ba(a);else throw "both async and sync fetching of the wasm failed";return a}async function Qa(a,b){try{var c=await Oa(a);return await WebAssembly.instantiate(c,b)}catch(d){B(`failed to asynchronously prepare wasm: ${d}`),Ma(d);}}
 		async function Ra(a){var b=Na;if(!Ea&&!Ca(b)&&!ca)try{var c=fetch(b,{credentials:"same-origin"});return await WebAssembly.instantiateStreaming(c,a)}catch(d){B(`wasm streaming compile failed: ${d}`),B("falling back to ArrayBuffer instantiation");}return Qa(b,a)}class Sa{name="ExitStatus";constructor(a){this.message=`Program terminated with exit(${a})`;this.status=a;}}var Ta=a=>{for(;0<a.length;)a.shift()(k);},Ua=[],Va=[],Wa=()=>{var a=k.preRun.shift();Va.push(a);},J=0,Xa=null;
@@ -8339,89 +8339,89 @@ $CONTENT
 		function qa(a){var b="i32";b.endsWith("*")&&(b="*");switch(b){case "i1":m[a]=0;break;case "i8":m[a]=0;break;case "i16":Ha[a>>1]=0;break;case "i32":E[a>>2]=0;break;case "i64":G[a>>3]=BigInt(0);break;case "float":Ia[a>>2]=0;break;case "double":Ja[a>>3]=0;break;case "*":F[a>>2]=0;break;default:Ma(`invalid type for setValue: ${b}`);}}
 		var Za=new TextDecoder,$a=(a,b,c,d)=>{c=b+c;if(d)return c;for(;a[b]&&!(b>=c);)++b;return b},z=(a,b,c)=>a?Za.decode(C.subarray(a,$a(C,a,b,c))):"",ab=(a,b)=>{for(var c=0,d=a.length-1;0<=d;d--){var e=a[d];"."===e?a.splice(d,1):".."===e?(a.splice(d,1),c++):c&&(a.splice(d,1),c--);}if(b)for(;c;c--)a.unshift("..");return a},ia=a=>{var b="/"===a.charAt(0),c="/"===a.slice(-1);(a=ab(a.split("/").filter(d=>!!d),!b).join("/"))||b||(a=".");a&&c&&(a+="/");return (b?"/":"")+a},bb=a=>{var b=/^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/.exec(a).slice(1);
 		a=b[0];b=b[1];if(!a&&!b)return ".";b&&=b.slice(0,-1);return a+b},cb=a=>a&&a.match(/([^\/]+|\/)\/*$/)[1],db=()=>{if(ca){var a=require$$1;return b=>a.randomFillSync(b)}return b=>crypto.getRandomValues(b)},eb=a=>{(eb=db())(a);},fb=(...a)=>{for(var b="",c=!1,d=a.length-1;-1<=d&&!c;d--){c=0<=d?a[d]:"/";if("string"!=typeof c)throw new TypeError("Arguments to path.resolve must be strings");if(!c)return "";b=c+"/"+b;c="/"===c.charAt(0);}b=ab(b.split("/").filter(e=>!!e),!c).join("/");return (c?"/":
-    		"")+b||"."},gb=a=>{var b=$a(a,0);return Za.decode(a.buffer?a.subarray(0,b):new Uint8Array(a.slice(0,b)))},hb=[],ib=a=>{for(var b=0,c=0;c<a.length;++c){var d=a.charCodeAt(c);127>=d?b++:2047>=d?b+=2:55296<=d&&57343>=d?(b+=4,++c):b+=3;}return b},M=(a,b,c,d)=>{if(!(0<d))return 0;var e=c;d=c+d-1;for(var g=0;g<a.length;++g){var h=a.codePointAt(g);if(127>=h){if(c>=d)break;b[c++]=h;}else if(2047>=h){if(c+1>=d)break;b[c++]=192|h>>6;b[c++]=128|h&63;}else if(65535>=h){if(c+2>=d)break;b[c++]=224|h>>12;b[c++]=128|
-    		h>>6&63;b[c++]=128|h&63;}else {if(c+3>=d)break;b[c++]=240|h>>18;b[c++]=128|h>>12&63;b[c++]=128|h>>6&63;b[c++]=128|h&63;g++;}}b[c]=0;return c-e},jb=[];function kb(a,b){jb[a]={input:[],output:[],eb:b};mb(a,nb);}
-    		var nb={open(a){var b=jb[a.node.rdev];if(!b)throw new N(43);a.tty=b;a.seekable=!1;},close(a){a.tty.eb.fsync(a.tty);},fsync(a){a.tty.eb.fsync(a.tty);},read(a,b,c,d){if(!a.tty||!a.tty.eb.Bb)throw new N(60);for(var e=0,g=0;g<d;g++){try{var h=a.tty.eb.Bb(a.tty);}catch(q){throw new N(29);}if(void 0===h&&0===e)throw new N(6);if(null===h||void 0===h)break;e++;b[c+g]=h;}e&&(a.node.atime=Date.now());return e},write(a,b,c,d){if(!a.tty||!a.tty.eb.ub)throw new N(60);try{for(var e=0;e<d;e++)a.tty.eb.ub(a.tty,b[c+e]);}catch(g){throw new N(29);
-    		}d&&(a.node.mtime=a.node.ctime=Date.now());return e}},wb={Bb(){a:{if(!hb.length){var a=null;if(ca){var b=Buffer.alloc(256),c=0,d=process.stdin.fd;try{c=fs.readSync(d,b,0,256);}catch(e){if(e.toString().includes("EOF"))c=0;else throw e;}0<c&&(a=b.slice(0,c).toString("utf-8"));}else globalThis.window?.prompt&&(a=window.prompt("Input: "),null!==a&&(a+="\n"));if(!a){a=null;break a}b=Array(ib(a)+1);a=M(a,b,0,b.length);b.length=a;hb=b;}a=hb.shift();}return a},ub(a,b){null===b||10===b?(Da(gb(a.output)),a.output=
-    		[]):0!=b&&a.output.push(b);},fsync(a){0<a.output?.length&&(Da(gb(a.output)),a.output=[]);},hc(){return {bc:25856,dc:5,ac:191,cc:35387,$b:[3,28,127,21,4,0,1,0,17,19,26,0,18,15,23,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}},ic(){return 0},jc(){return [24,80]}},xb={ub(a,b){null===b||10===b?(B(gb(a.output)),a.output=[]):0!=b&&a.output.push(b);},fsync(a){0<a.output?.length&&(B(gb(a.output)),a.output=[]);}},O={Wa:null,Xa(){return O.createNode(null,"/",16895,0)},createNode(a,b,c,d){if(24576===(c&61440)||4096===(c&61440))throw new N(63);
-    		O.Wa||(O.Wa={dir:{node:{Ta:O.La.Ta,Ua:O.La.Ua,lookup:O.La.lookup,ib:O.La.ib,rename:O.La.rename,unlink:O.La.unlink,rmdir:O.La.rmdir,readdir:O.La.readdir,symlink:O.La.symlink},stream:{Va:O.Ma.Va}},file:{node:{Ta:O.La.Ta,Ua:O.La.Ua},stream:{Va:O.Ma.Va,read:O.Ma.read,write:O.Ma.write,jb:O.Ma.jb,kb:O.Ma.kb}},link:{node:{Ta:O.La.Ta,Ua:O.La.Ua,readlink:O.La.readlink},stream:{}},yb:{node:{Ta:O.La.Ta,Ua:O.La.Ua},stream:yb}});c=zb(a,b,c,d);P(c.mode)?(c.La=O.Wa.dir.node,c.Ma=O.Wa.dir.stream,c.Na={}):32768===
-    		(c.mode&61440)?(c.La=O.Wa.file.node,c.Ma=O.Wa.file.stream,c.Ra=0,c.Na=null):40960===(c.mode&61440)?(c.La=O.Wa.link.node,c.Ma=O.Wa.link.stream):8192===(c.mode&61440)&&(c.La=O.Wa.yb.node,c.Ma=O.Wa.yb.stream);c.atime=c.mtime=c.ctime=Date.now();a&&(a.Na[b]=c,a.atime=a.mtime=a.ctime=c.atime);return c},fc(a){return a.Na?a.Na.subarray?a.Na.subarray(0,a.Ra):new Uint8Array(a.Na):new Uint8Array(0)},La:{Ta(a){var b={};b.dev=8192===(a.mode&61440)?a.id:1;b.ino=a.id;b.mode=a.mode;b.nlink=1;b.uid=0;b.gid=0;b.rdev=
-    		a.rdev;P(a.mode)?b.size=4096:32768===(a.mode&61440)?b.size=a.Ra:40960===(a.mode&61440)?b.size=a.link.length:b.size=0;b.atime=new Date(a.atime);b.mtime=new Date(a.mtime);b.ctime=new Date(a.ctime);b.blksize=4096;b.blocks=Math.ceil(b.size/b.blksize);return b},Ua(a,b){for(var c of ["mode","atime","mtime","ctime"])null!=b[c]&&(a[c]=b[c]);void 0!==b.size&&(b=b.size,a.Ra!=b&&(0==b?(a.Na=null,a.Ra=0):(c=a.Na,a.Na=new Uint8Array(b),c&&a.Na.set(c.subarray(0,Math.min(b,a.Ra))),a.Ra=b)));},lookup(){O.nb||(O.nb=
-    		new N(44),O.nb.stack="<generic error, no stack>");throw O.nb;},ib(a,b,c,d){return O.createNode(a,b,c,d)},rename(a,b,c){try{var d=Q(b,c);}catch(g){}if(d){if(P(a.mode))for(var e in d.Na)throw new N(55);Ab(d);}delete a.parent.Na[a.name];b.Na[c]=a;a.name=c;b.ctime=b.mtime=a.parent.ctime=a.parent.mtime=Date.now();},unlink(a,b){delete a.Na[b];a.ctime=a.mtime=Date.now();},rmdir(a,b){var c=Q(a,b),d;for(d in c.Na)throw new N(55);delete a.Na[b];a.ctime=a.mtime=Date.now();},readdir(a){return [".","..",...Object.keys(a.Na)]},
-    		symlink(a,b,c){a=O.createNode(a,b,41471,0);a.link=c;return a},readlink(a){if(40960!==(a.mode&61440))throw new N(28);return a.link}},Ma:{read(a,b,c,d,e){var g=a.node.Na;if(e>=a.node.Ra)return 0;a=Math.min(a.node.Ra-e,d);if(8<a&&g.subarray)b.set(g.subarray(e,e+a),c);else for(d=0;d<a;d++)b[c+d]=g[e+d];return a},write(a,b,c,d,e,g){b.buffer===m.buffer&&(g=!1);if(!d)return 0;a=a.node;a.mtime=a.ctime=Date.now();if(b.subarray&&(!a.Na||a.Na.subarray)){if(g)return a.Na=b.subarray(c,c+d),a.Ra=d;if(0===a.Ra&&
-    		0===e)return a.Na=b.slice(c,c+d),a.Ra=d;if(e+d<=a.Ra)return a.Na.set(b.subarray(c,c+d),e),d}g=e+d;var h=a.Na?a.Na.length:0;h>=g||(g=Math.max(g,h*(1048576>h?2:1.125)>>>0),0!=h&&(g=Math.max(g,256)),h=a.Na,a.Na=new Uint8Array(g),0<a.Ra&&a.Na.set(h.subarray(0,a.Ra),0));if(a.Na.subarray&&b.subarray)a.Na.set(b.subarray(c,c+d),e);else for(g=0;g<d;g++)a.Na[e+g]=b[c+g];a.Ra=Math.max(a.Ra,e+d);return d},Va(a,b,c){1===c?b+=a.position:2===c&&32768===(a.node.mode&61440)&&(b+=a.node.Ra);if(0>b)throw new N(28);
-    		return b},jb(a,b,c,d,e){if(32768!==(a.node.mode&61440))throw new N(43);a=a.node.Na;if(e&2||!a||a.buffer!==m.buffer){e=!0;d=65536*Math.ceil(b/65536);var g=Bb(65536,d);g&&C.fill(0,g,g+d);d=g;if(!d)throw new N(48);if(a){if(0<c||c+b<a.length)a.subarray?a=a.subarray(c,c+b):a=Array.prototype.slice.call(a,c,c+b);m.set(a,d);}}else e=!1,d=a.byteOffset;return {Xb:d,Eb:e}},kb(a,b,c,d){O.Ma.write(a,b,0,d,c,!1);return 0}}},ja=(a,b)=>{var c=0;a&&(c|=365);b&&(c|=146);return c},Cb=null,Db={},Eb=[],Fb=1,R=null,Gb=!1,
-    		Hb=!0,N=class{name="ErrnoError";constructor(a){this.Pa=a;}},Ib=class{hb={};node=null;get flags(){return this.hb.flags}set flags(a){this.hb.flags=a;}get position(){return this.hb.position}set position(a){this.hb.position=a;}},Jb=class{La={};Ma={};bb=null;constructor(a,b,c,d){a||=this;this.parent=a;this.Xa=a.Xa;this.id=Fb++;this.name=b;this.mode=c;this.rdev=d;this.atime=this.mtime=this.ctime=Date.now();}get read(){return 365===(this.mode&365)}set read(a){a?this.mode|=365:this.mode&=-366;}get write(){return 146===
-    		(this.mode&146)}set write(a){a?this.mode|=146:this.mode&=-147;}};
-    		function S(a,b={}){if(!a)throw new N(44);b.pb??(b.pb=!0);"/"===a.charAt(0)||(a="//"+a);var c=0;a:for(;40>c;c++){a=a.split("/").filter(q=>!!q);for(var d=Cb,e="/",g=0;g<a.length;g++){var h=g===a.length-1;if(h&&b.parent)break;if("."!==a[g])if(".."===a[g])if(e=bb(e),d===d.parent){a=e+"/"+a.slice(g+1).join("/");c--;continue a}else d=d.parent;else {e=ia(e+"/"+a[g]);try{d=Q(d,a[g]);}catch(q){if(44===q?.Pa&&h&&b.Wb)return {path:e};throw q;}!d.bb||h&&!b.pb||(d=d.bb.root);if(40960===(d.mode&61440)&&(!h||b.ab)){if(!d.La.readlink)throw new N(52);
-    		d=d.La.readlink(d);"/"===d.charAt(0)||(d=bb(e)+"/"+d);a=d+"/"+a.slice(g+1).join("/");continue a}}}return {path:e,node:d}}throw new N(32);}function ha(a){for(var b;;){if(a===a.parent)return a=a.Xa.Db,b?"/"!==a[a.length-1]?`${a}/${b}`:a+b:a;b=b?`${a.name}/${b}`:a.name;a=a.parent;}}function Kb(a,b){for(var c=0,d=0;d<b.length;d++)c=(c<<5)-c+b.charCodeAt(d)|0;return (a+c>>>0)%R.length}
-    		function Ab(a){var b=Kb(a.parent.id,a.name);if(R[b]===a)R[b]=a.cb;else for(b=R[b];b;){if(b.cb===a){b.cb=a.cb;break}b=b.cb;}}function Q(a,b){var c=P(a.mode)?(c=Lb(a,"x"))?c:a.La.lookup?0:2:54;if(c)throw new N(c);for(c=R[Kb(a.id,b)];c;c=c.cb){var d=c.name;if(c.parent.id===a.id&&d===b)return c}return a.La.lookup(a,b)}function zb(a,b,c,d){a=new Jb(a,b,c,d);b=Kb(a.parent.id,a.name);a.cb=R[b];return R[b]=a}function P(a){return 16384===(a&61440)}
-    		function Lb(a,b){return Hb?0:b.includes("r")&&!(a.mode&292)||b.includes("w")&&!(a.mode&146)||b.includes("x")&&!(a.mode&73)?2:0}function Mb(a,b){if(!P(a.mode))return 54;try{return Q(a,b),20}catch(c){}return Lb(a,"wx")}function Nb(a,b,c){try{var d=Q(a,b);}catch(e){return e.Pa}if(a=Lb(a,"wx"))return a;if(c){if(!P(d.mode))return 54;if(d===d.parent||"/"===ha(d))return 10}else if(P(d.mode))return 31;return 0}function Ob(a){if(!a)throw new N(63);return a}
-    		function T(a){a=Eb[a];if(!a)throw new N(8);return a}function Pb(a,b=-1){a=Object.assign(new Ib,a);if(-1==b)a:{for(b=0;4096>=b;b++)if(!Eb[b])break a;throw new N(33);}a.fd=b;return Eb[b]=a}function Qb(a,b=-1){a=Pb(a,b);a.Ma?.ec?.(a);return a}function Rb(a,b,c){var d=a?.Ma.Ua;a=d?a:b;d??=b.La.Ua;Ob(d);d(a,c);}var yb={open(a){a.Ma=Db[a.node.rdev].Ma;a.Ma.open?.(a);},Va(){throw new N(70);}};function mb(a,b){Db[a]={Ma:b};}
-    		function Sb(a,b){var c="/"===b;if(c&&Cb)throw new N(10);if(!c&&b){var d=S(b,{pb:!1});b=d.path;d=d.node;if(d.bb)throw new N(10);if(!P(d.mode))throw new N(54);}b={type:a,kc:{},Db:b,Vb:[]};a=a.Xa(b);a.Xa=b;b.root=a;c?Cb=a:d&&(d.bb=b,d.Xa&&d.Xa.Vb.push(b));}function Tb(a,b,c){var d=S(a,{parent:!0}).node;a=cb(a);if(!a)throw new N(28);if("."===a||".."===a)throw new N(20);var e=Mb(d,a);if(e)throw new N(e);if(!d.La.ib)throw new N(63);return d.La.ib(d,a,b,c)}
-    		function ka(a,b=438){return Tb(a,b&4095|32768,0)}function U(a,b=511){return Tb(a,b&1023|16384,0)}function Ub(a,b,c){"undefined"==typeof c&&(c=b,b=438);Tb(a,b|8192,c);}function Vb(a,b){if(!fb(a))throw new N(44);var c=S(b,{parent:!0}).node;if(!c)throw new N(44);b=cb(b);var d=Mb(c,b);if(d)throw new N(d);if(!c.La.symlink)throw new N(63);c.La.symlink(c,b,a);}
-    		function Wb(a){var b=S(a,{parent:!0}).node;a=cb(a);var c=Q(b,a),d=Nb(b,a,!0);if(d)throw new N(d);if(!b.La.rmdir)throw new N(63);if(c.bb)throw new N(10);b.La.rmdir(b,a);Ab(c);}function ua(a){var b=S(a,{parent:!0}).node;if(!b)throw new N(44);a=cb(a);var c=Q(b,a),d=Nb(b,a,!1);if(d)throw new N(d);if(!b.La.unlink)throw new N(63);if(c.bb)throw new N(10);b.La.unlink(b,a);Ab(c);}function Xb(a,b){a=S(a,{ab:!b}).node;return Ob(a.La.Ta)(a)}
-    		function Yb(a,b,c,d){Rb(a,b,{mode:c&4095|b.mode&-4096,ctime:Date.now(),Lb:d});}function la(a,b){a="string"==typeof a?S(a,{ab:!0}).node:a;Yb(null,a,b);}function Zb(a,b,c){if(P(b.mode))throw new N(31);if(32768!==(b.mode&61440))throw new N(28);var d=Lb(b,"w");if(d)throw new N(d);Rb(a,b,{size:c,timestamp:Date.now()});}
-    		function ma(a,b,c=438){if(""===a)throw new N(44);if("string"==typeof b){var d={r:0,"r+":2,w:577,"w+":578,a:1089,"a+":1090}[b];if("undefined"==typeof d)throw Error(`Unknown file open mode: ${b}`);b=d;}c=b&64?c&4095|32768:0;if("object"==typeof a)d=a;else {var e=a.endsWith("/");var g=S(a,{ab:!(b&131072),Wb:!0});d=g.node;a=g.path;}g=!1;if(b&64)if(d){if(b&128)throw new N(20);}else {if(e)throw new N(31);d=Tb(a,c|511,0);g=!0;}if(!d)throw new N(44);8192===(d.mode&61440)&&(b&=-513);if(b&65536&&!P(d.mode))throw new N(54);
-    		if(!g&&(d?40960===(d.mode&61440)?e=32:(e=["r","w","rw"][b&3],b&512&&(e+="w"),e=P(d.mode)&&("r"!==e||b&576)?31:Lb(d,e)):e=44,e))throw new N(e);b&512&&!g&&(e=d,e="string"==typeof e?S(e,{ab:!0}).node:e,Zb(null,e,0));b=Pb({node:d,path:ha(d),flags:b&-131713,seekable:!0,position:0,Ma:d.Ma,Yb:[],error:!1});b.Ma.open&&b.Ma.open(b);g&&la(d,c&511);return b}function oa(a){if(null===a.fd)throw new N(8);a.rb&&(a.rb=null);try{a.Ma.close&&a.Ma.close(a);}catch(b){throw b;}finally{Eb[a.fd]=null;}a.fd=null;}
-    		function $b(a,b,c){if(null===a.fd)throw new N(8);if(!a.seekable||!a.Ma.Va)throw new N(70);if(0!=c&&1!=c&&2!=c)throw new N(28);a.position=a.Ma.Va(a,b,c);a.Yb=[];}function ac(a,b,c,d,e){if(0>d||0>e)throw new N(28);if(null===a.fd)throw new N(8);if(1===(a.flags&2097155))throw new N(8);if(P(a.node.mode))throw new N(31);if(!a.Ma.read)throw new N(28);var g="undefined"!=typeof e;if(!g)e=a.position;else if(!a.seekable)throw new N(70);b=a.Ma.read(a,b,c,d,e);g||(a.position+=b);return b}
-    		function na(a,b,c,d,e){if(0>d||0>e)throw new N(28);if(null===a.fd)throw new N(8);if(0===(a.flags&2097155))throw new N(8);if(P(a.node.mode))throw new N(31);if(!a.Ma.write)throw new N(28);a.seekable&&a.flags&1024&&$b(a,0,2);var g="undefined"!=typeof e;if(!g)e=a.position;else if(!a.seekable)throw new N(70);b=a.Ma.write(a,b,c,d,e,void 0);g||(a.position+=b);return b}
-    		function ta(a){var b=b||0;var c="binary";"utf8"!==c&&"binary"!==c&&Ma(`Invalid encoding type "${c}"`);b=ma(a,b);a=Xb(a).size;var d=new Uint8Array(a);ac(b,d,0,a,0);"utf8"===c&&(d=gb(d));oa(b);return d}
-    		function W(a,b,c){a=ia("/dev/"+a);var d=ja(!!b,!!c);W.Cb??(W.Cb=64);var e=W.Cb++<<8|0;mb(e,{open(g){g.seekable=!1;},close(){c?.buffer?.length&&c(10);},read(g,h,q,w){for(var t=0,x=0;x<w;x++){try{var D=b();}catch(pb){throw new N(29);}if(void 0===D&&0===t)throw new N(6);if(null===D||void 0===D)break;t++;h[q+x]=D;}t&&(g.node.atime=Date.now());return t},write(g,h,q,w){for(var t=0;t<w;t++)try{c(h[q+t]);}catch(x){throw new N(29);}w&&(g.node.mtime=g.node.ctime=Date.now());return t}});Ub(a,d,e);}var X={};
-    		function Y(a,b,c){if("/"===b.charAt(0))return b;a=-100===a?"/":T(a).path;if(0==b.length){if(!c)throw new N(44);return a}return a+"/"+b}
-    		function kc(a,b){F[a>>2]=b.dev;F[a+4>>2]=b.mode;F[a+8>>2]=b.nlink;F[a+12>>2]=b.uid;F[a+16>>2]=b.gid;F[a+20>>2]=b.rdev;G[a+24>>3]=BigInt(b.size);E[a+32>>2]=4096;E[a+36>>2]=b.blocks;var c=b.atime.getTime(),d=b.mtime.getTime(),e=b.ctime.getTime();G[a+40>>3]=BigInt(Math.floor(c/1E3));F[a+48>>2]=c%1E3*1E6;G[a+56>>3]=BigInt(Math.floor(d/1E3));F[a+64>>2]=d%1E3*1E6;G[a+72>>3]=BigInt(Math.floor(e/1E3));F[a+80>>2]=e%1E3*1E6;G[a+88>>3]=BigInt(b.ino);return 0}
-    		var Cc=void 0,Ec=()=>{var a=E[+Cc>>2];Cc+=4;return a},Fc=0,Gc=[0,31,60,91,121,152,182,213,244,274,305,335],Hc=[0,31,59,90,120,151,181,212,243,273,304,334],Ic={},Jc=a=>{Ga=a;Ya||0<Fc||(k.onExit?.(a),Fa=!0);xa(a,new Sa(a));},Kc=a=>{if(!Fa)try{a();}catch(b){b instanceof Sa||"unwind"==b||xa(1,b);}finally{if(!(Ya||0<Fc))try{Ga=a=Ga,Jc(a);}catch(b){b instanceof Sa||"unwind"==b||xa(1,b);}}},Lc={},Nc=()=>{if(!Mc){var a={USER:"web_user",LOGNAME:"web_user",PATH:"/",PWD:"/",HOME:"/home/web_user",LANG:(globalThis.navigator?.language??
-    		"C").replace("-","_")+".UTF-8",_:wa||"./this.program"},b;for(b in Lc)void 0===Lc[b]?delete a[b]:a[b]=Lc[b];var c=[];for(b in a)c.push(`${b}=${a[b]}`);Mc=c;}return Mc},Mc,Oc=(a,b,c,d)=>{var e={string:t=>{var x=0;if(null!==t&&void 0!==t&&0!==t){x=ib(t)+1;var D=y(x);M(t,C,D,x);x=D;}return x},array:t=>{var x=y(t.length);m.set(t,x);return x}};a=k["_"+a];var g=[],h=0;if(d)for(var q=0;q<d.length;q++){var w=e[c[q]];w?(0===h&&(h=pa()),g[q]=w(d[q])):g[q]=d[q];}c=a(...g);return c=function(t){0!==h&&ra(h);return "string"===
-    		b?z(t):"boolean"===b?!!t:t}(c)},fa=a=>{var b=ib(a)+1,c=da(b);c&&M(a,C,c,b);return c},Pc,Qc=[],A=a=>{Pc.delete(Z.get(a));Z.set(a,null);Qc.push(a);},Rc=a=>{const b=a.length;return [b%128|128,b>>7,...a]},Sc={i:127,p:127,j:126,f:125,d:124,e:111},Tc=a=>Rc(Array.from(a,b=>Sc[b])),va=(a,b)=>{if(!Pc){Pc=new WeakMap;var c=Z.length;if(Pc)for(var d=0;d<0+c;d++){var e=Z.get(d);e&&Pc.set(e,d);}}if(c=Pc.get(a)||0)return c;c=Qc.length?Qc.pop():Z.grow(1);try{Z.set(c,a);}catch(g){if(!(g instanceof TypeError))throw g;
-    		b=Uint8Array.of(0,97,115,109,1,0,0,0,1,...Rc([1,96,...Tc(b.slice(1)),...Tc("v"===b[0]?"":b[0])]),2,7,1,1,101,1,102,0,0,7,5,1,1,102,0,0);b=new WebAssembly.Module(b);b=(new WebAssembly.Instance(b,{e:{f:a}})).exports.f;Z.set(c,b);}Pc.set(a,c);return c};R=Array(4096);Sb(O,"/");U("/tmp");U("/home");U("/home/web_user");
-    		(function(){U("/dev");mb(259,{read:()=>0,write:(d,e,g,h)=>h,Va:()=>0});Ub("/dev/null",259);kb(1280,wb);kb(1536,xb);Ub("/dev/tty",1280);Ub("/dev/tty1",1536);var a=new Uint8Array(1024),b=0,c=()=>{0===b&&(eb(a),b=a.byteLength);return a[--b]};W("random",c);W("urandom",c);U("/dev/shm");U("/dev/shm/tmp");})();
-    		(function(){U("/proc");var a=U("/proc/self");U("/proc/self/fd");Sb({Xa(){var b=zb(a,"fd",16895,73);b.Ma={Va:O.Ma.Va};b.La={lookup(c,d){c=+d;var e=T(c);c={parent:null,Xa:{Db:"fake"},La:{readlink:()=>e.path},id:c+1};return c.parent=c},readdir(){return Array.from(Eb.entries()).filter(([,c])=>c).map(([c])=>c.toString())}};return b}},"/proc/self/fd");})();k.noExitRuntime&&(Ya=k.noExitRuntime);k.print&&(Da=k.print);k.printErr&&(B=k.printErr);k.wasmBinary&&(Ea=k.wasmBinary);k.thisProgram&&(wa=k.thisProgram);
-    		if(k.preInit)for("function"==typeof k.preInit&&(k.preInit=[k.preInit]);0<k.preInit.length;)k.preInit.shift()();k.stackSave=()=>pa();k.stackRestore=a=>ra(a);k.stackAlloc=a=>y(a);k.cwrap=(a,b,c,d)=>{var e=!c||c.every(g=>"number"===g||"boolean"===g);return "string"!==b&&e&&!d?k["_"+a]:(...g)=>Oc(a,b,c,g)};k.addFunction=va;k.removeFunction=A;k.UTF8ToString=z;k.stringToNewUTF8=fa;k.writeArrayToMemory=(a,b)=>{m.set(a,b);};
-    		var da,ea,Bb,Uc,ra,y,pa,La,Z,Vc={a:(a,b,c,d)=>Ma(`Assertion failed: ${z(a)}, at: `+[b?z(b):"unknown filename",c,d?z(d):"unknown function"]),i:function(a,b){try{return a=z(a),la(a,b),0}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return -c.Pa}},L:function(a,b,c){try{b=z(b);b=Y(a,b);if(c&-8)return -28;var d=S(b,{ab:!0}).node;if(!d)return -44;a="";c&4&&(a+="r");c&2&&(a+="w");c&1&&(a+="x");return a&&Lb(d,a)?-2:0}catch(e){if("undefined"==typeof X||"ErrnoError"!==e.name)throw e;return -e.Pa}},
-    		j:function(a,b){try{var c=T(a);Yb(c,c.node,b,!1);return 0}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;return -d.Pa}},h:function(a){try{var b=T(a);Rb(b,b.node,{timestamp:Date.now(),Lb:!1});return 0}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return -c.Pa}},b:function(a,b,c){Cc=c;try{var d=T(a);switch(b){case 0:var e=Ec();if(0>e)break;for(;Eb[e];)e++;return Qb(d,e).fd;case 1:case 2:return 0;case 3:return d.flags;case 4:return e=Ec(),d.flags|=e,0;case 12:return e=
-    		Ec(),Ha[e+0>>1]=2,0;case 13:case 14:return 0}return -28}catch(g){if("undefined"==typeof X||"ErrnoError"!==g.name)throw g;return -g.Pa}},g:function(a,b){try{var c=T(a),d=c.node,e=c.Ma.Ta;a=e?c:d;e??=d.La.Ta;Ob(e);var g=e(a);return kc(b,g)}catch(h){if("undefined"==typeof X||"ErrnoError"!==h.name)throw h;return -h.Pa}},H:function(a,b){b=-9007199254740992>b||9007199254740992<b?NaN:Number(b);try{if(isNaN(b))return -61;var c=T(a);if(0>b||0===(c.flags&2097155))throw new N(28);Zb(c,c.node,b);return 0}catch(d){if("undefined"==
-    		typeof X||"ErrnoError"!==d.name)throw d;return -d.Pa}},G:function(a,b){try{if(0===b)return -28;var c=ib("/")+1;if(b<c)return -68;M("/",C,a,b);return c}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;return -d.Pa}},K:function(a,b){try{return a=z(a),kc(b,Xb(a,!0))}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return -c.Pa}},C:function(a,b,c){try{return b=z(b),b=Y(a,b),U(b,c),0}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;return -d.Pa}},J:function(a,
-    		b,c,d){try{b=z(b);var e=d&256;b=Y(a,b,d&4096);return kc(c,e?Xb(b,!0):Xb(b))}catch(g){if("undefined"==typeof X||"ErrnoError"!==g.name)throw g;return -g.Pa}},x:function(a,b,c,d){Cc=d;try{b=z(b);b=Y(a,b);var e=d?Ec():0;return ma(b,c,e).fd}catch(g){if("undefined"==typeof X||"ErrnoError"!==g.name)throw g;return -g.Pa}},v:function(a,b,c,d){try{b=z(b);b=Y(a,b);if(0>=d)return -28;var e=S(b).node;if(!e)throw new N(44);if(!e.La.readlink)throw new N(28);var g=e.La.readlink(e);var h=Math.min(d,ib(g)),q=m[c+h];M(g,
-    		C,c,d+1);m[c+h]=q;return h}catch(w){if("undefined"==typeof X||"ErrnoError"!==w.name)throw w;return -w.Pa}},u:function(a){try{return a=z(a),Wb(a),0}catch(b){if("undefined"==typeof X||"ErrnoError"!==b.name)throw b;return -b.Pa}},f:function(a,b){try{return a=z(a),kc(b,Xb(a))}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return -c.Pa}},r:function(a,b,c){try{b=z(b);b=Y(a,b);if(c)if(512===c)Wb(b);else return -28;else ua(b);return 0}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;
-    		return -d.Pa}},q:function(a,b,c){try{b=z(b);b=Y(a,b,!0);var d=Date.now(),e,g;if(c){var h=F[c>>2]+4294967296*E[c+4>>2],q=E[c+8>>2];1073741823==q?e=d:1073741822==q?e=null:e=1E3*h+q/1E6;c+=16;h=F[c>>2]+4294967296*E[c+4>>2];q=E[c+8>>2];1073741823==q?g=d:1073741822==q?g=null:g=1E3*h+q/1E6;}else g=e=d;if(null!==(g??e)){a=e;var w=S(b,{ab:!0}).node;Ob(w.La.Ua)(w,{atime:a,mtime:g});}return 0}catch(t){if("undefined"==typeof X||"ErrnoError"!==t.name)throw t;return -t.Pa}},m:()=>Ma(""),l:()=>{Ya=!1;Fc=0;},A:function(a,
-    		b){a=-9007199254740992>a||9007199254740992<a?NaN:Number(a);a=new Date(1E3*a);E[b>>2]=a.getSeconds();E[b+4>>2]=a.getMinutes();E[b+8>>2]=a.getHours();E[b+12>>2]=a.getDate();E[b+16>>2]=a.getMonth();E[b+20>>2]=a.getFullYear()-1900;E[b+24>>2]=a.getDay();var c=a.getFullYear();E[b+28>>2]=(0!==c%4||0===c%100&&0!==c%400?Hc:Gc)[a.getMonth()]+a.getDate()-1|0;E[b+36>>2]=-(60*a.getTimezoneOffset());c=(new Date(a.getFullYear(),6,1)).getTimezoneOffset();var d=(new Date(a.getFullYear(),0,1)).getTimezoneOffset();
-    		E[b+32>>2]=(c!=d&&a.getTimezoneOffset()==Math.min(d,c))|0;},y:function(a,b,c,d,e,g,h){e=-9007199254740992>e||9007199254740992<e?NaN:Number(e);try{var q=T(d);if(0!==(b&2)&&0===(c&2)&&2!==(q.flags&2097155))throw new N(2);if(1===(q.flags&2097155))throw new N(2);if(!q.Ma.jb)throw new N(43);if(!a)throw new N(28);var w=q.Ma.jb(q,a,e,b,c);var t=w.Xb;E[g>>2]=w.Eb;F[h>>2]=t;return 0}catch(x){if("undefined"==typeof X||"ErrnoError"!==x.name)throw x;return -x.Pa}},z:function(a,b,c,d,e,g){g=-9007199254740992>g||
-    		9007199254740992<g?NaN:Number(g);try{var h=T(e);if(c&2){c=g;if(32768!==(h.node.mode&61440))throw new N(43);if(!(d&2)){var q=C.slice(a,a+b);h.Ma.kb&&h.Ma.kb(h,q,c,b,d);}}}catch(w){if("undefined"==typeof X||"ErrnoError"!==w.name)throw w;return -w.Pa}},n:(a,b)=>{Ic[a]&&(clearTimeout(Ic[a].id),delete Ic[a]);if(!b)return 0;var c=setTimeout(()=>{delete Ic[a];Kc(()=>Uc(a,performance.now()));},b);Ic[a]={id:c,lc:b};return 0},B:(a,b,c,d)=>{var e=(new Date).getFullYear(),g=(new Date(e,0,1)).getTimezoneOffset();
-    		e=(new Date(e,6,1)).getTimezoneOffset();F[a>>2]=60*Math.max(g,e);E[b>>2]=Number(g!=e);b=h=>{var q=Math.abs(h);return `UTC${0<=h?"-":"+"}${String(Math.floor(q/60)).padStart(2,"0")}${String(q%60).padStart(2,"0")}`};a=b(g);b=b(e);e<g?(M(a,C,c,17),M(b,C,d,17)):(M(a,C,d,17),M(b,C,c,17));},d:()=>Date.now(),s:()=>2147483648,c:()=>performance.now(),o:a=>{var b=C.length;a>>>=0;if(2147483648<a)return !1;for(var c=1;4>=c;c*=2){var d=b*(1+.2/c);d=Math.min(d,a+100663296);a:{d=(Math.min(2147483648,65536*Math.ceil(Math.max(a,
-    		d)/65536))-La.buffer.byteLength+65535)/65536|0;try{La.grow(d);Ka();var e=1;break a}catch(g){}e=void 0;}if(e)return !0}return !1},E:(a,b)=>{var c=0,d=0,e;for(e of Nc()){var g=b+c;F[a+d>>2]=g;c+=M(e,C,g,Infinity)+1;d+=4;}return 0},F:(a,b)=>{var c=Nc();F[a>>2]=c.length;a=0;for(var d of c)a+=ib(d)+1;F[b>>2]=a;return 0},e:function(a){try{var b=T(a);oa(b);return 0}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return c.Pa}},p:function(a,b){try{var c=T(a);m[b]=c.tty?2:P(c.mode)?3:40960===(c.mode&
-    		61440)?7:4;Ha[b+2>>1]=0;G[b+8>>3]=BigInt(0);G[b+16>>3]=BigInt(0);return 0}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;return d.Pa}},w:function(a,b,c,d){try{a:{var e=T(a);a=b;for(var g,h=b=0;h<c;h++){var q=F[a>>2],w=F[a+4>>2];a+=8;var t=ac(e,m,q,w,g);if(0>t){var x=-1;break a}b+=t;if(t<w)break;"undefined"!=typeof g&&(g+=t);}x=b;}F[d>>2]=x;return 0}catch(D){if("undefined"==typeof X||"ErrnoError"!==D.name)throw D;return D.Pa}},D:function(a,b,c,d){b=-9007199254740992>b||9007199254740992<
-    		b?NaN:Number(b);try{if(isNaN(b))return 61;var e=T(a);$b(e,b,c);G[d>>3]=BigInt(e.position);e.rb&&0===b&&0===c&&(e.rb=null);return 0}catch(g){if("undefined"==typeof X||"ErrnoError"!==g.name)throw g;return g.Pa}},I:function(a){try{var b=T(a);return b.Ma?.fsync?.(b)}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return c.Pa}},t:function(a,b,c,d){try{a:{var e=T(a);a=b;for(var g,h=b=0;h<c;h++){var q=F[a>>2],w=F[a+4>>2];a+=8;var t=na(e,m,q,w,g);if(0>t){var x=-1;break a}b+=t;if(t<w)break;
-    		"undefined"!=typeof g&&(g+=t);}x=b;}F[d>>2]=x;return 0}catch(D){if("undefined"==typeof X||"ErrnoError"!==D.name)throw D;return D.Pa}},k:Jc};
-    		function Wc(){function a(){k.calledRun=!0;if(!Fa){if(!k.noFSInit&&!Gb){var b,c;Gb=!0;b??=k.stdin;c??=k.stdout;d??=k.stderr;b?W("stdin",b):Vb("/dev/tty","/dev/stdin");c?W("stdout",null,c):Vb("/dev/tty","/dev/stdout");d?W("stderr",null,d):Vb("/dev/tty1","/dev/stderr");ma("/dev/stdin",0);ma("/dev/stdout",1);ma("/dev/stderr",1);}Xc.N();Hb=!1;k.onRuntimeInitialized?.();if(k.postRun)for("function"==typeof k.postRun&&(k.postRun=[k.postRun]);k.postRun.length;){var d=k.postRun.shift();Ua.push(d);}Ta(Ua);}}if(0<
-    		J)Xa=Wc;else {if(k.preRun)for("function"==typeof k.preRun&&(k.preRun=[k.preRun]);k.preRun.length;)Wa();Ta(Va);0<J?Xa=Wc:k.setStatus?(k.setStatus("Running..."),setTimeout(()=>{setTimeout(()=>k.setStatus(""),1);a();},1)):a();}}var Xc;
-    		(async function(){function a(c){c=Xc=c.exports;k._sqlite3_free=c.P;k._sqlite3_value_text=c.Q;k._sqlite3_prepare_v2=c.R;k._sqlite3_step=c.S;k._sqlite3_reset=c.T;k._sqlite3_exec=c.U;k._sqlite3_finalize=c.V;k._sqlite3_column_name=c.W;k._sqlite3_column_text=c.X;k._sqlite3_column_type=c.Y;k._sqlite3_errmsg=c.Z;k._sqlite3_clear_bindings=c._;k._sqlite3_value_blob=c.$;k._sqlite3_value_bytes=c.aa;k._sqlite3_value_double=c.ba;k._sqlite3_value_int=c.ca;k._sqlite3_value_type=c.da;k._sqlite3_result_blob=c.ea;
-    		k._sqlite3_result_double=c.fa;k._sqlite3_result_error=c.ga;k._sqlite3_result_int=c.ha;k._sqlite3_result_int64=c.ia;k._sqlite3_result_null=c.ja;k._sqlite3_result_text=c.ka;k._sqlite3_aggregate_context=c.la;k._sqlite3_column_count=c.ma;k._sqlite3_data_count=c.na;k._sqlite3_column_blob=c.oa;k._sqlite3_column_bytes=c.pa;k._sqlite3_column_double=c.qa;k._sqlite3_bind_blob=c.ra;k._sqlite3_bind_double=c.sa;k._sqlite3_bind_int=c.ta;k._sqlite3_bind_text=c.ua;k._sqlite3_bind_parameter_index=c.va;k._sqlite3_sql=
-    		c.wa;k._sqlite3_normalized_sql=c.xa;k._sqlite3_changes=c.ya;k._sqlite3_close_v2=c.za;k._sqlite3_create_function_v2=c.Aa;k._sqlite3_update_hook=c.Ba;k._sqlite3_open=c.Ca;da=k._malloc=c.Da;ea=k._free=c.Ea;k._RegisterExtensionFunctions=c.Fa;Bb=c.Ga;Uc=c.Ha;ra=c.Ia;y=c.Ja;pa=c.Ka;La=c.M;Z=c.O;Ka();J--;k.monitorRunDependencies?.(J);0==J&&Xa&&(c=Xa,Xa=null,c());return Xc}J++;k.monitorRunDependencies?.(J);var b={a:Vc};if(k.instantiateWasm)return new Promise(c=>{k.instantiateWasm(b,(d,e)=>{c(a(d,e));});});
-    		Na??=k.locateFile?k.locateFile("sql-wasm.wasm",za):za+"sql-wasm.wasm";return a((await Ra(b)).instance)})();Wc();
+		"")+b||"."},gb=a=>{var b=$a(a,0);return Za.decode(a.buffer?a.subarray(0,b):new Uint8Array(a.slice(0,b)))},hb=[],ib=a=>{for(var b=0,c=0;c<a.length;++c){var d=a.charCodeAt(c);127>=d?b++:2047>=d?b+=2:55296<=d&&57343>=d?(b+=4,++c):b+=3;}return b},M=(a,b,c,d)=>{if(!(0<d))return 0;var e=c;d=c+d-1;for(var g=0;g<a.length;++g){var h=a.codePointAt(g);if(127>=h){if(c>=d)break;b[c++]=h;}else if(2047>=h){if(c+1>=d)break;b[c++]=192|h>>6;b[c++]=128|h&63;}else if(65535>=h){if(c+2>=d)break;b[c++]=224|h>>12;b[c++]=128|
+		h>>6&63;b[c++]=128|h&63;}else {if(c+3>=d)break;b[c++]=240|h>>18;b[c++]=128|h>>12&63;b[c++]=128|h>>6&63;b[c++]=128|h&63;g++;}}b[c]=0;return c-e},jb=[];function kb(a,b){jb[a]={input:[],output:[],eb:b};mb(a,nb);}
+		var nb={open(a){var b=jb[a.node.rdev];if(!b)throw new N(43);a.tty=b;a.seekable=!1;},close(a){a.tty.eb.fsync(a.tty);},fsync(a){a.tty.eb.fsync(a.tty);},read(a,b,c,d){if(!a.tty||!a.tty.eb.Bb)throw new N(60);for(var e=0,g=0;g<d;g++){try{var h=a.tty.eb.Bb(a.tty);}catch(q){throw new N(29);}if(void 0===h&&0===e)throw new N(6);if(null===h||void 0===h)break;e++;b[c+g]=h;}e&&(a.node.atime=Date.now());return e},write(a,b,c,d){if(!a.tty||!a.tty.eb.ub)throw new N(60);try{for(var e=0;e<d;e++)a.tty.eb.ub(a.tty,b[c+e]);}catch(g){throw new N(29);
+		}d&&(a.node.mtime=a.node.ctime=Date.now());return e}},wb={Bb(){a:{if(!hb.length){var a=null;if(ca){var b=Buffer.alloc(256),c=0,d=process.stdin.fd;try{c=fs.readSync(d,b,0,256);}catch(e){if(e.toString().includes("EOF"))c=0;else throw e;}0<c&&(a=b.slice(0,c).toString("utf-8"));}else globalThis.window?.prompt&&(a=window.prompt("Input: "),null!==a&&(a+="\n"));if(!a){a=null;break a}b=Array(ib(a)+1);a=M(a,b,0,b.length);b.length=a;hb=b;}a=hb.shift();}return a},ub(a,b){null===b||10===b?(Da(gb(a.output)),a.output=
+		[]):0!=b&&a.output.push(b);},fsync(a){0<a.output?.length&&(Da(gb(a.output)),a.output=[]);},hc(){return {bc:25856,dc:5,ac:191,cc:35387,$b:[3,28,127,21,4,0,1,0,17,19,26,0,18,15,23,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}},ic(){return 0},jc(){return [24,80]}},xb={ub(a,b){null===b||10===b?(B(gb(a.output)),a.output=[]):0!=b&&a.output.push(b);},fsync(a){0<a.output?.length&&(B(gb(a.output)),a.output=[]);}},O={Wa:null,Xa(){return O.createNode(null,"/",16895,0)},createNode(a,b,c,d){if(24576===(c&61440)||4096===(c&61440))throw new N(63);
+		O.Wa||(O.Wa={dir:{node:{Ta:O.La.Ta,Ua:O.La.Ua,lookup:O.La.lookup,ib:O.La.ib,rename:O.La.rename,unlink:O.La.unlink,rmdir:O.La.rmdir,readdir:O.La.readdir,symlink:O.La.symlink},stream:{Va:O.Ma.Va}},file:{node:{Ta:O.La.Ta,Ua:O.La.Ua},stream:{Va:O.Ma.Va,read:O.Ma.read,write:O.Ma.write,jb:O.Ma.jb,kb:O.Ma.kb}},link:{node:{Ta:O.La.Ta,Ua:O.La.Ua,readlink:O.La.readlink},stream:{}},yb:{node:{Ta:O.La.Ta,Ua:O.La.Ua},stream:yb}});c=zb(a,b,c,d);P(c.mode)?(c.La=O.Wa.dir.node,c.Ma=O.Wa.dir.stream,c.Na={}):32768===
+		(c.mode&61440)?(c.La=O.Wa.file.node,c.Ma=O.Wa.file.stream,c.Ra=0,c.Na=null):40960===(c.mode&61440)?(c.La=O.Wa.link.node,c.Ma=O.Wa.link.stream):8192===(c.mode&61440)&&(c.La=O.Wa.yb.node,c.Ma=O.Wa.yb.stream);c.atime=c.mtime=c.ctime=Date.now();a&&(a.Na[b]=c,a.atime=a.mtime=a.ctime=c.atime);return c},fc(a){return a.Na?a.Na.subarray?a.Na.subarray(0,a.Ra):new Uint8Array(a.Na):new Uint8Array(0)},La:{Ta(a){var b={};b.dev=8192===(a.mode&61440)?a.id:1;b.ino=a.id;b.mode=a.mode;b.nlink=1;b.uid=0;b.gid=0;b.rdev=
+		a.rdev;P(a.mode)?b.size=4096:32768===(a.mode&61440)?b.size=a.Ra:40960===(a.mode&61440)?b.size=a.link.length:b.size=0;b.atime=new Date(a.atime);b.mtime=new Date(a.mtime);b.ctime=new Date(a.ctime);b.blksize=4096;b.blocks=Math.ceil(b.size/b.blksize);return b},Ua(a,b){for(var c of ["mode","atime","mtime","ctime"])null!=b[c]&&(a[c]=b[c]);void 0!==b.size&&(b=b.size,a.Ra!=b&&(0==b?(a.Na=null,a.Ra=0):(c=a.Na,a.Na=new Uint8Array(b),c&&a.Na.set(c.subarray(0,Math.min(b,a.Ra))),a.Ra=b)));},lookup(){O.nb||(O.nb=
+		new N(44),O.nb.stack="<generic error, no stack>");throw O.nb;},ib(a,b,c,d){return O.createNode(a,b,c,d)},rename(a,b,c){try{var d=Q(b,c);}catch(g){}if(d){if(P(a.mode))for(var e in d.Na)throw new N(55);Ab(d);}delete a.parent.Na[a.name];b.Na[c]=a;a.name=c;b.ctime=b.mtime=a.parent.ctime=a.parent.mtime=Date.now();},unlink(a,b){delete a.Na[b];a.ctime=a.mtime=Date.now();},rmdir(a,b){var c=Q(a,b),d;for(d in c.Na)throw new N(55);delete a.Na[b];a.ctime=a.mtime=Date.now();},readdir(a){return [".","..",...Object.keys(a.Na)]},
+		symlink(a,b,c){a=O.createNode(a,b,41471,0);a.link=c;return a},readlink(a){if(40960!==(a.mode&61440))throw new N(28);return a.link}},Ma:{read(a,b,c,d,e){var g=a.node.Na;if(e>=a.node.Ra)return 0;a=Math.min(a.node.Ra-e,d);if(8<a&&g.subarray)b.set(g.subarray(e,e+a),c);else for(d=0;d<a;d++)b[c+d]=g[e+d];return a},write(a,b,c,d,e,g){b.buffer===m.buffer&&(g=!1);if(!d)return 0;a=a.node;a.mtime=a.ctime=Date.now();if(b.subarray&&(!a.Na||a.Na.subarray)){if(g)return a.Na=b.subarray(c,c+d),a.Ra=d;if(0===a.Ra&&
+		0===e)return a.Na=b.slice(c,c+d),a.Ra=d;if(e+d<=a.Ra)return a.Na.set(b.subarray(c,c+d),e),d}g=e+d;var h=a.Na?a.Na.length:0;h>=g||(g=Math.max(g,h*(1048576>h?2:1.125)>>>0),0!=h&&(g=Math.max(g,256)),h=a.Na,a.Na=new Uint8Array(g),0<a.Ra&&a.Na.set(h.subarray(0,a.Ra),0));if(a.Na.subarray&&b.subarray)a.Na.set(b.subarray(c,c+d),e);else for(g=0;g<d;g++)a.Na[e+g]=b[c+g];a.Ra=Math.max(a.Ra,e+d);return d},Va(a,b,c){1===c?b+=a.position:2===c&&32768===(a.node.mode&61440)&&(b+=a.node.Ra);if(0>b)throw new N(28);
+		return b},jb(a,b,c,d,e){if(32768!==(a.node.mode&61440))throw new N(43);a=a.node.Na;if(e&2||!a||a.buffer!==m.buffer){e=!0;d=65536*Math.ceil(b/65536);var g=Bb(65536,d);g&&C.fill(0,g,g+d);d=g;if(!d)throw new N(48);if(a){if(0<c||c+b<a.length)a.subarray?a=a.subarray(c,c+b):a=Array.prototype.slice.call(a,c,c+b);m.set(a,d);}}else e=!1,d=a.byteOffset;return {Xb:d,Eb:e}},kb(a,b,c,d){O.Ma.write(a,b,0,d,c,!1);return 0}}},ja=(a,b)=>{var c=0;a&&(c|=365);b&&(c|=146);return c},Cb=null,Db={},Eb=[],Fb=1,R=null,Gb=!1,
+		Hb=!0,N=class{name="ErrnoError";constructor(a){this.Pa=a;}},Ib=class{hb={};node=null;get flags(){return this.hb.flags}set flags(a){this.hb.flags=a;}get position(){return this.hb.position}set position(a){this.hb.position=a;}},Jb=class{La={};Ma={};bb=null;constructor(a,b,c,d){a||=this;this.parent=a;this.Xa=a.Xa;this.id=Fb++;this.name=b;this.mode=c;this.rdev=d;this.atime=this.mtime=this.ctime=Date.now();}get read(){return 365===(this.mode&365)}set read(a){a?this.mode|=365:this.mode&=-366;}get write(){return 146===
+		(this.mode&146)}set write(a){a?this.mode|=146:this.mode&=-147;}};
+		function S(a,b={}){if(!a)throw new N(44);b.pb??(b.pb=!0);"/"===a.charAt(0)||(a="//"+a);var c=0;a:for(;40>c;c++){a=a.split("/").filter(q=>!!q);for(var d=Cb,e="/",g=0;g<a.length;g++){var h=g===a.length-1;if(h&&b.parent)break;if("."!==a[g])if(".."===a[g])if(e=bb(e),d===d.parent){a=e+"/"+a.slice(g+1).join("/");c--;continue a}else d=d.parent;else {e=ia(e+"/"+a[g]);try{d=Q(d,a[g]);}catch(q){if(44===q?.Pa&&h&&b.Wb)return {path:e};throw q;}!d.bb||h&&!b.pb||(d=d.bb.root);if(40960===(d.mode&61440)&&(!h||b.ab)){if(!d.La.readlink)throw new N(52);
+		d=d.La.readlink(d);"/"===d.charAt(0)||(d=bb(e)+"/"+d);a=d+"/"+a.slice(g+1).join("/");continue a}}}return {path:e,node:d}}throw new N(32);}function ha(a){for(var b;;){if(a===a.parent)return a=a.Xa.Db,b?"/"!==a[a.length-1]?`${a}/${b}`:a+b:a;b=b?`${a.name}/${b}`:a.name;a=a.parent;}}function Kb(a,b){for(var c=0,d=0;d<b.length;d++)c=(c<<5)-c+b.charCodeAt(d)|0;return (a+c>>>0)%R.length}
+		function Ab(a){var b=Kb(a.parent.id,a.name);if(R[b]===a)R[b]=a.cb;else for(b=R[b];b;){if(b.cb===a){b.cb=a.cb;break}b=b.cb;}}function Q(a,b){var c=P(a.mode)?(c=Lb(a,"x"))?c:a.La.lookup?0:2:54;if(c)throw new N(c);for(c=R[Kb(a.id,b)];c;c=c.cb){var d=c.name;if(c.parent.id===a.id&&d===b)return c}return a.La.lookup(a,b)}function zb(a,b,c,d){a=new Jb(a,b,c,d);b=Kb(a.parent.id,a.name);a.cb=R[b];return R[b]=a}function P(a){return 16384===(a&61440)}
+		function Lb(a,b){return Hb?0:b.includes("r")&&!(a.mode&292)||b.includes("w")&&!(a.mode&146)||b.includes("x")&&!(a.mode&73)?2:0}function Mb(a,b){if(!P(a.mode))return 54;try{return Q(a,b),20}catch(c){}return Lb(a,"wx")}function Nb(a,b,c){try{var d=Q(a,b);}catch(e){return e.Pa}if(a=Lb(a,"wx"))return a;if(c){if(!P(d.mode))return 54;if(d===d.parent||"/"===ha(d))return 10}else if(P(d.mode))return 31;return 0}function Ob(a){if(!a)throw new N(63);return a}
+		function T(a){a=Eb[a];if(!a)throw new N(8);return a}function Pb(a,b=-1){a=Object.assign(new Ib,a);if(-1==b)a:{for(b=0;4096>=b;b++)if(!Eb[b])break a;throw new N(33);}a.fd=b;return Eb[b]=a}function Qb(a,b=-1){a=Pb(a,b);a.Ma?.ec?.(a);return a}function Rb(a,b,c){var d=a?.Ma.Ua;a=d?a:b;d??=b.La.Ua;Ob(d);d(a,c);}var yb={open(a){a.Ma=Db[a.node.rdev].Ma;a.Ma.open?.(a);},Va(){throw new N(70);}};function mb(a,b){Db[a]={Ma:b};}
+		function Sb(a,b){var c="/"===b;if(c&&Cb)throw new N(10);if(!c&&b){var d=S(b,{pb:!1});b=d.path;d=d.node;if(d.bb)throw new N(10);if(!P(d.mode))throw new N(54);}b={type:a,kc:{},Db:b,Vb:[]};a=a.Xa(b);a.Xa=b;b.root=a;c?Cb=a:d&&(d.bb=b,d.Xa&&d.Xa.Vb.push(b));}function Tb(a,b,c){var d=S(a,{parent:!0}).node;a=cb(a);if(!a)throw new N(28);if("."===a||".."===a)throw new N(20);var e=Mb(d,a);if(e)throw new N(e);if(!d.La.ib)throw new N(63);return d.La.ib(d,a,b,c)}
+		function ka(a,b=438){return Tb(a,b&4095|32768,0)}function U(a,b=511){return Tb(a,b&1023|16384,0)}function Ub(a,b,c){"undefined"==typeof c&&(c=b,b=438);Tb(a,b|8192,c);}function Vb(a,b){if(!fb(a))throw new N(44);var c=S(b,{parent:!0}).node;if(!c)throw new N(44);b=cb(b);var d=Mb(c,b);if(d)throw new N(d);if(!c.La.symlink)throw new N(63);c.La.symlink(c,b,a);}
+		function Wb(a){var b=S(a,{parent:!0}).node;a=cb(a);var c=Q(b,a),d=Nb(b,a,!0);if(d)throw new N(d);if(!b.La.rmdir)throw new N(63);if(c.bb)throw new N(10);b.La.rmdir(b,a);Ab(c);}function ua(a){var b=S(a,{parent:!0}).node;if(!b)throw new N(44);a=cb(a);var c=Q(b,a),d=Nb(b,a,!1);if(d)throw new N(d);if(!b.La.unlink)throw new N(63);if(c.bb)throw new N(10);b.La.unlink(b,a);Ab(c);}function Xb(a,b){a=S(a,{ab:!b}).node;return Ob(a.La.Ta)(a)}
+		function Yb(a,b,c,d){Rb(a,b,{mode:c&4095|b.mode&-4096,ctime:Date.now(),Lb:d});}function la(a,b){a="string"==typeof a?S(a,{ab:!0}).node:a;Yb(null,a,b);}function Zb(a,b,c){if(P(b.mode))throw new N(31);if(32768!==(b.mode&61440))throw new N(28);var d=Lb(b,"w");if(d)throw new N(d);Rb(a,b,{size:c,timestamp:Date.now()});}
+		function ma(a,b,c=438){if(""===a)throw new N(44);if("string"==typeof b){var d={r:0,"r+":2,w:577,"w+":578,a:1089,"a+":1090}[b];if("undefined"==typeof d)throw Error(`Unknown file open mode: ${b}`);b=d;}c=b&64?c&4095|32768:0;if("object"==typeof a)d=a;else {var e=a.endsWith("/");var g=S(a,{ab:!(b&131072),Wb:!0});d=g.node;a=g.path;}g=!1;if(b&64)if(d){if(b&128)throw new N(20);}else {if(e)throw new N(31);d=Tb(a,c|511,0);g=!0;}if(!d)throw new N(44);8192===(d.mode&61440)&&(b&=-513);if(b&65536&&!P(d.mode))throw new N(54);
+		if(!g&&(d?40960===(d.mode&61440)?e=32:(e=["r","w","rw"][b&3],b&512&&(e+="w"),e=P(d.mode)&&("r"!==e||b&576)?31:Lb(d,e)):e=44,e))throw new N(e);b&512&&!g&&(e=d,e="string"==typeof e?S(e,{ab:!0}).node:e,Zb(null,e,0));b=Pb({node:d,path:ha(d),flags:b&-131713,seekable:!0,position:0,Ma:d.Ma,Yb:[],error:!1});b.Ma.open&&b.Ma.open(b);g&&la(d,c&511);return b}function oa(a){if(null===a.fd)throw new N(8);a.rb&&(a.rb=null);try{a.Ma.close&&a.Ma.close(a);}catch(b){throw b;}finally{Eb[a.fd]=null;}a.fd=null;}
+		function $b(a,b,c){if(null===a.fd)throw new N(8);if(!a.seekable||!a.Ma.Va)throw new N(70);if(0!=c&&1!=c&&2!=c)throw new N(28);a.position=a.Ma.Va(a,b,c);a.Yb=[];}function ac(a,b,c,d,e){if(0>d||0>e)throw new N(28);if(null===a.fd)throw new N(8);if(1===(a.flags&2097155))throw new N(8);if(P(a.node.mode))throw new N(31);if(!a.Ma.read)throw new N(28);var g="undefined"!=typeof e;if(!g)e=a.position;else if(!a.seekable)throw new N(70);b=a.Ma.read(a,b,c,d,e);g||(a.position+=b);return b}
+		function na(a,b,c,d,e){if(0>d||0>e)throw new N(28);if(null===a.fd)throw new N(8);if(0===(a.flags&2097155))throw new N(8);if(P(a.node.mode))throw new N(31);if(!a.Ma.write)throw new N(28);a.seekable&&a.flags&1024&&$b(a,0,2);var g="undefined"!=typeof e;if(!g)e=a.position;else if(!a.seekable)throw new N(70);b=a.Ma.write(a,b,c,d,e,void 0);g||(a.position+=b);return b}
+		function ta(a){var b=b||0;var c="binary";"utf8"!==c&&"binary"!==c&&Ma(`Invalid encoding type "${c}"`);b=ma(a,b);a=Xb(a).size;var d=new Uint8Array(a);ac(b,d,0,a,0);"utf8"===c&&(d=gb(d));oa(b);return d}
+		function W(a,b,c){a=ia("/dev/"+a);var d=ja(!!b,!!c);W.Cb??(W.Cb=64);var e=W.Cb++<<8|0;mb(e,{open(g){g.seekable=!1;},close(){c?.buffer?.length&&c(10);},read(g,h,q,w){for(var t=0,x=0;x<w;x++){try{var D=b();}catch(pb){throw new N(29);}if(void 0===D&&0===t)throw new N(6);if(null===D||void 0===D)break;t++;h[q+x]=D;}t&&(g.node.atime=Date.now());return t},write(g,h,q,w){for(var t=0;t<w;t++)try{c(h[q+t]);}catch(x){throw new N(29);}w&&(g.node.mtime=g.node.ctime=Date.now());return t}});Ub(a,d,e);}var X={};
+		function Y(a,b,c){if("/"===b.charAt(0))return b;a=-100===a?"/":T(a).path;if(0==b.length){if(!c)throw new N(44);return a}return a+"/"+b}
+		function kc(a,b){F[a>>2]=b.dev;F[a+4>>2]=b.mode;F[a+8>>2]=b.nlink;F[a+12>>2]=b.uid;F[a+16>>2]=b.gid;F[a+20>>2]=b.rdev;G[a+24>>3]=BigInt(b.size);E[a+32>>2]=4096;E[a+36>>2]=b.blocks;var c=b.atime.getTime(),d=b.mtime.getTime(),e=b.ctime.getTime();G[a+40>>3]=BigInt(Math.floor(c/1E3));F[a+48>>2]=c%1E3*1E6;G[a+56>>3]=BigInt(Math.floor(d/1E3));F[a+64>>2]=d%1E3*1E6;G[a+72>>3]=BigInt(Math.floor(e/1E3));F[a+80>>2]=e%1E3*1E6;G[a+88>>3]=BigInt(b.ino);return 0}
+		var Cc=void 0,Ec=()=>{var a=E[+Cc>>2];Cc+=4;return a},Fc=0,Gc=[0,31,60,91,121,152,182,213,244,274,305,335],Hc=[0,31,59,90,120,151,181,212,243,273,304,334],Ic={},Jc=a=>{Ga=a;Ya||0<Fc||(k.onExit?.(a),Fa=!0);xa(a,new Sa(a));},Kc=a=>{if(!Fa)try{a();}catch(b){b instanceof Sa||"unwind"==b||xa(1,b);}finally{if(!(Ya||0<Fc))try{Ga=a=Ga,Jc(a);}catch(b){b instanceof Sa||"unwind"==b||xa(1,b);}}},Lc={},Nc=()=>{if(!Mc){var a={USER:"web_user",LOGNAME:"web_user",PATH:"/",PWD:"/",HOME:"/home/web_user",LANG:(globalThis.navigator?.language??
+		"C").replace("-","_")+".UTF-8",_:wa||"./this.program"},b;for(b in Lc)void 0===Lc[b]?delete a[b]:a[b]=Lc[b];var c=[];for(b in a)c.push(`${b}=${a[b]}`);Mc=c;}return Mc},Mc,Oc=(a,b,c,d)=>{var e={string:t=>{var x=0;if(null!==t&&void 0!==t&&0!==t){x=ib(t)+1;var D=y(x);M(t,C,D,x);x=D;}return x},array:t=>{var x=y(t.length);m.set(t,x);return x}};a=k["_"+a];var g=[],h=0;if(d)for(var q=0;q<d.length;q++){var w=e[c[q]];w?(0===h&&(h=pa()),g[q]=w(d[q])):g[q]=d[q];}c=a(...g);return c=function(t){0!==h&&ra(h);return "string"===
+		b?z(t):"boolean"===b?!!t:t}(c)},fa=a=>{var b=ib(a)+1,c=da(b);c&&M(a,C,c,b);return c},Pc,Qc=[],A=a=>{Pc.delete(Z.get(a));Z.set(a,null);Qc.push(a);},Rc=a=>{const b=a.length;return [b%128|128,b>>7,...a]},Sc={i:127,p:127,j:126,f:125,d:124,e:111},Tc=a=>Rc(Array.from(a,b=>Sc[b])),va=(a,b)=>{if(!Pc){Pc=new WeakMap;var c=Z.length;if(Pc)for(var d=0;d<0+c;d++){var e=Z.get(d);e&&Pc.set(e,d);}}if(c=Pc.get(a)||0)return c;c=Qc.length?Qc.pop():Z.grow(1);try{Z.set(c,a);}catch(g){if(!(g instanceof TypeError))throw g;
+		b=Uint8Array.of(0,97,115,109,1,0,0,0,1,...Rc([1,96,...Tc(b.slice(1)),...Tc("v"===b[0]?"":b[0])]),2,7,1,1,101,1,102,0,0,7,5,1,1,102,0,0);b=new WebAssembly.Module(b);b=(new WebAssembly.Instance(b,{e:{f:a}})).exports.f;Z.set(c,b);}Pc.set(a,c);return c};R=Array(4096);Sb(O,"/");U("/tmp");U("/home");U("/home/web_user");
+		(function(){U("/dev");mb(259,{read:()=>0,write:(d,e,g,h)=>h,Va:()=>0});Ub("/dev/null",259);kb(1280,wb);kb(1536,xb);Ub("/dev/tty",1280);Ub("/dev/tty1",1536);var a=new Uint8Array(1024),b=0,c=()=>{0===b&&(eb(a),b=a.byteLength);return a[--b]};W("random",c);W("urandom",c);U("/dev/shm");U("/dev/shm/tmp");})();
+		(function(){U("/proc");var a=U("/proc/self");U("/proc/self/fd");Sb({Xa(){var b=zb(a,"fd",16895,73);b.Ma={Va:O.Ma.Va};b.La={lookup(c,d){c=+d;var e=T(c);c={parent:null,Xa:{Db:"fake"},La:{readlink:()=>e.path},id:c+1};return c.parent=c},readdir(){return Array.from(Eb.entries()).filter(([,c])=>c).map(([c])=>c.toString())}};return b}},"/proc/self/fd");})();k.noExitRuntime&&(Ya=k.noExitRuntime);k.print&&(Da=k.print);k.printErr&&(B=k.printErr);k.wasmBinary&&(Ea=k.wasmBinary);k.thisProgram&&(wa=k.thisProgram);
+		if(k.preInit)for("function"==typeof k.preInit&&(k.preInit=[k.preInit]);0<k.preInit.length;)k.preInit.shift()();k.stackSave=()=>pa();k.stackRestore=a=>ra(a);k.stackAlloc=a=>y(a);k.cwrap=(a,b,c,d)=>{var e=!c||c.every(g=>"number"===g||"boolean"===g);return "string"!==b&&e&&!d?k["_"+a]:(...g)=>Oc(a,b,c,g)};k.addFunction=va;k.removeFunction=A;k.UTF8ToString=z;k.stringToNewUTF8=fa;k.writeArrayToMemory=(a,b)=>{m.set(a,b);};
+		var da,ea,Bb,Uc,ra,y,pa,La,Z,Vc={a:(a,b,c,d)=>Ma(`Assertion failed: ${z(a)}, at: `+[b?z(b):"unknown filename",c,d?z(d):"unknown function"]),i:function(a,b){try{return a=z(a),la(a,b),0}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return -c.Pa}},L:function(a,b,c){try{b=z(b);b=Y(a,b);if(c&-8)return -28;var d=S(b,{ab:!0}).node;if(!d)return -44;a="";c&4&&(a+="r");c&2&&(a+="w");c&1&&(a+="x");return a&&Lb(d,a)?-2:0}catch(e){if("undefined"==typeof X||"ErrnoError"!==e.name)throw e;return -e.Pa}},
+		j:function(a,b){try{var c=T(a);Yb(c,c.node,b,!1);return 0}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;return -d.Pa}},h:function(a){try{var b=T(a);Rb(b,b.node,{timestamp:Date.now(),Lb:!1});return 0}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return -c.Pa}},b:function(a,b,c){Cc=c;try{var d=T(a);switch(b){case 0:var e=Ec();if(0>e)break;for(;Eb[e];)e++;return Qb(d,e).fd;case 1:case 2:return 0;case 3:return d.flags;case 4:return e=Ec(),d.flags|=e,0;case 12:return e=
+		Ec(),Ha[e+0>>1]=2,0;case 13:case 14:return 0}return -28}catch(g){if("undefined"==typeof X||"ErrnoError"!==g.name)throw g;return -g.Pa}},g:function(a,b){try{var c=T(a),d=c.node,e=c.Ma.Ta;a=e?c:d;e??=d.La.Ta;Ob(e);var g=e(a);return kc(b,g)}catch(h){if("undefined"==typeof X||"ErrnoError"!==h.name)throw h;return -h.Pa}},H:function(a,b){b=-9007199254740992>b||9007199254740992<b?NaN:Number(b);try{if(isNaN(b))return -61;var c=T(a);if(0>b||0===(c.flags&2097155))throw new N(28);Zb(c,c.node,b);return 0}catch(d){if("undefined"==
+		typeof X||"ErrnoError"!==d.name)throw d;return -d.Pa}},G:function(a,b){try{if(0===b)return -28;var c=ib("/")+1;if(b<c)return -68;M("/",C,a,b);return c}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;return -d.Pa}},K:function(a,b){try{return a=z(a),kc(b,Xb(a,!0))}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return -c.Pa}},C:function(a,b,c){try{return b=z(b),b=Y(a,b),U(b,c),0}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;return -d.Pa}},J:function(a,
+		b,c,d){try{b=z(b);var e=d&256;b=Y(a,b,d&4096);return kc(c,e?Xb(b,!0):Xb(b))}catch(g){if("undefined"==typeof X||"ErrnoError"!==g.name)throw g;return -g.Pa}},x:function(a,b,c,d){Cc=d;try{b=z(b);b=Y(a,b);var e=d?Ec():0;return ma(b,c,e).fd}catch(g){if("undefined"==typeof X||"ErrnoError"!==g.name)throw g;return -g.Pa}},v:function(a,b,c,d){try{b=z(b);b=Y(a,b);if(0>=d)return -28;var e=S(b).node;if(!e)throw new N(44);if(!e.La.readlink)throw new N(28);var g=e.La.readlink(e);var h=Math.min(d,ib(g)),q=m[c+h];M(g,
+		C,c,d+1);m[c+h]=q;return h}catch(w){if("undefined"==typeof X||"ErrnoError"!==w.name)throw w;return -w.Pa}},u:function(a){try{return a=z(a),Wb(a),0}catch(b){if("undefined"==typeof X||"ErrnoError"!==b.name)throw b;return -b.Pa}},f:function(a,b){try{return a=z(a),kc(b,Xb(a))}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return -c.Pa}},r:function(a,b,c){try{b=z(b);b=Y(a,b);if(c)if(512===c)Wb(b);else return -28;else ua(b);return 0}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;
+		return -d.Pa}},q:function(a,b,c){try{b=z(b);b=Y(a,b,!0);var d=Date.now(),e,g;if(c){var h=F[c>>2]+4294967296*E[c+4>>2],q=E[c+8>>2];1073741823==q?e=d:1073741822==q?e=null:e=1E3*h+q/1E6;c+=16;h=F[c>>2]+4294967296*E[c+4>>2];q=E[c+8>>2];1073741823==q?g=d:1073741822==q?g=null:g=1E3*h+q/1E6;}else g=e=d;if(null!==(g??e)){a=e;var w=S(b,{ab:!0}).node;Ob(w.La.Ua)(w,{atime:a,mtime:g});}return 0}catch(t){if("undefined"==typeof X||"ErrnoError"!==t.name)throw t;return -t.Pa}},m:()=>Ma(""),l:()=>{Ya=!1;Fc=0;},A:function(a,
+		b){a=-9007199254740992>a||9007199254740992<a?NaN:Number(a);a=new Date(1E3*a);E[b>>2]=a.getSeconds();E[b+4>>2]=a.getMinutes();E[b+8>>2]=a.getHours();E[b+12>>2]=a.getDate();E[b+16>>2]=a.getMonth();E[b+20>>2]=a.getFullYear()-1900;E[b+24>>2]=a.getDay();var c=a.getFullYear();E[b+28>>2]=(0!==c%4||0===c%100&&0!==c%400?Hc:Gc)[a.getMonth()]+a.getDate()-1|0;E[b+36>>2]=-(60*a.getTimezoneOffset());c=(new Date(a.getFullYear(),6,1)).getTimezoneOffset();var d=(new Date(a.getFullYear(),0,1)).getTimezoneOffset();
+		E[b+32>>2]=(c!=d&&a.getTimezoneOffset()==Math.min(d,c))|0;},y:function(a,b,c,d,e,g,h){e=-9007199254740992>e||9007199254740992<e?NaN:Number(e);try{var q=T(d);if(0!==(b&2)&&0===(c&2)&&2!==(q.flags&2097155))throw new N(2);if(1===(q.flags&2097155))throw new N(2);if(!q.Ma.jb)throw new N(43);if(!a)throw new N(28);var w=q.Ma.jb(q,a,e,b,c);var t=w.Xb;E[g>>2]=w.Eb;F[h>>2]=t;return 0}catch(x){if("undefined"==typeof X||"ErrnoError"!==x.name)throw x;return -x.Pa}},z:function(a,b,c,d,e,g){g=-9007199254740992>g||
+		9007199254740992<g?NaN:Number(g);try{var h=T(e);if(c&2){c=g;if(32768!==(h.node.mode&61440))throw new N(43);if(!(d&2)){var q=C.slice(a,a+b);h.Ma.kb&&h.Ma.kb(h,q,c,b,d);}}}catch(w){if("undefined"==typeof X||"ErrnoError"!==w.name)throw w;return -w.Pa}},n:(a,b)=>{Ic[a]&&(clearTimeout(Ic[a].id),delete Ic[a]);if(!b)return 0;var c=setTimeout(()=>{delete Ic[a];Kc(()=>Uc(a,performance.now()));},b);Ic[a]={id:c,lc:b};return 0},B:(a,b,c,d)=>{var e=(new Date).getFullYear(),g=(new Date(e,0,1)).getTimezoneOffset();
+		e=(new Date(e,6,1)).getTimezoneOffset();F[a>>2]=60*Math.max(g,e);E[b>>2]=Number(g!=e);b=h=>{var q=Math.abs(h);return `UTC${0<=h?"-":"+"}${String(Math.floor(q/60)).padStart(2,"0")}${String(q%60).padStart(2,"0")}`};a=b(g);b=b(e);e<g?(M(a,C,c,17),M(b,C,d,17)):(M(a,C,d,17),M(b,C,c,17));},d:()=>Date.now(),s:()=>2147483648,c:()=>performance.now(),o:a=>{var b=C.length;a>>>=0;if(2147483648<a)return !1;for(var c=1;4>=c;c*=2){var d=b*(1+.2/c);d=Math.min(d,a+100663296);a:{d=(Math.min(2147483648,65536*Math.ceil(Math.max(a,
+		d)/65536))-La.buffer.byteLength+65535)/65536|0;try{La.grow(d);Ka();var e=1;break a}catch(g){}e=void 0;}if(e)return !0}return !1},E:(a,b)=>{var c=0,d=0,e;for(e of Nc()){var g=b+c;F[a+d>>2]=g;c+=M(e,C,g,Infinity)+1;d+=4;}return 0},F:(a,b)=>{var c=Nc();F[a>>2]=c.length;a=0;for(var d of c)a+=ib(d)+1;F[b>>2]=a;return 0},e:function(a){try{var b=T(a);oa(b);return 0}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return c.Pa}},p:function(a,b){try{var c=T(a);m[b]=c.tty?2:P(c.mode)?3:40960===(c.mode&
+		61440)?7:4;Ha[b+2>>1]=0;G[b+8>>3]=BigInt(0);G[b+16>>3]=BigInt(0);return 0}catch(d){if("undefined"==typeof X||"ErrnoError"!==d.name)throw d;return d.Pa}},w:function(a,b,c,d){try{a:{var e=T(a);a=b;for(var g,h=b=0;h<c;h++){var q=F[a>>2],w=F[a+4>>2];a+=8;var t=ac(e,m,q,w,g);if(0>t){var x=-1;break a}b+=t;if(t<w)break;"undefined"!=typeof g&&(g+=t);}x=b;}F[d>>2]=x;return 0}catch(D){if("undefined"==typeof X||"ErrnoError"!==D.name)throw D;return D.Pa}},D:function(a,b,c,d){b=-9007199254740992>b||9007199254740992<
+		b?NaN:Number(b);try{if(isNaN(b))return 61;var e=T(a);$b(e,b,c);G[d>>3]=BigInt(e.position);e.rb&&0===b&&0===c&&(e.rb=null);return 0}catch(g){if("undefined"==typeof X||"ErrnoError"!==g.name)throw g;return g.Pa}},I:function(a){try{var b=T(a);return b.Ma?.fsync?.(b)}catch(c){if("undefined"==typeof X||"ErrnoError"!==c.name)throw c;return c.Pa}},t:function(a,b,c,d){try{a:{var e=T(a);a=b;for(var g,h=b=0;h<c;h++){var q=F[a>>2],w=F[a+4>>2];a+=8;var t=na(e,m,q,w,g);if(0>t){var x=-1;break a}b+=t;if(t<w)break;
+		"undefined"!=typeof g&&(g+=t);}x=b;}F[d>>2]=x;return 0}catch(D){if("undefined"==typeof X||"ErrnoError"!==D.name)throw D;return D.Pa}},k:Jc};
+		function Wc(){function a(){k.calledRun=!0;if(!Fa){if(!k.noFSInit&&!Gb){var b,c;Gb=!0;b??=k.stdin;c??=k.stdout;d??=k.stderr;b?W("stdin",b):Vb("/dev/tty","/dev/stdin");c?W("stdout",null,c):Vb("/dev/tty","/dev/stdout");d?W("stderr",null,d):Vb("/dev/tty1","/dev/stderr");ma("/dev/stdin",0);ma("/dev/stdout",1);ma("/dev/stderr",1);}Xc.N();Hb=!1;k.onRuntimeInitialized?.();if(k.postRun)for("function"==typeof k.postRun&&(k.postRun=[k.postRun]);k.postRun.length;){var d=k.postRun.shift();Ua.push(d);}Ta(Ua);}}if(0<
+		J)Xa=Wc;else {if(k.preRun)for("function"==typeof k.preRun&&(k.preRun=[k.preRun]);k.preRun.length;)Wa();Ta(Va);0<J?Xa=Wc:k.setStatus?(k.setStatus("Running..."),setTimeout(()=>{setTimeout(()=>k.setStatus(""),1);a();},1)):a();}}var Xc;
+		(async function(){function a(c){c=Xc=c.exports;k._sqlite3_free=c.P;k._sqlite3_value_text=c.Q;k._sqlite3_prepare_v2=c.R;k._sqlite3_step=c.S;k._sqlite3_reset=c.T;k._sqlite3_exec=c.U;k._sqlite3_finalize=c.V;k._sqlite3_column_name=c.W;k._sqlite3_column_text=c.X;k._sqlite3_column_type=c.Y;k._sqlite3_errmsg=c.Z;k._sqlite3_clear_bindings=c._;k._sqlite3_value_blob=c.$;k._sqlite3_value_bytes=c.aa;k._sqlite3_value_double=c.ba;k._sqlite3_value_int=c.ca;k._sqlite3_value_type=c.da;k._sqlite3_result_blob=c.ea;
+		k._sqlite3_result_double=c.fa;k._sqlite3_result_error=c.ga;k._sqlite3_result_int=c.ha;k._sqlite3_result_int64=c.ia;k._sqlite3_result_null=c.ja;k._sqlite3_result_text=c.ka;k._sqlite3_aggregate_context=c.la;k._sqlite3_column_count=c.ma;k._sqlite3_data_count=c.na;k._sqlite3_column_blob=c.oa;k._sqlite3_column_bytes=c.pa;k._sqlite3_column_double=c.qa;k._sqlite3_bind_blob=c.ra;k._sqlite3_bind_double=c.sa;k._sqlite3_bind_int=c.ta;k._sqlite3_bind_text=c.ua;k._sqlite3_bind_parameter_index=c.va;k._sqlite3_sql=
+		c.wa;k._sqlite3_normalized_sql=c.xa;k._sqlite3_changes=c.ya;k._sqlite3_close_v2=c.za;k._sqlite3_create_function_v2=c.Aa;k._sqlite3_update_hook=c.Ba;k._sqlite3_open=c.Ca;da=k._malloc=c.Da;ea=k._free=c.Ea;k._RegisterExtensionFunctions=c.Fa;Bb=c.Ga;Uc=c.Ha;ra=c.Ia;y=c.Ja;pa=c.Ka;La=c.M;Z=c.O;Ka();J--;k.monitorRunDependencies?.(J);0==J&&Xa&&(c=Xa,Xa=null,c());return Xc}J++;k.monitorRunDependencies?.(J);var b={a:Vc};if(k.instantiateWasm)return new Promise(c=>{k.instantiateWasm(b,(d,e)=>{c(a(d,e));});});
+		Na??=k.locateFile?k.locateFile("sql-wasm.wasm",za):za+"sql-wasm.wasm";return a((await Ra(b)).instance)})();Wc();
 
 
-    		        // The shell-pre.js and emcc-generated code goes above
-    		        return Module;
-    		    }); // The end of the promise being returned
+		        // The shell-pre.js and emcc-generated code goes above
+		        return Module;
+		    }); // The end of the promise being returned
 
-    		  return initSqlJsPromise;
-    		}; // The end of our initSqlJs function
+		  return initSqlJsPromise;
+		}; // The end of our initSqlJs function
 
-    		// This bit below is copied almost exactly from what you get when you use the MODULARIZE=1 flag with emcc
-    		// However, we don't want to use the emcc modularization. See shell-pre.js
-    		if ('object' === 'object' && 'object' === 'object'){
-    		    module.exports = initSqlJs;
-    		    // This will allow the module to be used in ES6 or CommonJS
-    		    module.exports.default = initSqlJs;
-    		}
-    		else if (typeof undefined === 'function' && undefined['amd']) {
-    		    undefined([], function() { return initSqlJs; });
-    		}
-    		else if ('object' === 'object'){
-    		    exports["Module"] = initSqlJs;
-    		} 
-    	} (sqlWasm$1, sqlWasm$1.exports));
-    	return sqlWasm$1.exports;
+		// This bit below is copied almost exactly from what you get when you use the MODULARIZE=1 flag with emcc
+		// However, we don't want to use the emcc modularization. See shell-pre.js
+		if ('object' === 'object' && 'object' === 'object'){
+		    module.exports = initSqlJs;
+		    // This will allow the module to be used in ES6 or CommonJS
+		    module.exports.default = initSqlJs;
+		}
+		else if (typeof undefined === 'function' && undefined['amd']) {
+		    undefined([], function() { return initSqlJs; });
+		}
+		else if ('object' === 'object'){
+		    exports["Module"] = initSqlJs;
+		}
+	} (sqlWasm$1, sqlWasm$1.exports));
+	return sqlWasm$1.exports;
     }
 
     var sqlWasmExports = requireSqlWasm();
@@ -9769,7 +9769,7 @@ $CONTENT
         dict: Symbol('surname'),
     }));
 
-    const map$1 = {
+    const map$2 = {
         'bǎng páng pāng': ['膀'],
         líng: [
             '〇',
@@ -28431,8 +28431,8 @@ $CONTENT
         'yáo xiào': ['滧'],
     };
     const DICT1 = new FastDictFactory();
-    Object.keys(map$1).forEach((key) => {
-        const chars = map$1[key];
+    Object.keys(map$2).forEach((key) => {
+        const chars = map$2[key];
         for (let char of chars) {
             DICT1.set(char, key);
         }
@@ -36784,7 +36784,7 @@ $CONTENT
         });
     }
 
-    function isRecord_ACU$b(value) {
+    function isRecord_ACU$c(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function createResult_ACU() {
@@ -36800,7 +36800,7 @@ $CONTENT
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet_key', { sheetKey });
             return result;
         }
-        if (!isRecord_ACU$b(sheet)) {
+        if (!isRecord_ACU$c(sheet)) {
             addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet', { sheetKey });
             return result;
         }
@@ -36839,7 +36839,7 @@ $CONTENT
     }
     function validateCanonicalCheckpointData_ACU(data, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$b(data)) {
+        if (!isRecord_ACU$c(data)) {
             addIssue_ACU$1(result, 'data', context, 'invalid_data');
             return result;
         }
@@ -36867,7 +36867,7 @@ $CONTENT
      */
     function validateMigrationProvenanceV1_ACU(provenance) {
         const issues = [];
-        if (!isRecord_ACU$b(provenance)) {
+        if (!isRecord_ACU$c(provenance)) {
             return { valid: false, issues: ['provenance_not_object'] };
         }
         if (provenance.version !== 1)
@@ -36890,7 +36890,7 @@ $CONTENT
             issues.push('invalid_source_ai_floors');
         }
         const lastChangedBySheet = provenance.legacyLastChangedAiFloorBySheet;
-        if (!isRecord_ACU$b(lastChangedBySheet)
+        if (!isRecord_ACU$c(lastChangedBySheet)
             || Object.keys(lastChangedBySheet).some(sheetKey => !sheetKey.startsWith('sheet_') || !isNonNegativeInteger_ACU(lastChangedBySheet[sheetKey]))) {
             issues.push('invalid_last_changed_floor_by_sheet');
         }
@@ -36906,7 +36906,7 @@ $CONTENT
     }
     function validateCanonicalCheckpoint_ACU(checkpoint, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$b(checkpoint)) {
+        if (!isRecord_ACU$c(checkpoint)) {
             addIssue_ACU$1(result, 'full', context, 'checkpoint_not_object');
             return result;
         }
@@ -36927,7 +36927,7 @@ $CONTENT
             if (checkpoint.fallbackProvenance !== undefined) {
                 const provenance = checkpoint.fallbackProvenance;
                 let valid = false;
-                if (isRecord_ACU$b(provenance)) {
+                if (isRecord_ACU$c(provenance)) {
                     const rangeStart = provenance.rangeStartMessageIndex;
                     const rangeEnd = provenance.rangeEndMessageIndex;
                     const createdAt = provenance.createdAt;
@@ -39495,12 +39495,12 @@ $CONTENT
         };
     }
 
-    function isRecord_ACU$a(value) {
+    function isRecord_ACU$b(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function fingerprint_ACU(value) {
         const text = JSON.stringify(value, (_key, item) => {
-            if (!isRecord_ACU$a(item))
+            if (!isRecord_ACU$b(item))
                 return item;
             return Object.keys(item).sort().reduce((out, key) => { out[key] = item[key]; return out; }, {});
         });
@@ -39536,7 +39536,7 @@ $CONTENT
         return !!value && (canonicalPhysicalName_ACU(value) === canonicalPhysicalName_ACU(sqlName) || (!!comment && value === comment));
     }
     function resolveRequiredHeaderIndexes_ACU(result, sheetKey, sheet, header, omitLeadingRowId = false) {
-        const ddl = isRecord_ACU$a(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
+        const ddl = isRecord_ACU$b(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
         if (!ddl)
             return new Map();
         const ddlColumns = parseDDLColumnInfos_ACU(ddl).slice(omitLeadingRowId ? 1 : 0);
@@ -39682,11 +39682,11 @@ $CONTENT
      * It deliberately does not touch populated tables or malformed seed pools.
      */
     function normalizeHeaderOnlyRowIdColumns_ACU(data) {
-        if (!isRecord_ACU$a(data))
+        if (!isRecord_ACU$b(data))
             return data;
         let normalized = null;
         for (const [sheetKey, sheet] of Object.entries(data)) {
-            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$a(sheet))
+            if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$b(sheet))
                 continue;
             const action = headerOnlyRowIdNormalizationAction_ACU(sheet);
             if (!action)
@@ -39718,7 +39718,7 @@ $CONTENT
             addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '无数据模板缺少 row_id，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
             return { header: ['row_id', ...header], insertsRowId: true };
         }
-        const ddl = isRecord_ACU$a(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
+        const ddl = isRecord_ACU$b(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
         const ddlText = typeof ddl === 'string' ? ddl : '';
         const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
         // 只有 DDL 明确多出首列 row_id，且其余列按顺序与业务表头对应，才允许自动插入身份列。
@@ -39739,7 +39739,7 @@ $CONTENT
     }
     function auditTableDataForUpgrade_ACU(data) {
         const result = { status: 'clean', issues: [], repairPlan: [], dataFingerprintBefore: fingerprint_ACU(data), sourceData: data };
-        if (!isRecord_ACU$a(data)) {
+        if (!isRecord_ACU$b(data)) {
             addIssue_ACU(result, { code: 'upgrade_invalid_data', message: '表格数据不是对象' });
             result.status = 'unrecoverable';
             return result;
@@ -39751,7 +39751,7 @@ $CONTENT
             return result;
         }
         for (const [sheetKey, rawSheet] of sheets) {
-            if (!isRecord_ACU$a(rawSheet)) {
+            if (!isRecord_ACU$b(rawSheet)) {
                 addIssue_ACU(result, { code: 'upgrade_invalid_data', sheetKey, message: 'sheet 不是对象' });
                 continue;
             }
@@ -39784,7 +39784,7 @@ $CONTENT
         return result;
     }
 
-    function isRecord_ACU$9(value) {
+    function isRecord_ACU$a(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function cloneData_ACU(data) {
@@ -39852,9 +39852,9 @@ $CONTENT
         const candidateData = cloneData_ACU(audit.sourceData);
         const idRemap = [];
         const overflowCells = [];
-        if (isRecord_ACU$9(candidateData) && audit.status !== 'unrecoverable') {
+        if (isRecord_ACU$a(candidateData) && audit.status !== 'unrecoverable') {
             Object.entries(candidateData).forEach(([sheetKey, sheet]) => {
-                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$9(sheet))
+                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$a(sheet))
                     return;
                 repairSheet_ACU(sheet, sheetKey, audit, idRemap, overflowCells);
             });
@@ -61743,6 +61743,7494 @@ $CONTENT
         }
     }
 
+    const ALIAS = Symbol.for('yaml.alias');
+    const DOC = Symbol.for('yaml.document');
+    const MAP = Symbol.for('yaml.map');
+    const PAIR = Symbol.for('yaml.pair');
+    const SCALAR$1 = Symbol.for('yaml.scalar');
+    const SEQ = Symbol.for('yaml.seq');
+    const NODE_TYPE = Symbol.for('yaml.node.type');
+    const isAlias = (node) => !!node && typeof node === 'object' && node[NODE_TYPE] === ALIAS;
+    const isDocument = (node) => !!node && typeof node === 'object' && node[NODE_TYPE] === DOC;
+    const isMap$1 = (node) => !!node && typeof node === 'object' && node[NODE_TYPE] === MAP;
+    const isPair = (node) => !!node && typeof node === 'object' && node[NODE_TYPE] === PAIR;
+    const isScalar$1 = (node) => !!node && typeof node === 'object' && node[NODE_TYPE] === SCALAR$1;
+    const isSeq = (node) => !!node && typeof node === 'object' && node[NODE_TYPE] === SEQ;
+    function isCollection$1(node) {
+        if (node && typeof node === 'object')
+            switch (node[NODE_TYPE]) {
+                case MAP:
+                case SEQ:
+                    return true;
+            }
+        return false;
+    }
+    function isNode(node) {
+        if (node && typeof node === 'object')
+            switch (node[NODE_TYPE]) {
+                case ALIAS:
+                case MAP:
+                case SCALAR$1:
+                case SEQ:
+                    return true;
+            }
+        return false;
+    }
+    const hasAnchor = (node) => (isScalar$1(node) || isCollection$1(node)) && !!node.anchor;
+
+    const BREAK$1 = Symbol('break visit');
+    const SKIP$1 = Symbol('skip children');
+    const REMOVE$1 = Symbol('remove node');
+    /**
+     * Apply a visitor to an AST node or document.
+     *
+     * Walks through the tree (depth-first) starting from `node`, calling a
+     * `visitor` function with three arguments:
+     *   - `key`: For sequence values and map `Pair`, the node's index in the
+     *     collection. Within a `Pair`, `'key'` or `'value'`, correspondingly.
+     *     `null` for the root node.
+     *   - `node`: The current node.
+     *   - `path`: The ancestry of the current node.
+     *
+     * The return value of the visitor may be used to control the traversal:
+     *   - `undefined` (default): Do nothing and continue
+     *   - `visit.SKIP`: Do not visit the children of this node, continue with next
+     *     sibling
+     *   - `visit.BREAK`: Terminate traversal completely
+     *   - `visit.REMOVE`: Remove the current node, then continue with the next one
+     *   - `Node`: Replace the current node, then continue by visiting it
+     *   - `number`: While iterating the items of a sequence or map, set the index
+     *     of the next step. This is useful especially if the index of the current
+     *     node has changed.
+     *
+     * If `visitor` is a single function, it will be called with all values
+     * encountered in the tree, including e.g. `null` values. Alternatively,
+     * separate visitor functions may be defined for each `Map`, `Pair`, `Seq`,
+     * `Alias` and `Scalar` node. To define the same visitor function for more than
+     * one node type, use the `Collection` (map and seq), `Value` (map, seq & scalar)
+     * and `Node` (alias, map, seq & scalar) targets. Of all these, only the most
+     * specific defined one will be used for each node.
+     */
+    function visit$1(node, visitor) {
+        const visitor_ = initVisitor(visitor);
+        if (isDocument(node)) {
+            const cd = visit_(null, node.contents, visitor_, Object.freeze([node]));
+            if (cd === REMOVE$1)
+                node.contents = null;
+        }
+        else
+            visit_(null, node, visitor_, Object.freeze([]));
+    }
+    // Without the `as symbol` casts, TS declares these in the `visit`
+    // namespace using `var`, but then complains about that because
+    // `unique symbol` must be `const`.
+    /** Terminate visit traversal completely */
+    visit$1.BREAK = BREAK$1;
+    /** Do not visit the children of the current node */
+    visit$1.SKIP = SKIP$1;
+    /** Remove the current node */
+    visit$1.REMOVE = REMOVE$1;
+    function visit_(key, node, visitor, path) {
+        const ctrl = callVisitor(key, node, visitor, path);
+        if (isNode(ctrl) || isPair(ctrl)) {
+            replaceNode(key, path, ctrl);
+            return visit_(key, ctrl, visitor, path);
+        }
+        if (typeof ctrl !== 'symbol') {
+            if (isCollection$1(node)) {
+                path = Object.freeze(path.concat(node));
+                for (let i = 0; i < node.items.length; ++i) {
+                    const ci = visit_(i, node.items[i], visitor, path);
+                    if (typeof ci === 'number')
+                        i = ci - 1;
+                    else if (ci === BREAK$1)
+                        return BREAK$1;
+                    else if (ci === REMOVE$1) {
+                        node.items.splice(i, 1);
+                        i -= 1;
+                    }
+                }
+            }
+            else if (isPair(node)) {
+                path = Object.freeze(path.concat(node));
+                const ck = visit_('key', node.key, visitor, path);
+                if (ck === BREAK$1)
+                    return BREAK$1;
+                else if (ck === REMOVE$1)
+                    node.key = null;
+                const cv = visit_('value', node.value, visitor, path);
+                if (cv === BREAK$1)
+                    return BREAK$1;
+                else if (cv === REMOVE$1)
+                    node.value = null;
+            }
+        }
+        return ctrl;
+    }
+    /**
+     * Apply an async visitor to an AST node or document.
+     *
+     * Walks through the tree (depth-first) starting from `node`, calling a
+     * `visitor` function with three arguments:
+     *   - `key`: For sequence values and map `Pair`, the node's index in the
+     *     collection. Within a `Pair`, `'key'` or `'value'`, correspondingly.
+     *     `null` for the root node.
+     *   - `node`: The current node.
+     *   - `path`: The ancestry of the current node.
+     *
+     * The return value of the visitor may be used to control the traversal:
+     *   - `Promise`: Must resolve to one of the following values
+     *   - `undefined` (default): Do nothing and continue
+     *   - `visit.SKIP`: Do not visit the children of this node, continue with next
+     *     sibling
+     *   - `visit.BREAK`: Terminate traversal completely
+     *   - `visit.REMOVE`: Remove the current node, then continue with the next one
+     *   - `Node`: Replace the current node, then continue by visiting it
+     *   - `number`: While iterating the items of a sequence or map, set the index
+     *     of the next step. This is useful especially if the index of the current
+     *     node has changed.
+     *
+     * If `visitor` is a single function, it will be called with all values
+     * encountered in the tree, including e.g. `null` values. Alternatively,
+     * separate visitor functions may be defined for each `Map`, `Pair`, `Seq`,
+     * `Alias` and `Scalar` node. To define the same visitor function for more than
+     * one node type, use the `Collection` (map and seq), `Value` (map, seq & scalar)
+     * and `Node` (alias, map, seq & scalar) targets. Of all these, only the most
+     * specific defined one will be used for each node.
+     */
+    async function visitAsync(node, visitor) {
+        const visitor_ = initVisitor(visitor);
+        if (isDocument(node)) {
+            const cd = await visitAsync_(null, node.contents, visitor_, Object.freeze([node]));
+            if (cd === REMOVE$1)
+                node.contents = null;
+        }
+        else
+            await visitAsync_(null, node, visitor_, Object.freeze([]));
+    }
+    // Without the `as symbol` casts, TS declares these in the `visit`
+    // namespace using `var`, but then complains about that because
+    // `unique symbol` must be `const`.
+    /** Terminate visit traversal completely */
+    visitAsync.BREAK = BREAK$1;
+    /** Do not visit the children of the current node */
+    visitAsync.SKIP = SKIP$1;
+    /** Remove the current node */
+    visitAsync.REMOVE = REMOVE$1;
+    async function visitAsync_(key, node, visitor, path) {
+        const ctrl = await callVisitor(key, node, visitor, path);
+        if (isNode(ctrl) || isPair(ctrl)) {
+            replaceNode(key, path, ctrl);
+            return visitAsync_(key, ctrl, visitor, path);
+        }
+        if (typeof ctrl !== 'symbol') {
+            if (isCollection$1(node)) {
+                path = Object.freeze(path.concat(node));
+                for (let i = 0; i < node.items.length; ++i) {
+                    const ci = await visitAsync_(i, node.items[i], visitor, path);
+                    if (typeof ci === 'number')
+                        i = ci - 1;
+                    else if (ci === BREAK$1)
+                        return BREAK$1;
+                    else if (ci === REMOVE$1) {
+                        node.items.splice(i, 1);
+                        i -= 1;
+                    }
+                }
+            }
+            else if (isPair(node)) {
+                path = Object.freeze(path.concat(node));
+                const ck = await visitAsync_('key', node.key, visitor, path);
+                if (ck === BREAK$1)
+                    return BREAK$1;
+                else if (ck === REMOVE$1)
+                    node.key = null;
+                const cv = await visitAsync_('value', node.value, visitor, path);
+                if (cv === BREAK$1)
+                    return BREAK$1;
+                else if (cv === REMOVE$1)
+                    node.value = null;
+            }
+        }
+        return ctrl;
+    }
+    function initVisitor(visitor) {
+        if (typeof visitor === 'object' &&
+            (visitor.Collection || visitor.Node || visitor.Value)) {
+            return Object.assign({
+                Alias: visitor.Node,
+                Map: visitor.Node,
+                Scalar: visitor.Node,
+                Seq: visitor.Node
+            }, visitor.Value && {
+                Map: visitor.Value,
+                Scalar: visitor.Value,
+                Seq: visitor.Value
+            }, visitor.Collection && {
+                Map: visitor.Collection,
+                Seq: visitor.Collection
+            }, visitor);
+        }
+        return visitor;
+    }
+    function callVisitor(key, node, visitor, path) {
+        if (typeof visitor === 'function')
+            return visitor(key, node, path);
+        if (isMap$1(node))
+            return visitor.Map?.(key, node, path);
+        if (isSeq(node))
+            return visitor.Seq?.(key, node, path);
+        if (isPair(node))
+            return visitor.Pair?.(key, node, path);
+        if (isScalar$1(node))
+            return visitor.Scalar?.(key, node, path);
+        if (isAlias(node))
+            return visitor.Alias?.(key, node, path);
+        return undefined;
+    }
+    function replaceNode(key, path, node) {
+        const parent = path[path.length - 1];
+        if (isCollection$1(parent)) {
+            parent.items[key] = node;
+        }
+        else if (isPair(parent)) {
+            if (key === 'key')
+                parent.key = node;
+            else
+                parent.value = node;
+        }
+        else if (isDocument(parent)) {
+            parent.contents = node;
+        }
+        else {
+            const pt = isAlias(parent) ? 'alias' : 'scalar';
+            throw new Error(`Cannot replace node with ${pt} parent`);
+        }
+    }
+
+    const escapeChars = {
+        '!': '%21',
+        ',': '%2C',
+        '[': '%5B',
+        ']': '%5D',
+        '{': '%7B',
+        '}': '%7D'
+    };
+    const escapeTagName = (tn) => tn.replace(/[!,[\]{}]/g, ch => escapeChars[ch]);
+    class Directives {
+        constructor(yaml, tags) {
+            /**
+             * The directives-end/doc-start marker `---`. If `null`, a marker may still be
+             * included in the document's stringified representation.
+             */
+            this.docStart = null;
+            /** The doc-end marker `...`.  */
+            this.docEnd = false;
+            this.yaml = Object.assign({}, Directives.defaultYaml, yaml);
+            this.tags = Object.assign({}, Directives.defaultTags, tags);
+        }
+        clone() {
+            const copy = new Directives(this.yaml, this.tags);
+            copy.docStart = this.docStart;
+            return copy;
+        }
+        /**
+         * During parsing, get a Directives instance for the current document and
+         * update the stream state according to the current version's spec.
+         */
+        atDocument() {
+            const res = new Directives(this.yaml, this.tags);
+            switch (this.yaml.version) {
+                case '1.1':
+                    this.atNextDocument = true;
+                    break;
+                case '1.2':
+                    this.atNextDocument = false;
+                    this.yaml = {
+                        explicit: Directives.defaultYaml.explicit,
+                        version: '1.2'
+                    };
+                    this.tags = Object.assign({}, Directives.defaultTags);
+                    break;
+            }
+            return res;
+        }
+        /**
+         * @param onError - May be called even if the action was successful
+         * @returns `true` on success
+         */
+        add(line, onError) {
+            if (this.atNextDocument) {
+                this.yaml = { explicit: Directives.defaultYaml.explicit, version: '1.1' };
+                this.tags = Object.assign({}, Directives.defaultTags);
+                this.atNextDocument = false;
+            }
+            const parts = line.trim().split(/[ \t]+/);
+            const name = parts.shift();
+            switch (name) {
+                case '%TAG': {
+                    if (parts.length !== 2) {
+                        onError(0, '%TAG directive should contain exactly two parts');
+                        if (parts.length < 2)
+                            return false;
+                    }
+                    const [handle, prefix] = parts;
+                    this.tags[handle] = prefix;
+                    return true;
+                }
+                case '%YAML': {
+                    this.yaml.explicit = true;
+                    if (parts.length !== 1) {
+                        onError(0, '%YAML directive should contain exactly one part');
+                        return false;
+                    }
+                    const [version] = parts;
+                    if (version === '1.1' || version === '1.2') {
+                        this.yaml.version = version;
+                        return true;
+                    }
+                    else {
+                        const isValid = /^\d+\.\d+$/.test(version);
+                        onError(6, `Unsupported YAML version ${version}`, isValid);
+                        return false;
+                    }
+                }
+                default:
+                    onError(0, `Unknown directive ${name}`, true);
+                    return false;
+            }
+        }
+        /**
+         * Resolves a tag, matching handles to those defined in %TAG directives.
+         *
+         * @returns Resolved tag, which may also be the non-specific tag `'!'` or a
+         *   `'!local'` tag, or `null` if unresolvable.
+         */
+        tagName(source, onError) {
+            if (source === '!')
+                return '!'; // non-specific tag
+            if (source[0] !== '!') {
+                onError(`Not a valid tag: ${source}`);
+                return null;
+            }
+            if (source[1] === '<') {
+                const verbatim = source.slice(2, -1);
+                if (verbatim === '!' || verbatim === '!!') {
+                    onError(`Verbatim tags aren't resolved, so ${source} is invalid.`);
+                    return null;
+                }
+                if (source[source.length - 1] !== '>')
+                    onError('Verbatim tags must end with a >');
+                return verbatim;
+            }
+            const [, handle, suffix] = source.match(/^(.*!)([^!]*)$/s);
+            if (!suffix)
+                onError(`The ${source} tag has no suffix`);
+            const prefix = this.tags[handle];
+            if (prefix) {
+                try {
+                    return prefix + decodeURIComponent(suffix);
+                }
+                catch (error) {
+                    onError(String(error));
+                    return null;
+                }
+            }
+            if (handle === '!')
+                return source; // local tag
+            onError(`Could not resolve tag: ${source}`);
+            return null;
+        }
+        /**
+         * Given a fully resolved tag, returns its printable string form,
+         * taking into account current tag prefixes and defaults.
+         */
+        tagString(tag) {
+            for (const [handle, prefix] of Object.entries(this.tags)) {
+                if (tag.startsWith(prefix))
+                    return handle + escapeTagName(tag.substring(prefix.length));
+            }
+            return tag[0] === '!' ? tag : `!<${tag}>`;
+        }
+        toString(doc) {
+            const lines = this.yaml.explicit
+                ? [`%YAML ${this.yaml.version || '1.2'}`]
+                : [];
+            const tagEntries = Object.entries(this.tags);
+            let tagNames;
+            if (doc && tagEntries.length > 0 && isNode(doc.contents)) {
+                const tags = {};
+                visit$1(doc.contents, (_key, node) => {
+                    if (isNode(node) && node.tag)
+                        tags[node.tag] = true;
+                });
+                tagNames = Object.keys(tags);
+            }
+            else
+                tagNames = [];
+            for (const [handle, prefix] of tagEntries) {
+                if (handle === '!!' && prefix === 'tag:yaml.org,2002:')
+                    continue;
+                if (!doc || tagNames.some(tn => tn.startsWith(prefix)))
+                    lines.push(`%TAG ${handle} ${prefix}`);
+            }
+            return lines.join('\n');
+        }
+    }
+    Directives.defaultYaml = { explicit: false, version: '1.2' };
+    Directives.defaultTags = { '!!': 'tag:yaml.org,2002:' };
+
+    /**
+     * Verify that the input string is a valid anchor.
+     *
+     * Will throw on errors.
+     */
+    function anchorIsValid(anchor) {
+        if (/[\x00-\x19\s,[\]{}]/.test(anchor)) {
+            const sa = JSON.stringify(anchor);
+            const msg = `Anchor must not contain whitespace or control characters: ${sa}`;
+            throw new Error(msg);
+        }
+        return true;
+    }
+    function anchorNames(root) {
+        const anchors = new Set();
+        visit$1(root, {
+            Value(_key, node) {
+                if (node.anchor)
+                    anchors.add(node.anchor);
+            }
+        });
+        return anchors;
+    }
+    /** Find a new anchor name with the given `prefix` and a one-indexed suffix. */
+    function findNewAnchor(prefix, exclude) {
+        for (let i = 1; true; ++i) {
+            const name = `${prefix}${i}`;
+            if (!exclude.has(name))
+                return name;
+        }
+    }
+    function createNodeAnchors(doc, prefix) {
+        const aliasObjects = [];
+        const sourceObjects = new Map();
+        let prevAnchors = null;
+        return {
+            onAnchor: (source) => {
+                aliasObjects.push(source);
+                prevAnchors ?? (prevAnchors = anchorNames(doc));
+                const anchor = findNewAnchor(prefix, prevAnchors);
+                prevAnchors.add(anchor);
+                return anchor;
+            },
+            /**
+             * With circular references, the source node is only resolved after all
+             * of its child nodes are. This is why anchors are set only after all of
+             * the nodes have been created.
+             */
+            setAnchors: () => {
+                for (const source of aliasObjects) {
+                    const ref = sourceObjects.get(source);
+                    if (typeof ref === 'object' &&
+                        ref.anchor &&
+                        (isScalar$1(ref.node) || isCollection$1(ref.node))) {
+                        ref.node.anchor = ref.anchor;
+                    }
+                    else {
+                        const error = new Error('Failed to resolve repeated object (this should not happen)');
+                        error.source = source;
+                        throw error;
+                    }
+                }
+            },
+            sourceObjects
+        };
+    }
+
+    /**
+     * Applies the JSON.parse reviver algorithm as defined in the ECMA-262 spec,
+     * in section 24.5.1.1 "Runtime Semantics: InternalizeJSONProperty" of the
+     * 2021 edition: https://tc39.es/ecma262/#sec-json.parse
+     *
+     * Includes extensions for handling Map and Set objects.
+     */
+    function applyReviver(reviver, obj, key, val) {
+        if (val && typeof val === 'object') {
+            if (Array.isArray(val)) {
+                for (let i = 0, len = val.length; i < len; ++i) {
+                    const v0 = val[i];
+                    const v1 = applyReviver(reviver, val, String(i), v0);
+                    // eslint-disable-next-line @typescript-eslint/no-array-delete
+                    if (v1 === undefined)
+                        delete val[i];
+                    else if (v1 !== v0)
+                        val[i] = v1;
+                }
+            }
+            else if (val instanceof Map) {
+                for (const k of Array.from(val.keys())) {
+                    const v0 = val.get(k);
+                    const v1 = applyReviver(reviver, val, k, v0);
+                    if (v1 === undefined)
+                        val.delete(k);
+                    else if (v1 !== v0)
+                        val.set(k, v1);
+                }
+            }
+            else if (val instanceof Set) {
+                for (const v0 of Array.from(val)) {
+                    const v1 = applyReviver(reviver, val, v0, v0);
+                    if (v1 === undefined)
+                        val.delete(v0);
+                    else if (v1 !== v0) {
+                        val.delete(v0);
+                        val.add(v1);
+                    }
+                }
+            }
+            else {
+                for (const [k, v0] of Object.entries(val)) {
+                    const v1 = applyReviver(reviver, val, k, v0);
+                    if (v1 === undefined)
+                        delete val[k];
+                    else if (v1 !== v0)
+                        val[k] = v1;
+                }
+            }
+        }
+        return reviver.call(obj, key, val);
+    }
+
+    /**
+     * Recursively convert any node or its contents to native JavaScript
+     *
+     * @param value - The input value
+     * @param arg - If `value` defines a `toJSON()` method, use this
+     *   as its first argument
+     * @param ctx - Conversion context, originally set in Document#toJS(). If
+     *   `{ keep: true }` is not set, output should be suitable for JSON
+     *   stringification.
+     */
+    function toJS(value, arg, ctx) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+        if (Array.isArray(value))
+            return value.map((v, i) => toJS(v, String(i), ctx));
+        if (value && typeof value.toJSON === 'function') {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+            if (!ctx || !hasAnchor(value))
+                return value.toJSON(arg, ctx);
+            const data = { aliasCount: 0, count: 1, res: undefined };
+            ctx.anchors.set(value, data);
+            ctx.onCreate = res => {
+                data.res = res;
+                delete ctx.onCreate;
+            };
+            const res = value.toJSON(arg, ctx);
+            if (ctx.onCreate)
+                ctx.onCreate(res);
+            return res;
+        }
+        if (typeof value === 'bigint' && !ctx?.keep)
+            return Number(value);
+        return value;
+    }
+
+    class NodeBase {
+        constructor(type) {
+            Object.defineProperty(this, NODE_TYPE, { value: type });
+        }
+        /** Create a copy of this node.  */
+        clone() {
+            const copy = Object.create(Object.getPrototypeOf(this), Object.getOwnPropertyDescriptors(this));
+            if (this.range)
+                copy.range = this.range.slice();
+            return copy;
+        }
+        /** A plain JavaScript representation of this node. */
+        toJS(doc, { mapAsMap, maxAliasCount, onAnchor, reviver } = {}) {
+            if (!isDocument(doc))
+                throw new TypeError('A document argument is required');
+            const ctx = {
+                anchors: new Map(),
+                doc,
+                keep: true,
+                mapAsMap: mapAsMap === true,
+                mapKeyWarned: false,
+                maxAliasCount: typeof maxAliasCount === 'number' ? maxAliasCount : 100
+            };
+            const res = toJS(this, '', ctx);
+            if (typeof onAnchor === 'function')
+                for (const { count, res } of ctx.anchors.values())
+                    onAnchor(res, count);
+            return typeof reviver === 'function'
+                ? applyReviver(reviver, { '': res }, '', res)
+                : res;
+        }
+    }
+
+    class Alias extends NodeBase {
+        constructor(source) {
+            super(ALIAS);
+            this.source = source;
+            Object.defineProperty(this, 'tag', {
+                set() {
+                    throw new Error('Alias nodes cannot have tags');
+                }
+            });
+        }
+        /**
+         * Resolve the value of this alias within `doc`, finding the last
+         * instance of the `source` anchor before this node.
+         */
+        resolve(doc, ctx) {
+            if (ctx?.maxAliasCount === 0)
+                throw new ReferenceError('Alias resolution is disabled');
+            let nodes;
+            if (ctx?.aliasResolveCache) {
+                nodes = ctx.aliasResolveCache;
+            }
+            else {
+                nodes = [];
+                visit$1(doc, {
+                    Node: (_key, node) => {
+                        if (isAlias(node) || hasAnchor(node))
+                            nodes.push(node);
+                    }
+                });
+                if (ctx)
+                    ctx.aliasResolveCache = nodes;
+            }
+            let found = undefined;
+            for (const node of nodes) {
+                if (node === this)
+                    break;
+                if (node.anchor === this.source)
+                    found = node;
+            }
+            return found;
+        }
+        toJSON(_arg, ctx) {
+            if (!ctx)
+                return { source: this.source };
+            const { anchors, doc, maxAliasCount } = ctx;
+            const source = this.resolve(doc, ctx);
+            if (!source) {
+                const msg = `Unresolved alias (the anchor must be set before the alias): ${this.source}`;
+                throw new ReferenceError(msg);
+            }
+            let data = anchors.get(source);
+            if (!data) {
+                // Resolve anchors for Node.prototype.toJS()
+                toJS(source, null, ctx);
+                data = anchors.get(source);
+            }
+            /* istanbul ignore if */
+            if (data?.res === undefined) {
+                const msg = 'This should not happen: Alias anchor was not resolved?';
+                throw new ReferenceError(msg);
+            }
+            if (maxAliasCount >= 0) {
+                data.count += 1;
+                if (data.aliasCount === 0)
+                    data.aliasCount = getAliasCount(doc, source, anchors);
+                if (data.count * data.aliasCount > maxAliasCount) {
+                    const msg = 'Excessive alias count indicates a resource exhaustion attack';
+                    throw new ReferenceError(msg);
+                }
+            }
+            return data.res;
+        }
+        toString(ctx, _onComment, _onChompKeep) {
+            const src = `*${this.source}`;
+            if (ctx) {
+                anchorIsValid(this.source);
+                if (ctx.options.verifyAliasOrder && !ctx.anchors.has(this.source)) {
+                    const msg = `Unresolved alias (the anchor must be set before the alias): ${this.source}`;
+                    throw new Error(msg);
+                }
+                if (ctx.implicitKey)
+                    return `${src} `;
+            }
+            return src;
+        }
+    }
+    function getAliasCount(doc, node, anchors) {
+        if (isAlias(node)) {
+            const source = node.resolve(doc);
+            const anchor = anchors && source && anchors.get(source);
+            return anchor ? anchor.count * anchor.aliasCount : 0;
+        }
+        else if (isCollection$1(node)) {
+            let count = 0;
+            for (const item of node.items) {
+                const c = getAliasCount(doc, item, anchors);
+                if (c > count)
+                    count = c;
+            }
+            return count;
+        }
+        else if (isPair(node)) {
+            const kc = getAliasCount(doc, node.key, anchors);
+            const vc = getAliasCount(doc, node.value, anchors);
+            return Math.max(kc, vc);
+        }
+        return 1;
+    }
+
+    const isScalarValue = (value) => !value || (typeof value !== 'function' && typeof value !== 'object');
+    class Scalar extends NodeBase {
+        constructor(value) {
+            super(SCALAR$1);
+            this.value = value;
+        }
+        toJSON(arg, ctx) {
+            return ctx?.keep ? this.value : toJS(this.value, arg, ctx);
+        }
+        toString() {
+            return String(this.value);
+        }
+    }
+    Scalar.BLOCK_FOLDED = 'BLOCK_FOLDED';
+    Scalar.BLOCK_LITERAL = 'BLOCK_LITERAL';
+    Scalar.PLAIN = 'PLAIN';
+    Scalar.QUOTE_DOUBLE = 'QUOTE_DOUBLE';
+    Scalar.QUOTE_SINGLE = 'QUOTE_SINGLE';
+
+    const defaultTagPrefix = 'tag:yaml.org,2002:';
+    function findTagObject(value, tagName, tags) {
+        if (tagName) {
+            const match = tags.filter(t => t.tag === tagName);
+            const tagObj = match.find(t => !t.format) ?? match[0];
+            if (!tagObj)
+                throw new Error(`Tag ${tagName} not found`);
+            return tagObj;
+        }
+        return tags.find(t => t.identify?.(value) && !t.format);
+    }
+    function createNode(value, tagName, ctx) {
+        if (isDocument(value))
+            value = value.contents;
+        if (isNode(value))
+            return value;
+        if (isPair(value)) {
+            const map = ctx.schema[MAP].createNode?.(ctx.schema, null, ctx);
+            map.items.push(value);
+            return map;
+        }
+        if (value instanceof String ||
+            value instanceof Number ||
+            value instanceof Boolean ||
+            (typeof BigInt !== 'undefined' && value instanceof BigInt) // not supported everywhere
+        ) {
+            // https://tc39.es/ecma262/#sec-serializejsonproperty
+            value = value.valueOf();
+        }
+        const { aliasDuplicateObjects, onAnchor, onTagObj, schema, sourceObjects } = ctx;
+        // Detect duplicate references to the same object & use Alias nodes for all
+        // after first. The `ref` wrapper allows for circular references to resolve.
+        let ref = undefined;
+        if (aliasDuplicateObjects && value && typeof value === 'object') {
+            ref = sourceObjects.get(value);
+            if (ref) {
+                ref.anchor ?? (ref.anchor = onAnchor(value));
+                return new Alias(ref.anchor);
+            }
+            else {
+                ref = { anchor: null, node: null };
+                sourceObjects.set(value, ref);
+            }
+        }
+        if (tagName?.startsWith('!!'))
+            tagName = defaultTagPrefix + tagName.slice(2);
+        let tagObj = findTagObject(value, tagName, schema.tags);
+        if (!tagObj) {
+            if (value && typeof value.toJSON === 'function') {
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+                value = value.toJSON();
+            }
+            if (!value || typeof value !== 'object') {
+                const node = new Scalar(value);
+                if (ref)
+                    ref.node = node;
+                return node;
+            }
+            tagObj =
+                value instanceof Map
+                    ? schema[MAP]
+                    : Symbol.iterator in Object(value)
+                        ? schema[SEQ]
+                        : schema[MAP];
+        }
+        if (onTagObj) {
+            onTagObj(tagObj);
+            delete ctx.onTagObj;
+        }
+        const node = tagObj?.createNode
+            ? tagObj.createNode(ctx.schema, value, ctx)
+            : typeof tagObj?.nodeClass?.from === 'function'
+                ? tagObj.nodeClass.from(ctx.schema, value, ctx)
+                : new Scalar(value);
+        if (tagName)
+            node.tag = tagName;
+        else if (!tagObj.default)
+            node.tag = tagObj.tag;
+        if (ref)
+            ref.node = node;
+        return node;
+    }
+
+    function collectionFromPath(schema, path, value) {
+        let v = value;
+        for (let i = path.length - 1; i >= 0; --i) {
+            const k = path[i];
+            if (typeof k === 'number' && Number.isInteger(k) && k >= 0) {
+                const a = [];
+                a[k] = v;
+                v = a;
+            }
+            else {
+                v = new Map([[k, v]]);
+            }
+        }
+        return createNode(v, undefined, {
+            aliasDuplicateObjects: false,
+            keepUndefined: false,
+            onAnchor: () => {
+                throw new Error('This should not happen, please report a bug.');
+            },
+            schema,
+            sourceObjects: new Map()
+        });
+    }
+    // Type guard is intentionally a little wrong so as to be more useful,
+    // as it does not cover untypable empty non-string iterables (e.g. []).
+    const isEmptyPath = (path) => path == null ||
+        (typeof path === 'object' && !!path[Symbol.iterator]().next().done);
+    class Collection extends NodeBase {
+        constructor(type, schema) {
+            super(type);
+            Object.defineProperty(this, 'schema', {
+                value: schema,
+                configurable: true,
+                enumerable: false,
+                writable: true
+            });
+        }
+        /**
+         * Create a copy of this collection.
+         *
+         * @param schema - If defined, overwrites the original's schema
+         */
+        clone(schema) {
+            const copy = Object.create(Object.getPrototypeOf(this), Object.getOwnPropertyDescriptors(this));
+            if (schema)
+                copy.schema = schema;
+            copy.items = copy.items.map(it => isNode(it) || isPair(it) ? it.clone(schema) : it);
+            if (this.range)
+                copy.range = this.range.slice();
+            return copy;
+        }
+        /**
+         * Adds a value to the collection. For `!!map` and `!!omap` the value must
+         * be a Pair instance or a `{ key, value }` object, which may not have a key
+         * that already exists in the map.
+         */
+        addIn(path, value) {
+            if (isEmptyPath(path))
+                this.add(value);
+            else {
+                const [key, ...rest] = path;
+                const node = this.get(key, true);
+                if (isCollection$1(node))
+                    node.addIn(rest, value);
+                else if (node === undefined && this.schema)
+                    this.set(key, collectionFromPath(this.schema, rest, value));
+                else
+                    throw new Error(`Expected YAML collection at ${key}. Remaining path: ${rest}`);
+            }
+        }
+        /**
+         * Removes a value from the collection.
+         * @returns `true` if the item was found and removed.
+         */
+        deleteIn(path) {
+            const [key, ...rest] = path;
+            if (rest.length === 0)
+                return this.delete(key);
+            const node = this.get(key, true);
+            if (isCollection$1(node))
+                return node.deleteIn(rest);
+            else
+                throw new Error(`Expected YAML collection at ${key}. Remaining path: ${rest}`);
+        }
+        /**
+         * Returns item at `key`, or `undefined` if not found. By default unwraps
+         * scalar values from their surrounding node; to disable set `keepScalar` to
+         * `true` (collections are always returned intact).
+         */
+        getIn(path, keepScalar) {
+            const [key, ...rest] = path;
+            const node = this.get(key, true);
+            if (rest.length === 0)
+                return !keepScalar && isScalar$1(node) ? node.value : node;
+            else
+                return isCollection$1(node) ? node.getIn(rest, keepScalar) : undefined;
+        }
+        hasAllNullValues(allowScalar) {
+            return this.items.every(node => {
+                if (!isPair(node))
+                    return false;
+                const n = node.value;
+                return (n == null ||
+                    (allowScalar &&
+                        isScalar$1(n) &&
+                        n.value == null &&
+                        !n.commentBefore &&
+                        !n.comment &&
+                        !n.tag));
+            });
+        }
+        /**
+         * Checks if the collection includes a value with the key `key`.
+         */
+        hasIn(path) {
+            const [key, ...rest] = path;
+            if (rest.length === 0)
+                return this.has(key);
+            const node = this.get(key, true);
+            return isCollection$1(node) ? node.hasIn(rest) : false;
+        }
+        /**
+         * Sets a value in this collection. For `!!set`, `value` needs to be a
+         * boolean to add/remove the item from the set.
+         */
+        setIn(path, value) {
+            const [key, ...rest] = path;
+            if (rest.length === 0) {
+                this.set(key, value);
+            }
+            else {
+                const node = this.get(key, true);
+                if (isCollection$1(node))
+                    node.setIn(rest, value);
+                else if (node === undefined && this.schema)
+                    this.set(key, collectionFromPath(this.schema, rest, value));
+                else
+                    throw new Error(`Expected YAML collection at ${key}. Remaining path: ${rest}`);
+            }
+        }
+    }
+
+    /**
+     * Stringifies a comment.
+     *
+     * Empty comment lines are left empty,
+     * lines consisting of a single space are replaced by `#`,
+     * and all other lines are prefixed with a `#`.
+     */
+    const stringifyComment = (str) => str.replace(/^(?!$)(?: $)?/gm, '#');
+    function indentComment(comment, indent) {
+        if (/^\n+$/.test(comment))
+            return comment.substring(1);
+        return indent ? comment.replace(/^(?! *$)/gm, indent) : comment;
+    }
+    const lineComment = (str, indent, comment) => str.endsWith('\n')
+        ? indentComment(comment, indent)
+        : comment.includes('\n')
+            ? '\n' + indentComment(comment, indent)
+            : (str.endsWith(' ') ? '' : ' ') + comment;
+
+    const FOLD_FLOW = 'flow';
+    const FOLD_BLOCK = 'block';
+    const FOLD_QUOTED = 'quoted';
+    /**
+     * Tries to keep input at up to `lineWidth` characters, splitting only on spaces
+     * not followed by newlines or spaces unless `mode` is `'quoted'`. Lines are
+     * terminated with `\n` and started with `indent`.
+     */
+    function foldFlowLines(text, indent, mode = 'flow', { indentAtStart, lineWidth = 80, minContentWidth = 20, onFold, onOverflow } = {}) {
+        if (!lineWidth || lineWidth < 0)
+            return text;
+        if (lineWidth < minContentWidth)
+            minContentWidth = 0;
+        const endStep = Math.max(1 + minContentWidth, 1 + lineWidth - indent.length);
+        if (text.length <= endStep)
+            return text;
+        const folds = [];
+        const escapedFolds = {};
+        let end = lineWidth - indent.length;
+        if (typeof indentAtStart === 'number') {
+            if (indentAtStart > lineWidth - Math.max(2, minContentWidth))
+                folds.push(0);
+            else
+                end = lineWidth - indentAtStart;
+        }
+        let split = undefined;
+        let prev = undefined;
+        let overflow = false;
+        let i = -1;
+        let escStart = -1;
+        let escEnd = -1;
+        if (mode === FOLD_BLOCK) {
+            i = consumeMoreIndentedLines(text, i, indent.length);
+            if (i !== -1)
+                end = i + endStep;
+        }
+        for (let ch; (ch = text[(i += 1)]);) {
+            if (mode === FOLD_QUOTED && ch === '\\') {
+                escStart = i;
+                switch (text[i + 1]) {
+                    case 'x':
+                        i += 3;
+                        break;
+                    case 'u':
+                        i += 5;
+                        break;
+                    case 'U':
+                        i += 9;
+                        break;
+                    default:
+                        i += 1;
+                }
+                escEnd = i;
+            }
+            if (ch === '\n') {
+                if (mode === FOLD_BLOCK)
+                    i = consumeMoreIndentedLines(text, i, indent.length);
+                end = i + indent.length + endStep;
+                split = undefined;
+            }
+            else {
+                if (ch === ' ' &&
+                    prev &&
+                    prev !== ' ' &&
+                    prev !== '\n' &&
+                    prev !== '\t') {
+                    // space surrounded by non-space can be replaced with newline + indent
+                    const next = text[i + 1];
+                    if (next && next !== ' ' && next !== '\n' && next !== '\t')
+                        split = i;
+                }
+                if (i >= end) {
+                    if (split) {
+                        folds.push(split);
+                        end = split + endStep;
+                        split = undefined;
+                    }
+                    else if (mode === FOLD_QUOTED) {
+                        // white-space collected at end may stretch past lineWidth
+                        while (prev === ' ' || prev === '\t') {
+                            prev = ch;
+                            ch = text[(i += 1)];
+                            overflow = true;
+                        }
+                        // Account for newline escape, but don't break preceding escape
+                        const j = i > escEnd + 1 ? i - 2 : escStart - 1;
+                        // Bail out if lineWidth & minContentWidth are shorter than an escape string
+                        if (escapedFolds[j])
+                            return text;
+                        folds.push(j);
+                        escapedFolds[j] = true;
+                        end = j + endStep;
+                        split = undefined;
+                    }
+                    else {
+                        overflow = true;
+                    }
+                }
+            }
+            prev = ch;
+        }
+        if (overflow && onOverflow)
+            onOverflow();
+        if (folds.length === 0)
+            return text;
+        if (onFold)
+            onFold();
+        let res = text.slice(0, folds[0]);
+        for (let i = 0; i < folds.length; ++i) {
+            const fold = folds[i];
+            const end = folds[i + 1] || text.length;
+            if (fold === 0)
+                res = `\n${indent}${text.slice(0, end)}`;
+            else {
+                if (mode === FOLD_QUOTED && escapedFolds[fold])
+                    res += `${text[fold]}\\`;
+                res += `\n${indent}${text.slice(fold + 1, end)}`;
+            }
+        }
+        return res;
+    }
+    /**
+     * Presumes `i + 1` is at the start of a line
+     * @returns index of last newline in more-indented block
+     */
+    function consumeMoreIndentedLines(text, i, indent) {
+        let end = i;
+        let start = i + 1;
+        let ch = text[start];
+        while (ch === ' ' || ch === '\t') {
+            if (i < start + indent) {
+                ch = text[++i];
+            }
+            else {
+                do {
+                    ch = text[++i];
+                } while (ch && ch !== '\n');
+                end = i;
+                start = i + 1;
+                ch = text[start];
+            }
+        }
+        return end;
+    }
+
+    const getFoldOptions = (ctx, isBlock) => ({
+        indentAtStart: isBlock ? ctx.indent.length : ctx.indentAtStart,
+        lineWidth: ctx.options.lineWidth,
+        minContentWidth: ctx.options.minContentWidth
+    });
+    // Also checks for lines starting with %, as parsing the output as YAML 1.1 will
+    // presume that's starting a new document.
+    const containsDocumentMarker = (str) => /^(%|---|\.\.\.)/m.test(str);
+    function lineLengthOverLimit(str, lineWidth, indentLength) {
+        if (!lineWidth || lineWidth < 0)
+            return false;
+        const limit = lineWidth - indentLength;
+        const strLen = str.length;
+        if (strLen <= limit)
+            return false;
+        for (let i = 0, start = 0; i < strLen; ++i) {
+            if (str[i] === '\n') {
+                if (i - start > limit)
+                    return true;
+                start = i + 1;
+                if (strLen - start <= limit)
+                    return false;
+            }
+        }
+        return true;
+    }
+    function doubleQuotedString(value, ctx) {
+        const json = JSON.stringify(value);
+        if (ctx.options.doubleQuotedAsJSON)
+            return json;
+        const { implicitKey } = ctx;
+        const minMultiLineLength = ctx.options.doubleQuotedMinMultiLineLength;
+        const indent = ctx.indent || (containsDocumentMarker(value) ? '  ' : '');
+        let str = '';
+        let start = 0;
+        for (let i = 0, ch = json[i]; ch; ch = json[++i]) {
+            if (ch === ' ' && json[i + 1] === '\\' && json[i + 2] === 'n') {
+                // space before newline needs to be escaped to not be folded
+                str += json.slice(start, i) + '\\ ';
+                i += 1;
+                start = i;
+                ch = '\\';
+            }
+            if (ch === '\\')
+                switch (json[i + 1]) {
+                    case 'u':
+                        {
+                            str += json.slice(start, i);
+                            const code = json.substr(i + 2, 4);
+                            switch (code) {
+                                case '0000':
+                                    str += '\\0';
+                                    break;
+                                case '0007':
+                                    str += '\\a';
+                                    break;
+                                case '000b':
+                                    str += '\\v';
+                                    break;
+                                case '001b':
+                                    str += '\\e';
+                                    break;
+                                case '0085':
+                                    str += '\\N';
+                                    break;
+                                case '00a0':
+                                    str += '\\_';
+                                    break;
+                                case '2028':
+                                    str += '\\L';
+                                    break;
+                                case '2029':
+                                    str += '\\P';
+                                    break;
+                                default:
+                                    if (code.substr(0, 2) === '00')
+                                        str += '\\x' + code.substr(2);
+                                    else
+                                        str += json.substr(i, 6);
+                            }
+                            i += 5;
+                            start = i + 1;
+                        }
+                        break;
+                    case 'n':
+                        if (implicitKey ||
+                            json[i + 2] === '"' ||
+                            json.length < minMultiLineLength) {
+                            i += 1;
+                        }
+                        else {
+                            // folding will eat first newline
+                            str += json.slice(start, i) + '\n\n';
+                            while (json[i + 2] === '\\' &&
+                                json[i + 3] === 'n' &&
+                                json[i + 4] !== '"') {
+                                str += '\n';
+                                i += 2;
+                            }
+                            str += indent;
+                            // space after newline needs to be escaped to not be folded
+                            if (json[i + 2] === ' ')
+                                str += '\\';
+                            i += 1;
+                            start = i + 1;
+                        }
+                        break;
+                    default:
+                        i += 1;
+                }
+        }
+        str = start ? str + json.slice(start) : json;
+        return implicitKey
+            ? str
+            : foldFlowLines(str, indent, FOLD_QUOTED, getFoldOptions(ctx, false));
+    }
+    function singleQuotedString(value, ctx) {
+        if (ctx.options.singleQuote === false ||
+            (ctx.implicitKey && value.includes('\n')) ||
+            /[ \t]\n|\n[ \t]/.test(value) // single quoted string can't have leading or trailing whitespace around newline
+        )
+            return doubleQuotedString(value, ctx);
+        const indent = ctx.indent || (containsDocumentMarker(value) ? '  ' : '');
+        const res = "'" + value.replace(/'/g, "''").replace(/\n+/g, `$&\n${indent}`) + "'";
+        return ctx.implicitKey
+            ? res
+            : foldFlowLines(res, indent, FOLD_FLOW, getFoldOptions(ctx, false));
+    }
+    function quotedString(value, ctx) {
+        const { singleQuote } = ctx.options;
+        let qs;
+        if (singleQuote === false)
+            qs = doubleQuotedString;
+        else {
+            const hasDouble = value.includes('"');
+            const hasSingle = value.includes("'");
+            if (hasDouble && !hasSingle)
+                qs = singleQuotedString;
+            else if (hasSingle && !hasDouble)
+                qs = doubleQuotedString;
+            else
+                qs = singleQuote ? singleQuotedString : doubleQuotedString;
+        }
+        return qs(value, ctx);
+    }
+    // The negative lookbehind avoids a polynomial search,
+    // but isn't supported yet on Safari: https://caniuse.com/js-regexp-lookbehind
+    let blockEndNewlines;
+    try {
+        blockEndNewlines = new RegExp('(^|(?<!\n))\n+(?!\n|$)', 'g');
+    }
+    catch {
+        blockEndNewlines = /\n+(?!\n|$)/g;
+    }
+    function blockString({ comment, type, value }, ctx, onComment, onChompKeep) {
+        const { blockQuote, commentString, lineWidth } = ctx.options;
+        // 1. Block can't end in whitespace unless the last line is non-empty.
+        // 2. Strings consisting of only whitespace are best rendered explicitly.
+        if (!blockQuote || /\n[\t ]+$/.test(value)) {
+            return quotedString(value, ctx);
+        }
+        const indent = ctx.indent ||
+            (ctx.forceBlockIndent || containsDocumentMarker(value) ? '  ' : '');
+        const literal = blockQuote === 'literal'
+            ? true
+            : blockQuote === 'folded' || type === Scalar.BLOCK_FOLDED
+                ? false
+                : type === Scalar.BLOCK_LITERAL
+                    ? true
+                    : !lineLengthOverLimit(value, lineWidth, indent.length);
+        if (!value)
+            return literal ? '|\n' : '>\n';
+        // determine chomping from whitespace at value end
+        let chomp;
+        let endStart;
+        for (endStart = value.length; endStart > 0; --endStart) {
+            const ch = value[endStart - 1];
+            if (ch !== '\n' && ch !== '\t' && ch !== ' ')
+                break;
+        }
+        let end = value.substring(endStart);
+        const endNlPos = end.indexOf('\n');
+        if (endNlPos === -1) {
+            chomp = '-'; // strip
+        }
+        else if (value === end || endNlPos !== end.length - 1) {
+            chomp = '+'; // keep
+            if (onChompKeep)
+                onChompKeep();
+        }
+        else {
+            chomp = ''; // clip
+        }
+        if (end) {
+            value = value.slice(0, -end.length);
+            if (end[end.length - 1] === '\n')
+                end = end.slice(0, -1);
+            end = end.replace(blockEndNewlines, `$&${indent}`);
+        }
+        // determine indent indicator from whitespace at value start
+        let startWithSpace = false;
+        let startEnd;
+        let startNlPos = -1;
+        for (startEnd = 0; startEnd < value.length; ++startEnd) {
+            const ch = value[startEnd];
+            if (ch === ' ')
+                startWithSpace = true;
+            else if (ch === '\n')
+                startNlPos = startEnd;
+            else
+                break;
+        }
+        let start = value.substring(0, startNlPos < startEnd ? startNlPos + 1 : startEnd);
+        if (start) {
+            value = value.substring(start.length);
+            start = start.replace(/\n+/g, `$&${indent}`);
+        }
+        const indentSize = indent ? '2' : '1'; // root is at -1
+        // Leading | or > is added later
+        let header = (startWithSpace ? indentSize : '') + chomp;
+        if (comment) {
+            header += ' ' + commentString(comment.replace(/ ?[\r\n]+/g, ' '));
+            if (onComment)
+                onComment();
+        }
+        if (!literal) {
+            const foldedValue = value
+                .replace(/\n+/g, '\n$&')
+                .replace(/(?:^|\n)([\t ].*)(?:([\n\t ]*)\n(?![\n\t ]))?/g, '$1$2') // more-indented lines aren't folded
+                //                ^ more-ind. ^ empty     ^ capture next empty lines only at end of indent
+                .replace(/\n+/g, `$&${indent}`);
+            let literalFallback = false;
+            const foldOptions = getFoldOptions(ctx, true);
+            if (blockQuote !== 'folded' && type !== Scalar.BLOCK_FOLDED) {
+                foldOptions.onOverflow = () => {
+                    literalFallback = true;
+                };
+            }
+            const body = foldFlowLines(`${start}${foldedValue}${end}`, indent, FOLD_BLOCK, foldOptions);
+            if (!literalFallback)
+                return `>${header}\n${indent}${body}`;
+        }
+        value = value.replace(/\n+/g, `$&${indent}`);
+        return `|${header}\n${indent}${start}${value}${end}`;
+    }
+    function plainString(item, ctx, onComment, onChompKeep) {
+        const { type, value } = item;
+        const { actualString, implicitKey, indent, indentStep, inFlow } = ctx;
+        if ((implicitKey && value.includes('\n')) ||
+            (inFlow && /[[\]{},]/.test(value))) {
+            return quotedString(value, ctx);
+        }
+        if (/^[\n\t ,[\]{}#&*!|>'"%@`]|^[?-]$|^[?-][ \t]|[\n:][ \t]|[ \t]\n|[\n\t ]#|[\n\t :]$/.test(value)) {
+            // not allowed:
+            // - '-' or '?'
+            // - start with an indicator character (except [?:-]) or /[?-] /
+            // - '\n ', ': ' or ' \n' anywhere
+            // - '#' not preceded by a non-space char
+            // - end with ' ' or ':'
+            return implicitKey || inFlow || !value.includes('\n')
+                ? quotedString(value, ctx)
+                : blockString(item, ctx, onComment, onChompKeep);
+        }
+        if (!implicitKey &&
+            !inFlow &&
+            type !== Scalar.PLAIN &&
+            value.includes('\n')) {
+            // Where allowed & type not set explicitly, prefer block style for multiline strings
+            return blockString(item, ctx, onComment, onChompKeep);
+        }
+        if (containsDocumentMarker(value)) {
+            if (indent === '') {
+                ctx.forceBlockIndent = true;
+                return blockString(item, ctx, onComment, onChompKeep);
+            }
+            else if (implicitKey && indent === indentStep) {
+                return quotedString(value, ctx);
+            }
+        }
+        const str = value.replace(/\n+/g, `$&\n${indent}`);
+        // Verify that output will be parsed as a string, as e.g. plain numbers and
+        // booleans get parsed with those types in v1.2 (e.g. '42', 'true' & '0.9e-3'),
+        // and others in v1.1.
+        if (actualString) {
+            const test = (tag) => tag.default && tag.tag !== 'tag:yaml.org,2002:str' && tag.test?.test(str);
+            const { compat, tags } = ctx.doc.schema;
+            if (tags.some(test) || compat?.some(test))
+                return quotedString(value, ctx);
+        }
+        return implicitKey
+            ? str
+            : foldFlowLines(str, indent, FOLD_FLOW, getFoldOptions(ctx, false));
+    }
+    function stringifyString(item, ctx, onComment, onChompKeep) {
+        const { implicitKey, inFlow } = ctx;
+        const ss = typeof item.value === 'string'
+            ? item
+            : Object.assign({}, item, { value: String(item.value) });
+        let { type } = item;
+        if (type !== Scalar.QUOTE_DOUBLE) {
+            // force double quotes on control characters & unpaired surrogates
+            if (/[\x00-\x08\x0b-\x1f\x7f-\x9f\u{D800}-\u{DFFF}]/u.test(ss.value))
+                type = Scalar.QUOTE_DOUBLE;
+        }
+        const _stringify = (_type) => {
+            switch (_type) {
+                case Scalar.BLOCK_FOLDED:
+                case Scalar.BLOCK_LITERAL:
+                    return implicitKey || inFlow
+                        ? quotedString(ss.value, ctx) // blocks are not valid inside flow containers
+                        : blockString(ss, ctx, onComment, onChompKeep);
+                case Scalar.QUOTE_DOUBLE:
+                    return doubleQuotedString(ss.value, ctx);
+                case Scalar.QUOTE_SINGLE:
+                    return singleQuotedString(ss.value, ctx);
+                case Scalar.PLAIN:
+                    return plainString(ss, ctx, onComment, onChompKeep);
+                default:
+                    return null;
+            }
+        };
+        let res = _stringify(type);
+        if (res === null) {
+            const { defaultKeyType, defaultStringType } = ctx.options;
+            const t = (implicitKey && defaultKeyType) || defaultStringType;
+            res = _stringify(t);
+            if (res === null)
+                throw new Error(`Unsupported default string type ${t}`);
+        }
+        return res;
+    }
+
+    function createStringifyContext(doc, options) {
+        const opt = Object.assign({
+            blockQuote: true,
+            commentString: stringifyComment,
+            defaultKeyType: null,
+            defaultStringType: 'PLAIN',
+            directives: null,
+            doubleQuotedAsJSON: false,
+            doubleQuotedMinMultiLineLength: 40,
+            falseStr: 'false',
+            flowCollectionPadding: true,
+            indentSeq: true,
+            lineWidth: 80,
+            minContentWidth: 20,
+            nullStr: 'null',
+            simpleKeys: false,
+            singleQuote: null,
+            trailingComma: false,
+            trueStr: 'true',
+            verifyAliasOrder: true
+        }, doc.schema.toStringOptions, options);
+        let inFlow;
+        switch (opt.collectionStyle) {
+            case 'block':
+                inFlow = false;
+                break;
+            case 'flow':
+                inFlow = true;
+                break;
+            default:
+                inFlow = null;
+        }
+        return {
+            anchors: new Set(),
+            doc,
+            flowCollectionPadding: opt.flowCollectionPadding ? ' ' : '',
+            indent: '',
+            indentStep: typeof opt.indent === 'number' ? ' '.repeat(opt.indent) : '  ',
+            inFlow,
+            options: opt
+        };
+    }
+    function getTagObject(tags, item) {
+        if (item.tag) {
+            const match = tags.filter(t => t.tag === item.tag);
+            if (match.length > 0)
+                return match.find(t => t.format === item.format) ?? match[0];
+        }
+        let tagObj = undefined;
+        let obj;
+        if (isScalar$1(item)) {
+            obj = item.value;
+            let match = tags.filter(t => t.identify?.(obj));
+            if (match.length > 1) {
+                const testMatch = match.filter(t => t.test);
+                if (testMatch.length > 0)
+                    match = testMatch;
+            }
+            tagObj =
+                match.find(t => t.format === item.format) ?? match.find(t => !t.format);
+        }
+        else {
+            obj = item;
+            tagObj = tags.find(t => t.nodeClass && obj instanceof t.nodeClass);
+        }
+        if (!tagObj) {
+            const name = obj?.constructor?.name ?? (obj === null ? 'null' : typeof obj);
+            throw new Error(`Tag not resolved for ${name} value`);
+        }
+        return tagObj;
+    }
+    // needs to be called before value stringifier to allow for circular anchor refs
+    function stringifyProps(node, tagObj, { anchors, doc }) {
+        if (!doc.directives)
+            return '';
+        const props = [];
+        const anchor = (isScalar$1(node) || isCollection$1(node)) && node.anchor;
+        if (anchor && anchorIsValid(anchor)) {
+            anchors.add(anchor);
+            props.push(`&${anchor}`);
+        }
+        const tag = node.tag ?? (tagObj.default ? null : tagObj.tag);
+        if (tag)
+            props.push(doc.directives.tagString(tag));
+        return props.join(' ');
+    }
+    function stringify$2(item, ctx, onComment, onChompKeep) {
+        if (isPair(item))
+            return item.toString(ctx, onComment, onChompKeep);
+        if (isAlias(item)) {
+            if (ctx.doc.directives)
+                return item.toString(ctx);
+            if (ctx.resolvedAliases?.has(item)) {
+                throw new TypeError(`Cannot stringify circular structure without alias nodes`);
+            }
+            else {
+                if (ctx.resolvedAliases)
+                    ctx.resolvedAliases.add(item);
+                else
+                    ctx.resolvedAliases = new Set([item]);
+                item = item.resolve(ctx.doc);
+            }
+        }
+        let tagObj = undefined;
+        const node = isNode(item)
+            ? item
+            : ctx.doc.createNode(item, { onTagObj: o => (tagObj = o) });
+        tagObj ?? (tagObj = getTagObject(ctx.doc.schema.tags, node));
+        const props = stringifyProps(node, tagObj, ctx);
+        if (props.length > 0)
+            ctx.indentAtStart = (ctx.indentAtStart ?? 0) + props.length + 1;
+        const str = typeof tagObj.stringify === 'function'
+            ? tagObj.stringify(node, ctx, onComment, onChompKeep)
+            : isScalar$1(node)
+                ? stringifyString(node, ctx, onComment, onChompKeep)
+                : node.toString(ctx, onComment, onChompKeep);
+        if (!props)
+            return str;
+        return isScalar$1(node) || str[0] === '{' || str[0] === '['
+            ? `${props} ${str}`
+            : `${props}\n${ctx.indent}${str}`;
+    }
+
+    function stringifyPair({ key, value }, ctx, onComment, onChompKeep) {
+        const { allNullValues, doc, indent, indentStep, options: { commentString, indentSeq, simpleKeys } } = ctx;
+        let keyComment = (isNode(key) && key.comment) || null;
+        if (simpleKeys) {
+            if (keyComment) {
+                throw new Error('With simple keys, key nodes cannot have comments');
+            }
+            if (isCollection$1(key) || (!isNode(key) && typeof key === 'object')) {
+                const msg = 'With simple keys, collection cannot be used as a key value';
+                throw new Error(msg);
+            }
+        }
+        let explicitKey = !simpleKeys &&
+            (!key ||
+                (keyComment && value == null && !ctx.inFlow) ||
+                isCollection$1(key) ||
+                (isScalar$1(key)
+                    ? key.type === Scalar.BLOCK_FOLDED || key.type === Scalar.BLOCK_LITERAL
+                    : typeof key === 'object'));
+        ctx = Object.assign({}, ctx, {
+            allNullValues: false,
+            implicitKey: !explicitKey && (simpleKeys || !allNullValues),
+            indent: indent + indentStep
+        });
+        let keyCommentDone = false;
+        let chompKeep = false;
+        let str = stringify$2(key, ctx, () => (keyCommentDone = true), () => (chompKeep = true));
+        if (!explicitKey && !ctx.inFlow && str.length > 1024) {
+            if (simpleKeys)
+                throw new Error('With simple keys, single line scalar must not span more than 1024 characters');
+            explicitKey = true;
+        }
+        if (ctx.inFlow) {
+            if (allNullValues || value == null) {
+                if (keyCommentDone && onComment)
+                    onComment();
+                return str === '' ? '?' : explicitKey ? `? ${str}` : str;
+            }
+        }
+        else if ((allNullValues && !simpleKeys) || (value == null && explicitKey)) {
+            str = `? ${str}`;
+            if (keyComment && !keyCommentDone) {
+                str += lineComment(str, ctx.indent, commentString(keyComment));
+            }
+            else if (chompKeep && onChompKeep)
+                onChompKeep();
+            return str;
+        }
+        if (keyCommentDone)
+            keyComment = null;
+        if (explicitKey) {
+            if (keyComment)
+                str += lineComment(str, ctx.indent, commentString(keyComment));
+            str = `? ${str}\n${indent}:`;
+        }
+        else {
+            str = `${str}:`;
+            if (keyComment)
+                str += lineComment(str, ctx.indent, commentString(keyComment));
+        }
+        let vsb, vcb, valueComment;
+        if (isNode(value)) {
+            vsb = !!value.spaceBefore;
+            vcb = value.commentBefore;
+            valueComment = value.comment;
+        }
+        else {
+            vsb = false;
+            vcb = null;
+            valueComment = null;
+            if (value && typeof value === 'object')
+                value = doc.createNode(value);
+        }
+        ctx.implicitKey = false;
+        if (!explicitKey && !keyComment && isScalar$1(value))
+            ctx.indentAtStart = str.length + 1;
+        chompKeep = false;
+        if (!indentSeq &&
+            indentStep.length >= 2 &&
+            !ctx.inFlow &&
+            !explicitKey &&
+            isSeq(value) &&
+            !value.flow &&
+            !value.tag &&
+            !value.anchor) {
+            // If indentSeq === false, consider '- ' as part of indentation where possible
+            ctx.indent = ctx.indent.substring(2);
+        }
+        let valueCommentDone = false;
+        const valueStr = stringify$2(value, ctx, () => (valueCommentDone = true), () => (chompKeep = true));
+        let ws = ' ';
+        if (keyComment || vsb || vcb) {
+            ws = vsb ? '\n' : '';
+            if (vcb) {
+                const cs = commentString(vcb);
+                ws += `\n${indentComment(cs, ctx.indent)}`;
+            }
+            if (valueStr === '' && !ctx.inFlow) {
+                if (ws === '\n' && valueComment)
+                    ws = '\n\n';
+            }
+            else {
+                ws += `\n${ctx.indent}`;
+            }
+        }
+        else if (!explicitKey && isCollection$1(value)) {
+            const vs0 = valueStr[0];
+            const nl0 = valueStr.indexOf('\n');
+            const hasNewline = nl0 !== -1;
+            const flow = ctx.inFlow ?? value.flow ?? value.items.length === 0;
+            if (hasNewline || !flow) {
+                let hasPropsLine = false;
+                if (hasNewline && (vs0 === '&' || vs0 === '!')) {
+                    let sp0 = valueStr.indexOf(' ');
+                    if (vs0 === '&' &&
+                        sp0 !== -1 &&
+                        sp0 < nl0 &&
+                        valueStr[sp0 + 1] === '!') {
+                        sp0 = valueStr.indexOf(' ', sp0 + 1);
+                    }
+                    if (sp0 === -1 || nl0 < sp0)
+                        hasPropsLine = true;
+                }
+                if (!hasPropsLine)
+                    ws = `\n${ctx.indent}`;
+            }
+        }
+        else if (valueStr === '' || valueStr[0] === '\n') {
+            ws = '';
+        }
+        str += ws + valueStr;
+        if (ctx.inFlow) {
+            if (valueCommentDone && onComment)
+                onComment();
+        }
+        else if (valueComment && !valueCommentDone) {
+            str += lineComment(str, ctx.indent, commentString(valueComment));
+        }
+        else if (chompKeep && onChompKeep) {
+            onChompKeep();
+        }
+        return str;
+    }
+
+    function debug(logLevel, ...messages) {
+        if (logLevel === 'debug')
+            console.log(...messages);
+    }
+    function warn$3(logLevel, warning) {
+        if (logLevel === 'debug' || logLevel === 'warn') {
+            console.warn(warning);
+        }
+    }
+
+    // If the value associated with a merge key is a single mapping node, each of
+    // its key/value pairs is inserted into the current mapping, unless the key
+    // already exists in it. If the value associated with the merge key is a
+    // sequence, then this sequence is expected to contain mapping nodes and each
+    // of these nodes is merged in turn according to its order in the sequence.
+    // Keys in mapping nodes earlier in the sequence override keys specified in
+    // later mapping nodes. -- http://yaml.org/type/merge.html
+    const MERGE_KEY = '<<';
+    const merge = {
+        identify: value => value === MERGE_KEY ||
+            (typeof value === 'symbol' && value.description === MERGE_KEY),
+        default: 'key',
+        tag: 'tag:yaml.org,2002:merge',
+        test: /^<<$/,
+        resolve: () => Object.assign(new Scalar(Symbol(MERGE_KEY)), {
+            addToJSMap: addMergeToJSMap
+        }),
+        stringify: () => MERGE_KEY
+    };
+    const isMergeKey = (ctx, key) => (merge.identify(key) ||
+        (isScalar$1(key) &&
+            (!key.type || key.type === Scalar.PLAIN) &&
+            merge.identify(key.value))) &&
+        ctx?.doc.schema.tags.some(tag => tag.tag === merge.tag && tag.default);
+    function addMergeToJSMap(ctx, map, value) {
+        const source = resolveAliasValue(ctx, value);
+        if (isSeq(source))
+            for (const it of source.items)
+                mergeValue(ctx, map, it);
+        else if (Array.isArray(source))
+            for (const it of source)
+                mergeValue(ctx, map, it);
+        else
+            mergeValue(ctx, map, source);
+    }
+    function mergeValue(ctx, map, value) {
+        const source = resolveAliasValue(ctx, value);
+        if (!isMap$1(source))
+            throw new Error('Merge sources must be maps or map aliases');
+        const srcMap = source.toJSON(null, ctx, Map);
+        for (const [key, value] of srcMap) {
+            if (map instanceof Map) {
+                if (!map.has(key))
+                    map.set(key, value);
+            }
+            else if (map instanceof Set) {
+                map.add(key);
+            }
+            else if (!Object.prototype.hasOwnProperty.call(map, key)) {
+                Object.defineProperty(map, key, {
+                    value,
+                    writable: true,
+                    enumerable: true,
+                    configurable: true
+                });
+            }
+        }
+        return map;
+    }
+    function resolveAliasValue(ctx, value) {
+        return ctx && isAlias(value) ? value.resolve(ctx.doc, ctx) : value;
+    }
+
+    function addPairToJSMap(ctx, map, { key, value }) {
+        if (isNode(key) && key.addToJSMap)
+            key.addToJSMap(ctx, map, value);
+        // TODO: Should drop this special case for bare << handling
+        else if (isMergeKey(ctx, key))
+            addMergeToJSMap(ctx, map, value);
+        else {
+            const jsKey = toJS(key, '', ctx);
+            if (map instanceof Map) {
+                map.set(jsKey, toJS(value, jsKey, ctx));
+            }
+            else if (map instanceof Set) {
+                map.add(jsKey);
+            }
+            else {
+                const stringKey = stringifyKey(key, jsKey, ctx);
+                const jsValue = toJS(value, stringKey, ctx);
+                if (stringKey in map)
+                    Object.defineProperty(map, stringKey, {
+                        value: jsValue,
+                        writable: true,
+                        enumerable: true,
+                        configurable: true
+                    });
+                else
+                    map[stringKey] = jsValue;
+            }
+        }
+        return map;
+    }
+    function stringifyKey(key, jsKey, ctx) {
+        if (jsKey === null)
+            return '';
+        // eslint-disable-next-line @typescript-eslint/no-base-to-string
+        if (typeof jsKey !== 'object')
+            return String(jsKey);
+        if (isNode(key) && ctx?.doc) {
+            const strCtx = createStringifyContext(ctx.doc, {});
+            strCtx.anchors = new Set();
+            for (const node of ctx.anchors.keys())
+                strCtx.anchors.add(node.anchor);
+            strCtx.inFlow = true;
+            strCtx.inStringifyKey = true;
+            const strKey = key.toString(strCtx);
+            if (!ctx.mapKeyWarned) {
+                let jsonStr = JSON.stringify(strKey);
+                if (jsonStr.length > 40)
+                    jsonStr = jsonStr.substring(0, 36) + '..."';
+                warn$3(ctx.doc.options.logLevel, `Keys with collection values will be stringified due to JS Object restrictions: ${jsonStr}. Set mapAsMap: true to use object keys.`);
+                ctx.mapKeyWarned = true;
+            }
+            return strKey;
+        }
+        return JSON.stringify(jsKey);
+    }
+
+    function createPair(key, value, ctx) {
+        const k = createNode(key, undefined, ctx);
+        const v = createNode(value, undefined, ctx);
+        return new Pair(k, v);
+    }
+    class Pair {
+        constructor(key, value = null) {
+            Object.defineProperty(this, NODE_TYPE, { value: PAIR });
+            this.key = key;
+            this.value = value;
+        }
+        clone(schema) {
+            let { key, value } = this;
+            if (isNode(key))
+                key = key.clone(schema);
+            if (isNode(value))
+                value = value.clone(schema);
+            return new Pair(key, value);
+        }
+        toJSON(_, ctx) {
+            const pair = ctx?.mapAsMap ? new Map() : {};
+            return addPairToJSMap(ctx, pair, this);
+        }
+        toString(ctx, onComment, onChompKeep) {
+            return ctx?.doc
+                ? stringifyPair(this, ctx, onComment, onChompKeep)
+                : JSON.stringify(this);
+        }
+    }
+
+    function stringifyCollection(collection, ctx, options) {
+        const flow = ctx.inFlow ?? collection.flow;
+        const stringify = flow ? stringifyFlowCollection : stringifyBlockCollection;
+        return stringify(collection, ctx, options);
+    }
+    function stringifyBlockCollection({ comment, items }, ctx, { blockItemPrefix, flowChars, itemIndent, onChompKeep, onComment }) {
+        const { indent, options: { commentString } } = ctx;
+        const itemCtx = Object.assign({}, ctx, { indent: itemIndent, type: null });
+        let chompKeep = false; // flag for the preceding node's status
+        const lines = [];
+        for (let i = 0; i < items.length; ++i) {
+            const item = items[i];
+            let comment = null;
+            if (isNode(item)) {
+                if (!chompKeep && item.spaceBefore)
+                    lines.push('');
+                addCommentBefore(ctx, lines, item.commentBefore, chompKeep);
+                if (item.comment)
+                    comment = item.comment;
+            }
+            else if (isPair(item)) {
+                const ik = isNode(item.key) ? item.key : null;
+                if (ik) {
+                    if (!chompKeep && ik.spaceBefore)
+                        lines.push('');
+                    addCommentBefore(ctx, lines, ik.commentBefore, chompKeep);
+                }
+            }
+            chompKeep = false;
+            let str = stringify$2(item, itemCtx, () => (comment = null), () => (chompKeep = true));
+            if (comment)
+                str += lineComment(str, itemIndent, commentString(comment));
+            if (chompKeep && comment)
+                chompKeep = false;
+            lines.push(blockItemPrefix + str);
+        }
+        let str;
+        if (lines.length === 0) {
+            str = flowChars.start + flowChars.end;
+        }
+        else {
+            str = lines[0];
+            for (let i = 1; i < lines.length; ++i) {
+                const line = lines[i];
+                str += line ? `\n${indent}${line}` : '\n';
+            }
+        }
+        if (comment) {
+            str += '\n' + indentComment(commentString(comment), indent);
+            if (onComment)
+                onComment();
+        }
+        else if (chompKeep && onChompKeep)
+            onChompKeep();
+        return str;
+    }
+    function stringifyFlowCollection({ items }, ctx, { flowChars, itemIndent }) {
+        const { indent, indentStep, flowCollectionPadding: fcPadding, options: { commentString } } = ctx;
+        itemIndent += indentStep;
+        const itemCtx = Object.assign({}, ctx, {
+            indent: itemIndent,
+            inFlow: true,
+            type: null
+        });
+        let reqNewline = false;
+        let linesAtValue = 0;
+        const lines = [];
+        for (let i = 0; i < items.length; ++i) {
+            const item = items[i];
+            let comment = null;
+            if (isNode(item)) {
+                if (item.spaceBefore)
+                    lines.push('');
+                addCommentBefore(ctx, lines, item.commentBefore, false);
+                if (item.comment)
+                    comment = item.comment;
+            }
+            else if (isPair(item)) {
+                const ik = isNode(item.key) ? item.key : null;
+                if (ik) {
+                    if (ik.spaceBefore)
+                        lines.push('');
+                    addCommentBefore(ctx, lines, ik.commentBefore, false);
+                    if (ik.comment)
+                        reqNewline = true;
+                }
+                const iv = isNode(item.value) ? item.value : null;
+                if (iv) {
+                    if (iv.comment)
+                        comment = iv.comment;
+                    if (iv.commentBefore)
+                        reqNewline = true;
+                }
+                else if (item.value == null && ik?.comment) {
+                    comment = ik.comment;
+                }
+            }
+            if (comment)
+                reqNewline = true;
+            let str = stringify$2(item, itemCtx, () => (comment = null));
+            reqNewline || (reqNewline = lines.length > linesAtValue || str.includes('\n'));
+            if (i < items.length - 1) {
+                str += ',';
+            }
+            else if (ctx.options.trailingComma) {
+                if (ctx.options.lineWidth > 0) {
+                    reqNewline || (reqNewline = lines.reduce((sum, line) => sum + line.length + 2, 2) +
+                        (str.length + 2) >
+                        ctx.options.lineWidth);
+                }
+                if (reqNewline) {
+                    str += ',';
+                }
+            }
+            if (comment)
+                str += lineComment(str, itemIndent, commentString(comment));
+            lines.push(str);
+            linesAtValue = lines.length;
+        }
+        const { start, end } = flowChars;
+        if (lines.length === 0) {
+            return start + end;
+        }
+        else {
+            if (!reqNewline) {
+                const len = lines.reduce((sum, line) => sum + line.length + 2, 2);
+                reqNewline = ctx.options.lineWidth > 0 && len > ctx.options.lineWidth;
+            }
+            if (reqNewline) {
+                let str = start;
+                for (const line of lines)
+                    str += line ? `\n${indentStep}${indent}${line}` : '\n';
+                return `${str}\n${indent}${end}`;
+            }
+            else {
+                return `${start}${fcPadding}${lines.join(' ')}${fcPadding}${end}`;
+            }
+        }
+    }
+    function addCommentBefore({ indent, options: { commentString } }, lines, comment, chompKeep) {
+        if (comment && chompKeep)
+            comment = comment.replace(/^\n+/, '');
+        if (comment) {
+            const ic = indentComment(commentString(comment), indent);
+            lines.push(ic.trimStart()); // Avoid double indent on first line
+        }
+    }
+
+    function findPair(items, key) {
+        const k = isScalar$1(key) ? key.value : key;
+        for (const it of items) {
+            if (isPair(it)) {
+                if (it.key === key || it.key === k)
+                    return it;
+                if (isScalar$1(it.key) && it.key.value === k)
+                    return it;
+            }
+        }
+        return undefined;
+    }
+    class YAMLMap extends Collection {
+        static get tagName() {
+            return 'tag:yaml.org,2002:map';
+        }
+        constructor(schema) {
+            super(MAP, schema);
+            this.items = [];
+        }
+        /**
+         * A generic collection parsing method that can be extended
+         * to other node classes that inherit from YAMLMap
+         */
+        static from(schema, obj, ctx) {
+            const { keepUndefined, replacer } = ctx;
+            const map = new this(schema);
+            const add = (key, value) => {
+                if (typeof replacer === 'function')
+                    value = replacer.call(obj, key, value);
+                else if (Array.isArray(replacer) && !replacer.includes(key))
+                    return;
+                if (value !== undefined || keepUndefined)
+                    map.items.push(createPair(key, value, ctx));
+            };
+            if (obj instanceof Map) {
+                for (const [key, value] of obj)
+                    add(key, value);
+            }
+            else if (obj && typeof obj === 'object') {
+                for (const key of Object.keys(obj))
+                    add(key, obj[key]);
+            }
+            if (typeof schema.sortMapEntries === 'function') {
+                map.items.sort(schema.sortMapEntries);
+            }
+            return map;
+        }
+        /**
+         * Adds a value to the collection.
+         *
+         * @param overwrite - If not set `true`, using a key that is already in the
+         *   collection will throw. Otherwise, overwrites the previous value.
+         */
+        add(pair, overwrite) {
+            let _pair;
+            if (isPair(pair))
+                _pair = pair;
+            else if (!pair || typeof pair !== 'object' || !('key' in pair)) {
+                // In TypeScript, this never happens.
+                _pair = new Pair(pair, pair?.value);
+            }
+            else
+                _pair = new Pair(pair.key, pair.value);
+            const prev = findPair(this.items, _pair.key);
+            const sortEntries = this.schema?.sortMapEntries;
+            if (prev) {
+                if (!overwrite)
+                    throw new Error(`Key ${_pair.key} already set`);
+                // For scalars, keep the old node & its comments and anchors
+                if (isScalar$1(prev.value) && isScalarValue(_pair.value))
+                    prev.value.value = _pair.value;
+                else
+                    prev.value = _pair.value;
+            }
+            else if (sortEntries) {
+                const i = this.items.findIndex(item => sortEntries(_pair, item) < 0);
+                if (i === -1)
+                    this.items.push(_pair);
+                else
+                    this.items.splice(i, 0, _pair);
+            }
+            else {
+                this.items.push(_pair);
+            }
+        }
+        delete(key) {
+            const it = findPair(this.items, key);
+            if (!it)
+                return false;
+            const del = this.items.splice(this.items.indexOf(it), 1);
+            return del.length > 0;
+        }
+        get(key, keepScalar) {
+            const it = findPair(this.items, key);
+            const node = it?.value;
+            return (!keepScalar && isScalar$1(node) ? node.value : node) ?? undefined;
+        }
+        has(key) {
+            return !!findPair(this.items, key);
+        }
+        set(key, value) {
+            this.add(new Pair(key, value), true);
+        }
+        /**
+         * @param ctx - Conversion context, originally set in Document#toJS()
+         * @param {Class} Type - If set, forces the returned collection type
+         * @returns Instance of Type, Map, or Object
+         */
+        toJSON(_, ctx, Type) {
+            const map = Type ? new Type() : ctx?.mapAsMap ? new Map() : {};
+            if (ctx?.onCreate)
+                ctx.onCreate(map);
+            for (const item of this.items)
+                addPairToJSMap(ctx, map, item);
+            return map;
+        }
+        toString(ctx, onComment, onChompKeep) {
+            if (!ctx)
+                return JSON.stringify(this);
+            for (const item of this.items) {
+                if (!isPair(item))
+                    throw new Error(`Map items must all be pairs; found ${JSON.stringify(item)} instead`);
+            }
+            if (!ctx.allNullValues && this.hasAllNullValues(false))
+                ctx = Object.assign({}, ctx, { allNullValues: true });
+            return stringifyCollection(this, ctx, {
+                blockItemPrefix: '',
+                flowChars: { start: '{', end: '}' },
+                itemIndent: ctx.indent || '',
+                onChompKeep,
+                onComment
+            });
+        }
+    }
+
+    const map$1 = {
+        collection: 'map',
+        default: true,
+        nodeClass: YAMLMap,
+        tag: 'tag:yaml.org,2002:map',
+        resolve(map, onError) {
+            if (!isMap$1(map))
+                onError('Expected a mapping for this tag');
+            return map;
+        },
+        createNode: (schema, obj, ctx) => YAMLMap.from(schema, obj, ctx)
+    };
+
+    class YAMLSeq extends Collection {
+        static get tagName() {
+            return 'tag:yaml.org,2002:seq';
+        }
+        constructor(schema) {
+            super(SEQ, schema);
+            this.items = [];
+        }
+        add(value) {
+            this.items.push(value);
+        }
+        /**
+         * Removes a value from the collection.
+         *
+         * `key` must contain a representation of an integer for this to succeed.
+         * It may be wrapped in a `Scalar`.
+         *
+         * @returns `true` if the item was found and removed.
+         */
+        delete(key) {
+            const idx = asItemIndex(key);
+            if (typeof idx !== 'number')
+                return false;
+            const del = this.items.splice(idx, 1);
+            return del.length > 0;
+        }
+        get(key, keepScalar) {
+            const idx = asItemIndex(key);
+            if (typeof idx !== 'number')
+                return undefined;
+            const it = this.items[idx];
+            return !keepScalar && isScalar$1(it) ? it.value : it;
+        }
+        /**
+         * Checks if the collection includes a value with the key `key`.
+         *
+         * `key` must contain a representation of an integer for this to succeed.
+         * It may be wrapped in a `Scalar`.
+         */
+        has(key) {
+            const idx = asItemIndex(key);
+            return typeof idx === 'number' && idx < this.items.length;
+        }
+        /**
+         * Sets a value in this collection. For `!!set`, `value` needs to be a
+         * boolean to add/remove the item from the set.
+         *
+         * If `key` does not contain a representation of an integer, this will throw.
+         * It may be wrapped in a `Scalar`.
+         */
+        set(key, value) {
+            const idx = asItemIndex(key);
+            if (typeof idx !== 'number')
+                throw new Error(`Expected a valid index, not ${key}.`);
+            const prev = this.items[idx];
+            if (isScalar$1(prev) && isScalarValue(value))
+                prev.value = value;
+            else
+                this.items[idx] = value;
+        }
+        toJSON(_, ctx) {
+            const seq = [];
+            if (ctx?.onCreate)
+                ctx.onCreate(seq);
+            let i = 0;
+            for (const item of this.items)
+                seq.push(toJS(item, String(i++), ctx));
+            return seq;
+        }
+        toString(ctx, onComment, onChompKeep) {
+            if (!ctx)
+                return JSON.stringify(this);
+            return stringifyCollection(this, ctx, {
+                blockItemPrefix: '- ',
+                flowChars: { start: '[', end: ']' },
+                itemIndent: (ctx.indent || '') + '  ',
+                onChompKeep,
+                onComment
+            });
+        }
+        static from(schema, obj, ctx) {
+            const { replacer } = ctx;
+            const seq = new this(schema);
+            if (obj && Symbol.iterator in Object(obj)) {
+                let i = 0;
+                for (let it of obj) {
+                    if (typeof replacer === 'function') {
+                        const key = obj instanceof Set ? it : String(i++);
+                        it = replacer.call(obj, key, it);
+                    }
+                    seq.items.push(createNode(it, undefined, ctx));
+                }
+            }
+            return seq;
+        }
+    }
+    function asItemIndex(key) {
+        let idx = isScalar$1(key) ? key.value : key;
+        if (idx && typeof idx === 'string')
+            idx = Number(idx);
+        return typeof idx === 'number' && Number.isInteger(idx) && idx >= 0
+            ? idx
+            : null;
+    }
+
+    const seq = {
+        collection: 'seq',
+        default: true,
+        nodeClass: YAMLSeq,
+        tag: 'tag:yaml.org,2002:seq',
+        resolve(seq, onError) {
+            if (!isSeq(seq))
+                onError('Expected a sequence for this tag');
+            return seq;
+        },
+        createNode: (schema, obj, ctx) => YAMLSeq.from(schema, obj, ctx)
+    };
+
+    const string = {
+        identify: value => typeof value === 'string',
+        default: true,
+        tag: 'tag:yaml.org,2002:str',
+        resolve: str => str,
+        stringify(item, ctx, onComment, onChompKeep) {
+            ctx = Object.assign({ actualString: true }, ctx);
+            return stringifyString(item, ctx, onComment, onChompKeep);
+        }
+    };
+
+    const nullTag = {
+        identify: value => value == null,
+        createNode: () => new Scalar(null),
+        default: true,
+        tag: 'tag:yaml.org,2002:null',
+        test: /^(?:~|[Nn]ull|NULL)?$/,
+        resolve: () => new Scalar(null),
+        stringify: ({ source }, ctx) => typeof source === 'string' && nullTag.test.test(source)
+            ? source
+            : ctx.options.nullStr
+    };
+
+    const boolTag = {
+        identify: value => typeof value === 'boolean',
+        default: true,
+        tag: 'tag:yaml.org,2002:bool',
+        test: /^(?:[Tt]rue|TRUE|[Ff]alse|FALSE)$/,
+        resolve: str => new Scalar(str[0] === 't' || str[0] === 'T'),
+        stringify({ source, value }, ctx) {
+            if (source && boolTag.test.test(source)) {
+                const sv = source[0] === 't' || source[0] === 'T';
+                if (value === sv)
+                    return source;
+            }
+            return value ? ctx.options.trueStr : ctx.options.falseStr;
+        }
+    };
+
+    function stringifyNumber({ format, minFractionDigits, tag, value }) {
+        if (typeof value === 'bigint')
+            return String(value);
+        const num = typeof value === 'number' ? value : Number(value);
+        if (!isFinite(num))
+            return isNaN(num) ? '.nan' : num < 0 ? '-.inf' : '.inf';
+        let n = Object.is(value, -0) ? '-0' : JSON.stringify(value);
+        if (!format &&
+            minFractionDigits &&
+            (!tag || tag === 'tag:yaml.org,2002:float') &&
+            /^-?\d/.test(n) &&
+            !n.includes('e')) {
+            let i = n.indexOf('.');
+            if (i < 0) {
+                i = n.length;
+                n += '.';
+            }
+            let d = minFractionDigits - (n.length - i - 1);
+            while (d-- > 0)
+                n += '0';
+        }
+        return n;
+    }
+
+    const floatNaN$1 = {
+        identify: value => typeof value === 'number',
+        default: true,
+        tag: 'tag:yaml.org,2002:float',
+        test: /^(?:[-+]?\.(?:inf|Inf|INF)|\.nan|\.NaN|\.NAN)$/,
+        resolve: str => str.slice(-3).toLowerCase() === 'nan'
+            ? NaN
+            : str[0] === '-'
+                ? Number.NEGATIVE_INFINITY
+                : Number.POSITIVE_INFINITY,
+        stringify: stringifyNumber
+    };
+    const floatExp$1 = {
+        identify: value => typeof value === 'number',
+        default: true,
+        tag: 'tag:yaml.org,2002:float',
+        format: 'EXP',
+        test: /^[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)[eE][-+]?[0-9]+$/,
+        resolve: str => parseFloat(str),
+        stringify(node) {
+            const num = Number(node.value);
+            return isFinite(num) ? num.toExponential() : stringifyNumber(node);
+        }
+    };
+    const float$1 = {
+        identify: value => typeof value === 'number',
+        default: true,
+        tag: 'tag:yaml.org,2002:float',
+        test: /^[-+]?(?:\.[0-9]+|[0-9]+\.[0-9]*)$/,
+        resolve(str) {
+            const node = new Scalar(parseFloat(str));
+            const dot = str.indexOf('.');
+            if (dot !== -1 && str[str.length - 1] === '0')
+                node.minFractionDigits = str.length - dot - 1;
+            return node;
+        },
+        stringify: stringifyNumber
+    };
+
+    const intIdentify$2 = (value) => typeof value === 'bigint' || Number.isInteger(value);
+    const intResolve$1 = (str, offset, radix, { intAsBigInt }) => (intAsBigInt ? BigInt(str) : parseInt(str.substring(offset), radix));
+    function intStringify$1(node, radix, prefix) {
+        const { value } = node;
+        if (intIdentify$2(value) && value >= 0)
+            return prefix + value.toString(radix);
+        return stringifyNumber(node);
+    }
+    const intOct$1 = {
+        identify: value => intIdentify$2(value) && value >= 0,
+        default: true,
+        tag: 'tag:yaml.org,2002:int',
+        format: 'OCT',
+        test: /^0o[0-7]+$/,
+        resolve: (str, _onError, opt) => intResolve$1(str, 2, 8, opt),
+        stringify: node => intStringify$1(node, 8, '0o')
+    };
+    const int$1 = {
+        identify: intIdentify$2,
+        default: true,
+        tag: 'tag:yaml.org,2002:int',
+        test: /^[-+]?[0-9]+$/,
+        resolve: (str, _onError, opt) => intResolve$1(str, 0, 10, opt),
+        stringify: stringifyNumber
+    };
+    const intHex$1 = {
+        identify: value => intIdentify$2(value) && value >= 0,
+        default: true,
+        tag: 'tag:yaml.org,2002:int',
+        format: 'HEX',
+        test: /^0x[0-9a-fA-F]+$/,
+        resolve: (str, _onError, opt) => intResolve$1(str, 2, 16, opt),
+        stringify: node => intStringify$1(node, 16, '0x')
+    };
+
+    const schema$2 = [
+        map$1,
+        seq,
+        string,
+        nullTag,
+        boolTag,
+        intOct$1,
+        int$1,
+        intHex$1,
+        floatNaN$1,
+        floatExp$1,
+        float$1
+    ];
+
+    function intIdentify$1(value) {
+        return typeof value === 'bigint' || Number.isInteger(value);
+    }
+    const stringifyJSON = ({ value }) => JSON.stringify(value);
+    const jsonScalars = [
+        {
+            identify: value => typeof value === 'string',
+            default: true,
+            tag: 'tag:yaml.org,2002:str',
+            resolve: str => str,
+            stringify: stringifyJSON
+        },
+        {
+            identify: value => value == null,
+            createNode: () => new Scalar(null),
+            default: true,
+            tag: 'tag:yaml.org,2002:null',
+            test: /^null$/,
+            resolve: () => null,
+            stringify: stringifyJSON
+        },
+        {
+            identify: value => typeof value === 'boolean',
+            default: true,
+            tag: 'tag:yaml.org,2002:bool',
+            test: /^true$|^false$/,
+            resolve: str => str === 'true',
+            stringify: stringifyJSON
+        },
+        {
+            identify: intIdentify$1,
+            default: true,
+            tag: 'tag:yaml.org,2002:int',
+            test: /^-?(?:0|[1-9][0-9]*)$/,
+            resolve: (str, _onError, { intAsBigInt }) => intAsBigInt ? BigInt(str) : parseInt(str, 10),
+            stringify: ({ value }) => intIdentify$1(value) ? value.toString() : JSON.stringify(value)
+        },
+        {
+            identify: value => typeof value === 'number',
+            default: true,
+            tag: 'tag:yaml.org,2002:float',
+            test: /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]*)?(?:[eE][-+]?[0-9]+)?$/,
+            resolve: str => parseFloat(str),
+            stringify: stringifyJSON
+        }
+    ];
+    const jsonError = {
+        default: true,
+        tag: '',
+        test: /^/,
+        resolve(str, onError) {
+            onError(`Unresolved plain scalar ${JSON.stringify(str)}`);
+            return str;
+        }
+    };
+    const schema$1 = [map$1, seq].concat(jsonScalars, jsonError);
+
+    const binary = {
+        identify: value => value instanceof Uint8Array, // Buffer inherits from Uint8Array
+        default: false,
+        tag: 'tag:yaml.org,2002:binary',
+        /**
+         * Returns a Buffer in node and an Uint8Array in browsers
+         *
+         * To use the resulting buffer as an image, you'll want to do something like:
+         *
+         *   const blob = new Blob([buffer], { type: 'image/jpeg' })
+         *   document.querySelector('#photo').src = URL.createObjectURL(blob)
+         */
+        resolve(src, onError) {
+            if (typeof atob === 'function') {
+                // On IE 11, atob() can't handle newlines
+                const str = atob(src.replace(/[\n\r]/g, ''));
+                const buffer = new Uint8Array(str.length);
+                for (let i = 0; i < str.length; ++i)
+                    buffer[i] = str.charCodeAt(i);
+                return buffer;
+            }
+            else {
+                onError('This environment does not support reading binary tags; either Buffer or atob is required');
+                return src;
+            }
+        },
+        stringify({ comment, type, value }, ctx, onComment, onChompKeep) {
+            if (!value)
+                return '';
+            const buf = value; // checked earlier by binary.identify()
+            let str;
+            if (typeof btoa === 'function') {
+                let s = '';
+                for (let i = 0; i < buf.length; ++i)
+                    s += String.fromCharCode(buf[i]);
+                str = btoa(s);
+            }
+            else {
+                throw new Error('This environment does not support writing binary tags; either Buffer or btoa is required');
+            }
+            type ?? (type = Scalar.BLOCK_LITERAL);
+            if (type !== Scalar.QUOTE_DOUBLE) {
+                const lineWidth = Math.max(ctx.options.lineWidth - ctx.indent.length, ctx.options.minContentWidth);
+                const n = Math.ceil(str.length / lineWidth);
+                const lines = new Array(n);
+                for (let i = 0, o = 0; i < n; ++i, o += lineWidth) {
+                    lines[i] = str.substr(o, lineWidth);
+                }
+                str = lines.join(type === Scalar.BLOCK_LITERAL ? '\n' : ' ');
+            }
+            return stringifyString({ comment, type, value: str }, ctx, onComment, onChompKeep);
+        }
+    };
+
+    function resolvePairs(seq, onError) {
+        if (isSeq(seq)) {
+            for (let i = 0; i < seq.items.length; ++i) {
+                let item = seq.items[i];
+                if (isPair(item))
+                    continue;
+                else if (isMap$1(item)) {
+                    if (item.items.length > 1)
+                        onError('Each pair must have its own sequence indicator');
+                    const pair = item.items[0] || new Pair(new Scalar(null));
+                    if (item.commentBefore)
+                        pair.key.commentBefore = pair.key.commentBefore
+                            ? `${item.commentBefore}\n${pair.key.commentBefore}`
+                            : item.commentBefore;
+                    if (item.comment) {
+                        const cn = pair.value ?? pair.key;
+                        cn.comment = cn.comment
+                            ? `${item.comment}\n${cn.comment}`
+                            : item.comment;
+                    }
+                    item = pair;
+                }
+                seq.items[i] = isPair(item) ? item : new Pair(item);
+            }
+        }
+        else
+            onError('Expected a sequence for this tag');
+        return seq;
+    }
+    function createPairs(schema, iterable, ctx) {
+        const { replacer } = ctx;
+        const pairs = new YAMLSeq(schema);
+        pairs.tag = 'tag:yaml.org,2002:pairs';
+        let i = 0;
+        if (iterable && Symbol.iterator in Object(iterable))
+            for (let it of iterable) {
+                if (typeof replacer === 'function')
+                    it = replacer.call(iterable, String(i++), it);
+                let key, value;
+                if (Array.isArray(it)) {
+                    if (it.length === 2) {
+                        key = it[0];
+                        value = it[1];
+                    }
+                    else
+                        throw new TypeError(`Expected [key, value] tuple: ${it}`);
+                }
+                else if (it && it instanceof Object) {
+                    const keys = Object.keys(it);
+                    if (keys.length === 1) {
+                        key = keys[0];
+                        value = it[key];
+                    }
+                    else {
+                        throw new TypeError(`Expected tuple with one key, not ${keys.length} keys`);
+                    }
+                }
+                else {
+                    key = it;
+                }
+                pairs.items.push(createPair(key, value, ctx));
+            }
+        return pairs;
+    }
+    const pairs = {
+        collection: 'seq',
+        default: false,
+        tag: 'tag:yaml.org,2002:pairs',
+        resolve: resolvePairs,
+        createNode: createPairs
+    };
+
+    class YAMLOMap extends YAMLSeq {
+        constructor() {
+            super();
+            this.add = YAMLMap.prototype.add.bind(this);
+            this.delete = YAMLMap.prototype.delete.bind(this);
+            this.get = YAMLMap.prototype.get.bind(this);
+            this.has = YAMLMap.prototype.has.bind(this);
+            this.set = YAMLMap.prototype.set.bind(this);
+            this.tag = YAMLOMap.tag;
+        }
+        /**
+         * If `ctx` is given, the return type is actually `Map<unknown, unknown>`,
+         * but TypeScript won't allow widening the signature of a child method.
+         */
+        toJSON(_, ctx) {
+            if (!ctx)
+                return super.toJSON(_);
+            const map = new Map();
+            if (ctx?.onCreate)
+                ctx.onCreate(map);
+            for (const pair of this.items) {
+                let key, value;
+                if (isPair(pair)) {
+                    key = toJS(pair.key, '', ctx);
+                    value = toJS(pair.value, key, ctx);
+                }
+                else {
+                    key = toJS(pair, '', ctx);
+                }
+                if (map.has(key))
+                    throw new Error('Ordered maps must not include duplicate keys');
+                map.set(key, value);
+            }
+            return map;
+        }
+        static from(schema, iterable, ctx) {
+            const pairs = createPairs(schema, iterable, ctx);
+            const omap = new this();
+            omap.items = pairs.items;
+            return omap;
+        }
+    }
+    YAMLOMap.tag = 'tag:yaml.org,2002:omap';
+    const omap = {
+        collection: 'seq',
+        identify: value => value instanceof Map,
+        nodeClass: YAMLOMap,
+        default: false,
+        tag: 'tag:yaml.org,2002:omap',
+        resolve(seq, onError) {
+            const pairs = resolvePairs(seq, onError);
+            const seenKeys = [];
+            for (const { key } of pairs.items) {
+                if (isScalar$1(key)) {
+                    if (seenKeys.includes(key.value)) {
+                        onError(`Ordered maps must not include duplicate keys: ${key.value}`);
+                    }
+                    else {
+                        seenKeys.push(key.value);
+                    }
+                }
+            }
+            return Object.assign(new YAMLOMap(), pairs);
+        },
+        createNode: (schema, iterable, ctx) => YAMLOMap.from(schema, iterable, ctx)
+    };
+
+    function boolStringify({ value, source }, ctx) {
+        const boolObj = value ? trueTag : falseTag;
+        if (source && boolObj.test.test(source))
+            return source;
+        return value ? ctx.options.trueStr : ctx.options.falseStr;
+    }
+    const trueTag = {
+        identify: value => value === true,
+        default: true,
+        tag: 'tag:yaml.org,2002:bool',
+        test: /^(?:Y|y|[Yy]es|YES|[Tt]rue|TRUE|[Oo]n|ON)$/,
+        resolve: () => new Scalar(true),
+        stringify: boolStringify
+    };
+    const falseTag = {
+        identify: value => value === false,
+        default: true,
+        tag: 'tag:yaml.org,2002:bool',
+        test: /^(?:N|n|[Nn]o|NO|[Ff]alse|FALSE|[Oo]ff|OFF)$/,
+        resolve: () => new Scalar(false),
+        stringify: boolStringify
+    };
+
+    const floatNaN = {
+        identify: value => typeof value === 'number',
+        default: true,
+        tag: 'tag:yaml.org,2002:float',
+        test: /^(?:[-+]?\.(?:inf|Inf|INF)|\.nan|\.NaN|\.NAN)$/,
+        resolve: (str) => str.slice(-3).toLowerCase() === 'nan'
+            ? NaN
+            : str[0] === '-'
+                ? Number.NEGATIVE_INFINITY
+                : Number.POSITIVE_INFINITY,
+        stringify: stringifyNumber
+    };
+    const floatExp = {
+        identify: value => typeof value === 'number',
+        default: true,
+        tag: 'tag:yaml.org,2002:float',
+        format: 'EXP',
+        test: /^[-+]?(?:[0-9][0-9_]*)?(?:\.[0-9_]*)?[eE][-+]?[0-9]+$/,
+        resolve: (str) => parseFloat(str.replace(/_/g, '')),
+        stringify(node) {
+            const num = Number(node.value);
+            return isFinite(num) ? num.toExponential() : stringifyNumber(node);
+        }
+    };
+    const float = {
+        identify: value => typeof value === 'number',
+        default: true,
+        tag: 'tag:yaml.org,2002:float',
+        test: /^[-+]?(?:[0-9][0-9_]*)?\.[0-9_]*$/,
+        resolve(str) {
+            const node = new Scalar(parseFloat(str.replace(/_/g, '')));
+            const dot = str.indexOf('.');
+            if (dot !== -1) {
+                const f = str.substring(dot + 1).replace(/_/g, '');
+                if (f[f.length - 1] === '0')
+                    node.minFractionDigits = f.length;
+            }
+            return node;
+        },
+        stringify: stringifyNumber
+    };
+
+    const intIdentify = (value) => typeof value === 'bigint' || Number.isInteger(value);
+    function intResolve(str, offset, radix, { intAsBigInt }) {
+        const sign = str[0];
+        if (sign === '-' || sign === '+')
+            offset += 1;
+        str = str.substring(offset).replace(/_/g, '');
+        if (intAsBigInt) {
+            switch (radix) {
+                case 2:
+                    str = `0b${str}`;
+                    break;
+                case 8:
+                    str = `0o${str}`;
+                    break;
+                case 16:
+                    str = `0x${str}`;
+                    break;
+            }
+            const n = BigInt(str);
+            return sign === '-' ? BigInt(-1) * n : n;
+        }
+        const n = parseInt(str, radix);
+        return sign === '-' ? -1 * n : n;
+    }
+    function intStringify(node, radix, prefix) {
+        const { value } = node;
+        if (intIdentify(value)) {
+            const str = value.toString(radix);
+            return value < 0 ? '-' + prefix + str.substr(1) : prefix + str;
+        }
+        return stringifyNumber(node);
+    }
+    const intBin = {
+        identify: intIdentify,
+        default: true,
+        tag: 'tag:yaml.org,2002:int',
+        format: 'BIN',
+        test: /^[-+]?0b[0-1_]+$/,
+        resolve: (str, _onError, opt) => intResolve(str, 2, 2, opt),
+        stringify: node => intStringify(node, 2, '0b')
+    };
+    const intOct = {
+        identify: intIdentify,
+        default: true,
+        tag: 'tag:yaml.org,2002:int',
+        format: 'OCT',
+        test: /^[-+]?0[0-7_]+$/,
+        resolve: (str, _onError, opt) => intResolve(str, 1, 8, opt),
+        stringify: node => intStringify(node, 8, '0')
+    };
+    const int = {
+        identify: intIdentify,
+        default: true,
+        tag: 'tag:yaml.org,2002:int',
+        test: /^[-+]?[0-9][0-9_]*$/,
+        resolve: (str, _onError, opt) => intResolve(str, 0, 10, opt),
+        stringify: stringifyNumber
+    };
+    const intHex = {
+        identify: intIdentify,
+        default: true,
+        tag: 'tag:yaml.org,2002:int',
+        format: 'HEX',
+        test: /^[-+]?0x[0-9a-fA-F_]+$/,
+        resolve: (str, _onError, opt) => intResolve(str, 2, 16, opt),
+        stringify: node => intStringify(node, 16, '0x')
+    };
+
+    class YAMLSet extends YAMLMap {
+        constructor(schema) {
+            super(schema);
+            this.tag = YAMLSet.tag;
+        }
+        add(key) {
+            let pair;
+            if (isPair(key))
+                pair = key;
+            else if (key &&
+                typeof key === 'object' &&
+                'key' in key &&
+                'value' in key &&
+                key.value === null)
+                pair = new Pair(key.key, null);
+            else
+                pair = new Pair(key, null);
+            const prev = findPair(this.items, pair.key);
+            if (!prev)
+                this.items.push(pair);
+        }
+        /**
+         * If `keepPair` is `true`, returns the Pair matching `key`.
+         * Otherwise, returns the value of that Pair's key.
+         */
+        get(key, keepPair) {
+            const pair = findPair(this.items, key);
+            return !keepPair && isPair(pair)
+                ? isScalar$1(pair.key)
+                    ? pair.key.value
+                    : pair.key
+                : pair;
+        }
+        set(key, value) {
+            if (typeof value !== 'boolean')
+                throw new Error(`Expected boolean value for set(key, value) in a YAML set, not ${typeof value}`);
+            const prev = findPair(this.items, key);
+            if (prev && !value) {
+                this.items.splice(this.items.indexOf(prev), 1);
+            }
+            else if (!prev && value) {
+                this.items.push(new Pair(key));
+            }
+        }
+        toJSON(_, ctx) {
+            return super.toJSON(_, ctx, Set);
+        }
+        toString(ctx, onComment, onChompKeep) {
+            if (!ctx)
+                return JSON.stringify(this);
+            if (this.hasAllNullValues(true))
+                return super.toString(Object.assign({}, ctx, { allNullValues: true }), onComment, onChompKeep);
+            else
+                throw new Error('Set items must all have null values');
+        }
+        static from(schema, iterable, ctx) {
+            const { replacer } = ctx;
+            const set = new this(schema);
+            if (iterable && Symbol.iterator in Object(iterable))
+                for (let value of iterable) {
+                    if (typeof replacer === 'function')
+                        value = replacer.call(iterable, value, value);
+                    set.items.push(createPair(value, null, ctx));
+                }
+            return set;
+        }
+    }
+    YAMLSet.tag = 'tag:yaml.org,2002:set';
+    const set$1 = {
+        collection: 'map',
+        identify: value => value instanceof Set,
+        nodeClass: YAMLSet,
+        default: false,
+        tag: 'tag:yaml.org,2002:set',
+        createNode: (schema, iterable, ctx) => YAMLSet.from(schema, iterable, ctx),
+        resolve(map, onError) {
+            if (isMap$1(map)) {
+                if (map.hasAllNullValues(true))
+                    return Object.assign(new YAMLSet(), map);
+                else
+                    onError('Set items must all have null values');
+            }
+            else
+                onError('Expected a mapping for this tag');
+            return map;
+        }
+    };
+
+    /** Internal types handle bigint as number, because TS can't figure it out. */
+    function parseSexagesimal(str, asBigInt) {
+        const sign = str[0];
+        const parts = sign === '-' || sign === '+' ? str.substring(1) : str;
+        const num = (n) => asBigInt ? BigInt(n) : Number(n);
+        const res = parts
+            .replace(/_/g, '')
+            .split(':')
+            .reduce((res, p) => res * num(60) + num(p), num(0));
+        return (sign === '-' ? num(-1) * res : res);
+    }
+    /**
+     * hhhh:mm:ss.sss
+     *
+     * Internal types handle bigint as number, because TS can't figure it out.
+     */
+    function stringifySexagesimal(node) {
+        let { value } = node;
+        let num = (n) => n;
+        if (typeof value === 'bigint')
+            num = n => BigInt(n);
+        else if (isNaN(value) || !isFinite(value))
+            return stringifyNumber(node);
+        let sign = '';
+        if (value < 0) {
+            sign = '-';
+            value *= num(-1);
+        }
+        const _60 = num(60);
+        const parts = [value % _60]; // seconds, including ms
+        if (value < 60) {
+            parts.unshift(0); // at least one : is required
+        }
+        else {
+            value = (value - parts[0]) / _60;
+            parts.unshift(value % _60); // minutes
+            if (value >= 60) {
+                value = (value - parts[0]) / _60;
+                parts.unshift(value); // hours
+            }
+        }
+        return (sign +
+            parts
+                .map(n => String(n).padStart(2, '0'))
+                .join(':')
+                .replace(/000000\d*$/, '') // % 60 may introduce error
+        );
+    }
+    const intTime = {
+        identify: value => typeof value === 'bigint' || Number.isInteger(value),
+        default: true,
+        tag: 'tag:yaml.org,2002:int',
+        format: 'TIME',
+        test: /^[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+$/,
+        resolve: (str, _onError, { intAsBigInt }) => parseSexagesimal(str, intAsBigInt),
+        stringify: stringifySexagesimal
+    };
+    const floatTime = {
+        identify: value => typeof value === 'number',
+        default: true,
+        tag: 'tag:yaml.org,2002:float',
+        format: 'TIME',
+        test: /^[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*$/,
+        resolve: str => parseSexagesimal(str, false),
+        stringify: stringifySexagesimal
+    };
+    const timestamp = {
+        identify: value => value instanceof Date,
+        default: true,
+        tag: 'tag:yaml.org,2002:timestamp',
+        // If the time zone is omitted, the timestamp is assumed to be specified in UTC. The time part
+        // may be omitted altogether, resulting in a date format. In such a case, the time part is
+        // assumed to be 00:00:00Z (start of day, UTC).
+        test: RegExp('^([0-9]{4})-([0-9]{1,2})-([0-9]{1,2})' + // YYYY-Mm-Dd
+            '(?:' + // time is optional
+            '(?:t|T|[ \\t]+)' + // t | T | whitespace
+            '([0-9]{1,2}):([0-9]{1,2}):([0-9]{1,2}(\\.[0-9]+)?)' + // Hh:Mm:Ss(.ss)?
+            '(?:[ \\t]*(Z|[-+][012]?[0-9](?::[0-9]{2})?))?' + // Z | +5 | -03:30
+            ')?$'),
+        resolve(str) {
+            const match = str.match(timestamp.test);
+            if (!match)
+                throw new Error('!!timestamp expects a date, starting with yyyy-mm-dd');
+            const [, year, month, day, hour, minute, second] = match.map(Number);
+            const millisec = match[7] ? Number((match[7] + '00').substr(1, 3)) : 0;
+            let date = Date.UTC(year, month - 1, day, hour || 0, minute || 0, second || 0, millisec);
+            const tz = match[8];
+            if (tz && tz !== 'Z') {
+                let d = parseSexagesimal(tz, false);
+                if (Math.abs(d) < 30)
+                    d *= 60;
+                date -= 60000 * d;
+            }
+            return new Date(date);
+        },
+        stringify: ({ value }) => value?.toISOString().replace(/(T00:00:00)?\.000Z$/, '') ?? ''
+    };
+
+    const schema = [
+        map$1,
+        seq,
+        string,
+        nullTag,
+        trueTag,
+        falseTag,
+        intBin,
+        intOct,
+        int,
+        intHex,
+        floatNaN,
+        floatExp,
+        float,
+        binary,
+        merge,
+        omap,
+        pairs,
+        set$1,
+        intTime,
+        floatTime,
+        timestamp
+    ];
+
+    const schemas = new Map([
+        ['core', schema$2],
+        ['failsafe', [map$1, seq, string]],
+        ['json', schema$1],
+        ['yaml11', schema],
+        ['yaml-1.1', schema]
+    ]);
+    const tagsByName = {
+        binary,
+        bool: boolTag,
+        float: float$1,
+        floatExp: floatExp$1,
+        floatNaN: floatNaN$1,
+        floatTime,
+        int: int$1,
+        intHex: intHex$1,
+        intOct: intOct$1,
+        intTime,
+        map: map$1,
+        merge,
+        null: nullTag,
+        omap,
+        pairs,
+        seq,
+        set: set$1,
+        timestamp
+    };
+    const coreKnownTags = {
+        'tag:yaml.org,2002:binary': binary,
+        'tag:yaml.org,2002:merge': merge,
+        'tag:yaml.org,2002:omap': omap,
+        'tag:yaml.org,2002:pairs': pairs,
+        'tag:yaml.org,2002:set': set$1,
+        'tag:yaml.org,2002:timestamp': timestamp
+    };
+    function getTags(customTags, schemaName, addMergeTag) {
+        const schemaTags = schemas.get(schemaName);
+        if (schemaTags && !customTags) {
+            return addMergeTag && !schemaTags.includes(merge)
+                ? schemaTags.concat(merge)
+                : schemaTags.slice();
+        }
+        let tags = schemaTags;
+        if (!tags) {
+            if (Array.isArray(customTags))
+                tags = [];
+            else {
+                const keys = Array.from(schemas.keys())
+                    .filter(key => key !== 'yaml11')
+                    .map(key => JSON.stringify(key))
+                    .join(', ');
+                throw new Error(`Unknown schema "${schemaName}"; use one of ${keys} or define customTags array`);
+            }
+        }
+        if (Array.isArray(customTags)) {
+            for (const tag of customTags)
+                tags = tags.concat(tag);
+        }
+        else if (typeof customTags === 'function') {
+            tags = customTags(tags.slice());
+        }
+        if (addMergeTag)
+            tags = tags.concat(merge);
+        return tags.reduce((tags, tag) => {
+            const tagObj = typeof tag === 'string' ? tagsByName[tag] : tag;
+            if (!tagObj) {
+                const tagName = JSON.stringify(tag);
+                const keys = Object.keys(tagsByName)
+                    .map(key => JSON.stringify(key))
+                    .join(', ');
+                throw new Error(`Unknown custom tag ${tagName}; use one of ${keys}`);
+            }
+            if (!tags.includes(tagObj))
+                tags.push(tagObj);
+            return tags;
+        }, []);
+    }
+
+    const sortMapEntriesByKey = (a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+    class Schema {
+        constructor({ compat, customTags, merge, resolveKnownTags, schema, sortMapEntries, toStringDefaults }) {
+            this.compat = Array.isArray(compat)
+                ? getTags(compat, 'compat')
+                : compat
+                    ? getTags(null, compat)
+                    : null;
+            this.name = (typeof schema === 'string' && schema) || 'core';
+            this.knownTags = resolveKnownTags ? coreKnownTags : {};
+            this.tags = getTags(customTags, this.name, merge);
+            this.toStringOptions = toStringDefaults ?? null;
+            Object.defineProperty(this, MAP, { value: map$1 });
+            Object.defineProperty(this, SCALAR$1, { value: string });
+            Object.defineProperty(this, SEQ, { value: seq });
+            // Used by createMap()
+            this.sortMapEntries =
+                typeof sortMapEntries === 'function'
+                    ? sortMapEntries
+                    : sortMapEntries === true
+                        ? sortMapEntriesByKey
+                        : null;
+        }
+        clone() {
+            const copy = Object.create(Schema.prototype, Object.getOwnPropertyDescriptors(this));
+            copy.tags = this.tags.slice();
+            return copy;
+        }
+    }
+
+    function stringifyDocument(doc, options) {
+        const lines = [];
+        let hasDirectives = options.directives === true;
+        if (options.directives !== false && doc.directives) {
+            const dir = doc.directives.toString(doc);
+            if (dir) {
+                lines.push(dir);
+                hasDirectives = true;
+            }
+            else if (doc.directives.docStart)
+                hasDirectives = true;
+        }
+        if (hasDirectives)
+            lines.push('---');
+        const ctx = createStringifyContext(doc, options);
+        const { commentString } = ctx.options;
+        if (doc.commentBefore) {
+            if (lines.length !== 1)
+                lines.unshift('');
+            const cs = commentString(doc.commentBefore);
+            lines.unshift(indentComment(cs, ''));
+        }
+        let chompKeep = false;
+        let contentComment = null;
+        if (doc.contents) {
+            if (isNode(doc.contents)) {
+                if (doc.contents.spaceBefore && hasDirectives)
+                    lines.push('');
+                if (doc.contents.commentBefore) {
+                    const cs = commentString(doc.contents.commentBefore);
+                    lines.push(indentComment(cs, ''));
+                }
+                // top-level block scalars need to be indented if followed by a comment
+                ctx.forceBlockIndent = !!doc.comment;
+                contentComment = doc.contents.comment;
+            }
+            const onChompKeep = contentComment ? undefined : () => (chompKeep = true);
+            let body = stringify$2(doc.contents, ctx, () => (contentComment = null), onChompKeep);
+            if (contentComment)
+                body += lineComment(body, '', commentString(contentComment));
+            if ((body[0] === '|' || body[0] === '>') &&
+                lines[lines.length - 1] === '---') {
+                // Top-level block scalars with a preceding doc marker ought to use the
+                // same line for their header.
+                lines[lines.length - 1] = `--- ${body}`;
+            }
+            else
+                lines.push(body);
+        }
+        else {
+            lines.push(stringify$2(doc.contents, ctx));
+        }
+        if (doc.directives?.docEnd) {
+            if (doc.comment) {
+                const cs = commentString(doc.comment);
+                if (cs.includes('\n')) {
+                    lines.push('...');
+                    lines.push(indentComment(cs, ''));
+                }
+                else {
+                    lines.push(`... ${cs}`);
+                }
+            }
+            else {
+                lines.push('...');
+            }
+        }
+        else {
+            let dc = doc.comment;
+            if (dc && chompKeep)
+                dc = dc.replace(/^\n+/, '');
+            if (dc) {
+                if ((!chompKeep || contentComment) && lines[lines.length - 1] !== '')
+                    lines.push('');
+                lines.push(indentComment(commentString(dc), ''));
+            }
+        }
+        return lines.join('\n') + '\n';
+    }
+
+    let Document$1 = class Document {
+        constructor(value, replacer, options) {
+            /** A comment before this Document */
+            this.commentBefore = null;
+            /** A comment immediately after this Document */
+            this.comment = null;
+            /** Errors encountered during parsing. */
+            this.errors = [];
+            /** Warnings encountered during parsing. */
+            this.warnings = [];
+            Object.defineProperty(this, NODE_TYPE, { value: DOC });
+            let _replacer = null;
+            if (typeof replacer === 'function' || Array.isArray(replacer)) {
+                _replacer = replacer;
+            }
+            else if (options === undefined && replacer) {
+                options = replacer;
+                replacer = undefined;
+            }
+            const opt = Object.assign({
+                intAsBigInt: false,
+                keepSourceTokens: false,
+                logLevel: 'warn',
+                prettyErrors: true,
+                strict: true,
+                stringKeys: false,
+                uniqueKeys: true,
+                version: '1.2'
+            }, options);
+            this.options = opt;
+            let { version } = opt;
+            if (options?._directives) {
+                this.directives = options._directives.atDocument();
+                if (this.directives.yaml.explicit)
+                    version = this.directives.yaml.version;
+            }
+            else
+                this.directives = new Directives({ version });
+            this.setSchema(version, options);
+            // @ts-expect-error We can't really know that this matches Contents.
+            this.contents =
+                value === undefined ? null : this.createNode(value, _replacer, options);
+        }
+        /**
+         * Create a deep copy of this Document and its contents.
+         *
+         * Custom Node values that inherit from `Object` still refer to their original instances.
+         */
+        clone() {
+            const copy = Object.create(Document.prototype, {
+                [NODE_TYPE]: { value: DOC }
+            });
+            copy.commentBefore = this.commentBefore;
+            copy.comment = this.comment;
+            copy.errors = this.errors.slice();
+            copy.warnings = this.warnings.slice();
+            copy.options = Object.assign({}, this.options);
+            if (this.directives)
+                copy.directives = this.directives.clone();
+            copy.schema = this.schema.clone();
+            // @ts-expect-error We can't really know that this matches Contents.
+            copy.contents = isNode(this.contents)
+                ? this.contents.clone(copy.schema)
+                : this.contents;
+            if (this.range)
+                copy.range = this.range.slice();
+            return copy;
+        }
+        /** Adds a value to the document. */
+        add(value) {
+            if (assertCollection(this.contents))
+                this.contents.add(value);
+        }
+        /** Adds a value to the document. */
+        addIn(path, value) {
+            if (assertCollection(this.contents))
+                this.contents.addIn(path, value);
+        }
+        /**
+         * Create a new `Alias` node, ensuring that the target `node` has the required anchor.
+         *
+         * If `node` already has an anchor, `name` is ignored.
+         * Otherwise, the `node.anchor` value will be set to `name`,
+         * or if an anchor with that name is already present in the document,
+         * `name` will be used as a prefix for a new unique anchor.
+         * If `name` is undefined, the generated anchor will use 'a' as a prefix.
+         */
+        createAlias(node, name) {
+            if (!node.anchor) {
+                const prev = anchorNames(this);
+                node.anchor =
+                    // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
+                    !name || prev.has(name) ? findNewAnchor(name || 'a', prev) : name;
+            }
+            return new Alias(node.anchor);
+        }
+        createNode(value, replacer, options) {
+            let _replacer = undefined;
+            if (typeof replacer === 'function') {
+                value = replacer.call({ '': value }, '', value);
+                _replacer = replacer;
+            }
+            else if (Array.isArray(replacer)) {
+                const keyToStr = (v) => typeof v === 'number' || v instanceof String || v instanceof Number;
+                const asStr = replacer.filter(keyToStr).map(String);
+                if (asStr.length > 0)
+                    replacer = replacer.concat(asStr);
+                _replacer = replacer;
+            }
+            else if (options === undefined && replacer) {
+                options = replacer;
+                replacer = undefined;
+            }
+            const { aliasDuplicateObjects, anchorPrefix, flow, keepUndefined, onTagObj, tag } = options ?? {};
+            const { onAnchor, setAnchors, sourceObjects } = createNodeAnchors(this,
+            // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
+            anchorPrefix || 'a');
+            const ctx = {
+                aliasDuplicateObjects: aliasDuplicateObjects ?? true,
+                keepUndefined: keepUndefined ?? false,
+                onAnchor,
+                onTagObj,
+                replacer: _replacer,
+                schema: this.schema,
+                sourceObjects
+            };
+            const node = createNode(value, tag, ctx);
+            if (flow && isCollection$1(node))
+                node.flow = true;
+            setAnchors();
+            return node;
+        }
+        /**
+         * Convert a key and a value into a `Pair` using the current schema,
+         * recursively wrapping all values as `Scalar` or `Collection` nodes.
+         */
+        createPair(key, value, options = {}) {
+            const k = this.createNode(key, null, options);
+            const v = this.createNode(value, null, options);
+            return new Pair(k, v);
+        }
+        /**
+         * Removes a value from the document.
+         * @returns `true` if the item was found and removed.
+         */
+        delete(key) {
+            return assertCollection(this.contents) ? this.contents.delete(key) : false;
+        }
+        /**
+         * Removes a value from the document.
+         * @returns `true` if the item was found and removed.
+         */
+        deleteIn(path) {
+            if (isEmptyPath(path)) {
+                if (this.contents == null)
+                    return false;
+                // @ts-expect-error Presumed impossible if Strict extends false
+                this.contents = null;
+                return true;
+            }
+            return assertCollection(this.contents)
+                ? this.contents.deleteIn(path)
+                : false;
+        }
+        /**
+         * Returns item at `key`, or `undefined` if not found. By default unwraps
+         * scalar values from their surrounding node; to disable set `keepScalar` to
+         * `true` (collections are always returned intact).
+         */
+        get(key, keepScalar) {
+            return isCollection$1(this.contents)
+                ? this.contents.get(key, keepScalar)
+                : undefined;
+        }
+        /**
+         * Returns item at `path`, or `undefined` if not found. By default unwraps
+         * scalar values from their surrounding node; to disable set `keepScalar` to
+         * `true` (collections are always returned intact).
+         */
+        getIn(path, keepScalar) {
+            if (isEmptyPath(path))
+                return !keepScalar && isScalar$1(this.contents)
+                    ? this.contents.value
+                    : this.contents;
+            return isCollection$1(this.contents)
+                ? this.contents.getIn(path, keepScalar)
+                : undefined;
+        }
+        /**
+         * Checks if the document includes a value with the key `key`.
+         */
+        has(key) {
+            return isCollection$1(this.contents) ? this.contents.has(key) : false;
+        }
+        /**
+         * Checks if the document includes a value at `path`.
+         */
+        hasIn(path) {
+            if (isEmptyPath(path))
+                return this.contents !== undefined;
+            return isCollection$1(this.contents) ? this.contents.hasIn(path) : false;
+        }
+        /**
+         * Sets a value in this document. For `!!set`, `value` needs to be a
+         * boolean to add/remove the item from the set.
+         */
+        set(key, value) {
+            if (this.contents == null) {
+                // @ts-expect-error We can't really know that this matches Contents.
+                this.contents = collectionFromPath(this.schema, [key], value);
+            }
+            else if (assertCollection(this.contents)) {
+                this.contents.set(key, value);
+            }
+        }
+        /**
+         * Sets a value in this document. For `!!set`, `value` needs to be a
+         * boolean to add/remove the item from the set.
+         */
+        setIn(path, value) {
+            if (isEmptyPath(path)) {
+                // @ts-expect-error We can't really know that this matches Contents.
+                this.contents = value;
+            }
+            else if (this.contents == null) {
+                // @ts-expect-error We can't really know that this matches Contents.
+                this.contents = collectionFromPath(this.schema, Array.from(path), value);
+            }
+            else if (assertCollection(this.contents)) {
+                this.contents.setIn(path, value);
+            }
+        }
+        /**
+         * Change the YAML version and schema used by the document.
+         * A `null` version disables support for directives, explicit tags, anchors, and aliases.
+         * It also requires the `schema` option to be given as a `Schema` instance value.
+         *
+         * Overrides all previously set schema options.
+         */
+        setSchema(version, options = {}) {
+            if (typeof version === 'number')
+                version = String(version);
+            let opt;
+            switch (version) {
+                case '1.1':
+                    if (this.directives)
+                        this.directives.yaml.version = '1.1';
+                    else
+                        this.directives = new Directives({ version: '1.1' });
+                    opt = { resolveKnownTags: false, schema: 'yaml-1.1' };
+                    break;
+                case '1.2':
+                case 'next':
+                    if (this.directives)
+                        this.directives.yaml.version = version;
+                    else
+                        this.directives = new Directives({ version });
+                    opt = { resolveKnownTags: true, schema: 'core' };
+                    break;
+                case null:
+                    if (this.directives)
+                        delete this.directives;
+                    opt = null;
+                    break;
+                default: {
+                    const sv = JSON.stringify(version);
+                    throw new Error(`Expected '1.1', '1.2' or null as first argument, but found: ${sv}`);
+                }
+            }
+            // Not using `instanceof Schema` to allow for duck typing
+            if (options.schema instanceof Object)
+                this.schema = options.schema;
+            else if (opt)
+                this.schema = new Schema(Object.assign(opt, options));
+            else
+                throw new Error(`With a null YAML version, the { schema: Schema } option is required`);
+        }
+        // json & jsonArg are only used from toJSON()
+        toJS({ json, jsonArg, mapAsMap, maxAliasCount, onAnchor, reviver } = {}) {
+            const ctx = {
+                anchors: new Map(),
+                doc: this,
+                keep: !json,
+                mapAsMap: mapAsMap === true,
+                mapKeyWarned: false,
+                maxAliasCount: typeof maxAliasCount === 'number' ? maxAliasCount : 100
+            };
+            const res = toJS(this.contents, jsonArg ?? '', ctx);
+            if (typeof onAnchor === 'function')
+                for (const { count, res } of ctx.anchors.values())
+                    onAnchor(res, count);
+            return typeof reviver === 'function'
+                ? applyReviver(reviver, { '': res }, '', res)
+                : res;
+        }
+        /**
+         * A JSON representation of the document `contents`.
+         *
+         * @param jsonArg Used by `JSON.stringify` to indicate the array index or
+         *   property name.
+         */
+        toJSON(jsonArg, onAnchor) {
+            return this.toJS({ json: true, jsonArg, mapAsMap: false, onAnchor });
+        }
+        /** A YAML representation of the document. */
+        toString(options = {}) {
+            if (this.errors.length > 0)
+                throw new Error('Document with errors cannot be stringified');
+            if ('indent' in options &&
+                (!Number.isInteger(options.indent) || Number(options.indent) <= 0)) {
+                const s = JSON.stringify(options.indent);
+                throw new Error(`"indent" option must be a positive integer, not ${s}`);
+            }
+            return stringifyDocument(this, options);
+        }
+    };
+    function assertCollection(contents) {
+        if (isCollection$1(contents))
+            return true;
+        throw new Error('Expected a YAML collection as document contents');
+    }
+
+    class YAMLError extends Error {
+        constructor(name, pos, code, message) {
+            super();
+            this.name = name;
+            this.code = code;
+            this.message = message;
+            this.pos = pos;
+        }
+    }
+    class YAMLParseError extends YAMLError {
+        constructor(pos, code, message) {
+            super('YAMLParseError', pos, code, message);
+        }
+    }
+    class YAMLWarning extends YAMLError {
+        constructor(pos, code, message) {
+            super('YAMLWarning', pos, code, message);
+        }
+    }
+    const prettifyError = (src, lc) => (error) => {
+        if (error.pos[0] === -1)
+            return;
+        error.linePos = error.pos.map(pos => lc.linePos(pos));
+        const { line, col } = error.linePos[0];
+        error.message += ` at line ${line}, column ${col}`;
+        let ci = col - 1;
+        let lineStr = src
+            .substring(lc.lineStarts[line - 1], lc.lineStarts[line])
+            .replace(/[\n\r]+$/, '');
+        // Trim to max 80 chars, keeping col position near the middle
+        if (ci >= 60 && lineStr.length > 80) {
+            const trimStart = Math.min(ci - 39, lineStr.length - 79);
+            lineStr = '…' + lineStr.substring(trimStart);
+            ci -= trimStart - 1;
+        }
+        if (lineStr.length > 80)
+            lineStr = lineStr.substring(0, 79) + '…';
+        // Include previous line in context if pointing at line start
+        if (line > 1 && /^ *$/.test(lineStr.substring(0, ci))) {
+            // Regexp won't match if start is trimmed
+            let prev = src.substring(lc.lineStarts[line - 2], lc.lineStarts[line - 1]);
+            if (prev.length > 80)
+                prev = prev.substring(0, 79) + '…\n';
+            lineStr = prev + lineStr;
+        }
+        if (/[^ ]/.test(lineStr)) {
+            let count = 1;
+            const end = error.linePos[1];
+            if (end?.line === line && end.col > col) {
+                count = Math.max(1, Math.min(end.col - col, 80 - ci));
+            }
+            const pointer = ' '.repeat(ci) + '^'.repeat(count);
+            error.message += `:\n\n${lineStr}\n${pointer}\n`;
+        }
+    };
+
+    function resolveProps(tokens, { flow, indicator, next, offset, onError, parentIndent, startOnNewline }) {
+        let spaceBefore = false;
+        let atNewline = startOnNewline;
+        let hasSpace = startOnNewline;
+        let comment = '';
+        let commentSep = '';
+        let hasNewline = false;
+        let reqSpace = false;
+        let tab = null;
+        let anchor = null;
+        let tag = null;
+        let newlineAfterProp = null;
+        let comma = null;
+        let found = null;
+        let start = null;
+        for (const token of tokens) {
+            if (reqSpace) {
+                if (token.type !== 'space' &&
+                    token.type !== 'newline' &&
+                    token.type !== 'comma')
+                    onError(token.offset, 'MISSING_CHAR', 'Tags and anchors must be separated from the next token by white space');
+                reqSpace = false;
+            }
+            if (tab) {
+                if (atNewline && token.type !== 'comment' && token.type !== 'newline') {
+                    onError(tab, 'TAB_AS_INDENT', 'Tabs are not allowed as indentation');
+                }
+                tab = null;
+            }
+            switch (token.type) {
+                case 'space':
+                    // At the doc level, tabs at line start may be parsed
+                    // as leading white space rather than indentation.
+                    // In a flow collection, only the parser handles indent.
+                    if (!flow &&
+                        (indicator !== 'doc-start' || next?.type !== 'flow-collection') &&
+                        token.source.includes('\t')) {
+                        tab = token;
+                    }
+                    hasSpace = true;
+                    break;
+                case 'comment': {
+                    if (!hasSpace)
+                        onError(token, 'MISSING_CHAR', 'Comments must be separated from other tokens by white space characters');
+                    const cb = token.source.substring(1) || ' ';
+                    if (!comment)
+                        comment = cb;
+                    else
+                        comment += commentSep + cb;
+                    commentSep = '';
+                    atNewline = false;
+                    break;
+                }
+                case 'newline':
+                    if (atNewline) {
+                        if (comment)
+                            comment += token.source;
+                        else if (!found || indicator !== 'seq-item-ind')
+                            spaceBefore = true;
+                    }
+                    else
+                        commentSep += token.source;
+                    atNewline = true;
+                    hasNewline = true;
+                    if (anchor || tag)
+                        newlineAfterProp = token;
+                    hasSpace = true;
+                    break;
+                case 'anchor':
+                    if (anchor)
+                        onError(token, 'MULTIPLE_ANCHORS', 'A node can have at most one anchor');
+                    if (token.source.endsWith(':'))
+                        onError(token.offset + token.source.length - 1, 'BAD_ALIAS', 'Anchor ending in : is ambiguous', true);
+                    anchor = token;
+                    start ?? (start = token.offset);
+                    atNewline = false;
+                    hasSpace = false;
+                    reqSpace = true;
+                    break;
+                case 'tag': {
+                    if (tag)
+                        onError(token, 'MULTIPLE_TAGS', 'A node can have at most one tag');
+                    tag = token;
+                    start ?? (start = token.offset);
+                    atNewline = false;
+                    hasSpace = false;
+                    reqSpace = true;
+                    break;
+                }
+                case indicator:
+                    // Could here handle preceding comments differently
+                    if (anchor || tag)
+                        onError(token, 'BAD_PROP_ORDER', `Anchors and tags must be after the ${token.source} indicator`);
+                    if (found)
+                        onError(token, 'UNEXPECTED_TOKEN', `Unexpected ${token.source} in ${flow ?? 'collection'}`);
+                    found = token;
+                    atNewline =
+                        indicator === 'seq-item-ind' || indicator === 'explicit-key-ind';
+                    hasSpace = false;
+                    break;
+                case 'comma':
+                    if (flow) {
+                        if (comma)
+                            onError(token, 'UNEXPECTED_TOKEN', `Unexpected , in ${flow}`);
+                        comma = token;
+                        atNewline = false;
+                        hasSpace = false;
+                        break;
+                    }
+                // else fallthrough
+                default:
+                    onError(token, 'UNEXPECTED_TOKEN', `Unexpected ${token.type} token`);
+                    atNewline = false;
+                    hasSpace = false;
+            }
+        }
+        const last = tokens[tokens.length - 1];
+        const end = last ? last.offset + last.source.length : offset;
+        if (reqSpace &&
+            next &&
+            next.type !== 'space' &&
+            next.type !== 'newline' &&
+            next.type !== 'comma' &&
+            (next.type !== 'scalar' || next.source !== '')) {
+            onError(next.offset, 'MISSING_CHAR', 'Tags and anchors must be separated from the next token by white space');
+        }
+        if (tab &&
+            ((atNewline && tab.indent <= parentIndent) ||
+                next?.type === 'block-map' ||
+                next?.type === 'block-seq'))
+            onError(tab, 'TAB_AS_INDENT', 'Tabs are not allowed as indentation');
+        return {
+            comma,
+            found,
+            spaceBefore,
+            comment,
+            hasNewline,
+            anchor,
+            tag,
+            newlineAfterProp,
+            end,
+            start: start ?? end
+        };
+    }
+
+    function containsNewline(key) {
+        if (!key)
+            return null;
+        switch (key.type) {
+            case 'alias':
+            case 'scalar':
+            case 'double-quoted-scalar':
+            case 'single-quoted-scalar':
+                if (key.source.includes('\n'))
+                    return true;
+                if (key.end)
+                    for (const st of key.end)
+                        if (st.type === 'newline')
+                            return true;
+                return false;
+            case 'flow-collection':
+                for (const it of key.items) {
+                    for (const st of it.start)
+                        if (st.type === 'newline')
+                            return true;
+                    if (it.sep)
+                        for (const st of it.sep)
+                            if (st.type === 'newline')
+                                return true;
+                    if (containsNewline(it.key) || containsNewline(it.value))
+                        return true;
+                }
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    function flowIndentCheck(indent, fc, onError) {
+        if (fc?.type === 'flow-collection') {
+            const end = fc.end[0];
+            if (end.indent === indent &&
+                (end.source === ']' || end.source === '}') &&
+                containsNewline(fc)) {
+                const msg = 'Flow end indicator should be more indented than parent';
+                onError(end, 'BAD_INDENT', msg, true);
+            }
+        }
+    }
+
+    function mapIncludes(ctx, items, search) {
+        const { uniqueKeys } = ctx.options;
+        if (uniqueKeys === false)
+            return false;
+        const isEqual = typeof uniqueKeys === 'function'
+            ? uniqueKeys
+            : (a, b) => a === b || (isScalar$1(a) && isScalar$1(b) && a.value === b.value);
+        return items.some(pair => isEqual(pair.key, search));
+    }
+
+    const startColMsg = 'All mapping items must start at the same column';
+    function resolveBlockMap({ composeNode, composeEmptyNode }, ctx, bm, onError, tag) {
+        const NodeClass = tag?.nodeClass ?? YAMLMap;
+        const map = new NodeClass(ctx.schema);
+        if (ctx.atRoot)
+            ctx.atRoot = false;
+        let offset = bm.offset;
+        let commentEnd = null;
+        for (const collItem of bm.items) {
+            const { start, key, sep, value } = collItem;
+            // key properties
+            const keyProps = resolveProps(start, {
+                indicator: 'explicit-key-ind',
+                next: key ?? sep?.[0],
+                offset,
+                onError,
+                parentIndent: bm.indent,
+                startOnNewline: true
+            });
+            const implicitKey = !keyProps.found;
+            if (implicitKey) {
+                if (key) {
+                    if (key.type === 'block-seq')
+                        onError(offset, 'BLOCK_AS_IMPLICIT_KEY', 'A block sequence may not be used as an implicit map key');
+                    else if ('indent' in key && key.indent !== bm.indent)
+                        onError(offset, 'BAD_INDENT', startColMsg);
+                }
+                if (!keyProps.anchor && !keyProps.tag && !sep) {
+                    commentEnd = keyProps.end;
+                    if (keyProps.comment) {
+                        if (map.comment)
+                            map.comment += '\n' + keyProps.comment;
+                        else
+                            map.comment = keyProps.comment;
+                    }
+                    continue;
+                }
+                if (keyProps.newlineAfterProp || containsNewline(key)) {
+                    onError(key ?? start[start.length - 1], 'MULTILINE_IMPLICIT_KEY', 'Implicit keys need to be on a single line');
+                }
+            }
+            else if (keyProps.found?.indent !== bm.indent) {
+                onError(offset, 'BAD_INDENT', startColMsg);
+            }
+            // key value
+            ctx.atKey = true;
+            const keyStart = keyProps.end;
+            const keyNode = key
+                ? composeNode(ctx, key, keyProps, onError)
+                : composeEmptyNode(ctx, keyStart, start, null, keyProps, onError);
+            if (ctx.schema.compat)
+                flowIndentCheck(bm.indent, key, onError);
+            ctx.atKey = false;
+            if (mapIncludes(ctx, map.items, keyNode))
+                onError(keyStart, 'DUPLICATE_KEY', 'Map keys must be unique');
+            // value properties
+            const valueProps = resolveProps(sep ?? [], {
+                indicator: 'map-value-ind',
+                next: value,
+                offset: keyNode.range[2],
+                onError,
+                parentIndent: bm.indent,
+                startOnNewline: !key || key.type === 'block-scalar'
+            });
+            offset = valueProps.end;
+            if (valueProps.found) {
+                if (implicitKey) {
+                    if (value?.type === 'block-map' && !valueProps.hasNewline)
+                        onError(offset, 'BLOCK_AS_IMPLICIT_KEY', 'Nested mappings are not allowed in compact mappings');
+                    if (ctx.options.strict &&
+                        keyProps.start < valueProps.found.offset - 1024)
+                        onError(keyNode.range, 'KEY_OVER_1024_CHARS', 'The : indicator must be at most 1024 chars after the start of an implicit block mapping key');
+                }
+                // value value
+                const valueNode = value
+                    ? composeNode(ctx, value, valueProps, onError)
+                    : composeEmptyNode(ctx, offset, sep, null, valueProps, onError);
+                if (ctx.schema.compat)
+                    flowIndentCheck(bm.indent, value, onError);
+                offset = valueNode.range[2];
+                const pair = new Pair(keyNode, valueNode);
+                if (ctx.options.keepSourceTokens)
+                    pair.srcToken = collItem;
+                map.items.push(pair);
+            }
+            else {
+                // key with no value
+                if (implicitKey)
+                    onError(keyNode.range, 'MISSING_CHAR', 'Implicit map keys need to be followed by map values');
+                if (valueProps.comment) {
+                    if (keyNode.comment)
+                        keyNode.comment += '\n' + valueProps.comment;
+                    else
+                        keyNode.comment = valueProps.comment;
+                }
+                const pair = new Pair(keyNode);
+                if (ctx.options.keepSourceTokens)
+                    pair.srcToken = collItem;
+                map.items.push(pair);
+            }
+        }
+        if (commentEnd && commentEnd < offset)
+            onError(commentEnd, 'IMPOSSIBLE', 'Map comment with trailing content');
+        map.range = [bm.offset, offset, commentEnd ?? offset];
+        return map;
+    }
+
+    function resolveBlockSeq({ composeNode, composeEmptyNode }, ctx, bs, onError, tag) {
+        const NodeClass = tag?.nodeClass ?? YAMLSeq;
+        const seq = new NodeClass(ctx.schema);
+        if (ctx.atRoot)
+            ctx.atRoot = false;
+        if (ctx.atKey)
+            ctx.atKey = false;
+        let offset = bs.offset;
+        let commentEnd = null;
+        for (const { start, value } of bs.items) {
+            const props = resolveProps(start, {
+                indicator: 'seq-item-ind',
+                next: value,
+                offset,
+                onError,
+                parentIndent: bs.indent,
+                startOnNewline: true
+            });
+            if (!props.found) {
+                if (props.anchor || props.tag || value) {
+                    if (value?.type === 'block-seq')
+                        onError(props.end, 'BAD_INDENT', 'All sequence items must start at the same column');
+                    else
+                        onError(offset, 'MISSING_CHAR', 'Sequence item without - indicator');
+                }
+                else {
+                    commentEnd = props.end;
+                    if (props.comment)
+                        seq.comment = props.comment;
+                    continue;
+                }
+            }
+            const node = value
+                ? composeNode(ctx, value, props, onError)
+                : composeEmptyNode(ctx, props.end, start, null, props, onError);
+            if (ctx.schema.compat)
+                flowIndentCheck(bs.indent, value, onError);
+            offset = node.range[2];
+            seq.items.push(node);
+        }
+        seq.range = [bs.offset, offset, commentEnd ?? offset];
+        return seq;
+    }
+
+    function resolveEnd(end, offset, reqSpace, onError) {
+        let comment = '';
+        if (end) {
+            let hasSpace = false;
+            let sep = '';
+            for (const token of end) {
+                const { source, type } = token;
+                switch (type) {
+                    case 'space':
+                        hasSpace = true;
+                        break;
+                    case 'comment': {
+                        if (reqSpace && !hasSpace)
+                            onError(token, 'MISSING_CHAR', 'Comments must be separated from other tokens by white space characters');
+                        const cb = source.substring(1) || ' ';
+                        if (!comment)
+                            comment = cb;
+                        else
+                            comment += sep + cb;
+                        sep = '';
+                        break;
+                    }
+                    case 'newline':
+                        if (comment)
+                            sep += source;
+                        hasSpace = true;
+                        break;
+                    default:
+                        onError(token, 'UNEXPECTED_TOKEN', `Unexpected ${type} at node end`);
+                }
+                offset += source.length;
+            }
+        }
+        return { comment, offset };
+    }
+
+    const blockMsg = 'Block collections are not allowed within flow collections';
+    const isBlock = (token) => token && (token.type === 'block-map' || token.type === 'block-seq');
+    function resolveFlowCollection({ composeNode, composeEmptyNode }, ctx, fc, onError, tag) {
+        const isMap = fc.start.source === '{';
+        const fcName = isMap ? 'flow map' : 'flow sequence';
+        const NodeClass = (tag?.nodeClass ?? (isMap ? YAMLMap : YAMLSeq));
+        const coll = new NodeClass(ctx.schema);
+        coll.flow = true;
+        const atRoot = ctx.atRoot;
+        if (atRoot)
+            ctx.atRoot = false;
+        if (ctx.atKey)
+            ctx.atKey = false;
+        let offset = fc.offset + fc.start.source.length;
+        for (let i = 0; i < fc.items.length; ++i) {
+            const collItem = fc.items[i];
+            const { start, key, sep, value } = collItem;
+            const props = resolveProps(start, {
+                flow: fcName,
+                indicator: 'explicit-key-ind',
+                next: key ?? sep?.[0],
+                offset,
+                onError,
+                parentIndent: fc.indent,
+                startOnNewline: false
+            });
+            if (!props.found) {
+                if (!props.anchor && !props.tag && !sep && !value) {
+                    if (i === 0 && props.comma)
+                        onError(props.comma, 'UNEXPECTED_TOKEN', `Unexpected , in ${fcName}`);
+                    else if (i < fc.items.length - 1)
+                        onError(props.start, 'UNEXPECTED_TOKEN', `Unexpected empty item in ${fcName}`);
+                    if (props.comment) {
+                        if (coll.comment)
+                            coll.comment += '\n' + props.comment;
+                        else
+                            coll.comment = props.comment;
+                    }
+                    offset = props.end;
+                    continue;
+                }
+                if (!isMap && ctx.options.strict && containsNewline(key))
+                    onError(key, // checked by containsNewline()
+                    'MULTILINE_IMPLICIT_KEY', 'Implicit keys of flow sequence pairs need to be on a single line');
+            }
+            if (i === 0) {
+                if (props.comma)
+                    onError(props.comma, 'UNEXPECTED_TOKEN', `Unexpected , in ${fcName}`);
+            }
+            else {
+                if (!props.comma)
+                    onError(props.start, 'MISSING_CHAR', `Missing , between ${fcName} items`);
+                if (props.comment) {
+                    let prevItemComment = '';
+                    loop: for (const st of start) {
+                        switch (st.type) {
+                            case 'comma':
+                            case 'space':
+                                break;
+                            case 'comment':
+                                prevItemComment = st.source.substring(1);
+                                break loop;
+                            default:
+                                break loop;
+                        }
+                    }
+                    if (prevItemComment) {
+                        let prev = coll.items[coll.items.length - 1];
+                        if (isPair(prev))
+                            prev = prev.value ?? prev.key;
+                        if (prev.comment)
+                            prev.comment += '\n' + prevItemComment;
+                        else
+                            prev.comment = prevItemComment;
+                        props.comment = props.comment.substring(prevItemComment.length + 1);
+                    }
+                }
+            }
+            if (!isMap && !sep && !props.found) {
+                // item is a value in a seq
+                // → key & sep are empty, start does not include ? or :
+                const valueNode = value
+                    ? composeNode(ctx, value, props, onError)
+                    : composeEmptyNode(ctx, props.end, sep, null, props, onError);
+                coll.items.push(valueNode);
+                offset = valueNode.range[2];
+                if (isBlock(value))
+                    onError(valueNode.range, 'BLOCK_IN_FLOW', blockMsg);
+            }
+            else {
+                // item is a key+value pair
+                // key value
+                ctx.atKey = true;
+                const keyStart = props.end;
+                const keyNode = key
+                    ? composeNode(ctx, key, props, onError)
+                    : composeEmptyNode(ctx, keyStart, start, null, props, onError);
+                if (isBlock(key))
+                    onError(keyNode.range, 'BLOCK_IN_FLOW', blockMsg);
+                ctx.atKey = false;
+                // value properties
+                const valueProps = resolveProps(sep ?? [], {
+                    flow: fcName,
+                    indicator: 'map-value-ind',
+                    next: value,
+                    offset: keyNode.range[2],
+                    onError,
+                    parentIndent: fc.indent,
+                    startOnNewline: false
+                });
+                if (valueProps.found) {
+                    if (!isMap && !props.found && ctx.options.strict) {
+                        if (sep)
+                            for (const st of sep) {
+                                if (st === valueProps.found)
+                                    break;
+                                if (st.type === 'newline') {
+                                    onError(st, 'MULTILINE_IMPLICIT_KEY', 'Implicit keys of flow sequence pairs need to be on a single line');
+                                    break;
+                                }
+                            }
+                        if (props.start < valueProps.found.offset - 1024)
+                            onError(valueProps.found, 'KEY_OVER_1024_CHARS', 'The : indicator must be at most 1024 chars after the start of an implicit flow sequence key');
+                    }
+                }
+                else if (value) {
+                    if ('source' in value && value.source?.[0] === ':')
+                        onError(value, 'MISSING_CHAR', `Missing space after : in ${fcName}`);
+                    else
+                        onError(valueProps.start, 'MISSING_CHAR', `Missing , or : between ${fcName} items`);
+                }
+                // value value
+                const valueNode = value
+                    ? composeNode(ctx, value, valueProps, onError)
+                    : valueProps.found
+                        ? composeEmptyNode(ctx, valueProps.end, sep, null, valueProps, onError)
+                        : null;
+                if (valueNode) {
+                    if (isBlock(value))
+                        onError(valueNode.range, 'BLOCK_IN_FLOW', blockMsg);
+                }
+                else if (valueProps.comment) {
+                    if (keyNode.comment)
+                        keyNode.comment += '\n' + valueProps.comment;
+                    else
+                        keyNode.comment = valueProps.comment;
+                }
+                const pair = new Pair(keyNode, valueNode);
+                if (ctx.options.keepSourceTokens)
+                    pair.srcToken = collItem;
+                if (isMap) {
+                    const map = coll;
+                    if (mapIncludes(ctx, map.items, keyNode))
+                        onError(keyStart, 'DUPLICATE_KEY', 'Map keys must be unique');
+                    map.items.push(pair);
+                }
+                else {
+                    const map = new YAMLMap(ctx.schema);
+                    map.flow = true;
+                    map.items.push(pair);
+                    const endRange = (valueNode ?? keyNode).range;
+                    map.range = [keyNode.range[0], endRange[1], endRange[2]];
+                    coll.items.push(map);
+                }
+                offset = valueNode ? valueNode.range[2] : valueProps.end;
+            }
+        }
+        const expectedEnd = isMap ? '}' : ']';
+        const [ce, ...ee] = fc.end;
+        let cePos = offset;
+        if (ce?.source === expectedEnd)
+            cePos = ce.offset + ce.source.length;
+        else {
+            const name = fcName[0].toUpperCase() + fcName.substring(1);
+            const msg = atRoot
+                ? `${name} must end with a ${expectedEnd}`
+                : `${name} in block collection must be sufficiently indented and end with a ${expectedEnd}`;
+            onError(offset, atRoot ? 'MISSING_CHAR' : 'BAD_INDENT', msg);
+            if (ce && ce.source.length !== 1)
+                ee.unshift(ce);
+        }
+        if (ee.length > 0) {
+            const end = resolveEnd(ee, cePos, ctx.options.strict, onError);
+            if (end.comment) {
+                if (coll.comment)
+                    coll.comment += '\n' + end.comment;
+                else
+                    coll.comment = end.comment;
+            }
+            coll.range = [fc.offset, cePos, end.offset];
+        }
+        else {
+            coll.range = [fc.offset, cePos, cePos];
+        }
+        return coll;
+    }
+
+    function resolveCollection(CN, ctx, token, onError, tagName, tag) {
+        const coll = token.type === 'block-map'
+            ? resolveBlockMap(CN, ctx, token, onError, tag)
+            : token.type === 'block-seq'
+                ? resolveBlockSeq(CN, ctx, token, onError, tag)
+                : resolveFlowCollection(CN, ctx, token, onError, tag);
+        const Coll = coll.constructor;
+        // If we got a tagName matching the class, or the tag name is '!',
+        // then use the tagName from the node class used to create it.
+        if (tagName === '!' || tagName === Coll.tagName) {
+            coll.tag = Coll.tagName;
+            return coll;
+        }
+        if (tagName)
+            coll.tag = tagName;
+        return coll;
+    }
+    function composeCollection(CN, ctx, token, props, onError) {
+        const tagToken = props.tag;
+        const tagName = !tagToken
+            ? null
+            : ctx.directives.tagName(tagToken.source, msg => onError(tagToken, 'TAG_RESOLVE_FAILED', msg));
+        if (token.type === 'block-seq') {
+            const { anchor, newlineAfterProp: nl } = props;
+            const lastProp = anchor && tagToken
+                ? anchor.offset > tagToken.offset
+                    ? anchor
+                    : tagToken
+                : (anchor ?? tagToken);
+            if (lastProp && (!nl || nl.offset < lastProp.offset)) {
+                const message = 'Missing newline after block sequence props';
+                onError(lastProp, 'MISSING_CHAR', message);
+            }
+        }
+        const expType = token.type === 'block-map'
+            ? 'map'
+            : token.type === 'block-seq'
+                ? 'seq'
+                : token.start.source === '{'
+                    ? 'map'
+                    : 'seq';
+        // shortcut: check if it's a generic YAMLMap or YAMLSeq
+        // before jumping into the custom tag logic.
+        if (!tagToken ||
+            !tagName ||
+            tagName === '!' ||
+            (tagName === YAMLMap.tagName && expType === 'map') ||
+            (tagName === YAMLSeq.tagName && expType === 'seq')) {
+            return resolveCollection(CN, ctx, token, onError, tagName);
+        }
+        let tag = ctx.schema.tags.find(t => t.tag === tagName && t.collection === expType);
+        if (!tag) {
+            const kt = ctx.schema.knownTags[tagName];
+            if (kt?.collection === expType) {
+                ctx.schema.tags.push(Object.assign({}, kt, { default: false }));
+                tag = kt;
+            }
+            else {
+                if (kt) {
+                    onError(tagToken, 'BAD_COLLECTION_TYPE', `${kt.tag} used for ${expType} collection, but expects ${kt.collection ?? 'scalar'}`, true);
+                }
+                else {
+                    onError(tagToken, 'TAG_RESOLVE_FAILED', `Unresolved tag: ${tagName}`, true);
+                }
+                return resolveCollection(CN, ctx, token, onError, tagName);
+            }
+        }
+        const coll = resolveCollection(CN, ctx, token, onError, tagName, tag);
+        const res = tag.resolve?.(coll, msg => onError(tagToken, 'TAG_RESOLVE_FAILED', msg), ctx.options) ?? coll;
+        const node = isNode(res)
+            ? res
+            : new Scalar(res);
+        node.range = coll.range;
+        node.tag = tagName;
+        if (tag?.format)
+            node.format = tag.format;
+        return node;
+    }
+
+    function resolveBlockScalar(ctx, scalar, onError) {
+        const start = scalar.offset;
+        const header = parseBlockScalarHeader(scalar, ctx.options.strict, onError);
+        if (!header)
+            return { value: '', type: null, comment: '', range: [start, start, start] };
+        const type = header.mode === '>' ? Scalar.BLOCK_FOLDED : Scalar.BLOCK_LITERAL;
+        const lines = scalar.source ? splitLines(scalar.source) : [];
+        // determine the end of content & start of chomping
+        let chompStart = lines.length;
+        for (let i = lines.length - 1; i >= 0; --i) {
+            const content = lines[i][1];
+            if (content === '' || content === '\r')
+                chompStart = i;
+            else
+                break;
+        }
+        // shortcut for empty contents
+        if (chompStart === 0) {
+            const value = header.chomp === '+' && lines.length > 0
+                ? '\n'.repeat(Math.max(1, lines.length - 1))
+                : '';
+            let end = start + header.length;
+            if (scalar.source)
+                end += scalar.source.length;
+            return { value, type, comment: header.comment, range: [start, end, end] };
+        }
+        // find the indentation level to trim from start
+        let trimIndent = scalar.indent + header.indent;
+        let offset = scalar.offset + header.length;
+        let contentStart = 0;
+        for (let i = 0; i < chompStart; ++i) {
+            const [indent, content] = lines[i];
+            if (content === '' || content === '\r') {
+                if (header.indent === 0 && indent.length > trimIndent)
+                    trimIndent = indent.length;
+            }
+            else {
+                if (indent.length < trimIndent) {
+                    const message = 'Block scalars with more-indented leading empty lines must use an explicit indentation indicator';
+                    onError(offset + indent.length, 'MISSING_CHAR', message);
+                }
+                if (header.indent === 0)
+                    trimIndent = indent.length;
+                contentStart = i;
+                if (trimIndent === 0 && !ctx.atRoot) {
+                    const message = 'Block scalar values in collections must be indented';
+                    onError(offset, 'BAD_INDENT', message);
+                }
+                break;
+            }
+            offset += indent.length + content.length + 1;
+        }
+        // include trailing more-indented empty lines in content
+        for (let i = lines.length - 1; i >= chompStart; --i) {
+            if (lines[i][0].length > trimIndent)
+                chompStart = i + 1;
+        }
+        let value = '';
+        let sep = '';
+        let prevMoreIndented = false;
+        // leading whitespace is kept intact
+        for (let i = 0; i < contentStart; ++i)
+            value += lines[i][0].slice(trimIndent) + '\n';
+        for (let i = contentStart; i < chompStart; ++i) {
+            let [indent, content] = lines[i];
+            offset += indent.length + content.length + 1;
+            const crlf = content[content.length - 1] === '\r';
+            if (crlf)
+                content = content.slice(0, -1);
+            /* istanbul ignore if already caught in lexer */
+            if (content && indent.length < trimIndent) {
+                const src = header.indent
+                    ? 'explicit indentation indicator'
+                    : 'first line';
+                const message = `Block scalar lines must not be less indented than their ${src}`;
+                onError(offset - content.length - (crlf ? 2 : 1), 'BAD_INDENT', message);
+                indent = '';
+            }
+            if (type === Scalar.BLOCK_LITERAL) {
+                value += sep + indent.slice(trimIndent) + content;
+                sep = '\n';
+            }
+            else if (indent.length > trimIndent || content[0] === '\t') {
+                // more-indented content within a folded block
+                if (sep === ' ')
+                    sep = '\n';
+                else if (!prevMoreIndented && sep === '\n')
+                    sep = '\n\n';
+                value += sep + indent.slice(trimIndent) + content;
+                sep = '\n';
+                prevMoreIndented = true;
+            }
+            else if (content === '') {
+                // empty line
+                if (sep === '\n')
+                    value += '\n';
+                else
+                    sep = '\n';
+            }
+            else {
+                value += sep + content;
+                sep = ' ';
+                prevMoreIndented = false;
+            }
+        }
+        switch (header.chomp) {
+            case '-':
+                break;
+            case '+':
+                for (let i = chompStart; i < lines.length; ++i)
+                    value += '\n' + lines[i][0].slice(trimIndent);
+                if (value[value.length - 1] !== '\n')
+                    value += '\n';
+                break;
+            default:
+                value += '\n';
+        }
+        const end = start + header.length + scalar.source.length;
+        return { value, type, comment: header.comment, range: [start, end, end] };
+    }
+    function parseBlockScalarHeader({ offset, props }, strict, onError) {
+        /* istanbul ignore if should not happen */
+        if (props[0].type !== 'block-scalar-header') {
+            onError(props[0], 'IMPOSSIBLE', 'Block scalar header not found');
+            return null;
+        }
+        const { source } = props[0];
+        const mode = source[0];
+        let indent = 0;
+        let chomp = '';
+        let error = -1;
+        for (let i = 1; i < source.length; ++i) {
+            const ch = source[i];
+            if (!chomp && (ch === '-' || ch === '+'))
+                chomp = ch;
+            else {
+                const n = Number(ch);
+                if (!indent && n)
+                    indent = n;
+                else if (error === -1)
+                    error = offset + i;
+            }
+        }
+        if (error !== -1)
+            onError(error, 'UNEXPECTED_TOKEN', `Block scalar header includes extra characters: ${source}`);
+        let hasSpace = false;
+        let comment = '';
+        let length = source.length;
+        for (let i = 1; i < props.length; ++i) {
+            const token = props[i];
+            switch (token.type) {
+                case 'space':
+                    hasSpace = true;
+                // fallthrough
+                case 'newline':
+                    length += token.source.length;
+                    break;
+                case 'comment':
+                    if (strict && !hasSpace) {
+                        const message = 'Comments must be separated from other tokens by white space characters';
+                        onError(token, 'MISSING_CHAR', message);
+                    }
+                    length += token.source.length;
+                    comment = token.source.substring(1);
+                    break;
+                case 'error':
+                    onError(token, 'UNEXPECTED_TOKEN', token.message);
+                    length += token.source.length;
+                    break;
+                /* istanbul ignore next should not happen */
+                default: {
+                    const message = `Unexpected token in block scalar header: ${token.type}`;
+                    onError(token, 'UNEXPECTED_TOKEN', message);
+                    const ts = token.source;
+                    if (ts && typeof ts === 'string')
+                        length += ts.length;
+                }
+            }
+        }
+        return { mode, indent, chomp, comment, length };
+    }
+    /** @returns Array of lines split up as `[indent, content]` */
+    function splitLines(source) {
+        const split = source.split(/\n( *)/);
+        const first = split[0];
+        const m = first.match(/^( *)/);
+        const line0 = m?.[1]
+            ? [m[1], first.slice(m[1].length)]
+            : ['', first];
+        const lines = [line0];
+        for (let i = 1; i < split.length; i += 2)
+            lines.push([split[i], split[i + 1]]);
+        return lines;
+    }
+
+    function resolveFlowScalar(scalar, strict, onError) {
+        const { offset, type, source, end } = scalar;
+        let _type;
+        let value;
+        const _onError = (rel, code, msg) => onError(offset + rel, code, msg);
+        switch (type) {
+            case 'scalar':
+                _type = Scalar.PLAIN;
+                value = plainValue(source, _onError);
+                break;
+            case 'single-quoted-scalar':
+                _type = Scalar.QUOTE_SINGLE;
+                value = singleQuotedValue(source, _onError);
+                break;
+            case 'double-quoted-scalar':
+                _type = Scalar.QUOTE_DOUBLE;
+                value = doubleQuotedValue(source, _onError);
+                break;
+            /* istanbul ignore next should not happen */
+            default:
+                onError(scalar, 'UNEXPECTED_TOKEN', `Expected a flow scalar value, but found: ${type}`);
+                return {
+                    value: '',
+                    type: null,
+                    comment: '',
+                    range: [offset, offset + source.length, offset + source.length]
+                };
+        }
+        const valueEnd = offset + source.length;
+        const re = resolveEnd(end, valueEnd, strict, onError);
+        return {
+            value,
+            type: _type,
+            comment: re.comment,
+            range: [offset, valueEnd, re.offset]
+        };
+    }
+    function plainValue(source, onError) {
+        let badChar = '';
+        switch (source[0]) {
+            /* istanbul ignore next should not happen */
+            case '\t':
+                badChar = 'a tab character';
+                break;
+            case ',':
+                badChar = 'flow indicator character ,';
+                break;
+            case '%':
+                badChar = 'directive indicator character %';
+                break;
+            case '|':
+            case '>': {
+                badChar = `block scalar indicator ${source[0]}`;
+                break;
+            }
+            case '@':
+            case '`': {
+                badChar = `reserved character ${source[0]}`;
+                break;
+            }
+        }
+        if (badChar)
+            onError(0, 'BAD_SCALAR_START', `Plain value cannot start with ${badChar}`);
+        return foldLines(source);
+    }
+    function singleQuotedValue(source, onError) {
+        if (source[source.length - 1] !== "'" || source.length === 1)
+            onError(source.length, 'MISSING_CHAR', "Missing closing 'quote");
+        return foldLines(source.slice(1, -1)).replace(/''/g, "'");
+    }
+    function foldLines(source) {
+        /**
+         * The negative lookbehind here and in the `re` RegExp is to
+         * prevent causing a polynomial search time in certain cases.
+         *
+         * The try-catch is for Safari, which doesn't support this yet:
+         * https://caniuse.com/js-regexp-lookbehind
+         */
+        let first, line;
+        try {
+            first = new RegExp('(.*?)(?<![ \t])[ \t]*\r?\n', 'sy');
+            line = new RegExp('[ \t]*(.*?)(?:(?<![ \t])[ \t]*)?\r?\n', 'sy');
+        }
+        catch {
+            first = /(.*?)[ \t]*\r?\n/sy;
+            line = /[ \t]*(.*?)[ \t]*\r?\n/sy;
+        }
+        let match = first.exec(source);
+        if (!match)
+            return source;
+        let res = match[1];
+        let sep = ' ';
+        let pos = first.lastIndex;
+        line.lastIndex = pos;
+        while ((match = line.exec(source))) {
+            if (match[1] === '') {
+                if (sep === '\n')
+                    res += sep;
+                else
+                    sep = '\n';
+            }
+            else {
+                res += sep + match[1];
+                sep = ' ';
+            }
+            pos = line.lastIndex;
+        }
+        const last = /[ \t]*(.*)/sy;
+        last.lastIndex = pos;
+        match = last.exec(source);
+        return res + sep + (match?.[1] ?? '');
+    }
+    function doubleQuotedValue(source, onError) {
+        let res = '';
+        for (let i = 1; i < source.length - 1; ++i) {
+            const ch = source[i];
+            if (ch === '\r' && source[i + 1] === '\n')
+                continue;
+            if (ch === '\n') {
+                const { fold, offset } = foldNewline(source, i);
+                res += fold;
+                i = offset;
+            }
+            else if (ch === '\\') {
+                let next = source[++i];
+                const cc = escapeCodes[next];
+                if (cc)
+                    res += cc;
+                else if (next === '\n') {
+                    // skip escaped newlines, but still trim the following line
+                    next = source[i + 1];
+                    while (next === ' ' || next === '\t')
+                        next = source[++i + 1];
+                }
+                else if (next === '\r' && source[i + 1] === '\n') {
+                    // skip escaped CRLF newlines, but still trim the following line
+                    next = source[++i + 1];
+                    while (next === ' ' || next === '\t')
+                        next = source[++i + 1];
+                }
+                else if (next === 'x' || next === 'u' || next === 'U') {
+                    const length = next === 'x' ? 2 : next === 'u' ? 4 : 8;
+                    res += parseCharCode(source, i + 1, length, onError);
+                    i += length;
+                }
+                else {
+                    const raw = source.substr(i - 1, 2);
+                    onError(i - 1, 'BAD_DQ_ESCAPE', `Invalid escape sequence ${raw}`);
+                    res += raw;
+                }
+            }
+            else if (ch === ' ' || ch === '\t') {
+                // trim trailing whitespace
+                const wsStart = i;
+                let next = source[i + 1];
+                while (next === ' ' || next === '\t')
+                    next = source[++i + 1];
+                if (next !== '\n' && !(next === '\r' && source[i + 2] === '\n'))
+                    res += i > wsStart ? source.slice(wsStart, i + 1) : ch;
+            }
+            else {
+                res += ch;
+            }
+        }
+        if (source[source.length - 1] !== '"' || source.length === 1)
+            onError(source.length, 'MISSING_CHAR', 'Missing closing "quote');
+        return res;
+    }
+    /**
+     * Fold a single newline into a space, multiple newlines to N - 1 newlines.
+     * Presumes `source[offset] === '\n'`
+     */
+    function foldNewline(source, offset) {
+        let fold = '';
+        let ch = source[offset + 1];
+        while (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+            if (ch === '\r' && source[offset + 2] !== '\n')
+                break;
+            if (ch === '\n')
+                fold += '\n';
+            offset += 1;
+            ch = source[offset + 1];
+        }
+        if (!fold)
+            fold = ' ';
+        return { fold, offset };
+    }
+    const escapeCodes = {
+        '0': '\0', // null character
+        a: '\x07', // bell character
+        b: '\b', // backspace
+        e: '\x1b', // escape character
+        f: '\f', // form feed
+        n: '\n', // line feed
+        r: '\r', // carriage return
+        t: '\t', // horizontal tab
+        v: '\v', // vertical tab
+        N: '\u0085', // Unicode next line
+        _: '\u00a0', // Unicode non-breaking space
+        L: '\u2028', // Unicode line separator
+        P: '\u2029', // Unicode paragraph separator
+        ' ': ' ',
+        '"': '"',
+        '/': '/',
+        '\\': '\\',
+        '\t': '\t'
+    };
+    function parseCharCode(source, offset, length, onError) {
+        const cc = source.substr(offset, length);
+        const ok = cc.length === length && /^[0-9a-fA-F]+$/.test(cc);
+        const code = ok ? parseInt(cc, 16) : NaN;
+        try {
+            return String.fromCodePoint(code);
+        }
+        catch {
+            const raw = source.substr(offset - 2, length + 2);
+            onError(offset - 2, 'BAD_DQ_ESCAPE', `Invalid escape sequence ${raw}`);
+            return raw;
+        }
+    }
+
+    function composeScalar(ctx, token, tagToken, onError) {
+        const { value, type, comment, range } = token.type === 'block-scalar'
+            ? resolveBlockScalar(ctx, token, onError)
+            : resolveFlowScalar(token, ctx.options.strict, onError);
+        const tagName = tagToken
+            ? ctx.directives.tagName(tagToken.source, msg => onError(tagToken, 'TAG_RESOLVE_FAILED', msg))
+            : null;
+        let tag;
+        if (ctx.options.stringKeys && ctx.atKey) {
+            tag = ctx.schema[SCALAR$1];
+        }
+        else if (tagName)
+            tag = findScalarTagByName(ctx.schema, value, tagName, tagToken, onError);
+        else if (token.type === 'scalar')
+            tag = findScalarTagByTest(ctx, value, token, onError);
+        else
+            tag = ctx.schema[SCALAR$1];
+        let scalar;
+        try {
+            const res = tag.resolve(value, msg => onError(tagToken ?? token, 'TAG_RESOLVE_FAILED', msg), ctx.options);
+            scalar = isScalar$1(res) ? res : new Scalar(res);
+        }
+        catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            onError(tagToken ?? token, 'TAG_RESOLVE_FAILED', msg);
+            scalar = new Scalar(value);
+        }
+        scalar.range = range;
+        scalar.source = value;
+        if (type)
+            scalar.type = type;
+        if (tagName)
+            scalar.tag = tagName;
+        if (tag.format)
+            scalar.format = tag.format;
+        if (comment)
+            scalar.comment = comment;
+        return scalar;
+    }
+    function findScalarTagByName(schema, value, tagName, tagToken, onError) {
+        if (tagName === '!')
+            return schema[SCALAR$1]; // non-specific tag
+        const matchWithTest = [];
+        for (const tag of schema.tags) {
+            if (!tag.collection && tag.tag === tagName) {
+                if (tag.default && tag.test)
+                    matchWithTest.push(tag);
+                else
+                    return tag;
+            }
+        }
+        for (const tag of matchWithTest)
+            if (tag.test?.test(value))
+                return tag;
+        const kt = schema.knownTags[tagName];
+        if (kt && !kt.collection) {
+            // Ensure that the known tag is available for stringifying,
+            // but does not get used by default.
+            schema.tags.push(Object.assign({}, kt, { default: false, test: undefined }));
+            return kt;
+        }
+        onError(tagToken, 'TAG_RESOLVE_FAILED', `Unresolved tag: ${tagName}`, tagName !== 'tag:yaml.org,2002:str');
+        return schema[SCALAR$1];
+    }
+    function findScalarTagByTest({ atKey, directives, schema }, value, token, onError) {
+        const tag = schema.tags.find(tag => (tag.default === true || (atKey && tag.default === 'key')) &&
+            tag.test?.test(value)) || schema[SCALAR$1];
+        if (schema.compat) {
+            const compat = schema.compat.find(tag => tag.default && tag.test?.test(value)) ??
+                schema[SCALAR$1];
+            if (tag.tag !== compat.tag) {
+                const ts = directives.tagString(tag.tag);
+                const cs = directives.tagString(compat.tag);
+                const msg = `Value may be parsed as either ${ts} or ${cs}`;
+                onError(token, 'TAG_RESOLVE_FAILED', msg, true);
+            }
+        }
+        return tag;
+    }
+
+    function emptyScalarPosition(offset, before, pos) {
+        if (before) {
+            pos ?? (pos = before.length);
+            for (let i = pos - 1; i >= 0; --i) {
+                let st = before[i];
+                switch (st.type) {
+                    case 'space':
+                    case 'comment':
+                    case 'newline':
+                        offset -= st.source.length;
+                        continue;
+                }
+                // Technically, an empty scalar is immediately after the last non-empty
+                // node, but it's more useful to place it after any whitespace.
+                st = before[++i];
+                while (st?.type === 'space') {
+                    offset += st.source.length;
+                    st = before[++i];
+                }
+                break;
+            }
+        }
+        return offset;
+    }
+
+    const CN = { composeNode, composeEmptyNode };
+    function composeNode(ctx, token, props, onError) {
+        const atKey = ctx.atKey;
+        const { spaceBefore, comment, anchor, tag } = props;
+        let node;
+        let isSrcToken = true;
+        switch (token.type) {
+            case 'alias':
+                node = composeAlias(ctx, token, onError);
+                if (anchor || tag)
+                    onError(token, 'ALIAS_PROPS', 'An alias node must not specify any properties');
+                break;
+            case 'scalar':
+            case 'single-quoted-scalar':
+            case 'double-quoted-scalar':
+            case 'block-scalar':
+                node = composeScalar(ctx, token, tag, onError);
+                if (anchor)
+                    node.anchor = anchor.source.substring(1);
+                break;
+            case 'block-map':
+            case 'block-seq':
+            case 'flow-collection':
+                try {
+                    node = composeCollection(CN, ctx, token, props, onError);
+                    if (anchor)
+                        node.anchor = anchor.source.substring(1);
+                }
+                catch (error) {
+                    // Almost certainly here due to a stack overflow
+                    const message = error instanceof Error ? error.message : String(error);
+                    onError(token, 'RESOURCE_EXHAUSTION', message);
+                }
+                break;
+            default: {
+                const message = token.type === 'error'
+                    ? token.message
+                    : `Unsupported token (type: ${token.type})`;
+                onError(token, 'UNEXPECTED_TOKEN', message);
+                isSrcToken = false;
+            }
+        }
+        node ?? (node = composeEmptyNode(ctx, token.offset, undefined, null, props, onError));
+        if (anchor && node.anchor === '')
+            onError(anchor, 'BAD_ALIAS', 'Anchor cannot be an empty string');
+        if (atKey &&
+            ctx.options.stringKeys &&
+            (!isScalar$1(node) ||
+                typeof node.value !== 'string' ||
+                (node.tag && node.tag !== 'tag:yaml.org,2002:str'))) {
+            const msg = 'With stringKeys, all keys must be strings';
+            onError(tag ?? token, 'NON_STRING_KEY', msg);
+        }
+        if (spaceBefore)
+            node.spaceBefore = true;
+        if (comment) {
+            if (token.type === 'scalar' && token.source === '')
+                node.comment = comment;
+            else
+                node.commentBefore = comment;
+        }
+        // @ts-expect-error Type checking misses meaning of isSrcToken
+        if (ctx.options.keepSourceTokens && isSrcToken)
+            node.srcToken = token;
+        return node;
+    }
+    function composeEmptyNode(ctx, offset, before, pos, { spaceBefore, comment, anchor, tag, end }, onError) {
+        const token = {
+            type: 'scalar',
+            offset: emptyScalarPosition(offset, before, pos),
+            indent: -1,
+            source: ''
+        };
+        const node = composeScalar(ctx, token, tag, onError);
+        if (anchor) {
+            node.anchor = anchor.source.substring(1);
+            if (node.anchor === '')
+                onError(anchor, 'BAD_ALIAS', 'Anchor cannot be an empty string');
+        }
+        if (spaceBefore)
+            node.spaceBefore = true;
+        if (comment) {
+            node.comment = comment;
+            node.range[2] = end;
+        }
+        return node;
+    }
+    function composeAlias({ options }, { offset, source, end }, onError) {
+        const alias = new Alias(source.substring(1));
+        if (alias.source === '')
+            onError(offset, 'BAD_ALIAS', 'Alias cannot be an empty string');
+        if (alias.source.endsWith(':'))
+            onError(offset + source.length - 1, 'BAD_ALIAS', 'Alias ending in : is ambiguous', true);
+        const valueEnd = offset + source.length;
+        const re = resolveEnd(end, valueEnd, options.strict, onError);
+        alias.range = [offset, valueEnd, re.offset];
+        if (re.comment)
+            alias.comment = re.comment;
+        return alias;
+    }
+
+    function composeDoc(options, directives, { offset, start, value, end }, onError) {
+        const opts = Object.assign({ _directives: directives }, options);
+        const doc = new Document$1(undefined, opts);
+        const ctx = {
+            atKey: false,
+            atRoot: true,
+            directives: doc.directives,
+            options: doc.options,
+            schema: doc.schema
+        };
+        const props = resolveProps(start, {
+            indicator: 'doc-start',
+            next: value ?? end?.[0],
+            offset,
+            onError,
+            parentIndent: 0,
+            startOnNewline: true
+        });
+        if (props.found) {
+            doc.directives.docStart = true;
+            if (value &&
+                (value.type === 'block-map' || value.type === 'block-seq') &&
+                !props.hasNewline)
+                onError(props.end, 'MISSING_CHAR', 'Block collection cannot start on same line with directives-end marker');
+        }
+        // @ts-expect-error If Contents is set, let's trust the user
+        doc.contents = value
+            ? composeNode(ctx, value, props, onError)
+            : composeEmptyNode(ctx, props.end, start, null, props, onError);
+        const contentEnd = doc.contents.range[2];
+        const re = resolveEnd(end, contentEnd, false, onError);
+        if (re.comment)
+            doc.comment = re.comment;
+        doc.range = [offset, contentEnd, re.offset];
+        return doc;
+    }
+
+    function getErrorPos(src) {
+        if (typeof src === 'number')
+            return [src, src + 1];
+        if (Array.isArray(src))
+            return src.length === 2 ? src : [src[0], src[1]];
+        const { offset, source } = src;
+        return [offset, offset + (typeof source === 'string' ? source.length : 1)];
+    }
+    function parsePrelude(prelude) {
+        let comment = '';
+        let atComment = false;
+        let afterEmptyLine = false;
+        for (let i = 0; i < prelude.length; ++i) {
+            const source = prelude[i];
+            switch (source[0]) {
+                case '#':
+                    comment +=
+                        (comment === '' ? '' : afterEmptyLine ? '\n\n' : '\n') +
+                            (source.substring(1) || ' ');
+                    atComment = true;
+                    afterEmptyLine = false;
+                    break;
+                case '%':
+                    if (prelude[i + 1]?.[0] !== '#')
+                        i += 1;
+                    atComment = false;
+                    break;
+                default:
+                    // This may be wrong after doc-end, but in that case it doesn't matter
+                    if (!atComment)
+                        afterEmptyLine = true;
+                    atComment = false;
+            }
+        }
+        return { comment, afterEmptyLine };
+    }
+    /**
+     * Compose a stream of CST nodes into a stream of YAML Documents.
+     *
+     * ```ts
+     * import { Composer, Parser } from 'yaml'
+     *
+     * const src: string = ...
+     * const tokens = new Parser().parse(src)
+     * const docs = new Composer().compose(tokens)
+     * ```
+     */
+    class Composer {
+        constructor(options = {}) {
+            this.doc = null;
+            this.atDirectives = false;
+            this.prelude = [];
+            this.errors = [];
+            this.warnings = [];
+            this.onError = (source, code, message, warning) => {
+                const pos = getErrorPos(source);
+                if (warning)
+                    this.warnings.push(new YAMLWarning(pos, code, message));
+                else
+                    this.errors.push(new YAMLParseError(pos, code, message));
+            };
+            // eslint-disable-next-line @typescript-eslint/prefer-nullish-coalescing
+            this.directives = new Directives({ version: options.version || '1.2' });
+            this.options = options;
+        }
+        decorate(doc, afterDoc) {
+            const { comment, afterEmptyLine } = parsePrelude(this.prelude);
+            //console.log({ dc: doc.comment, prelude, comment })
+            if (comment) {
+                const dc = doc.contents;
+                if (afterDoc) {
+                    doc.comment = doc.comment ? `${doc.comment}\n${comment}` : comment;
+                }
+                else if (afterEmptyLine || doc.directives.docStart || !dc) {
+                    doc.commentBefore = comment;
+                }
+                else if (isCollection$1(dc) && !dc.flow && dc.items.length > 0) {
+                    let it = dc.items[0];
+                    if (isPair(it))
+                        it = it.key;
+                    const cb = it.commentBefore;
+                    it.commentBefore = cb ? `${comment}\n${cb}` : comment;
+                }
+                else {
+                    const cb = dc.commentBefore;
+                    dc.commentBefore = cb ? `${comment}\n${cb}` : comment;
+                }
+            }
+            if (afterDoc) {
+                for (let i = 0; i < this.errors.length; ++i)
+                    doc.errors.push(this.errors[i]);
+                for (let i = 0; i < this.warnings.length; ++i)
+                    doc.warnings.push(this.warnings[i]);
+            }
+            else {
+                doc.errors = this.errors;
+                doc.warnings = this.warnings;
+            }
+            this.prelude = [];
+            this.errors = [];
+            this.warnings = [];
+        }
+        /**
+         * Current stream status information.
+         *
+         * Mostly useful at the end of input for an empty stream.
+         */
+        streamInfo() {
+            return {
+                comment: parsePrelude(this.prelude).comment,
+                directives: this.directives,
+                errors: this.errors,
+                warnings: this.warnings
+            };
+        }
+        /**
+         * Compose tokens into documents.
+         *
+         * @param forceDoc - If the stream contains no document, still emit a final document including any comments and directives that would be applied to a subsequent document.
+         * @param endOffset - Should be set if `forceDoc` is also set, to set the document range end and to indicate errors correctly.
+         */
+        *compose(tokens, forceDoc = false, endOffset = -1) {
+            for (const token of tokens)
+                yield* this.next(token);
+            yield* this.end(forceDoc, endOffset);
+        }
+        /** Advance the composer by one CST token. */
+        *next(token) {
+            switch (token.type) {
+                case 'directive':
+                    this.directives.add(token.source, (offset, message, warning) => {
+                        const pos = getErrorPos(token);
+                        pos[0] += offset;
+                        this.onError(pos, 'BAD_DIRECTIVE', message, warning);
+                    });
+                    this.prelude.push(token.source);
+                    this.atDirectives = true;
+                    break;
+                case 'document': {
+                    const doc = composeDoc(this.options, this.directives, token, this.onError);
+                    if (this.atDirectives && !doc.directives.docStart)
+                        this.onError(token, 'MISSING_CHAR', 'Missing directives-end/doc-start indicator line');
+                    this.decorate(doc, false);
+                    if (this.doc)
+                        yield this.doc;
+                    this.doc = doc;
+                    this.atDirectives = false;
+                    break;
+                }
+                case 'byte-order-mark':
+                case 'space':
+                    break;
+                case 'comment':
+                case 'newline':
+                    this.prelude.push(token.source);
+                    break;
+                case 'error': {
+                    const msg = token.source
+                        ? `${token.message}: ${JSON.stringify(token.source)}`
+                        : token.message;
+                    const error = new YAMLParseError(getErrorPos(token), 'UNEXPECTED_TOKEN', msg);
+                    if (this.atDirectives || !this.doc)
+                        this.errors.push(error);
+                    else
+                        this.doc.errors.push(error);
+                    break;
+                }
+                case 'doc-end': {
+                    if (!this.doc) {
+                        const msg = 'Unexpected doc-end without preceding document';
+                        this.errors.push(new YAMLParseError(getErrorPos(token), 'UNEXPECTED_TOKEN', msg));
+                        break;
+                    }
+                    this.doc.directives.docEnd = true;
+                    const end = resolveEnd(token.end, token.offset + token.source.length, this.doc.options.strict, this.onError);
+                    this.decorate(this.doc, true);
+                    if (end.comment) {
+                        const dc = this.doc.comment;
+                        this.doc.comment = dc ? `${dc}\n${end.comment}` : end.comment;
+                    }
+                    this.doc.range[2] = end.offset;
+                    break;
+                }
+                default:
+                    this.errors.push(new YAMLParseError(getErrorPos(token), 'UNEXPECTED_TOKEN', `Unsupported token ${token.type}`));
+            }
+        }
+        /**
+         * Call at end of input to yield any remaining document.
+         *
+         * @param forceDoc - If the stream contains no document, still emit a final document including any comments and directives that would be applied to a subsequent document.
+         * @param endOffset - Should be set if `forceDoc` is also set, to set the document range end and to indicate errors correctly.
+         */
+        *end(forceDoc = false, endOffset = -1) {
+            if (this.doc) {
+                this.decorate(this.doc, true);
+                yield this.doc;
+                this.doc = null;
+            }
+            else if (forceDoc) {
+                const opts = Object.assign({ _directives: this.directives }, this.options);
+                const doc = new Document$1(undefined, opts);
+                if (this.atDirectives)
+                    this.onError(endOffset, 'MISSING_CHAR', 'Missing directives-end indicator line');
+                doc.range = [0, endOffset, endOffset];
+                this.decorate(doc, false);
+                yield doc;
+            }
+        }
+    }
+
+    function resolveAsScalar(token, strict = true, onError) {
+        if (token) {
+            const _onError = (pos, code, message) => {
+                const offset = typeof pos === 'number' ? pos : Array.isArray(pos) ? pos[0] : pos.offset;
+                if (onError)
+                    onError(offset, code, message);
+                else
+                    throw new YAMLParseError([offset, offset + 1], code, message);
+            };
+            switch (token.type) {
+                case 'scalar':
+                case 'single-quoted-scalar':
+                case 'double-quoted-scalar':
+                    return resolveFlowScalar(token, strict, _onError);
+                case 'block-scalar':
+                    return resolveBlockScalar({ options: { strict } }, token, _onError);
+            }
+        }
+        return null;
+    }
+    /**
+     * Create a new scalar token with `value`
+     *
+     * Values that represent an actual string but may be parsed as a different type should use a `type` other than `'PLAIN'`,
+     * as this function does not support any schema operations and won't check for such conflicts.
+     *
+     * @param value The string representation of the value, which will have its content properly indented.
+     * @param context.end Comments and whitespace after the end of the value, or after the block scalar header. If undefined, a newline will be added.
+     * @param context.implicitKey Being within an implicit key may affect the resolved type of the token's value.
+     * @param context.indent The indent level of the token.
+     * @param context.inFlow Is this scalar within a flow collection? This may affect the resolved type of the token's value.
+     * @param context.offset The offset position of the token.
+     * @param context.type The preferred type of the scalar token. If undefined, the previous type of the `token` will be used, defaulting to `'PLAIN'`.
+     */
+    function createScalarToken(value, context) {
+        const { implicitKey = false, indent, inFlow = false, offset = -1, type = 'PLAIN' } = context;
+        const source = stringifyString({ type, value }, {
+            implicitKey,
+            indent: indent > 0 ? ' '.repeat(indent) : '',
+            inFlow,
+            options: { blockQuote: true, lineWidth: -1 }
+        });
+        const end = context.end ?? [
+            { type: 'newline', offset: -1, indent, source: '\n' }
+        ];
+        switch (source[0]) {
+            case '|':
+            case '>': {
+                const he = source.indexOf('\n');
+                const head = source.substring(0, he);
+                const body = source.substring(he + 1) + '\n';
+                const props = [
+                    { type: 'block-scalar-header', offset, indent, source: head }
+                ];
+                if (!addEndtoBlockProps(props, end))
+                    props.push({ type: 'newline', offset: -1, indent, source: '\n' });
+                return { type: 'block-scalar', offset, indent, props, source: body };
+            }
+            case '"':
+                return { type: 'double-quoted-scalar', offset, indent, source, end };
+            case "'":
+                return { type: 'single-quoted-scalar', offset, indent, source, end };
+            default:
+                return { type: 'scalar', offset, indent, source, end };
+        }
+    }
+    /**
+     * Set the value of `token` to the given string `value`, overwriting any previous contents and type that it may have.
+     *
+     * Best efforts are made to retain any comments previously associated with the `token`,
+     * though all contents within a collection's `items` will be overwritten.
+     *
+     * Values that represent an actual string but may be parsed as a different type should use a `type` other than `'PLAIN'`,
+     * as this function does not support any schema operations and won't check for such conflicts.
+     *
+     * @param token Any token. If it does not include an `indent` value, the value will be stringified as if it were an implicit key.
+     * @param value The string representation of the value, which will have its content properly indented.
+     * @param context.afterKey In most cases, values after a key should have an additional level of indentation.
+     * @param context.implicitKey Being within an implicit key may affect the resolved type of the token's value.
+     * @param context.inFlow Being within a flow collection may affect the resolved type of the token's value.
+     * @param context.type The preferred type of the scalar token. If undefined, the previous type of the `token` will be used, defaulting to `'PLAIN'`.
+     */
+    function setScalarValue(token, value, context = {}) {
+        let { afterKey = false, implicitKey = false, inFlow = false, type } = context;
+        let indent = 'indent' in token ? token.indent : null;
+        if (afterKey && typeof indent === 'number')
+            indent += 2;
+        if (!type)
+            switch (token.type) {
+                case 'single-quoted-scalar':
+                    type = 'QUOTE_SINGLE';
+                    break;
+                case 'double-quoted-scalar':
+                    type = 'QUOTE_DOUBLE';
+                    break;
+                case 'block-scalar': {
+                    const header = token.props[0];
+                    if (header.type !== 'block-scalar-header')
+                        throw new Error('Invalid block scalar header');
+                    type = header.source[0] === '>' ? 'BLOCK_FOLDED' : 'BLOCK_LITERAL';
+                    break;
+                }
+                default:
+                    type = 'PLAIN';
+            }
+        const source = stringifyString({ type, value }, {
+            implicitKey: implicitKey || indent === null,
+            indent: indent !== null && indent > 0 ? ' '.repeat(indent) : '',
+            inFlow,
+            options: { blockQuote: true, lineWidth: -1 }
+        });
+        switch (source[0]) {
+            case '|':
+            case '>':
+                setBlockScalarValue(token, source);
+                break;
+            case '"':
+                setFlowScalarValue(token, source, 'double-quoted-scalar');
+                break;
+            case "'":
+                setFlowScalarValue(token, source, 'single-quoted-scalar');
+                break;
+            default:
+                setFlowScalarValue(token, source, 'scalar');
+        }
+    }
+    function setBlockScalarValue(token, source) {
+        const he = source.indexOf('\n');
+        const head = source.substring(0, he);
+        const body = source.substring(he + 1) + '\n';
+        if (token.type === 'block-scalar') {
+            const header = token.props[0];
+            if (header.type !== 'block-scalar-header')
+                throw new Error('Invalid block scalar header');
+            header.source = head;
+            token.source = body;
+        }
+        else {
+            const { offset } = token;
+            const indent = 'indent' in token ? token.indent : -1;
+            const props = [
+                { type: 'block-scalar-header', offset, indent, source: head }
+            ];
+            if (!addEndtoBlockProps(props, 'end' in token ? token.end : undefined))
+                props.push({ type: 'newline', offset: -1, indent, source: '\n' });
+            for (const key of Object.keys(token))
+                if (key !== 'type' && key !== 'offset')
+                    delete token[key];
+            Object.assign(token, { type: 'block-scalar', indent, props, source: body });
+        }
+    }
+    /** @returns `true` if last token is a newline */
+    function addEndtoBlockProps(props, end) {
+        if (end)
+            for (const st of end)
+                switch (st.type) {
+                    case 'space':
+                    case 'comment':
+                        props.push(st);
+                        break;
+                    case 'newline':
+                        props.push(st);
+                        return true;
+                }
+        return false;
+    }
+    function setFlowScalarValue(token, source, type) {
+        switch (token.type) {
+            case 'scalar':
+            case 'double-quoted-scalar':
+            case 'single-quoted-scalar':
+                token.type = type;
+                token.source = source;
+                break;
+            case 'block-scalar': {
+                const end = token.props.slice(1);
+                let oa = source.length;
+                if (token.props[0].type === 'block-scalar-header')
+                    oa -= token.props[0].source.length;
+                for (const tok of end)
+                    tok.offset += oa;
+                delete token.props;
+                Object.assign(token, { type, source, end });
+                break;
+            }
+            case 'block-map':
+            case 'block-seq': {
+                const offset = token.offset + source.length;
+                const nl = { type: 'newline', offset, indent: token.indent, source: '\n' };
+                delete token.items;
+                Object.assign(token, { type, source, end: [nl] });
+                break;
+            }
+            default: {
+                const indent = 'indent' in token ? token.indent : -1;
+                const end = 'end' in token && Array.isArray(token.end)
+                    ? token.end.filter(st => st.type === 'space' ||
+                        st.type === 'comment' ||
+                        st.type === 'newline')
+                    : [];
+                for (const key of Object.keys(token))
+                    if (key !== 'type' && key !== 'offset')
+                        delete token[key];
+                Object.assign(token, { type, indent, source, end });
+            }
+        }
+    }
+
+    /**
+     * Stringify a CST document, token, or collection item
+     *
+     * Fair warning: This applies no validation whatsoever, and
+     * simply concatenates the sources in their logical order.
+     */
+    const stringify$1 = (cst) => 'type' in cst ? stringifyToken(cst) : stringifyItem(cst);
+    function stringifyToken(token) {
+        switch (token.type) {
+            case 'block-scalar': {
+                let res = '';
+                for (const tok of token.props)
+                    res += stringifyToken(tok);
+                return res + token.source;
+            }
+            case 'block-map':
+            case 'block-seq': {
+                let res = '';
+                for (const item of token.items)
+                    res += stringifyItem(item);
+                return res;
+            }
+            case 'flow-collection': {
+                let res = token.start.source;
+                for (const item of token.items)
+                    res += stringifyItem(item);
+                for (const st of token.end)
+                    res += st.source;
+                return res;
+            }
+            case 'document': {
+                let res = stringifyItem(token);
+                if (token.end)
+                    for (const st of token.end)
+                        res += st.source;
+                return res;
+            }
+            default: {
+                let res = token.source;
+                if ('end' in token && token.end)
+                    for (const st of token.end)
+                        res += st.source;
+                return res;
+            }
+        }
+    }
+    function stringifyItem({ start, key, sep, value }) {
+        let res = '';
+        for (const st of start)
+            res += st.source;
+        if (key)
+            res += stringifyToken(key);
+        if (sep)
+            for (const st of sep)
+                res += st.source;
+        if (value)
+            res += stringifyToken(value);
+        return res;
+    }
+
+    const BREAK = Symbol('break visit');
+    const SKIP = Symbol('skip children');
+    const REMOVE = Symbol('remove item');
+    /**
+     * Apply a visitor to a CST document or item.
+     *
+     * Walks through the tree (depth-first) starting from the root, calling a
+     * `visitor` function with two arguments when entering each item:
+     *   - `item`: The current item, which included the following members:
+     *     - `start: SourceToken[]` – Source tokens before the key or value,
+     *       possibly including its anchor or tag.
+     *     - `key?: Token | null` – Set for pair values. May then be `null`, if
+     *       the key before the `:` separator is empty.
+     *     - `sep?: SourceToken[]` – Source tokens between the key and the value,
+     *       which should include the `:` map value indicator if `value` is set.
+     *     - `value?: Token` – The value of a sequence item, or of a map pair.
+     *   - `path`: The steps from the root to the current node, as an array of
+     *     `['key' | 'value', number]` tuples.
+     *
+     * The return value of the visitor may be used to control the traversal:
+     *   - `undefined` (default): Do nothing and continue
+     *   - `visit.SKIP`: Do not visit the children of this token, continue with
+     *      next sibling
+     *   - `visit.BREAK`: Terminate traversal completely
+     *   - `visit.REMOVE`: Remove the current item, then continue with the next one
+     *   - `number`: Set the index of the next step. This is useful especially if
+     *     the index of the current token has changed.
+     *   - `function`: Define the next visitor for this item. After the original
+     *     visitor is called on item entry, next visitors are called after handling
+     *     a non-empty `key` and when exiting the item.
+     */
+    function visit(cst, visitor) {
+        if ('type' in cst && cst.type === 'document')
+            cst = { start: cst.start, value: cst.value };
+        _visit(Object.freeze([]), cst, visitor);
+    }
+    // Without the `as symbol` casts, TS declares these in the `visit`
+    // namespace using `var`, but then complains about that because
+    // `unique symbol` must be `const`.
+    /** Terminate visit traversal completely */
+    visit.BREAK = BREAK;
+    /** Do not visit the children of the current item */
+    visit.SKIP = SKIP;
+    /** Remove the current item */
+    visit.REMOVE = REMOVE;
+    /** Find the item at `path` from `cst` as the root */
+    visit.itemAtPath = (cst, path) => {
+        let item = cst;
+        for (const [field, index] of path) {
+            const tok = item?.[field];
+            if (tok && 'items' in tok) {
+                item = tok.items[index];
+            }
+            else
+                return undefined;
+        }
+        return item;
+    };
+    /**
+     * Get the immediate parent collection of the item at `path` from `cst` as the root.
+     *
+     * Throws an error if the collection is not found, which should never happen if the item itself exists.
+     */
+    visit.parentCollection = (cst, path) => {
+        const parent = visit.itemAtPath(cst, path.slice(0, -1));
+        const field = path[path.length - 1][0];
+        const coll = parent?.[field];
+        if (coll && 'items' in coll)
+            return coll;
+        throw new Error('Parent collection not found');
+    };
+    function _visit(path, item, visitor) {
+        let ctrl = visitor(item, path);
+        if (typeof ctrl === 'symbol')
+            return ctrl;
+        for (const field of ['key', 'value']) {
+            const token = item[field];
+            if (token && 'items' in token) {
+                for (let i = 0; i < token.items.length; ++i) {
+                    const ci = _visit(Object.freeze(path.concat([[field, i]])), token.items[i], visitor);
+                    if (typeof ci === 'number')
+                        i = ci - 1;
+                    else if (ci === BREAK)
+                        return BREAK;
+                    else if (ci === REMOVE) {
+                        token.items.splice(i, 1);
+                        i -= 1;
+                    }
+                }
+                if (typeof ctrl === 'function' && field === 'key')
+                    ctrl = ctrl(item, path);
+            }
+        }
+        return typeof ctrl === 'function' ? ctrl(item, path) : ctrl;
+    }
+
+    /** The byte order mark */
+    const BOM = '\u{FEFF}';
+    /** Start of doc-mode */
+    const DOCUMENT = '\x02'; // C0: Start of Text
+    /** Unexpected end of flow-mode */
+    const FLOW_END = '\x18'; // C0: Cancel
+    /** Next token is a scalar value */
+    const SCALAR = '\x1f'; // C0: Unit Separator
+    /** @returns `true` if `token` is a flow or block collection */
+    const isCollection = (token) => !!token && 'items' in token;
+    /** @returns `true` if `token` is a flow or block scalar; not an alias */
+    const isScalar = (token) => !!token &&
+        (token.type === 'scalar' ||
+            token.type === 'single-quoted-scalar' ||
+            token.type === 'double-quoted-scalar' ||
+            token.type === 'block-scalar');
+    /* istanbul ignore next */
+    /** Get a printable representation of a lexer token */
+    function prettyToken(token) {
+        switch (token) {
+            case BOM:
+                return '<BOM>';
+            case DOCUMENT:
+                return '<DOC>';
+            case FLOW_END:
+                return '<FLOW_END>';
+            case SCALAR:
+                return '<SCALAR>';
+            default:
+                return JSON.stringify(token);
+        }
+    }
+    /** Identify the type of a lexer token. May return `null` for unknown tokens. */
+    function tokenType(source) {
+        switch (source) {
+            case BOM:
+                return 'byte-order-mark';
+            case DOCUMENT:
+                return 'doc-mode';
+            case FLOW_END:
+                return 'flow-error-end';
+            case SCALAR:
+                return 'scalar';
+            case '---':
+                return 'doc-start';
+            case '...':
+                return 'doc-end';
+            case '':
+            case '\n':
+            case '\r\n':
+                return 'newline';
+            case '-':
+                return 'seq-item-ind';
+            case '?':
+                return 'explicit-key-ind';
+            case ':':
+                return 'map-value-ind';
+            case '{':
+                return 'flow-map-start';
+            case '}':
+                return 'flow-map-end';
+            case '[':
+                return 'flow-seq-start';
+            case ']':
+                return 'flow-seq-end';
+            case ',':
+                return 'comma';
+        }
+        switch (source[0]) {
+            case ' ':
+            case '\t':
+                return 'space';
+            case '#':
+                return 'comment';
+            case '%':
+                return 'directive-line';
+            case '*':
+                return 'alias';
+            case '&':
+                return 'anchor';
+            case '!':
+                return 'tag';
+            case "'":
+                return 'single-quoted-scalar';
+            case '"':
+                return 'double-quoted-scalar';
+            case '|':
+            case '>':
+                return 'block-scalar-header';
+        }
+        return null;
+    }
+
+    var cst = /*#__PURE__*/Object.freeze({
+        __proto__: null,
+        BOM: BOM,
+        DOCUMENT: DOCUMENT,
+        FLOW_END: FLOW_END,
+        SCALAR: SCALAR,
+        createScalarToken: createScalarToken,
+        isCollection: isCollection,
+        isScalar: isScalar,
+        prettyToken: prettyToken,
+        resolveAsScalar: resolveAsScalar,
+        setScalarValue: setScalarValue,
+        stringify: stringify$1,
+        tokenType: tokenType,
+        visit: visit
+    });
+
+    /*
+    START -> stream
+
+    stream
+      directive -> line-end -> stream
+      indent + line-end -> stream
+      [else] -> line-start
+
+    line-end
+      comment -> line-end
+      newline -> .
+      input-end -> END
+
+    line-start
+      doc-start -> doc
+      doc-end -> stream
+      [else] -> indent -> block-start
+
+    block-start
+      seq-item-start -> block-start
+      explicit-key-start -> block-start
+      map-value-start -> block-start
+      [else] -> doc
+
+    doc
+      line-end -> line-start
+      spaces -> doc
+      anchor -> doc
+      tag -> doc
+      flow-start -> flow -> doc
+      flow-end -> error -> doc
+      seq-item-start -> error -> doc
+      explicit-key-start -> error -> doc
+      map-value-start -> doc
+      alias -> doc
+      quote-start -> quoted-scalar -> doc
+      block-scalar-header -> line-end -> block-scalar(min) -> line-start
+      [else] -> plain-scalar(false, min) -> doc
+
+    flow
+      line-end -> flow
+      spaces -> flow
+      anchor -> flow
+      tag -> flow
+      flow-start -> flow -> flow
+      flow-end -> .
+      seq-item-start -> error -> flow
+      explicit-key-start -> flow
+      map-value-start -> flow
+      alias -> flow
+      quote-start -> quoted-scalar -> flow
+      comma -> flow
+      [else] -> plain-scalar(true, 0) -> flow
+
+    quoted-scalar
+      quote-end -> .
+      [else] -> quoted-scalar
+
+    block-scalar(min)
+      newline + peek(indent < min) -> .
+      [else] -> block-scalar(min)
+
+    plain-scalar(is-flow, min)
+      scalar-end(is-flow) -> .
+      peek(newline + (indent < min)) -> .
+      [else] -> plain-scalar(min)
+    */
+    function isEmpty(ch) {
+        switch (ch) {
+            case undefined:
+            case ' ':
+            case '\n':
+            case '\r':
+            case '\t':
+                return true;
+            default:
+                return false;
+        }
+    }
+    const hexDigits = new Set('0123456789ABCDEFabcdef');
+    const tagChars = new Set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-#;/?:@&=+$_.!~*'()");
+    const flowIndicatorChars = new Set(',[]{}');
+    const invalidAnchorChars = new Set(' ,[]{}\n\r\t');
+    const isNotAnchorChar = (ch) => !ch || invalidAnchorChars.has(ch);
+    /**
+     * Splits an input string into lexical tokens, i.e. smaller strings that are
+     * easily identifiable by `tokens.tokenType()`.
+     *
+     * Lexing starts always in a "stream" context. Incomplete input may be buffered
+     * until a complete token can be emitted.
+     *
+     * In addition to slices of the original input, the following control characters
+     * may also be emitted:
+     *
+     * - `\x02` (Start of Text): A document starts with the next token
+     * - `\x18` (Cancel): Unexpected end of flow-mode (indicates an error)
+     * - `\x1f` (Unit Separator): Next token is a scalar value
+     * - `\u{FEFF}` (Byte order mark): Emitted separately outside documents
+     */
+    class Lexer {
+        constructor() {
+            /**
+             * Flag indicating whether the end of the current buffer marks the end of
+             * all input
+             */
+            this.atEnd = false;
+            /**
+             * Explicit indent set in block scalar header, as an offset from the current
+             * minimum indent, so e.g. set to 1 from a header `|2+`. Set to -1 if not
+             * explicitly set.
+             */
+            this.blockScalarIndent = -1;
+            /**
+             * Block scalars that include a + (keep) chomping indicator in their header
+             * include trailing empty lines, which are otherwise excluded from the
+             * scalar's contents.
+             */
+            this.blockScalarKeep = false;
+            /** Current input */
+            this.buffer = '';
+            /**
+             * Flag noting whether the map value indicator : can immediately follow this
+             * node within a flow context.
+             */
+            this.flowKey = false;
+            /** Count of surrounding flow collection levels. */
+            this.flowLevel = 0;
+            /**
+             * Minimum level of indentation required for next lines to be parsed as a
+             * part of the current scalar value.
+             */
+            this.indentNext = 0;
+            /** Indentation level of the current line. */
+            this.indentValue = 0;
+            /** Position of the next \n character. */
+            this.lineEndPos = null;
+            /** Stores the state of the lexer if reaching the end of incpomplete input */
+            this.next = null;
+            /** A pointer to `buffer`; the current position of the lexer. */
+            this.pos = 0;
+        }
+        /**
+         * Generate YAML tokens from the `source` string. If `incomplete`,
+         * a part of the last line may be left as a buffer for the next call.
+         *
+         * @returns A generator of lexical tokens
+         */
+        *lex(source, incomplete = false) {
+            if (source) {
+                if (typeof source !== 'string')
+                    throw TypeError('source is not a string');
+                this.buffer = this.buffer ? this.buffer + source : source;
+                this.lineEndPos = null;
+            }
+            this.atEnd = !incomplete;
+            let next = this.next ?? 'stream';
+            while (next && (incomplete || this.hasChars(1)))
+                next = yield* this.parseNext(next);
+        }
+        atLineEnd() {
+            let i = this.pos;
+            let ch = this.buffer[i];
+            while (ch === ' ' || ch === '\t')
+                ch = this.buffer[++i];
+            if (!ch || ch === '#' || ch === '\n')
+                return true;
+            if (ch === '\r')
+                return this.buffer[i + 1] === '\n';
+            return false;
+        }
+        charAt(n) {
+            return this.buffer[this.pos + n];
+        }
+        continueScalar(offset) {
+            let ch = this.buffer[offset];
+            if (this.indentNext > 0) {
+                let indent = 0;
+                while (ch === ' ')
+                    ch = this.buffer[++indent + offset];
+                if (ch === '\r') {
+                    const next = this.buffer[indent + offset + 1];
+                    if (next === '\n' || (!next && !this.atEnd))
+                        return offset + indent + 1;
+                }
+                return ch === '\n' || indent >= this.indentNext || (!ch && !this.atEnd)
+                    ? offset + indent
+                    : -1;
+            }
+            if (ch === '-' || ch === '.') {
+                const dt = this.buffer.substr(offset, 3);
+                if ((dt === '---' || dt === '...') && isEmpty(this.buffer[offset + 3]))
+                    return -1;
+            }
+            return offset;
+        }
+        getLine() {
+            let end = this.lineEndPos;
+            if (typeof end !== 'number' || (end !== -1 && end < this.pos)) {
+                end = this.buffer.indexOf('\n', this.pos);
+                this.lineEndPos = end;
+            }
+            if (end === -1)
+                return this.atEnd ? this.buffer.substring(this.pos) : null;
+            if (this.buffer[end - 1] === '\r')
+                end -= 1;
+            return this.buffer.substring(this.pos, end);
+        }
+        hasChars(n) {
+            return this.pos + n <= this.buffer.length;
+        }
+        setNext(state) {
+            this.buffer = this.buffer.substring(this.pos);
+            this.pos = 0;
+            this.lineEndPos = null;
+            this.next = state;
+            return null;
+        }
+        peek(n) {
+            return this.buffer.substr(this.pos, n);
+        }
+        *parseNext(next) {
+            switch (next) {
+                case 'stream':
+                    return yield* this.parseStream();
+                case 'line-start':
+                    return yield* this.parseLineStart();
+                case 'block-start':
+                    return yield* this.parseBlockStart();
+                case 'doc':
+                    return yield* this.parseDocument();
+                case 'flow':
+                    return yield* this.parseFlowCollection();
+                case 'quoted-scalar':
+                    return yield* this.parseQuotedScalar();
+                case 'block-scalar':
+                    return yield* this.parseBlockScalar();
+                case 'plain-scalar':
+                    return yield* this.parsePlainScalar();
+            }
+        }
+        *parseStream() {
+            let line = this.getLine();
+            if (line === null)
+                return this.setNext('stream');
+            if (line[0] === BOM) {
+                yield* this.pushCount(1);
+                line = line.substring(1);
+            }
+            if (line[0] === '%') {
+                let dirEnd = line.length;
+                let cs = line.indexOf('#');
+                while (cs !== -1) {
+                    const ch = line[cs - 1];
+                    if (ch === ' ' || ch === '\t') {
+                        dirEnd = cs - 1;
+                        break;
+                    }
+                    else {
+                        cs = line.indexOf('#', cs + 1);
+                    }
+                }
+                while (true) {
+                    const ch = line[dirEnd - 1];
+                    if (ch === ' ' || ch === '\t')
+                        dirEnd -= 1;
+                    else
+                        break;
+                }
+                const n = (yield* this.pushCount(dirEnd)) + (yield* this.pushSpaces(true));
+                yield* this.pushCount(line.length - n); // possible comment
+                this.pushNewline();
+                return 'stream';
+            }
+            if (this.atLineEnd()) {
+                const sp = yield* this.pushSpaces(true);
+                yield* this.pushCount(line.length - sp);
+                yield* this.pushNewline();
+                return 'stream';
+            }
+            yield DOCUMENT;
+            return yield* this.parseLineStart();
+        }
+        *parseLineStart() {
+            const ch = this.charAt(0);
+            if (!ch && !this.atEnd)
+                return this.setNext('line-start');
+            if (ch === '-' || ch === '.') {
+                if (!this.atEnd && !this.hasChars(4))
+                    return this.setNext('line-start');
+                const s = this.peek(3);
+                if ((s === '---' || s === '...') && isEmpty(this.charAt(3))) {
+                    yield* this.pushCount(3);
+                    this.indentValue = 0;
+                    this.indentNext = 0;
+                    return s === '---' ? 'doc' : 'stream';
+                }
+            }
+            this.indentValue = yield* this.pushSpaces(false);
+            if (this.indentNext > this.indentValue && !isEmpty(this.charAt(1)))
+                this.indentNext = this.indentValue;
+            return yield* this.parseBlockStart();
+        }
+        *parseBlockStart() {
+            const [ch0, ch1] = this.peek(2);
+            if (!ch1 && !this.atEnd)
+                return this.setNext('block-start');
+            if ((ch0 === '-' || ch0 === '?' || ch0 === ':') && isEmpty(ch1)) {
+                const n = (yield* this.pushCount(1)) + (yield* this.pushSpaces(true));
+                this.indentNext = this.indentValue + 1;
+                this.indentValue += n;
+                return 'block-start';
+            }
+            return 'doc';
+        }
+        *parseDocument() {
+            yield* this.pushSpaces(true);
+            const line = this.getLine();
+            if (line === null)
+                return this.setNext('doc');
+            let n = yield* this.pushIndicators();
+            switch (line[n]) {
+                case '#':
+                    yield* this.pushCount(line.length - n);
+                // fallthrough
+                case undefined:
+                    yield* this.pushNewline();
+                    return yield* this.parseLineStart();
+                case '{':
+                case '[':
+                    yield* this.pushCount(1);
+                    this.flowKey = false;
+                    this.flowLevel = 1;
+                    return 'flow';
+                case '}':
+                case ']':
+                    // this is an error
+                    yield* this.pushCount(1);
+                    return 'doc';
+                case '*':
+                    yield* this.pushUntil(isNotAnchorChar);
+                    return 'doc';
+                case '"':
+                case "'":
+                    return yield* this.parseQuotedScalar();
+                case '|':
+                case '>':
+                    n += yield* this.parseBlockScalarHeader();
+                    n += yield* this.pushSpaces(true);
+                    yield* this.pushCount(line.length - n);
+                    yield* this.pushNewline();
+                    return yield* this.parseBlockScalar();
+                default:
+                    return yield* this.parsePlainScalar();
+            }
+        }
+        *parseFlowCollection() {
+            let nl, sp;
+            let indent = -1;
+            do {
+                nl = yield* this.pushNewline();
+                if (nl > 0) {
+                    sp = yield* this.pushSpaces(false);
+                    this.indentValue = indent = sp;
+                }
+                else {
+                    sp = 0;
+                }
+                sp += yield* this.pushSpaces(true);
+            } while (nl + sp > 0);
+            const line = this.getLine();
+            if (line === null)
+                return this.setNext('flow');
+            if ((indent !== -1 && indent < this.indentNext && line[0] !== '#') ||
+                (indent === 0 &&
+                    (line.startsWith('---') || line.startsWith('...')) &&
+                    isEmpty(line[3]))) {
+                // Allowing for the terminal ] or } at the same (rather than greater)
+                // indent level as the initial [ or { is technically invalid, but
+                // failing here would be surprising to users.
+                const atFlowEndMarker = indent === this.indentNext - 1 &&
+                    this.flowLevel === 1 &&
+                    (line[0] === ']' || line[0] === '}');
+                if (!atFlowEndMarker) {
+                    // this is an error
+                    this.flowLevel = 0;
+                    yield FLOW_END;
+                    return yield* this.parseLineStart();
+                }
+            }
+            let n = 0;
+            while (line[n] === ',') {
+                n += yield* this.pushCount(1);
+                n += yield* this.pushSpaces(true);
+                this.flowKey = false;
+            }
+            n += yield* this.pushIndicators();
+            switch (line[n]) {
+                case undefined:
+                    return 'flow';
+                case '#':
+                    yield* this.pushCount(line.length - n);
+                    return 'flow';
+                case '{':
+                case '[':
+                    yield* this.pushCount(1);
+                    this.flowKey = false;
+                    this.flowLevel += 1;
+                    return 'flow';
+                case '}':
+                case ']':
+                    yield* this.pushCount(1);
+                    this.flowKey = true;
+                    this.flowLevel -= 1;
+                    return this.flowLevel ? 'flow' : 'doc';
+                case '*':
+                    yield* this.pushUntil(isNotAnchorChar);
+                    return 'flow';
+                case '"':
+                case "'":
+                    this.flowKey = true;
+                    return yield* this.parseQuotedScalar();
+                case ':': {
+                    const next = this.charAt(1);
+                    if (this.flowKey || isEmpty(next) || next === ',') {
+                        this.flowKey = false;
+                        yield* this.pushCount(1);
+                        yield* this.pushSpaces(true);
+                        return 'flow';
+                    }
+                }
+                // fallthrough
+                default:
+                    this.flowKey = false;
+                    return yield* this.parsePlainScalar();
+            }
+        }
+        *parseQuotedScalar() {
+            const quote = this.charAt(0);
+            let end = this.buffer.indexOf(quote, this.pos + 1);
+            if (quote === "'") {
+                while (end !== -1 && this.buffer[end + 1] === "'")
+                    end = this.buffer.indexOf("'", end + 2);
+            }
+            else {
+                // double-quote
+                while (end !== -1) {
+                    let n = 0;
+                    while (this.buffer[end - 1 - n] === '\\')
+                        n += 1;
+                    if (n % 2 === 0)
+                        break;
+                    end = this.buffer.indexOf('"', end + 1);
+                }
+            }
+            // Only looking for newlines within the quotes
+            const qb = this.buffer.substring(0, end);
+            let nl = qb.indexOf('\n', this.pos);
+            if (nl !== -1) {
+                while (nl !== -1) {
+                    const cs = this.continueScalar(nl + 1);
+                    if (cs === -1)
+                        break;
+                    nl = qb.indexOf('\n', cs);
+                }
+                if (nl !== -1) {
+                    // this is an error caused by an unexpected unindent
+                    end = nl - (qb[nl - 1] === '\r' ? 2 : 1);
+                }
+            }
+            if (end === -1) {
+                if (!this.atEnd)
+                    return this.setNext('quoted-scalar');
+                end = this.buffer.length;
+            }
+            yield* this.pushToIndex(end + 1, false);
+            return this.flowLevel ? 'flow' : 'doc';
+        }
+        *parseBlockScalarHeader() {
+            this.blockScalarIndent = -1;
+            this.blockScalarKeep = false;
+            let i = this.pos;
+            while (true) {
+                const ch = this.buffer[++i];
+                if (ch === '+')
+                    this.blockScalarKeep = true;
+                else if (ch > '0' && ch <= '9')
+                    this.blockScalarIndent = Number(ch) - 1;
+                else if (ch !== '-')
+                    break;
+            }
+            return yield* this.pushUntil(ch => isEmpty(ch) || ch === '#');
+        }
+        *parseBlockScalar() {
+            let nl = this.pos - 1; // may be -1 if this.pos === 0
+            let indent = 0;
+            let ch;
+            loop: for (let i = this.pos; (ch = this.buffer[i]); ++i) {
+                switch (ch) {
+                    case ' ':
+                        indent += 1;
+                        break;
+                    case '\n':
+                        nl = i;
+                        indent = 0;
+                        break;
+                    case '\r': {
+                        const next = this.buffer[i + 1];
+                        if (!next && !this.atEnd)
+                            return this.setNext('block-scalar');
+                        if (next === '\n')
+                            break;
+                    } // fallthrough
+                    default:
+                        break loop;
+                }
+            }
+            if (!ch && !this.atEnd)
+                return this.setNext('block-scalar');
+            if (indent >= this.indentNext) {
+                if (this.blockScalarIndent === -1)
+                    this.indentNext = indent;
+                else {
+                    this.indentNext =
+                        this.blockScalarIndent + (this.indentNext === 0 ? 1 : this.indentNext);
+                }
+                do {
+                    const cs = this.continueScalar(nl + 1);
+                    if (cs === -1)
+                        break;
+                    nl = this.buffer.indexOf('\n', cs);
+                } while (nl !== -1);
+                if (nl === -1) {
+                    if (!this.atEnd)
+                        return this.setNext('block-scalar');
+                    nl = this.buffer.length;
+                }
+            }
+            // Trailing insufficiently indented tabs are invalid.
+            // To catch that during parsing, we include them in the block scalar value.
+            let i = nl + 1;
+            ch = this.buffer[i];
+            while (ch === ' ')
+                ch = this.buffer[++i];
+            if (ch === '\t') {
+                while (ch === '\t' || ch === ' ' || ch === '\r' || ch === '\n')
+                    ch = this.buffer[++i];
+                nl = i - 1;
+            }
+            else if (!this.blockScalarKeep) {
+                do {
+                    let i = nl - 1;
+                    let ch = this.buffer[i];
+                    if (ch === '\r')
+                        ch = this.buffer[--i];
+                    const lastChar = i; // Drop the line if last char not more indented
+                    while (ch === ' ')
+                        ch = this.buffer[--i];
+                    if (ch === '\n' && i >= this.pos && i + 1 + indent > lastChar)
+                        nl = i;
+                    else
+                        break;
+                } while (true);
+            }
+            yield SCALAR;
+            yield* this.pushToIndex(nl + 1, true);
+            return yield* this.parseLineStart();
+        }
+        *parsePlainScalar() {
+            const inFlow = this.flowLevel > 0;
+            let end = this.pos - 1;
+            let i = this.pos - 1;
+            let ch;
+            while ((ch = this.buffer[++i])) {
+                if (ch === ':') {
+                    const next = this.buffer[i + 1];
+                    if (isEmpty(next) || (inFlow && flowIndicatorChars.has(next)))
+                        break;
+                    end = i;
+                }
+                else if (isEmpty(ch)) {
+                    let next = this.buffer[i + 1];
+                    if (ch === '\r') {
+                        if (next === '\n') {
+                            i += 1;
+                            ch = '\n';
+                            next = this.buffer[i + 1];
+                        }
+                        else
+                            end = i;
+                    }
+                    if (next === '#' || (inFlow && flowIndicatorChars.has(next)))
+                        break;
+                    if (ch === '\n') {
+                        const cs = this.continueScalar(i + 1);
+                        if (cs === -1)
+                            break;
+                        i = Math.max(i, cs - 2); // to advance, but still account for ' #'
+                    }
+                }
+                else {
+                    if (inFlow && flowIndicatorChars.has(ch))
+                        break;
+                    end = i;
+                }
+            }
+            if (!ch && !this.atEnd)
+                return this.setNext('plain-scalar');
+            yield SCALAR;
+            yield* this.pushToIndex(end + 1, true);
+            return inFlow ? 'flow' : 'doc';
+        }
+        *pushCount(n) {
+            if (n > 0) {
+                yield this.buffer.substr(this.pos, n);
+                this.pos += n;
+                return n;
+            }
+            return 0;
+        }
+        *pushToIndex(i, allowEmpty) {
+            const s = this.buffer.slice(this.pos, i);
+            if (s) {
+                yield s;
+                this.pos += s.length;
+                return s.length;
+            }
+            else if (allowEmpty)
+                yield '';
+            return 0;
+        }
+        *pushIndicators() {
+            let n = 0;
+            loop: while (true) {
+                switch (this.charAt(0)) {
+                    case '!':
+                        n += yield* this.pushTag();
+                        n += yield* this.pushSpaces(true);
+                        continue loop;
+                    case '&':
+                        n += yield* this.pushUntil(isNotAnchorChar);
+                        n += yield* this.pushSpaces(true);
+                        continue loop;
+                    case '-': // this is an error
+                    case '?': // this is an error outside flow collections
+                    case ':': {
+                        const inFlow = this.flowLevel > 0;
+                        const ch1 = this.charAt(1);
+                        if (isEmpty(ch1) || (inFlow && flowIndicatorChars.has(ch1))) {
+                            if (!inFlow)
+                                this.indentNext = this.indentValue + 1;
+                            else if (this.flowKey)
+                                this.flowKey = false;
+                            n += yield* this.pushCount(1);
+                            n += yield* this.pushSpaces(true);
+                            continue loop;
+                        }
+                    }
+                }
+                break loop;
+            }
+            return n;
+        }
+        *pushTag() {
+            if (this.charAt(1) === '<') {
+                let i = this.pos + 2;
+                let ch = this.buffer[i];
+                while (!isEmpty(ch) && ch !== '>')
+                    ch = this.buffer[++i];
+                return yield* this.pushToIndex(ch === '>' ? i + 1 : i, false);
+            }
+            else {
+                let i = this.pos + 1;
+                let ch = this.buffer[i];
+                while (ch) {
+                    if (tagChars.has(ch))
+                        ch = this.buffer[++i];
+                    else if (ch === '%' &&
+                        hexDigits.has(this.buffer[i + 1]) &&
+                        hexDigits.has(this.buffer[i + 2])) {
+                        ch = this.buffer[(i += 3)];
+                    }
+                    else
+                        break;
+                }
+                return yield* this.pushToIndex(i, false);
+            }
+        }
+        *pushNewline() {
+            const ch = this.buffer[this.pos];
+            if (ch === '\n')
+                return yield* this.pushCount(1);
+            else if (ch === '\r' && this.charAt(1) === '\n')
+                return yield* this.pushCount(2);
+            else
+                return 0;
+        }
+        *pushSpaces(allowTabs) {
+            let i = this.pos - 1;
+            let ch;
+            do {
+                ch = this.buffer[++i];
+            } while (ch === ' ' || (allowTabs && ch === '\t'));
+            const n = i - this.pos;
+            if (n > 0) {
+                yield this.buffer.substr(this.pos, n);
+                this.pos = i;
+            }
+            return n;
+        }
+        *pushUntil(test) {
+            let i = this.pos;
+            let ch = this.buffer[i];
+            while (!test(ch))
+                ch = this.buffer[++i];
+            return yield* this.pushToIndex(i, false);
+        }
+    }
+
+    /**
+     * Tracks newlines during parsing in order to provide an efficient API for
+     * determining the one-indexed `{ line, col }` position for any offset
+     * within the input.
+     */
+    class LineCounter {
+        constructor() {
+            this.lineStarts = [];
+            /**
+             * Should be called in ascending order. Otherwise, call
+             * `lineCounter.lineStarts.sort()` before calling `linePos()`.
+             */
+            this.addNewLine = (offset) => this.lineStarts.push(offset);
+            /**
+             * Performs a binary search and returns the 1-indexed { line, col }
+             * position of `offset`. If `line === 0`, `addNewLine` has never been
+             * called or `offset` is before the first known newline.
+             */
+            this.linePos = (offset) => {
+                let low = 0;
+                let high = this.lineStarts.length;
+                while (low < high) {
+                    const mid = (low + high) >> 1; // Math.floor((low + high) / 2)
+                    if (this.lineStarts[mid] < offset)
+                        low = mid + 1;
+                    else
+                        high = mid;
+                }
+                if (this.lineStarts[low] === offset)
+                    return { line: low + 1, col: 1 };
+                if (low === 0)
+                    return { line: 0, col: offset };
+                const start = this.lineStarts[low - 1];
+                return { line: low, col: offset - start + 1 };
+            };
+        }
+    }
+
+    function includesToken(list, type) {
+        for (let i = 0; i < list.length; ++i)
+            if (list[i].type === type)
+                return true;
+        return false;
+    }
+    function findNonEmptyIndex(list) {
+        for (let i = 0; i < list.length; ++i) {
+            switch (list[i].type) {
+                case 'space':
+                case 'comment':
+                case 'newline':
+                    break;
+                default:
+                    return i;
+            }
+        }
+        return -1;
+    }
+    function isFlowToken(token) {
+        switch (token?.type) {
+            case 'alias':
+            case 'scalar':
+            case 'single-quoted-scalar':
+            case 'double-quoted-scalar':
+            case 'flow-collection':
+                return true;
+            default:
+                return false;
+        }
+    }
+    function getPrevProps(parent) {
+        switch (parent.type) {
+            case 'document':
+                return parent.start;
+            case 'block-map': {
+                const it = parent.items[parent.items.length - 1];
+                return it.sep ?? it.start;
+            }
+            case 'block-seq':
+                return parent.items[parent.items.length - 1].start;
+            /* istanbul ignore next should not happen */
+            default:
+                return [];
+        }
+    }
+    /** Note: May modify input array */
+    function getFirstKeyStartProps(prev) {
+        if (prev.length === 0)
+            return [];
+        let i = prev.length;
+        loop: while (--i >= 0) {
+            switch (prev[i].type) {
+                case 'doc-start':
+                case 'explicit-key-ind':
+                case 'map-value-ind':
+                case 'seq-item-ind':
+                case 'newline':
+                    break loop;
+            }
+        }
+        while (prev[++i]?.type === 'space') {
+            /* loop */
+        }
+        return prev.splice(i, prev.length);
+    }
+    function arrayPushArray(target, source) {
+        // May exhaust call stack with large `source` array
+        if (source.length < 1e5)
+            Array.prototype.push.apply(target, source);
+        else
+            for (let i = 0; i < source.length; ++i)
+                target.push(source[i]);
+    }
+    function fixFlowSeqItems(fc) {
+        if (fc.start.type === 'flow-seq-start') {
+            for (const it of fc.items) {
+                if (it.sep &&
+                    !it.value &&
+                    !includesToken(it.start, 'explicit-key-ind') &&
+                    !includesToken(it.sep, 'map-value-ind')) {
+                    if (it.key)
+                        it.value = it.key;
+                    delete it.key;
+                    if (isFlowToken(it.value)) {
+                        if (it.value.end)
+                            arrayPushArray(it.value.end, it.sep);
+                        else
+                            it.value.end = it.sep;
+                    }
+                    else
+                        arrayPushArray(it.start, it.sep);
+                    delete it.sep;
+                }
+            }
+        }
+    }
+    /**
+     * A YAML concrete syntax tree (CST) parser
+     *
+     * ```ts
+     * const src: string = ...
+     * for (const token of new Parser().parse(src)) {
+     *   // token: Token
+     * }
+     * ```
+     *
+     * To use the parser with a user-provided lexer:
+     *
+     * ```ts
+     * function* parse(source: string, lexer: Lexer) {
+     *   const parser = new Parser()
+     *   for (const lexeme of lexer.lex(source))
+     *     yield* parser.next(lexeme)
+     *   yield* parser.end()
+     * }
+     *
+     * const src: string = ...
+     * const lexer = new Lexer()
+     * for (const token of parse(src, lexer)) {
+     *   // token: Token
+     * }
+     * ```
+     */
+    class Parser {
+        /**
+         * @param onNewLine - If defined, called separately with the start position of
+         *   each new line (in `parse()`, including the start of input).
+         */
+        constructor(onNewLine) {
+            /** If true, space and sequence indicators count as indentation */
+            this.atNewLine = true;
+            /** If true, next token is a scalar value */
+            this.atScalar = false;
+            /** Current indentation level */
+            this.indent = 0;
+            /** Current offset since the start of parsing */
+            this.offset = 0;
+            /** On the same line with a block map key */
+            this.onKeyLine = false;
+            /** Top indicates the node that's currently being built */
+            this.stack = [];
+            /** The source of the current token, set in parse() */
+            this.source = '';
+            /** The type of the current token, set in parse() */
+            this.type = '';
+            // Must be defined after `next()`
+            this.lexer = new Lexer();
+            this.onNewLine = onNewLine;
+        }
+        /**
+         * Parse `source` as a YAML stream.
+         * If `incomplete`, a part of the last line may be left as a buffer for the next call.
+         *
+         * Errors are not thrown, but yielded as `{ type: 'error', message }` tokens.
+         *
+         * @returns A generator of tokens representing each directive, document, and other structure.
+         */
+        *parse(source, incomplete = false) {
+            if (this.onNewLine && this.offset === 0)
+                this.onNewLine(0);
+            for (const lexeme of this.lexer.lex(source, incomplete))
+                yield* this.next(lexeme);
+            if (!incomplete)
+                yield* this.end();
+        }
+        /**
+         * Advance the parser by the `source` of one lexical token.
+         */
+        *next(source) {
+            this.source = source;
+            if (this.atScalar) {
+                this.atScalar = false;
+                yield* this.step();
+                this.offset += source.length;
+                return;
+            }
+            const type = tokenType(source);
+            if (!type) {
+                const message = `Not a YAML token: ${source}`;
+                yield* this.pop({ type: 'error', offset: this.offset, message, source });
+                this.offset += source.length;
+            }
+            else if (type === 'scalar') {
+                this.atNewLine = false;
+                this.atScalar = true;
+                this.type = 'scalar';
+            }
+            else {
+                this.type = type;
+                yield* this.step();
+                switch (type) {
+                    case 'newline':
+                        this.atNewLine = true;
+                        this.indent = 0;
+                        if (this.onNewLine)
+                            this.onNewLine(this.offset + source.length);
+                        break;
+                    case 'space':
+                        if (this.atNewLine && source[0] === ' ')
+                            this.indent += source.length;
+                        break;
+                    case 'explicit-key-ind':
+                    case 'map-value-ind':
+                    case 'seq-item-ind':
+                        if (this.atNewLine)
+                            this.indent += source.length;
+                        break;
+                    case 'doc-mode':
+                    case 'flow-error-end':
+                        return;
+                    default:
+                        this.atNewLine = false;
+                }
+                this.offset += source.length;
+            }
+        }
+        /** Call at end of input to push out any remaining constructions */
+        *end() {
+            while (this.stack.length > 0)
+                yield* this.pop();
+        }
+        get sourceToken() {
+            const st = {
+                type: this.type,
+                offset: this.offset,
+                indent: this.indent,
+                source: this.source
+            };
+            return st;
+        }
+        *step() {
+            const top = this.peek(1);
+            if (this.type === 'doc-end' && top?.type !== 'doc-end') {
+                while (this.stack.length > 0)
+                    yield* this.pop();
+                this.stack.push({
+                    type: 'doc-end',
+                    offset: this.offset,
+                    source: this.source
+                });
+                return;
+            }
+            if (!top)
+                return yield* this.stream();
+            switch (top.type) {
+                case 'document':
+                    return yield* this.document(top);
+                case 'alias':
+                case 'scalar':
+                case 'single-quoted-scalar':
+                case 'double-quoted-scalar':
+                    return yield* this.scalar(top);
+                case 'block-scalar':
+                    return yield* this.blockScalar(top);
+                case 'block-map':
+                    return yield* this.blockMap(top);
+                case 'block-seq':
+                    return yield* this.blockSequence(top);
+                case 'flow-collection':
+                    return yield* this.flowCollection(top);
+                case 'doc-end':
+                    return yield* this.documentEnd(top);
+            }
+            /* istanbul ignore next should not happen */
+            yield* this.pop();
+        }
+        peek(n) {
+            return this.stack[this.stack.length - n];
+        }
+        *pop(error) {
+            const token = error ?? this.stack.pop();
+            /* istanbul ignore if should not happen */
+            if (!token) {
+                const message = 'Tried to pop an empty stack';
+                yield { type: 'error', offset: this.offset, source: '', message };
+            }
+            else if (this.stack.length === 0) {
+                yield token;
+            }
+            else {
+                const top = this.peek(1);
+                if (token.type === 'block-scalar') {
+                    // Block scalars use their parent rather than header indent
+                    token.indent = 'indent' in top ? top.indent : 0;
+                }
+                else if (token.type === 'flow-collection' && top.type === 'document') {
+                    // Ignore all indent for top-level flow collections
+                    token.indent = 0;
+                }
+                if (token.type === 'flow-collection')
+                    fixFlowSeqItems(token);
+                switch (top.type) {
+                    case 'document':
+                        top.value = token;
+                        break;
+                    case 'block-scalar':
+                        top.props.push(token); // error
+                        break;
+                    case 'block-map': {
+                        const it = top.items[top.items.length - 1];
+                        if (it.value) {
+                            top.items.push({ start: [], key: token, sep: [] });
+                            this.onKeyLine = true;
+                            return;
+                        }
+                        else if (it.sep) {
+                            it.value = token;
+                        }
+                        else {
+                            Object.assign(it, { key: token, sep: [] });
+                            this.onKeyLine = !it.explicitKey;
+                            return;
+                        }
+                        break;
+                    }
+                    case 'block-seq': {
+                        const it = top.items[top.items.length - 1];
+                        if (it.value)
+                            top.items.push({ start: [], value: token });
+                        else
+                            it.value = token;
+                        break;
+                    }
+                    case 'flow-collection': {
+                        const it = top.items[top.items.length - 1];
+                        if (!it || it.value)
+                            top.items.push({ start: [], key: token, sep: [] });
+                        else if (it.sep)
+                            it.value = token;
+                        else
+                            Object.assign(it, { key: token, sep: [] });
+                        return;
+                    }
+                    /* istanbul ignore next should not happen */
+                    default:
+                        yield* this.pop();
+                        yield* this.pop(token);
+                }
+                if ((top.type === 'document' ||
+                    top.type === 'block-map' ||
+                    top.type === 'block-seq') &&
+                    (token.type === 'block-map' || token.type === 'block-seq')) {
+                    const last = token.items[token.items.length - 1];
+                    if (last &&
+                        !last.sep &&
+                        !last.value &&
+                        last.start.length > 0 &&
+                        findNonEmptyIndex(last.start) === -1 &&
+                        (token.indent === 0 ||
+                            last.start.every(st => st.type !== 'comment' || st.indent < token.indent))) {
+                        if (top.type === 'document')
+                            top.end = last.start;
+                        else
+                            top.items.push({ start: last.start });
+                        token.items.splice(-1, 1);
+                    }
+                }
+            }
+        }
+        *stream() {
+            switch (this.type) {
+                case 'directive-line':
+                    yield { type: 'directive', offset: this.offset, source: this.source };
+                    return;
+                case 'byte-order-mark':
+                case 'space':
+                case 'comment':
+                case 'newline':
+                    yield this.sourceToken;
+                    return;
+                case 'doc-mode':
+                case 'doc-start': {
+                    const doc = {
+                        type: 'document',
+                        offset: this.offset,
+                        start: []
+                    };
+                    if (this.type === 'doc-start')
+                        doc.start.push(this.sourceToken);
+                    this.stack.push(doc);
+                    return;
+                }
+            }
+            yield {
+                type: 'error',
+                offset: this.offset,
+                message: `Unexpected ${this.type} token in YAML stream`,
+                source: this.source
+            };
+        }
+        *document(doc) {
+            if (doc.value)
+                return yield* this.lineEnd(doc);
+            switch (this.type) {
+                case 'doc-start': {
+                    if (findNonEmptyIndex(doc.start) !== -1) {
+                        yield* this.pop();
+                        yield* this.step();
+                    }
+                    else
+                        doc.start.push(this.sourceToken);
+                    return;
+                }
+                case 'anchor':
+                case 'tag':
+                case 'space':
+                case 'comment':
+                case 'newline':
+                    doc.start.push(this.sourceToken);
+                    return;
+            }
+            const bv = this.startBlockValue(doc);
+            if (bv)
+                this.stack.push(bv);
+            else {
+                yield {
+                    type: 'error',
+                    offset: this.offset,
+                    message: `Unexpected ${this.type} token in YAML document`,
+                    source: this.source
+                };
+            }
+        }
+        *scalar(scalar) {
+            if (this.type === 'map-value-ind') {
+                const prev = getPrevProps(this.peek(2));
+                const start = getFirstKeyStartProps(prev);
+                let sep;
+                if (scalar.end) {
+                    sep = scalar.end;
+                    sep.push(this.sourceToken);
+                    delete scalar.end;
+                }
+                else
+                    sep = [this.sourceToken];
+                const map = {
+                    type: 'block-map',
+                    offset: scalar.offset,
+                    indent: scalar.indent,
+                    items: [{ start, key: scalar, sep }]
+                };
+                this.onKeyLine = true;
+                this.stack[this.stack.length - 1] = map;
+            }
+            else
+                yield* this.lineEnd(scalar);
+        }
+        *blockScalar(scalar) {
+            switch (this.type) {
+                case 'space':
+                case 'comment':
+                case 'newline':
+                    scalar.props.push(this.sourceToken);
+                    return;
+                case 'scalar':
+                    scalar.source = this.source;
+                    // block-scalar source includes trailing newline
+                    this.atNewLine = true;
+                    this.indent = 0;
+                    if (this.onNewLine) {
+                        let nl = this.source.indexOf('\n') + 1;
+                        while (nl !== 0) {
+                            this.onNewLine(this.offset + nl);
+                            nl = this.source.indexOf('\n', nl) + 1;
+                        }
+                    }
+                    yield* this.pop();
+                    break;
+                /* istanbul ignore next should not happen */
+                default:
+                    yield* this.pop();
+                    yield* this.step();
+            }
+        }
+        *blockMap(map) {
+            const it = map.items[map.items.length - 1];
+            // it.sep is true-ish if pair already has key or : separator
+            switch (this.type) {
+                case 'newline':
+                    this.onKeyLine = false;
+                    if (it.value) {
+                        const end = 'end' in it.value ? it.value.end : undefined;
+                        const last = Array.isArray(end) ? end[end.length - 1] : undefined;
+                        if (last?.type === 'comment')
+                            end?.push(this.sourceToken);
+                        else
+                            map.items.push({ start: [this.sourceToken] });
+                    }
+                    else if (it.sep) {
+                        it.sep.push(this.sourceToken);
+                    }
+                    else {
+                        it.start.push(this.sourceToken);
+                    }
+                    return;
+                case 'space':
+                case 'comment':
+                    if (it.value) {
+                        map.items.push({ start: [this.sourceToken] });
+                    }
+                    else if (it.sep) {
+                        it.sep.push(this.sourceToken);
+                    }
+                    else {
+                        if (this.atIndentedComment(it.start, map.indent)) {
+                            const prev = map.items[map.items.length - 2];
+                            const end = prev?.value?.end;
+                            if (Array.isArray(end)) {
+                                arrayPushArray(end, it.start);
+                                end.push(this.sourceToken);
+                                map.items.pop();
+                                return;
+                            }
+                        }
+                        it.start.push(this.sourceToken);
+                    }
+                    return;
+            }
+            if (this.indent >= map.indent) {
+                const atMapIndent = !this.onKeyLine && this.indent === map.indent;
+                const atNextItem = atMapIndent &&
+                    (it.sep || it.explicitKey) &&
+                    this.type !== 'seq-item-ind';
+                // For empty nodes, assign newline-separated not indented empty tokens to following node
+                let start = [];
+                if (atNextItem && it.sep && !it.value) {
+                    const nl = [];
+                    for (let i = 0; i < it.sep.length; ++i) {
+                        const st = it.sep[i];
+                        switch (st.type) {
+                            case 'newline':
+                                nl.push(i);
+                                break;
+                            case 'space':
+                                break;
+                            case 'comment':
+                                if (st.indent > map.indent)
+                                    nl.length = 0;
+                                break;
+                            default:
+                                nl.length = 0;
+                        }
+                    }
+                    if (nl.length >= 2)
+                        start = it.sep.splice(nl[1]);
+                }
+                switch (this.type) {
+                    case 'anchor':
+                    case 'tag':
+                        if (atNextItem || it.value) {
+                            start.push(this.sourceToken);
+                            map.items.push({ start });
+                            this.onKeyLine = true;
+                        }
+                        else if (it.sep) {
+                            it.sep.push(this.sourceToken);
+                        }
+                        else {
+                            it.start.push(this.sourceToken);
+                        }
+                        return;
+                    case 'explicit-key-ind':
+                        if (!it.sep && !it.explicitKey) {
+                            it.start.push(this.sourceToken);
+                            it.explicitKey = true;
+                        }
+                        else if (atNextItem || it.value) {
+                            start.push(this.sourceToken);
+                            map.items.push({ start, explicitKey: true });
+                        }
+                        else {
+                            this.stack.push({
+                                type: 'block-map',
+                                offset: this.offset,
+                                indent: this.indent,
+                                items: [{ start: [this.sourceToken], explicitKey: true }]
+                            });
+                        }
+                        this.onKeyLine = true;
+                        return;
+                    case 'map-value-ind':
+                        if (it.explicitKey) {
+                            if (!it.sep) {
+                                if (includesToken(it.start, 'newline')) {
+                                    Object.assign(it, { key: null, sep: [this.sourceToken] });
+                                }
+                                else {
+                                    const start = getFirstKeyStartProps(it.start);
+                                    this.stack.push({
+                                        type: 'block-map',
+                                        offset: this.offset,
+                                        indent: this.indent,
+                                        items: [{ start, key: null, sep: [this.sourceToken] }]
+                                    });
+                                }
+                            }
+                            else if (it.value) {
+                                map.items.push({ start: [], key: null, sep: [this.sourceToken] });
+                            }
+                            else if (includesToken(it.sep, 'map-value-ind')) {
+                                this.stack.push({
+                                    type: 'block-map',
+                                    offset: this.offset,
+                                    indent: this.indent,
+                                    items: [{ start, key: null, sep: [this.sourceToken] }]
+                                });
+                            }
+                            else if (isFlowToken(it.key) &&
+                                !includesToken(it.sep, 'newline')) {
+                                const start = getFirstKeyStartProps(it.start);
+                                const key = it.key;
+                                const sep = it.sep;
+                                sep.push(this.sourceToken);
+                                // @ts-expect-error type guard is wrong here
+                                delete it.key;
+                                // @ts-expect-error type guard is wrong here
+                                delete it.sep;
+                                this.stack.push({
+                                    type: 'block-map',
+                                    offset: this.offset,
+                                    indent: this.indent,
+                                    items: [{ start, key, sep }]
+                                });
+                            }
+                            else if (start.length > 0) {
+                                // Not actually at next item
+                                it.sep = it.sep.concat(start, this.sourceToken);
+                            }
+                            else {
+                                it.sep.push(this.sourceToken);
+                            }
+                        }
+                        else {
+                            if (!it.sep) {
+                                Object.assign(it, { key: null, sep: [this.sourceToken] });
+                            }
+                            else if (it.value || atNextItem) {
+                                map.items.push({ start, key: null, sep: [this.sourceToken] });
+                            }
+                            else if (includesToken(it.sep, 'map-value-ind')) {
+                                this.stack.push({
+                                    type: 'block-map',
+                                    offset: this.offset,
+                                    indent: this.indent,
+                                    items: [{ start: [], key: null, sep: [this.sourceToken] }]
+                                });
+                            }
+                            else {
+                                it.sep.push(this.sourceToken);
+                            }
+                        }
+                        this.onKeyLine = true;
+                        return;
+                    case 'alias':
+                    case 'scalar':
+                    case 'single-quoted-scalar':
+                    case 'double-quoted-scalar': {
+                        const fs = this.flowScalar(this.type);
+                        if (atNextItem || it.value) {
+                            map.items.push({ start, key: fs, sep: [] });
+                            this.onKeyLine = true;
+                        }
+                        else if (it.sep) {
+                            this.stack.push(fs);
+                        }
+                        else {
+                            Object.assign(it, { key: fs, sep: [] });
+                            this.onKeyLine = true;
+                        }
+                        return;
+                    }
+                    default: {
+                        const bv = this.startBlockValue(map);
+                        if (bv) {
+                            if (bv.type === 'block-seq') {
+                                if (!it.explicitKey &&
+                                    it.sep &&
+                                    !includesToken(it.sep, 'newline')) {
+                                    yield* this.pop({
+                                        type: 'error',
+                                        offset: this.offset,
+                                        message: 'Unexpected block-seq-ind on same line with key',
+                                        source: this.source
+                                    });
+                                    return;
+                                }
+                            }
+                            else if (atMapIndent) {
+                                map.items.push({ start });
+                            }
+                            this.stack.push(bv);
+                            return;
+                        }
+                    }
+                }
+            }
+            yield* this.pop();
+            yield* this.step();
+        }
+        *blockSequence(seq) {
+            const it = seq.items[seq.items.length - 1];
+            switch (this.type) {
+                case 'newline':
+                    if (it.value) {
+                        const end = 'end' in it.value ? it.value.end : undefined;
+                        const last = Array.isArray(end) ? end[end.length - 1] : undefined;
+                        if (last?.type === 'comment')
+                            end?.push(this.sourceToken);
+                        else
+                            seq.items.push({ start: [this.sourceToken] });
+                    }
+                    else
+                        it.start.push(this.sourceToken);
+                    return;
+                case 'space':
+                case 'comment':
+                    if (it.value)
+                        seq.items.push({ start: [this.sourceToken] });
+                    else {
+                        if (this.atIndentedComment(it.start, seq.indent)) {
+                            const prev = seq.items[seq.items.length - 2];
+                            const end = prev?.value?.end;
+                            if (Array.isArray(end)) {
+                                arrayPushArray(end, it.start);
+                                end.push(this.sourceToken);
+                                seq.items.pop();
+                                return;
+                            }
+                        }
+                        it.start.push(this.sourceToken);
+                    }
+                    return;
+                case 'anchor':
+                case 'tag':
+                    if (it.value || this.indent <= seq.indent)
+                        break;
+                    it.start.push(this.sourceToken);
+                    return;
+                case 'seq-item-ind':
+                    if (this.indent !== seq.indent)
+                        break;
+                    if (it.value || includesToken(it.start, 'seq-item-ind'))
+                        seq.items.push({ start: [this.sourceToken] });
+                    else
+                        it.start.push(this.sourceToken);
+                    return;
+            }
+            if (this.indent > seq.indent) {
+                const bv = this.startBlockValue(seq);
+                if (bv) {
+                    this.stack.push(bv);
+                    return;
+                }
+            }
+            yield* this.pop();
+            yield* this.step();
+        }
+        *flowCollection(fc) {
+            const it = fc.items[fc.items.length - 1];
+            if (this.type === 'flow-error-end') {
+                let top;
+                do {
+                    yield* this.pop();
+                    top = this.peek(1);
+                } while (top?.type === 'flow-collection');
+            }
+            else if (fc.end.length === 0) {
+                switch (this.type) {
+                    case 'comma':
+                    case 'explicit-key-ind':
+                        if (!it || it.sep)
+                            fc.items.push({ start: [this.sourceToken] });
+                        else
+                            it.start.push(this.sourceToken);
+                        return;
+                    case 'map-value-ind':
+                        if (!it || it.value)
+                            fc.items.push({ start: [], key: null, sep: [this.sourceToken] });
+                        else if (it.sep)
+                            it.sep.push(this.sourceToken);
+                        else
+                            Object.assign(it, { key: null, sep: [this.sourceToken] });
+                        return;
+                    case 'space':
+                    case 'comment':
+                    case 'newline':
+                    case 'anchor':
+                    case 'tag':
+                        if (!it || it.value)
+                            fc.items.push({ start: [this.sourceToken] });
+                        else if (it.sep)
+                            it.sep.push(this.sourceToken);
+                        else
+                            it.start.push(this.sourceToken);
+                        return;
+                    case 'alias':
+                    case 'scalar':
+                    case 'single-quoted-scalar':
+                    case 'double-quoted-scalar': {
+                        const fs = this.flowScalar(this.type);
+                        if (!it || it.value)
+                            fc.items.push({ start: [], key: fs, sep: [] });
+                        else if (it.sep)
+                            this.stack.push(fs);
+                        else
+                            Object.assign(it, { key: fs, sep: [] });
+                        return;
+                    }
+                    case 'flow-map-end':
+                    case 'flow-seq-end':
+                        fc.end.push(this.sourceToken);
+                        return;
+                }
+                const bv = this.startBlockValue(fc);
+                /* istanbul ignore else should not happen */
+                if (bv)
+                    this.stack.push(bv);
+                else {
+                    yield* this.pop();
+                    yield* this.step();
+                }
+            }
+            else {
+                const parent = this.peek(2);
+                if (parent.type === 'block-map' &&
+                    ((this.type === 'map-value-ind' && parent.indent === fc.indent) ||
+                        (this.type === 'newline' &&
+                            !parent.items[parent.items.length - 1].sep))) {
+                    yield* this.pop();
+                    yield* this.step();
+                }
+                else if (this.type === 'map-value-ind' &&
+                    parent.type !== 'flow-collection') {
+                    const prev = getPrevProps(parent);
+                    const start = getFirstKeyStartProps(prev);
+                    fixFlowSeqItems(fc);
+                    const sep = fc.end.splice(1, fc.end.length);
+                    sep.push(this.sourceToken);
+                    const map = {
+                        type: 'block-map',
+                        offset: fc.offset,
+                        indent: fc.indent,
+                        items: [{ start, key: fc, sep }]
+                    };
+                    this.onKeyLine = true;
+                    this.stack[this.stack.length - 1] = map;
+                }
+                else {
+                    yield* this.lineEnd(fc);
+                }
+            }
+        }
+        flowScalar(type) {
+            if (this.onNewLine) {
+                let nl = this.source.indexOf('\n') + 1;
+                while (nl !== 0) {
+                    this.onNewLine(this.offset + nl);
+                    nl = this.source.indexOf('\n', nl) + 1;
+                }
+            }
+            return {
+                type,
+                offset: this.offset,
+                indent: this.indent,
+                source: this.source
+            };
+        }
+        startBlockValue(parent) {
+            switch (this.type) {
+                case 'alias':
+                case 'scalar':
+                case 'single-quoted-scalar':
+                case 'double-quoted-scalar':
+                    return this.flowScalar(this.type);
+                case 'block-scalar-header':
+                    return {
+                        type: 'block-scalar',
+                        offset: this.offset,
+                        indent: this.indent,
+                        props: [this.sourceToken],
+                        source: ''
+                    };
+                case 'flow-map-start':
+                case 'flow-seq-start':
+                    return {
+                        type: 'flow-collection',
+                        offset: this.offset,
+                        indent: this.indent,
+                        start: this.sourceToken,
+                        items: [],
+                        end: []
+                    };
+                case 'seq-item-ind':
+                    return {
+                        type: 'block-seq',
+                        offset: this.offset,
+                        indent: this.indent,
+                        items: [{ start: [this.sourceToken] }]
+                    };
+                case 'explicit-key-ind': {
+                    this.onKeyLine = true;
+                    const prev = getPrevProps(parent);
+                    const start = getFirstKeyStartProps(prev);
+                    start.push(this.sourceToken);
+                    return {
+                        type: 'block-map',
+                        offset: this.offset,
+                        indent: this.indent,
+                        items: [{ start, explicitKey: true }]
+                    };
+                }
+                case 'map-value-ind': {
+                    this.onKeyLine = true;
+                    const prev = getPrevProps(parent);
+                    const start = getFirstKeyStartProps(prev);
+                    return {
+                        type: 'block-map',
+                        offset: this.offset,
+                        indent: this.indent,
+                        items: [{ start, key: null, sep: [this.sourceToken] }]
+                    };
+                }
+            }
+            return null;
+        }
+        atIndentedComment(start, indent) {
+            if (this.type !== 'comment')
+                return false;
+            if (this.indent <= indent)
+                return false;
+            return start.every(st => st.type === 'newline' || st.type === 'space');
+        }
+        *documentEnd(docEnd) {
+            if (this.type !== 'doc-mode') {
+                if (docEnd.end)
+                    docEnd.end.push(this.sourceToken);
+                else
+                    docEnd.end = [this.sourceToken];
+                if (this.type === 'newline')
+                    yield* this.pop();
+            }
+        }
+        *lineEnd(token) {
+            switch (this.type) {
+                case 'comma':
+                case 'doc-start':
+                case 'doc-end':
+                case 'flow-seq-end':
+                case 'flow-map-end':
+                case 'map-value-ind':
+                    yield* this.pop();
+                    yield* this.step();
+                    break;
+                case 'newline':
+                    this.onKeyLine = false;
+                // fallthrough
+                case 'space':
+                case 'comment':
+                default:
+                    // all other values are errors
+                    if (token.end)
+                        token.end.push(this.sourceToken);
+                    else
+                        token.end = [this.sourceToken];
+                    if (this.type === 'newline')
+                        yield* this.pop();
+            }
+        }
+    }
+
+    function parseOptions(options) {
+        const prettyErrors = options.prettyErrors !== false;
+        const lineCounter = options.lineCounter || (prettyErrors && new LineCounter()) || null;
+        return { lineCounter, prettyErrors };
+    }
+    /**
+     * Parse the input as a stream of YAML documents.
+     *
+     * Documents should be separated from each other by `...` or `---` marker lines.
+     *
+     * @returns If an empty `docs` array is returned, it will be of type
+     *   EmptyStream and contain additional stream information. In
+     *   TypeScript, you should use `'empty' in docs` as a type guard for it.
+     */
+    function parseAllDocuments(source, options = {}) {
+        const { lineCounter, prettyErrors } = parseOptions(options);
+        const parser = new Parser(lineCounter?.addNewLine);
+        const composer = new Composer(options);
+        const docs = Array.from(composer.compose(parser.parse(source)));
+        if (prettyErrors && lineCounter)
+            for (const doc of docs) {
+                doc.errors.forEach(prettifyError(source, lineCounter));
+                doc.warnings.forEach(prettifyError(source, lineCounter));
+            }
+        if (docs.length > 0)
+            return docs;
+        return Object.assign([], { empty: true }, composer.streamInfo());
+    }
+    /** Parse an input string into a single YAML.Document */
+    function parseDocument(source, options = {}) {
+        const { lineCounter, prettyErrors } = parseOptions(options);
+        const parser = new Parser(lineCounter?.addNewLine);
+        const composer = new Composer(options);
+        // `doc` is always set by compose.end(true) at the very latest
+        let doc = null;
+        for (const _doc of composer.compose(parser.parse(source), true, source.length)) {
+            if (!doc)
+                doc = _doc;
+            else if (doc.options.logLevel !== 'silent') {
+                doc.errors.push(new YAMLParseError(_doc.range.slice(0, 2), 'MULTIPLE_DOCS', 'Source contains multiple documents; please use YAML.parseAllDocuments()'));
+                break;
+            }
+        }
+        if (prettyErrors && lineCounter) {
+            doc.errors.forEach(prettifyError(source, lineCounter));
+            doc.warnings.forEach(prettifyError(source, lineCounter));
+        }
+        return doc;
+    }
+    function parse(src, reviver, options) {
+        let _reviver = undefined;
+        if (typeof reviver === 'function') {
+            _reviver = reviver;
+        }
+        else if (options === undefined && reviver && typeof reviver === 'object') {
+            options = reviver;
+        }
+        const doc = parseDocument(src, options);
+        if (!doc)
+            return null;
+        doc.warnings.forEach(warning => warn$3(doc.options.logLevel, warning));
+        if (doc.errors.length > 0) {
+            if (doc.options.logLevel !== 'silent')
+                throw doc.errors[0];
+            else
+                doc.errors = [];
+        }
+        return doc.toJS(Object.assign({ reviver: _reviver }, options));
+    }
+    function stringify(value, replacer, options) {
+        let _replacer = null;
+        if (typeof replacer === 'function' || Array.isArray(replacer)) {
+            _replacer = replacer;
+        }
+        else if (options === undefined && replacer) {
+            options = replacer;
+        }
+        if (typeof options === 'string')
+            options = options.length;
+        if (typeof options === 'number') {
+            const indent = Math.round(options);
+            options = indent < 1 ? undefined : indent > 8 ? { indent: 8 } : { indent };
+        }
+        if (value === undefined) {
+            const { keepUndefined } = options ?? replacer ?? {};
+            if (!keepUndefined)
+                return undefined;
+        }
+        if (isDocument(value) && !_replacer)
+            return value.toString(options);
+        return new Document$1(value, _replacer, options).toString(options);
+    }
+
+    var YAML = /*#__PURE__*/Object.freeze({
+        __proto__: null,
+        Alias: Alias,
+        CST: cst,
+        Composer: Composer,
+        Document: Document$1,
+        Lexer: Lexer,
+        LineCounter: LineCounter,
+        Pair: Pair,
+        Parser: Parser,
+        Scalar: Scalar,
+        Schema: Schema,
+        YAMLError: YAMLError,
+        YAMLMap: YAMLMap,
+        YAMLParseError: YAMLParseError,
+        YAMLSeq: YAMLSeq,
+        YAMLWarning: YAMLWarning,
+        isAlias: isAlias,
+        isCollection: isCollection$1,
+        isDocument: isDocument,
+        isMap: isMap$1,
+        isNode: isNode,
+        isPair: isPair,
+        isScalar: isScalar$1,
+        isSeq: isSeq,
+        parse: parse,
+        parseAllDocuments: parseAllDocuments,
+        parseDocument: parseDocument,
+        stringify: stringify,
+        visit: visit$1,
+        visitAsync: visitAsync
+    });
+
+    // `export * as default from ...` fails on Webpack v4
+    // https://github.com/eemeli/yaml/issues/228
+
     const EXTERNAL_CUSTOM_TABLE_EXPORT_MARKER_VERSION_ACU = 1;
     const MARKER_PATTERN_ACU = /<!--\s*ACU_CUSTOM_TABLE_EXPORT_V1\s+({[\s\S]*?})\s*-->/;
     function buildExternalCustomTableExportComment_ACU(comment, marker) {
@@ -66345,21 +73833,61 @@ $CONTENT
             }
         }
     }
+    function toUsageCount_ACU(value) {
+        return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0
+            ? value
+            : undefined;
+    }
+    function firstUsageCount_ACU(...values) {
+        for (const value of values) {
+            const count = toUsageCount_ACU(value);
+            if (count !== undefined)
+                return count;
+        }
+        return undefined;
+    }
+    /** 后出现的已定义字段覆盖先前值；缺失字段不得擦除已经报告的计数。 */
+    function mergeAiUsageMetadata_ACU(current, incoming) {
+        if (!incoming)
+            return current;
+        const merged = current ? { ...current } : {};
+        if (incoming.promptTokens !== undefined)
+            merged.promptTokens = incoming.promptTokens;
+        if (incoming.completionTokens !== undefined)
+            merged.completionTokens = incoming.completionTokens;
+        if (incoming.cachedTokens !== undefined)
+            merged.cachedTokens = incoming.cachedTokens;
+        if (incoming.cacheWriteTokens !== undefined)
+            merged.cacheWriteTokens = incoming.cacheWriteTokens;
+        return merged;
+    }
+    /** 同一响应中先合并 usage，再由 usageMetadata 的已定义字段覆盖。 */
+    function extractResponseUsageMetadata_ACU(raw) {
+        return mergeAiUsageMetadata_ACU(extractAiUsageMetadata_ACU(raw?.usage), extractAiUsageMetadata_ACU(raw?.usageMetadata));
+    }
     /**
-     * 从 OpenAI 兼容响应的 usage 字段提取统一的用量结构。
-     * @param raw 响应里的 usage 对象（chat completions 形态）
+     * 从 OpenAI、Anthropic、DeepSeek 或 Gemini 兼容 usage 对象提取统一用量。
+     * 只接受非负有限整数；字段缺失或非法时保持未报告，显式 0 会被保留。
+     * @param raw 响应里的 usage 或 usageMetadata 对象
      * @returns 统一用量；raw 不含任何有效计数时返回 null
      */
     function extractAiUsageMetadata_ACU(raw) {
         if (!raw || typeof raw !== 'object')
             return null;
-        const toCount = (value) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0);
-        const promptTokens = toCount(raw.prompt_tokens);
-        const completionTokens = toCount(raw.completion_tokens);
-        const cachedTokens = toCount(raw.prompt_tokens_details?.cached_tokens);
-        if (!promptTokens && !completionTokens && !cachedTokens)
-            return null;
-        return { promptTokens, completionTokens, cachedTokens };
+        const promptTokens = firstUsageCount_ACU(raw.prompt_tokens, raw.input_tokens, raw.promptTokenCount);
+        const completionTokens = firstUsageCount_ACU(raw.completion_tokens, raw.output_tokens, raw.candidatesTokenCount);
+        const cachedTokens = firstUsageCount_ACU(raw.prompt_tokens_details?.cached_tokens, raw.input_tokens_details?.cached_tokens, raw.cache_read_input_tokens, raw.prompt_cache_hit_tokens, raw.cachedContentTokenCount);
+        const cacheWriteTokens = firstUsageCount_ACU(raw.cache_creation_input_tokens, raw.cache_write_input_tokens, raw.cache_write_tokens);
+        const usage = {};
+        if (promptTokens !== undefined)
+            usage.promptTokens = promptTokens;
+        if (completionTokens !== undefined)
+            usage.completionTokens = completionTokens;
+        if (cachedTokens !== undefined)
+            usage.cachedTokens = cachedTokens;
+        if (cacheWriteTokens !== undefined)
+            usage.cacheWriteTokens = cacheWriteTokens;
+        return Object.keys(usage).length ? usage : null;
     }
     async function streamToText_ACU(response, signal = null, onUsage) {
         const reader = response.body.getReader();
@@ -66390,9 +73918,8 @@ $CONTENT
                             if (content) {
                                 fullContent += content;
                             }
-                            const usage = extractAiUsageMetadata_ACU(json?.usage);
-                            if (usage)
-                                capturedUsage = usage;
+                            const usage = extractResponseUsageMetadata_ACU(json);
+                            capturedUsage = mergeAiUsageMetadata_ACU(capturedUsage, usage);
                         }
                         catch (e) {
                             // 忽略解析错误
@@ -66415,7 +73942,7 @@ $CONTENT
     async function parseNonStreamResponse_ACU(response, onUsage) {
         try {
             const data = await response.json();
-            const usage = extractAiUsageMetadata_ACU(data?.usage);
+            const usage = extractResponseUsageMetadata_ACU(data);
             if (usage && onUsage) {
                 try {
                     onUsage(usage);
@@ -66893,6 +74420,74 @@ $CONTENT
 
     // service/ai/api-call.ts — AI 调用编排（剧情推进用）
     // 从 04_shared_helpers.js 迁入
+    function isRecord_ACU$9(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value);
+    }
+    function copyRecordWithoutPrototype_ACU(value) {
+        const copy = Object.create(null);
+        for (const key of Object.keys(value))
+            copy[key] = value[key];
+        return copy;
+    }
+    /**
+     * 组合 SillyTavern 的 custom_include_body。JSON 是合法 YAML；输出 JSON 可避免把对象字段
+     * 再拼成不合法的混合 YAML，同时与宿主 yaml.parse 后的浅合并语义保持一致。
+     */
+    function composeCustomIncludeBody_ACU(userBodyParams, pluginFields) {
+        const pluginKeys = Object.keys(pluginFields);
+        if (pluginKeys.length === 0) {
+            return { value: userBodyParams, diagnostic: { reason: 'none', rootType: userBodyParams.trim() ? 'scalar' : 'empty' } };
+        }
+        const trimmed = userBodyParams.trim();
+        if (!trimmed) {
+            return {
+                value: JSON.stringify(copyRecordWithoutPrototype_ACU(pluginFields)),
+                diagnostic: { reason: 'none', rootType: 'empty' },
+            };
+        }
+        let parsed;
+        try {
+            parsed = parse(userBodyParams);
+        }
+        catch {
+            return { value: userBodyParams, diagnostic: { reason: 'parse_error', rootType: 'invalid' } };
+        }
+        const merged = Object.create(null);
+        let rootType;
+        if (Array.isArray(parsed)) {
+            rootType = 'sequence';
+            for (const item of parsed) {
+                if (!isRecord_ACU$9(item))
+                    continue;
+                for (const key of Object.keys(item))
+                    merged[key] = item[key];
+            }
+        }
+        else if (isRecord_ACU$9(parsed)) {
+            rootType = 'mapping';
+            for (const key of Object.keys(parsed))
+                merged[key] = parsed[key];
+        }
+        else {
+            return { value: userBodyParams, diagnostic: { reason: 'unsupported_root', rootType: 'scalar' } };
+        }
+        let diagnostic = { reason: 'none', rootType };
+        for (const key of pluginKeys) {
+            if (key === 'stream_options' && isRecord_ACU$9(pluginFields[key])) {
+                const current = merged[key];
+                if (current !== undefined && !isRecord_ACU$9(current)) {
+                    diagnostic = { reason: 'stream_options_replaced', rootType };
+                }
+                merged[key] = {
+                    ...(isRecord_ACU$9(current) ? copyRecordWithoutPrototype_ACU(current) : {}),
+                    ...copyRecordWithoutPrototype_ACU(pluginFields[key]),
+                };
+                continue;
+            }
+            merged[key] = pluginFields[key];
+        }
+        return { value: JSON.stringify(merged), diagnostic };
+    }
     function normalizeExcludeBodyParamsForSillyTavern_ACU(raw) {
         if (typeof raw !== 'string')
             return '';
@@ -66924,28 +74519,27 @@ $CONTENT
                 headers = headers ? `${headers}\n${extra}` : extra;
             }
         }
-        // 追加缓存相关字段走 custom_include_body（宿主会把这段 YAML 合并进上游请求体）。
-        // 用户自配的 bodyParams 可能是 JSON 流式写法（{ 或 [ 开头），逐行追加键会产生非法 YAML，
-        // 此时跳过注入，绝不破坏用户既有配置。
+        // 插件字段与用户 bodyParams 先按 SillyTavern 的 YAML 解析规则结构化组合，再作为
+        // custom_include_body 交给宿主合并。无法安全解析时保留用户原文并跳过插件字段。
         const streaming = settings_ACU.streamingEnabled || false;
         const userBodyParams = String(effectiveApiConfig.bodyParams || '');
-        const extraIncludeLines = [];
+        const pluginFields = Object.create(null);
         if (opts.promptCacheKey && /^[A-Za-z0-9_-]+$/.test(opts.promptCacheKey)) {
-            extraIncludeLines.push(`prompt_cache_key: ${opts.promptCacheKey}`);
+            pluginFields.prompt_cache_key = opts.promptCacheKey;
         }
         if (opts.includeStreamUsage && streaming) {
-            extraIncludeLines.push('stream_options: {"include_usage": true}');
+            pluginFields.stream_options = { include_usage: true };
         }
         if (opts.responseFormat && typeof opts.responseFormat === 'object') {
-            extraIncludeLines.push(`response_format: ${JSON.stringify(opts.responseFormat)}`);
+            pluginFields.response_format = opts.responseFormat;
         }
-        const userBodyIsFlowStyle = /^[{[]/.test(userBodyParams.trim());
-        if (extraIncludeLines.length && userBodyIsFlowStyle) {
-            logDebug_ACU('[buildCustomApiRequestBody] bodyParams 为 JSON 流式写法，跳过 prompt_cache_key/stream_options 注入');
+        const composedIncludeBody = composeCustomIncludeBody_ACU(userBodyParams, pluginFields);
+        if (composedIncludeBody.diagnostic.reason === 'parse_error' || composedIncludeBody.diagnostic.reason === 'unsupported_root') {
+            logWarn_ACU('[buildCustomApiRequestBody] 跳过插件请求体字段', composedIncludeBody.diagnostic);
         }
-        const includeBody = extraIncludeLines.length && !userBodyIsFlowStyle
-            ? [userBodyParams.trim(), ...extraIncludeLines].filter(Boolean).join('\n')
-            : userBodyParams;
+        else if (composedIncludeBody.diagnostic.reason === 'stream_options_replaced') {
+            logWarn_ACU('[buildCustomApiRequestBody] 用户 stream_options 不是对象，已由插件对象替换', composedIncludeBody.diagnostic);
+        }
         const body = {
             // 统一将 messages 的 role 归一为小写（system / user / assistant）。
             //
@@ -66983,7 +74577,7 @@ $CONTENT
             proxy_password: '',
             custom_url: effectiveApiConfig.url,
             custom_include_headers: headers,
-            custom_include_body: includeBody,
+            custom_include_body: composedIncludeBody.value,
             custom_exclude_body: normalizeExcludeBodyParamsForSillyTavern_ACU(effectiveApiConfig.excludeBodyParams),
         };
         return body;
@@ -69579,7 +77173,7 @@ $CONTENT
     function getDefaultPlotContextExcludeRules_ACU() {
         return normalizeExcludeRules_ACU(DEFAULT_PLOT_SETTINGS_ACU.contextExcludeRules, DEFAULT_PLOT_SETTINGS_ACU.contextExcludeTags || "");
     }
-    function removeLastMatchedBoundary_ACU(text, startBoundary, endBoundary) {
+    function removeAllMatchedBoundaries_ACU(text, startBoundary, endBoundary) {
         const source = String(text ?? "");
         const start = String(startBoundary || "");
         const end = String(endBoundary || "");
@@ -69588,16 +77182,48 @@ $CONTENT
         const lowerSource = source.toLowerCase();
         const lowerStart = start.toLowerCase();
         const lowerEnd = end.toLowerCase();
-        const endIdx = lowerSource.lastIndexOf(lowerEnd);
-        if (endIdx === -1)
+        const openStartIndexes = [];
+        const matchedRanges = [];
+        let searchIndex = 0;
+        while (searchIndex < lowerSource.length) {
+            const nextStartIdx = lowerSource.indexOf(lowerStart, searchIndex);
+            const nextEndIdx = lowerSource.indexOf(lowerEnd, searchIndex);
+            if (nextStartIdx === -1 && nextEndIdx === -1)
+                break;
+            const isStartBoundary = nextStartIdx !== -1
+                && (nextEndIdx === -1 || nextStartIdx <= nextEndIdx);
+            if (isStartBoundary) {
+                openStartIndexes.push(nextStartIdx);
+                searchIndex = nextStartIdx + lowerStart.length;
+                continue;
+            }
+            if (openStartIndexes.length > 0) {
+                const matchedStartIdx = openStartIndexes.pop();
+                const matchedEndIdx = nextEndIdx + lowerEnd.length;
+                if (matchedEndIdx > matchedStartIdx) {
+                    matchedRanges.push({ start: matchedStartIdx, end: matchedEndIdx });
+                }
+            }
+            searchIndex = nextEndIdx + lowerEnd.length;
+        }
+        if (matchedRanges.length === 0)
             return source;
-        const startIdx = lowerSource.lastIndexOf(lowerStart, Math.max(0, endIdx - 1));
-        if (startIdx === -1)
-            return source;
-        const removeTo = endIdx + end.length;
-        if (removeTo <= startIdx)
-            return source;
-        return source.slice(0, startIdx) + source.slice(removeTo);
+        matchedRanges.sort((left, right) => left.start - right.start || left.end - right.end);
+        const mergedRanges = [];
+        matchedRanges.forEach((range) => {
+            const previousRange = mergedRanges[mergedRanges.length - 1];
+            if (!previousRange || range.start > previousRange.end) {
+                mergedRanges.push({ ...range });
+                return;
+            }
+            previousRange.end = Math.max(previousRange.end, range.end);
+        });
+        let result = source;
+        for (let rangeIndex = mergedRanges.length - 1; rangeIndex >= 0; rangeIndex--) {
+            const range = mergedRanges[rangeIndex];
+            result = result.slice(0, range.start) + result.slice(range.end);
+        }
+        return result;
     }
     function applyExcludeRulesToText_ACU(text, { excludeRules = [], excludeTags = "" } = {}) {
         let result = String(text ?? "");
@@ -69605,7 +77231,7 @@ $CONTENT
         if (!result || rules.length === 0)
             return result;
         rules.forEach((rule) => {
-            result = removeLastMatchedBoundary_ACU(result, rule.start, rule.end);
+            result = removeAllMatchedBoundaries_ACU(result, rule.start, rule.end);
         });
         return result.replace(/\n{3,}/g, "\n\n").trim();
     }
@@ -71268,6 +78894,7 @@ $CONTENT
             }
             let rawResponse = '';
             let lastErrorMessage = '';
+            let acceptedTagExtraction = null;
             for (let attemptIndex = 0; attemptIndex < maxRetries; attemptIndex++) {
                 checkPlotAbortRequested_ACU();
                 const effectivePlotApiPreset = resolvePlotTaskApiPreset_ACU(normalizedTask);
@@ -71290,20 +78917,31 @@ $CONTENT
                 }
                 checkPlotAbortRequested_ACU();
                 if (!apiError && tempMessage) {
-                    if (minLength <= 0 || tempMessage.length >= minLength) {
-                        rawResponse = tempMessage;
-                        logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 在第 ${attemptIndex + 1} 次尝试中成功完成。`);
-                        break;
+                    if (minLength > 0 && tempMessage.length < minLength) {
+                        lastErrorMessage = `回复长度不足（${tempMessage.length}/${minLength}）`;
+                        logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次回复过短: ${tempMessage.length}/${minLength}`);
                     }
-                    lastErrorMessage = `回复长度不足（${tempMessage.length}/${minLength}）`;
-                    logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次回复过短: ${tempMessage.length}/${minLength}`);
+                    else {
+                        const candidateTagExtraction = extractPlotTagsFromResponse_ACU(tempMessage, normalizedTask.extractTags, normalizedTask.extractInjectTags);
+                        if (candidateTagExtraction.tagNames.length > 0 && Object.keys(candidateTagExtraction.extractedTags).length === 0) {
+                            const expectedTagNames = candidateTagExtraction.tagNames.join(', ');
+                            lastErrorMessage = `未提取到任何配置标签（${expectedTagNames}）`;
+                            logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次回复未包含任何配置标签: ${expectedTagNames}`);
+                        }
+                        else {
+                            rawResponse = tempMessage;
+                            acceptedTagExtraction = candidateTagExtraction;
+                            logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 在第 ${attemptIndex + 1} 次尝试中成功完成。`);
+                            break;
+                        }
+                    }
                 }
                 if (attemptIndex < maxRetries - 1) {
                     // 可被 abort 信号中断的等待，避免用户点中止后还要等 5 秒
                     await abortableDelay(5000, abortController_ACU?.signal);
                 }
             }
-            if (!rawResponse) {
+            if (!rawResponse || !acceptedTagExtraction) {
                 return {
                     taskId: normalizedTask.id,
                     taskName: taskLabel,
@@ -71316,7 +78954,7 @@ $CONTENT
                     order: normalizedTask.order ?? 0,
                 };
             }
-            const { tagNames, extractedTags, injectedFragments, injectOnlyTags, injectOnlyFragments, injectOnlyTagNames } = extractPlotTagsFromResponse_ACU(rawResponse, normalizedTask.extractTags, normalizedTask.extractInjectTags);
+            const { tagNames, extractedTags, injectedFragments, injectOnlyTags, injectOnlyFragments, injectOnlyTagNames } = acceptedTagExtraction;
             if (tagNames.length > 0 && Object.keys(extractedTags).length > 0) {
                 logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 成功摘取标签: ${Object.keys(extractedTags).join(', ')}`);
             }
@@ -107681,6 +115319,10 @@ $CONTENT
      */
     /** 主 Agent 提示词里标记会话记录插入位置的段。装配器遇到该段时插入会话消息而不发送本段。 */
     const AGENT_HISTORY_ANCHOR_TOKEN_ACU = '$HISTORY_ANCHOR';
+    /** V17 会话记录默认规则；仅用于从已知默认文本定向迁移，不能匹配时必须保留用户文本。 */
+    const AGENT_HISTORY_READ_RULE_V17_ACU = '已经调阅到的资料就在这里，不要重复调阅；';
+    /** V18 append-only 会话规则：同址重读由靠后的新消息声明快照关系，旧消息保持原文。 */
+    const AGENT_HISTORY_READ_RULE_V18_ACU = '同一地址多次出现时，靠后的工具结果是最新快照，较早结果仅代表产生时状态；';
     /** 各请求尾段预填充文本。解析器会在必要时把它拼回模型输出前再解析。 */
     const AGENT_PREFILLS_ACU = {
         main: '{\n  "thought": "',
@@ -107795,7 +115437,7 @@ $CONTENT
         },
         {
             role: 'system',
-            content: '【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。已经调阅到的资料就在这里，不要重复调阅；已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。',
+            content: `【以下是你自己的会话记录】\n用户对你说过的话、你历次迭代实际输出过的动作、运行时回灌给你的工具结果、派工结果与拒绝原因，按真实发生顺序排列，跨轮次持续累积。${AGENT_HISTORY_READ_RULE_V18_ACU}已经完成的工作不要重做，被拒过的写法不要重犯，用户的最新指令优先于你此前的计划。`,
             enabled: true,
             deletable: true,
         },
@@ -108206,6 +115848,11 @@ $CONTENT
      */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU = 'spv2.5-continuation-story-layers-v17';
     /**
+     * Append-only 会话契约版本：同址重读不再动态投影旧工具消息，最新快照关系由新消息自身说明。
+     * 从 V17 升级时只定向替换已知默认句，保留用户定制提示词；更老版本继续整体刷新。
+     */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU = 'spv2.6-continuation-append-only-history-v18';
+    /**
      * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
      * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
      */
@@ -108255,7 +115902,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -108777,6 +116424,29 @@ $CONTENT
         };
     }
     /**
+     * V17 → V18 只迁移已知的默认会话规则句。无法识别的结构或用户文本保持原样，
+     * 随后仍由 validateAgentPrompts_ACU 执行完整持久化校验。
+     */
+    function migrateV17AgentPromptsToV18_ACU(raw) {
+        if (!isRecord_ACU$6(raw))
+            return raw;
+        const currentMain = raw.main;
+        if (!Array.isArray(currentMain))
+            return raw;
+        let changed = false;
+        const main = currentMain.map(segment => {
+            if (!isRecord_ACU$6(segment) || typeof segment.content !== 'string' || !segment.content.includes(AGENT_HISTORY_READ_RULE_V17_ACU)) {
+                return segment;
+            }
+            changed = true;
+            return {
+                ...segment,
+                content: segment.content.split(AGENT_HISTORY_READ_RULE_V17_ACU).join(AGENT_HISTORY_READ_RULE_V18_ACU),
+            };
+        });
+        return changed ? { ...raw, main } : raw;
+    }
+    /**
      * 校验七个角色的 AI 渠道配置。
      * @param raw 持久化里的 agentApiPresets 字段
      * @returns 逐角色校验后的渠道配置
@@ -108913,10 +116583,14 @@ $CONTENT
         let outlinePrompt = raw.outlinePrompt;
         let agentPrompts = raw.agentPrompts;
         let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-        if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU) {
+        if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU) {
+            agentPrompts = migrateV17AgentPromptsToV18_ACU(agentPrompts);
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU;
+        }
+        else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU;
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -109285,7 +116959,7 @@ $CONTENT
 
     /**
      * fnv-1a 32 位哈希（十六进制）。缓存 key 只需要稳定与低碰撞，不需要密码学强度；
-     * chatIdentity 可能含中文与路径分隔符，哈希后得到纯 [0-9a-f] 串，满足请求体注入通道的字符白名单。
+     * 输入可能含中文与路径分隔符，哈希后得到纯 [0-9a-f] 串，满足请求体注入通道的字符白名单。
      */
     function fnv1aHex_ACU(input) {
         let hash = 0x811c9dc5;
@@ -109295,21 +116969,40 @@ $CONTENT
         }
         return (hash >>> 0).toString(16).padStart(8, '0');
     }
+    const PROMPT_CACHE_KEY_NAMESPACE_ACU = 'acu-cont-v2';
+    const PROMPT_CACHE_KEY_MAX_LENGTH_ACU = 64;
     /**
-     * 组装本次调用的 prompt_cache_key。只含稳定因子（聊天身份哈希 + 调用方 scope），
-     * 不含任何随迭代/轮次变化的内容——key 每轮都变会让跨轮缓存命中归零。
+     * 组装本次调用的 prompt_cache_key。只含版本、聊天身份、调用 scope 与模型路由四类稳定因子；
+     * 不含任何随请求、迭代或轮次变化的内容，也不暴露原始聊天身份、scope、模型或 URL。
      */
-    function buildPromptCacheKey_ACU(identity, scope) {
-        const safeScope = scope.replace(/[^A-Za-z0-9_-]/g, '-');
-        return `acu-cont-${fnv1aHex_ACU(identity.chatIdentity)}-${safeScope}`;
+    function buildPromptCacheKey_ACU(identity, scope, preset) {
+        const chatHash = fnv1aHex_ACU(identity.chatIdentity);
+        const scopeHash = fnv1aHex_ACU(scope);
+        const routeHash = fnv1aHex_ACU(JSON.stringify([
+            preset.apiMode,
+            preset.apiConfig.model,
+            preset.apiConfig.url,
+        ]));
+        const key = `${PROMPT_CACHE_KEY_NAMESPACE_ACU}-${chatHash}-${scopeHash}-${routeHash}`;
+        if (key.length > PROMPT_CACHE_KEY_MAX_LENGTH_ACU || !/^[A-Za-z0-9_-]+$/.test(key)) {
+            throw new Error('内部 AI 缓存路由键不符合长度或字符约束。');
+        }
+        return key;
     }
     /**
-     * 把一次调用的用量渲染成会话流条目里的紧凑标签，如「输入 15.0k · ⚡缓存 14.2k · 输出 0.8k」。
-     * ⚡ 是缓存命中数（含在输入内）；恒常显示，命中为 0 时用户能直接看到未命中。
+     * 把一次调用的用量渲染成会话流条目里的紧凑标签。
+     * 基础字段恒常显示；未报告与明确报告 0 保持不同语义。缓存写入仅在厂商报告时追加。
      */
     function formatAgentUsageLabel_ACU(usage) {
-        const compact = (value) => (value < 1000 ? String(value) : `${(value / 1000).toFixed(1)}k`);
-        return `输入 ${compact(usage.promptTokens)} · ⚡缓存 ${compact(usage.cachedTokens)} · 输出 ${compact(usage.completionTokens)}`;
+        const compact = (value) => (value === undefined ? '未报告' : value < 1000 ? String(value) : `${(value / 1000).toFixed(1)}k`);
+        const parts = [
+            `输入 ${compact(usage.promptTokens)}`,
+            `缓存读取 ${compact(usage.cachedTokens)}`,
+            `输出 ${compact(usage.completionTokens)}`,
+        ];
+        if (usage.cacheWriteTokens !== undefined)
+            parts.push(`缓存写入 ${compact(usage.cacheWriteTokens)}`);
+        return parts.join(' · ');
     }
     /**
      * Executes one continuation-owned internal request with explicit provenance.
@@ -109324,7 +117017,9 @@ $CONTENT
                 beforeMainApiCall: () => beginContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
                 afterMainApiCall: () => endContinuationInternalAiMainApiInvocation_ACU(identity.requestId),
                 ...(cacheEnabled && options?.onUsage ? { onUsage: options.onUsage } : {}),
-            }, cacheEnabled ? { promptCacheKey: buildPromptCacheKey_ACU(identity, options?.cacheScope || identity.source) } : undefined);
+            }, cacheEnabled
+                ? { promptCacheKey: buildPromptCacheKey_ACU(identity, options?.cacheScope || identity.source, preset) }
+                : undefined);
         }
         finally {
             // A bound host lifecycle remains registered until its matching ended event.
@@ -110097,32 +117792,19 @@ $CONTENT
             return false;
         return appendPreparedAgentConversationMessages_ACU(messages, next.messages.slice(snapshot.messages.length));
     }
-    /** 同一读取地址被重读后，旧工具结果在发送给模型时投影成的占位说明。 */
-    function staleReadPlaceholder_ACU(readKey) {
-        return `（此前读取的 ${readKey} 内容已过期并被移出上下文，最新内容见后文的工具结果。）`;
-    }
     /**
      * 渲染会话消息为发送给模型的消息序列。
      *
-     * 携带相同 readKey 的工具消息只保留最后一条的完整内容，更早的投影成一行过期占位——
-     * 资料被重读说明旧版本已失效，继续占用上下文只会误导模型。持久化内容不受影响，
-     * 楼层回退后投影自动按剩余消息重算。
+     * 渲染严格使用每条消息自身的持久化文本；向尾部追加消息不得反向改写既有渲染前缀。
      * @param snapshot 当前会话视图
      * @returns `{ role, content }` 数组；主 Agent 自己的输出是 assistant，其余一律 user
      */
     function renderAgentConversationMessages_ACU(snapshot) {
-        const latestByReadKey = new Map();
-        snapshot.messages.forEach((message, index) => {
-            if (message.kind === 'tool' && message.readKey)
-                latestByReadKey.set(message.readKey, index);
-        });
-        return snapshot.messages.map((message, index) => {
+        return snapshot.messages.map((message) => {
             const prefix = KIND_PREFIXES_ACU[message.kind];
-            const stale = message.kind === 'tool' && message.readKey && latestByReadKey.get(message.readKey) !== index;
-            const text = stale ? staleReadPlaceholder_ACU(message.readKey) : message.text;
             return {
                 role: message.kind === 'agent' ? 'assistant' : 'user',
-                content: prefix ? `${prefix}\n${text}` : text,
+                content: prefix ? `${prefix}\n${message.text}` : message.text,
             };
         });
     }
@@ -114717,8 +122399,9 @@ $CONTENT
             let protocolRejections = 0;
             let attempt = 0;
             let lastReason = '';
-            // 本次派工的累计用量。派工间并发（Promise.all）但每次 run 各持有自己的局部累计，无共享状态。
+            // 本次派工的累计用量。只有每次已观测调用都报告某字段时，该字段才具备可求和的完整性。
             let usageTotal = null;
+            const addCompleteCount = (current, incoming) => (current !== undefined && incoming !== undefined ? current + incoming : undefined);
             const callOptions = {
                 promptCacheEnabled: input.settings.promptCacheEnabled,
                 // 每个子代理的提示词前缀不同，独立缓存命名空间避免互相挤占路由。
@@ -114726,11 +122409,17 @@ $CONTENT
                 onUsage: usage => {
                     usageTotal = usageTotal
                         ? {
-                            promptTokens: usageTotal.promptTokens + usage.promptTokens,
-                            completionTokens: usageTotal.completionTokens + usage.completionTokens,
-                            cachedTokens: usageTotal.cachedTokens + usage.cachedTokens,
+                            promptTokens: addCompleteCount(usageTotal.promptTokens, usage.promptTokens),
+                            completionTokens: addCompleteCount(usageTotal.completionTokens, usage.completionTokens),
+                            cachedTokens: addCompleteCount(usageTotal.cachedTokens, usage.cachedTokens),
+                            cacheWriteTokens: addCompleteCount(usageTotal.cacheWriteTokens, usage.cacheWriteTokens),
                         }
-                        : { ...usage };
+                        : {
+                            promptTokens: usage.promptTokens,
+                            completionTokens: usage.completionTokens,
+                            cachedTokens: usage.cachedTokens,
+                            cacheWriteTokens: usage.cacheWriteTokens,
+                        };
                 },
             };
             // 调用总数上界 = 首轮 + 工具轮 + 协议重试 + 工具轮用尽后的最后通牒轮。到界仍未交付即失败。
@@ -115039,7 +122728,12 @@ $CONTENT
             };
             // 中断恢复不复播门禁账本：工具结果已持久在会话里，恢复后重读同一地址会被去重挡下，
             // 账本从零起算只是给恢复后的运行一份完整的读取额度。
-            const toolUsage = { batchesUsed: 0, gateState: createAgentReadGateState_ACU(), granted: new Set() };
+            const toolUsage = {
+                batchesUsed: 0,
+                gateState: createAgentReadGateState_ACU(),
+                granted: new Set(),
+                invalidated: new Set(),
+            };
             const identitySeed = request.createInternalRequestIdentity(0);
             const cursorKeyOf = () => {
                 const execution = request.readContext();
@@ -115136,7 +122830,9 @@ $CONTENT
                     }
                     if (action.kind === 'edit_outline') {
                         await this.runOutlineEdits(action.edits, request, context, ledger);
-                        // 大纲可能已变化：清空放行地址，允许重读最新版（旧工具消息由渲染层投影成过期占位）。
+                        // 大纲可能已变化：记录既有读取地址后清空放行集合，允许重读并只在新消息标记最新快照。
+                        for (const key of toolUsage.granted)
+                            toolUsage.invalidated.add(key);
                         toolUsage.granted.clear();
                         await commitOutcomes(outcomesBefore);
                         iteration += 1;
@@ -115186,7 +122882,9 @@ $CONTENT
                         failLoop_ACU('CONTINUATION_AGENT_BLOCKED', `主 Agent 阻断本轮：${action.reason}`, { unresolved: action.unresolved });
                     }
                     snapshot = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, apiDependencies);
-                    // 派工可能结算模块或改写大纲：清空放行地址，允许重读最新版。
+                    // 派工可能结算模块或改写大纲：记录既有读取地址后允许重读最新版。
+                    for (const key of toolUsage.granted)
+                        toolUsage.invalidated.add(key);
                     toolUsage.granted.clear();
                     await commitOutcomes(outcomesBefore);
                     iteration += 1;
@@ -115457,8 +123155,12 @@ $CONTENT
                 if (decision.allowed) {
                     toolUsage.gateState.grantedTokens += decision.batchTokens;
                     for (const material of fresh) {
+                        const isLatestSnapshot = toolUsage.invalidated.delete(material.key);
                         toolUsage.granted.add(material.key);
-                        appends.push({ kind: 'tool', text: `### ${material.title}（${material.label}）\n${material.text}`, digest: `调阅 ${material.label}`, turnKey: session.turnKey, readKey: material.key });
+                        const latestSnapshotNotice = isLatestSnapshot
+                            ? '\n\n【最新快照】该地址的资料在上次调阅后可能已变化；本条是重新调阅所得的最新快照，较早结果仅代表产生时状态。'
+                            : '';
+                        appends.push({ kind: 'tool', text: `### ${material.title}（${material.label}）\n${material.text}${latestSnapshotNotice}`, digest: `调阅 ${material.label}`, turnKey: session.turnKey, readKey: material.key });
                     }
                     logAgentSession_ACU({
                         kind: 'tool_read',
@@ -164344,776 +172046,776 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_2$f = { class: "acu-v2-data-mgmt-page__panel-stack" };
     const _hoisted_3$e = { class: "acu-v2-data-mgmt-page__form-stack" };
     const _hoisted_4$b = {
-    	key: 0,
-    	class: "acu-v2-data-mgmt-page__history-list"
+	key: 0,
+	class: "acu-v2-data-mgmt-page__history-list"
     };
     const _hoisted_5$a = { class: "acu-v2-data-mgmt-page__history-code" };
     const _hoisted_6$9 = {
-    	key: 0,
-    	class: "acu-v2-data-mgmt-page__history-current"
+	key: 0,
+	class: "acu-v2-data-mgmt-page__history-current"
     };
     const _hoisted_7$7 = {
-    	key: 1,
-    	class: "acu-v2-data-mgmt-page__history-empty"
+	key: 1,
+	class: "acu-v2-data-mgmt-page__history-empty"
     };
     const _hoisted_8$7 = { class: "acu-v2-data-mgmt-page__actions" };
     const _hoisted_9$6 = {
-    	key: 0,
-    	class: "acu-v2-data-mgmt-page__command-grid"
+	key: 0,
+	class: "acu-v2-data-mgmt-page__command-grid"
     };
     const _hoisted_10$6 = {
-    	class: "acu-v2-data-mgmt-page__checkpoint-section",
-    	"aria-labelledby": "acu-checkpoint-title"
+	class: "acu-v2-data-mgmt-page__checkpoint-section",
+	"aria-labelledby": "acu-checkpoint-title"
     };
     const _hoisted_11$6 = { class: "acu-v2-data-mgmt-page__checkpoint-actions" };
     const _hoisted_12$6 = {
-    	key: 1,
-    	class: "acu-v2-data-mgmt-page__checkpoint-section",
-    	"aria-labelledby": "acu-mixed-storage-title"
+	key: 1,
+	class: "acu-v2-data-mgmt-page__checkpoint-section",
+	"aria-labelledby": "acu-mixed-storage-title"
     };
     const _hoisted_13$5 = { class: "acu-v2-data-mgmt-page__section-description" };
     const _hoisted_14$5 = { class: "acu-v2-data-mgmt-page__checkpoint-actions" };
     const _hoisted_15$5 = {
-    	key: 2,
-    	class: "acu-v2-data-mgmt-page__checkpoint-section",
-    	"aria-labelledby": "acu-v2-recovery-title"
+	key: 2,
+	class: "acu-v2-data-mgmt-page__checkpoint-section",
+	"aria-labelledby": "acu-v2-recovery-title"
     };
     const _hoisted_16$5 = { class: "acu-v2-data-mgmt-page__section-description" };
     const _hoisted_17$4 = { class: "acu-v2-data-mgmt-page__checkpoint-actions" };
     const _hoisted_18$4 = {
-    	key: 3,
-    	class: "acu-v2-data-mgmt-page__checkpoint-section",
-    	"aria-labelledby": "acu-v2-isolation-diagnostics-title"
+	key: 3,
+	class: "acu-v2-data-mgmt-page__checkpoint-section",
+	"aria-labelledby": "acu-v2-isolation-diagnostics-title"
     };
     const _hoisted_19$4 = { class: "acu-v2-data-mgmt-page__form-stack" };
     const _hoisted_20$3 = { key: 0 };
     const _hoisted_21$3 = { key: 1 };
     const _hoisted_22$2 = {
-    	key: 4,
-    	class: "acu-v2-data-mgmt-page__checkpoint-section acu-v2-data-mgmt-page__sqlite-runtime-section",
-    	"aria-labelledby": "acu-sqlite-runtime-title"
+	key: 4,
+	class: "acu-v2-data-mgmt-page__checkpoint-section acu-v2-data-mgmt-page__sqlite-runtime-section",
+	"aria-labelledby": "acu-sqlite-runtime-title"
     };
     const _hoisted_23$2 = {
-    	id: "acu-sqlite-runtime-title",
-    	class: "acu-v2-data-mgmt-page__section-title"
+	id: "acu-sqlite-runtime-title",
+	class: "acu-v2-data-mgmt-page__section-title"
     };
     const _hoisted_24$2 = { class: "acu-v2-data-mgmt-page__meta" };
     const _hoisted_25$2 = {
-    	class: "acu-v2-data-mgmt-page__runtime-health",
-    	"data-testid": "sqlite-runtime-health"
+	class: "acu-v2-data-mgmt-page__runtime-health",
+	"data-testid": "sqlite-runtime-health"
     };
     const _hoisted_26$2 = {
-    	key: 0,
-    	class: "acu-v2-data-mgmt-page__checkpoint-actions"
+	key: 0,
+	class: "acu-v2-data-mgmt-page__checkpoint-actions"
     };
     const _hoisted_27$2 = {
-    	key: 5,
-    	class: "acu-v2-data-mgmt-page__checkpoint-actions"
+	key: 5,
+	class: "acu-v2-data-mgmt-page__checkpoint-actions"
     };
     const _hoisted_28$1 = { class: "acu-v2-data-mgmt-page__panel-stack" };
     const _hoisted_29$1 = {
-    	class: "acu-v2-data-mgmt-page__cleanup-section",
-    	"aria-labelledby": "acu-cleanup-auto-title"
+	class: "acu-v2-data-mgmt-page__cleanup-section",
+	"aria-labelledby": "acu-cleanup-auto-title"
     };
     const _hoisted_30 = { class: "acu-v2-data-mgmt-page__form-stack" };
     const _hoisted_31 = {
-    	class: "acu-v2-data-mgmt-page__cleanup-section",
-    	"aria-labelledby": "acu-cleanup-manual-title"
+	class: "acu-v2-data-mgmt-page__cleanup-section",
+	"aria-labelledby": "acu-cleanup-manual-title"
     };
     const _hoisted_32 = { class: "acu-v2-data-mgmt-page__meta" };
     const _hoisted_33 = { class: "acu-v2-data-mgmt-page__form-grid" };
     const _hoisted_34 = { class: "acu-v2-data-mgmt-page__command-grid acu-v2-data-mgmt-page__command-grid--cleanup" };
     function _sfc_render$g(_ctx, _cache, $props, $setup, $data, $options) {
-    	return openBlock(), createElementBlock("section", _hoisted_1$g, [$setup.flow.message.value ? (openBlock(), createBlock($setup["AcuMessage"], {
-    		key: 0,
-    		kind: $setup.flow.message.value.kind
-    	}, {
-    		default: withCtx(() => [createTextVNode(
-    			toDisplayString($setup.flow.message.value.text),
-    			1
-    			/* TEXT */
-    		)]),
-    		_: 1
-    	}, 8, ["kind"])) : createCommentVNode("v-if", true), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-data-mgmt-page__layout" }, {
-    		default: withCtx(() => [createBaseVNode("div", _hoisted_2$f, [$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createBlock($setup["AcuPanel"], {
-    			key: 0,
-    			title: $setup.dataMgmtCopy.panels.isolation.title,
-    			description: $setup.dataMgmtCopy.panels.isolation.description
-    		}, {
-    			default: withCtx(() => [createBaseVNode("div", _hoisted_3$e, [createVNode($setup["AcuFormRow"], {
-    				label: "标识代码",
-    				hint: $setup.isolationCodeHint
-    			}, {
-    				default: withCtx(() => [createVNode($setup["AcuInput"], {
-    					"model-value": $setup.flow.isolationCode.value,
-    					type: "text",
-    					placeholder: "输入标识代码",
-    					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.flow.isolationCode.value = String($event))
-    				}, null, 8, ["model-value"])]),
-    				_: 1
-    			}, 8, ["hint"]), createVNode($setup["AcuDisclosureGroup"], {
-    				class: "acu-v2-data-mgmt-page__history",
-    				label: "历史标识",
-    				meta: $setup.historyMetaLabel,
-    				expanded: $setup.historyExpanded,
-    				"body-id": "acu-data-isolation-history",
-    				"body-mode": "if",
-    				onToggle: _cache[1] || (_cache[1] = ($event) => $setup.historyExpanded = !$setup.historyExpanded)
-    			}, {
-    				default: withCtx(() => [$setup.flow.isolationHistory.value.length ? (openBlock(), createElementBlock("div", _hoisted_4$b, [(openBlock(true), createElementBlock(
-    					Fragment,
-    					null,
-    					renderList($setup.flow.isolationHistory.value, (code) => {
-    						return openBlock(), createElementBlock("div", {
-    							key: code,
-    							class: "acu-v2-data-mgmt-page__history-item"
-    						}, [createVNode($setup["AcuButton"], {
-    							class: "acu-v2-data-mgmt-page__history-fill",
-    							size: "sm",
-    							title: `填入历史标识：${code}`,
-    							disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
-    							onClick: ($event) => $setup.selectHistory(code)
-    						}, {
-    							default: withCtx(() => [createBaseVNode(
-    								"span",
-    								_hoisted_5$a,
-    								toDisplayString(code),
-    								1
-    								/* TEXT */
-    							), code === $setup.flow.currentIsolationLabel.value ? (openBlock(), createElementBlock("span", _hoisted_6$9, " 当前 ")) : createCommentVNode("v-if", true)]),
-    							_: 2
-    						}, 1032, [
-    							"title",
-    							"disabled",
-    							"onClick"
-    						]), createVNode($setup["AcuIconButton"], {
-    							icon: "fa-solid fa-trash-can",
-    							variant: "danger",
-    							title: `删除历史标识：${code}`,
-    							"aria-label": `删除历史标识：${code}`,
-    							disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
-    							onClick: ($event) => $setup.onRemoveHistory(code)
-    						}, null, 8, [
-    							"title",
-    							"aria-label",
-    							"disabled",
-    							"onClick"
-    						])]);
-    					}),
-    					128
-    					/* KEYED_FRAGMENT */
-    				))])) : (openBlock(), createElementBlock("p", _hoisted_7$7, " 暂无历史标识。 "))]),
-    				_: 1
-    			}, 8, ["meta", "expanded"])]), createBaseVNode("div", _hoisted_8$7, [createVNode($setup["AcuButton"], {
-    				disabled: $setup.runtimeDiagnostic.busy.value,
-    				loading: $setup.flow.busyAction.value === "delete-isolation-entries",
-    				onClick: $setup.onDeleteCurrentIsolationEntries
-    			}, {
-    				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
-    					" 删除当前标识注入条目 ",
-    					-1
-    					/* CACHED */
-    				)])]),
-    				_: 1
-    			}, 8, ["disabled", "loading"]), createVNode($setup["AcuButton"], {
-    				variant: "primary",
-    				disabled: $setup.runtimeDiagnostic.busy.value,
-    				loading: $setup.flow.busyAction.value === "apply-isolation",
-    				onClick: $setup.onApplyIsolation
-    			}, {
-    				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
-    					" 保存并应用 ",
-    					-1
-    					/* CACHED */
-    				)])]),
-    				_: 1
-    			}, 8, ["disabled", "loading"])])]),
-    			_: 1
-    		}, 8, ["title", "description"])) : createCommentVNode("v-if", true), createVNode($setup["AcuPanel"], {
-    			title: $setup.dataMgmtCopy.panels.backup.title,
-    			description: $setup.dataMgmtCopy.panels.backup.description
-    		}, {
-    			default: withCtx(() => [
-    				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("div", _hoisted_9$6, [
-    					createVNode($setup["AcuFileButton"], {
-    						variant: "primary",
-    						block: "",
-    						accept: ".json,application/json",
-    						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
-    						onFile: $setup.flow.importCombinedSettings
-    					}, {
-    						default: withCtx(() => [..._cache[13] || (_cache[13] = [createBaseVNode(
-    							"i",
-    							{ class: "fa-solid fa-download" },
-    							null,
-    							-1
-    							/* CACHED */
-    						), createTextVNode(
-    							" 合并导入（模板+指令） ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					}, 8, ["disabled", "onFile"]),
-    					createVNode($setup["AcuButton"], {
-    						block: "",
-    						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
-    						onClick: $setup.flow.exportCombinedSettings
-    					}, {
-    						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
-    							"i",
-    							{ class: "fa-solid fa-upload" },
-    							null,
-    							-1
-    							/* CACHED */
-    						), createTextVNode(
-    							" 合并导出（模板+指令） ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					}, 8, ["disabled", "onClick"]),
-    					createVNode($setup["AcuButton"], {
-    						block: "",
-    						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
-    						onClick: $setup.flow.exportJsonData
-    					}, {
-    						default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
-    							"i",
-    							{ class: "fa-solid fa-upload" },
-    							null,
-    							-1
-    							/* CACHED */
-    						), createTextVNode(
-    							" 特殊导出 ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					}, 8, ["disabled", "onClick"]),
-    					createVNode($setup["AcuButton"], {
-    						block: "",
-    						disabled: $setup.runtimeDiagnostic.busy.value,
-    						loading: $setup.flow.busyAction.value === "override-latest",
-    						onClick: $setup.onOverrideLatestLayer
-    					}, {
-    						default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
-    							" 模板覆盖最新层数据 ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					}, 8, ["disabled", "loading"])
-    				])) : createCommentVNode("v-if", true),
-    				createBaseVNode("section", _hoisted_10$6, [
-    					_cache[19] || (_cache[19] = createBaseVNode(
-    						"h3",
-    						{
-    							id: "acu-checkpoint-title",
-    							class: "acu-v2-data-mgmt-page__section-title"
-    						},
-    						"当前聊天 Checkpoint",
-    						-1
-    						/* CACHED */
-    					)),
-    					_cache[20] || (_cache[20] = createBaseVNode(
-    						"p",
-    						{ class: "acu-v2-data-mgmt-page__section-description" },
-    						" 导出当前隔离标识的表格、聊天模板和指导表。导入会清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据， 仅在当前激活隔离键的最新 AI 楼层重建数据；当前聊天表格模板会切换为文件模板，后续更新将使用该模板。 全局模板和聊天正文不变。 ",
-    						-1
-    						/* CACHED */
-    					)),
-    					createBaseVNode("div", _hoisted_11$6, [createVNode($setup["AcuButton"], {
-    						block: "",
-    						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
-    						onClick: $setup.flow.exportTableCheckpoint
-    					}, {
-    						default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
-    							" 导出 Checkpoint ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					}, 8, ["disabled", "onClick"]), createVNode($setup["AcuFileButton"], {
-    						block: "",
-    						accept: ".json,application/json",
-    						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
-    						onFile: $setup.onImportTableCheckpoint
-    					}, {
-    						default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
-    							" 导入 Checkpoint ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					}, 8, ["disabled"])])
-    				]),
-    				$setup.flow.mixedStorageDecision.value ? (openBlock(), createElementBlock("section", _hoisted_12$6, [
-    					_cache[25] || (_cache[25] = createBaseVNode(
-    						"h3",
-    						{
-    							id: "acu-mixed-storage-title",
-    							class: "acu-v2-data-mgmt-page__section-title"
-    						},
-    						"混合存储决议",
-    						-1
-    						/* CACHED */
-    					)),
-    					createBaseVNode("p", _hoisted_13$5, [
-    						createTextVNode(
-    							" 当前聊天同时检测到 legacy-v1 与 V2 数据。决议：" + toDisplayString($setup.flow.mixedStorageDecision.value.kind) + "。 ",
-    							1
-    							/* TEXT */
-    						),
-    						$setup.flow.mixedStorageDecision.value.diagnosticCodes.length ? (openBlock(), createElementBlock(
-    							Fragment,
-    							{ key: 0 },
-    							[createTextVNode(
-    								" 诊断：" + toDisplayString($setup.flow.mixedStorageDecision.value.diagnosticCodes.join("、")) + "。 ",
-    								1
-    								/* TEXT */
-    							)],
-    							64
-    							/* STABLE_FRAGMENT */
-    						)) : createCommentVNode("v-if", true),
-    						$setup.flow.mixedStorageDecision.value.anchorStatus || $setup.flow.mixedStorageDecision.value.replayStatus ? (openBlock(), createElementBlock(
-    							Fragment,
-    							{ key: 1 },
-    							[createTextVNode(
-    								" 锚点：" + toDisplayString($setup.flow.mixedStorageDecision.value.anchorStatus) + "；回放：" + toDisplayString($setup.flow.mixedStorageDecision.value.replayStatus) + "； 静态表数：" + toDisplayString($setup.flow.mixedStorageDecision.value.staticSheetKeyCount) + "。 ",
-    								1
-    								/* TEXT */
-    							)],
-    							64
-    							/* STABLE_FRAGMENT */
-    						)) : createCommentVNode("v-if", true),
-    						_cache[21] || (_cache[21] = createTextVNode(
-    							" 可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。 ",
-    							-1
-    							/* CACHED */
-    						))
-    					]),
-    					createBaseVNode("div", _hoisted_14$5, [
-    						createVNode($setup["AcuButton"], {
-    							block: "",
-    							disabled: $setup.runtimeDiagnostic.busy.value,
-    							loading: $setup.flow.busyAction.value === "export-mixed-storage-snapshots",
-    							onClick: $setup.flow.exportMixedStorageSnapshots
-    						}, {
-    							default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
-    								" 导出 legacy/V2 快照 ",
-    								-1
-    								/* CACHED */
-    							)])]),
-    							_: 1
-    						}, 8, [
-    							"disabled",
-    							"loading",
-    							"onClick"
-    						]),
-    						$setup.flow.mixedStorageDecision.value.allowedActions.includes("keep_v2") ? (openBlock(), createBlock($setup["AcuButton"], {
-    							key: 0,
-    							block: "",
-    							disabled: $setup.runtimeDiagnostic.busy.value,
-    							loading: $setup.flow.busyAction.value === "commit-mixed-storage-keep_v2",
-    							onClick: _cache[2] || (_cache[2] = ($event) => $setup.onCommitMixedStorageDecision("keep_v2"))
-    						}, {
-    							default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
-    								" 保留 V2 并清理 legacy ",
-    								-1
-    								/* CACHED */
-    							)])]),
-    							_: 1
-    						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true),
-    						$setup.flow.mixedStorageDecision.value.allowedActions.includes("commit_merge_candidate") ? (openBlock(), createBlock($setup["AcuButton"], {
-    							key: 1,
-    							block: "",
-    							disabled: $setup.runtimeDiagnostic.busy.value,
-    							loading: $setup.flow.busyAction.value === "commit-mixed-storage-commit_merge_candidate",
-    							onClick: _cache[3] || (_cache[3] = ($event) => $setup.onCommitMixedStorageDecision("commit_merge_candidate"))
-    						}, {
-    							default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
-    								" 提交受限合并候选 ",
-    								-1
-    								/* CACHED */
-    							)])]),
-    							_: 1
-    						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true)
-    					])
-    				])) : createCommentVNode("v-if", true),
-    				$setup.flow.v2RecoverySummary.value ? (openBlock(), createElementBlock("section", _hoisted_15$5, [
-    					_cache[29] || (_cache[29] = createBaseVNode(
-    						"h3",
-    						{
-    							id: "acu-v2-recovery-title",
-    							class: "acu-v2-data-mgmt-page__section-title"
-    						},
-    						"V2 数据恢复诊断",
-    						-1
-    						/* CACHED */
-    					)),
-    					createBaseVNode(
-    						"p",
-    						_hoisted_16$5,
-    						toDisplayString($setup.flow.v2RecoverySummary.value.message) + " 恢复仅使用服务端冻结候选，不会从页面读取或提交可编辑表格数据。 ",
-    						1
-    						/* TEXT */
-    					),
-    					createBaseVNode("div", _hoisted_17$4, [
-    						createVNode($setup["AcuButton"], {
-    							block: "",
-    							disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
-    							onClick: $setup.flow.exportV2RecoveryBackups
-    						}, {
-    							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
-    								" 导出已保存的原始 frame 备份 ",
-    								-1
-    								/* CACHED */
-    							)])]),
-    							_: 1
-    						}, 8, ["disabled", "onClick"]),
-    						$setup.flow.v2RecoverySummary.value.status === "recoverable_repaired_checkpoint" || $setup.flow.v2RecoverySummary.value.status === "recoverable_temporary_sheet_anchor" || $setup.flow.v2RecoverySummary.value.status === "recoverable_redundant_full_checkpoint" || $setup.flow.v2RecoverySummary.value.status === "recoverable_from_recovery_backup" ? (openBlock(), createBlock($setup["AcuButton"], {
-    							key: 0,
-    							block: "",
-    							variant: "danger",
-    							disabled: $setup.runtimeDiagnostic.busy.value,
-    							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
-    							onClick: _cache[4] || (_cache[4] = ($event) => $setup.onCommitV2Recovery(false))
-    						}, {
-    							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
-    								" 应用 Checkpoint 修复/收敛 ",
-    								-1
-    								/* CACHED */
-    							)])]),
-    							_: 1
-    						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true),
-    						$setup.flow.v2RecoverySummary.value.status === "recoverable_orphan_data_replace" ? (openBlock(), createBlock($setup["AcuButton"], {
-    							key: 1,
-    							block: "",
-    							variant: "danger",
-    							disabled: $setup.runtimeDiagnostic.busy.value,
-    							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
-    							onClick: _cache[5] || (_cache[5] = ($event) => $setup.onCommitV2Recovery(true))
-    						}, {
-    							default: withCtx(() => [..._cache[28] || (_cache[28] = [createTextVNode(
-    								" 确认无锚点 data_replace 恢复 ",
-    								-1
-    								/* CACHED */
-    							)])]),
-    							_: 1
-    						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true)
-    					])
-    				])) : createCommentVNode("v-if", true),
-    				$setup.flow.v2IsolationDiagnostics.value.length ? (openBlock(), createElementBlock("section", _hoisted_18$4, [_cache[30] || (_cache[30] = createBaseVNode(
-    					"h3",
-    					{
-    						id: "acu-v2-isolation-diagnostics-title",
-    						class: "acu-v2-data-mgmt-page__section-title"
-    					},
-    					"V2 隔离域恢复诊断",
-    					-1
-    					/* CACHED */
-    				)), createBaseVNode("div", _hoisted_19$4, [(openBlock(true), createElementBlock(
-    					Fragment,
-    					null,
-    					renderList($setup.flow.v2IsolationDiagnostics.value, (diagnostic) => {
-    						return openBlock(), createElementBlock("div", {
-    							key: diagnostic.isolationKey,
-    							class: "acu-v2-data-mgmt-page__history-item"
-    						}, [
-    							createBaseVNode(
-    								"strong",
-    								null,
-    								toDisplayString(diagnostic.isolationKey || "默认隔离域"),
-    								1
-    								/* TEXT */
-    							),
-    							createBaseVNode(
-    								"p",
-    								null,
-    								toDisplayString(diagnostic.message),
-    								1
-    								/* TEXT */
-    							),
-    							!diagnostic.isCurrentIsolation ? (openBlock(), createElementBlock("p", _hoisted_20$3, "请切换到该隔离域后重新诊断；当前恢复提交不会跨隔离域执行。")) : diagnostic.status.startsWith("recoverable_") ? (openBlock(), createElementBlock("p", _hoisted_21$3, "当前隔离域存在可恢复候选，请使用下方“诊断 V2 数据恢复”生成可提交计划。")) : createCommentVNode("v-if", true)
-    						]);
-    					}),
-    					128
-    					/* KEYED_FRAGMENT */
-    				))])])) : createCommentVNode("v-if", true),
-    				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("section", _hoisted_22$2, [
-    					createBaseVNode(
-    						"h3",
-    						_hoisted_23$2,
-    						toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.title),
-    						1
-    						/* TEXT */
-    					),
-    					createBaseVNode(
-    						"p",
-    						_hoisted_24$2,
-    						toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.description),
-    						1
-    						/* TEXT */
-    					),
-    					createBaseVNode("dl", _hoisted_25$2, [
-    						createBaseVNode("div", null, [createBaseVNode(
-    							"dt",
-    							null,
-    							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.status),
-    							1
-    							/* TEXT */
-    						), createBaseVNode(
-    							"dd",
-    							null,
-    							toDisplayString($setup.runtimeDiagnostic.health.value.status),
-    							1
-    							/* TEXT */
-    						)]),
-    						createBaseVNode("div", null, [createBaseVNode(
-    							"dt",
-    							null,
-    							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.expectedMode),
-    							1
-    							/* TEXT */
-    						), createBaseVNode(
-    							"dd",
-    							null,
-    							toDisplayString($setup.runtimeDiagnostic.health.value.expectedMode),
-    							1
-    							/* TEXT */
-    						)]),
-    						createBaseVNode("div", null, [createBaseVNode(
-    							"dt",
-    							null,
-    							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.activeMode),
-    							1
-    							/* TEXT */
-    						), createBaseVNode(
-    							"dd",
-    							null,
-    							toDisplayString($setup.runtimeDiagnostic.health.value.activeMode || $setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.unavailable),
-    							1
-    							/* TEXT */
-    						)]),
-    						createBaseVNode("div", null, [createBaseVNode(
-    							"dt",
-    							null,
-    							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.source),
-    							1
-    							/* TEXT */
-    						), createBaseVNode(
-    							"dd",
-    							null,
-    							toDisplayString($setup.runtimeDiagnostic.health.value.source || $setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.unavailable),
-    							1
-    							/* TEXT */
-    						)]),
-    						createBaseVNode("div", null, [createBaseVNode(
-    							"dt",
-    							null,
-    							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.loadToken),
-    							1
-    							/* TEXT */
-    						), createBaseVNode(
-    							"dd",
-    							null,
-    							toDisplayString($setup.runtimeDiagnostic.health.value.loadToken),
-    							1
-    							/* TEXT */
-    						)]),
-    						createBaseVNode("div", null, [createBaseVNode(
-    							"dt",
-    							null,
-    							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.failureCode),
-    							1
-    							/* TEXT */
-    						), createBaseVNode(
-    							"dd",
-    							null,
-    							toDisplayString($setup.runtimeDiagnostic.health.value.failureCode || $setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.unavailable),
-    							1
-    							/* TEXT */
-    						)])
-    					]),
-    					$setup.runtimeDiagnostic.isVisible.value ? (openBlock(), createElementBlock("div", _hoisted_26$2, [createVNode($setup["AcuButton"], {
-    						block: "",
-    						variant: "primary",
-    						disabled: !!$setup.flow.busyAction.value,
-    						loading: $setup.runtimeDiagnostic.busy.value,
-    						onClick: $setup.onReloadSqliteRuntime
-    					}, {
-    						default: withCtx(() => [createTextVNode(
-    							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.reloadLabel),
-    							1
-    							/* TEXT */
-    						)]),
-    						_: 1
-    					}, 8, ["disabled", "loading"])])) : createCommentVNode("v-if", true)
-    				])) : createCommentVNode("v-if", true),
-    				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("div", _hoisted_27$2, [createVNode($setup["AcuButton"], {
-    					block: "",
-    					disabled: $setup.runtimeDiagnostic.busy.value,
-    					loading: $setup.flow.busyAction.value === "scan-v2-isolation-diagnostics",
-    					onClick: $setup.flow.scanV2IsolationDiagnostics
-    				}, {
-    					default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
-    						" 扫描全部 V2 隔离域 ",
-    						-1
-    						/* CACHED */
-    					)])]),
-    					_: 1
-    				}, 8, [
-    					"disabled",
-    					"loading",
-    					"onClick"
-    				]), createVNode($setup["AcuButton"], {
-    					block: "",
-    					disabled: $setup.runtimeDiagnostic.busy.value,
-    					loading: $setup.flow.busyAction.value === "prepare-v2-recovery",
-    					onClick: $setup.flow.prepareV2Recovery
-    				}, {
-    					default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
-    						" 诊断 V2 数据恢复 ",
-    						-1
-    						/* CACHED */
-    					)])]),
-    					_: 1
-    				}, 8, [
-    					"disabled",
-    					"loading",
-    					"onClick"
-    				])])) : createCommentVNode("v-if", true)
-    			]),
-    			_: 1
-    		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_28$1, [createVNode($setup["DormantDataPanel"]), createVNode($setup["AcuPanel"], {
-    			title: $setup.dataMgmtCopy.panels.cleanup.title,
-    			description: $setup.dataMgmtCopy.panels.cleanup.description
-    		}, {
-    			default: withCtx(() => [
-    				createBaseVNode("section", _hoisted_29$1, [_cache[33] || (_cache[33] = createBaseVNode(
-    					"h3",
-    					{
-    						id: "acu-cleanup-auto-title",
-    						class: "acu-v2-data-mgmt-page__section-title"
-    					},
-    					" 自动清理 ",
-    					-1
-    					/* CACHED */
-    				)), createBaseVNode("div", _hoisted_30, [createVNode($setup["AcuFormRow"], {
-    					label: "保留数据层数",
-    					hint: "自动更新结束后，超过保留范围的旧楼层插件数据会被清理；不影响聊天正文。"
-    				}, {
-    					default: withCtx(() => [createVNode($setup["AcuInput"], {
-    						type: "number",
-    						min: 0,
-    						step: 1,
-    						disabled: $setup.runtimeDiagnostic.busy.value,
-    						"model-value": $setup.flow.retainRecentLayers.value,
-    						onChange: _cache[6] || (_cache[6] = ($event) => $setup.flow.setRetainRecentLayers($event))
-    					}, null, 8, ["disabled", "model-value"])]),
-    					_: 1
-    				})])]),
-    				createBaseVNode("section", _hoisted_31, [
-    					_cache[34] || (_cache[34] = createBaseVNode(
-    						"h3",
-    						{
-    							id: "acu-cleanup-manual-title",
-    							class: "acu-v2-data-mgmt-page__section-title"
-    						},
-    						" 手动删除 ",
-    						-1
-    						/* CACHED */
-    					)),
-    					createBaseVNode(
-    						"p",
-    						_hoisted_32,
-    						" 当前聊天 " + toDisplayString($setup.flow.aiMessageCount.value) + " 个 AI 楼层 · 将处理：" + toDisplayString($setup.flow.rangeLabel.value),
-    						1
-    						/* TEXT */
-    					),
-    					createBaseVNode("div", _hoisted_33, [createVNode($setup["AcuFormRow"], {
-    						label: "起始楼层",
-    						hint: "从第N个楼层 AI 回复开始，留空为第 1 层。"
-    					}, {
-    						default: withCtx(() => [createVNode($setup["AcuInput"], {
-    							"model-value": $setup.flow.deleteRange.startFloor,
-    							type: "number",
-    							min: 1,
-    							step: 1,
-    							"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.flow.deleteRange.startFloor = $event)
-    						}, null, 8, ["model-value"])]),
-    						_: 1
-    					}), createVNode($setup["AcuFormRow"], {
-    						label: "终止楼层",
-    						hint: "留空为最新楼层。"
-    					}, {
-    						default: withCtx(() => [createVNode($setup["AcuInput"], {
-    							"model-value": $setup.flow.deleteRange.endFloor,
-    							type: "number",
-    							min: 1,
-    							step: 1,
-    							placeholder: "到最后",
-    							"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.flow.deleteRange.endFloor = $event)
-    						}, null, 8, ["model-value"])]),
-    						_: 1
-    					})])
-    				]),
-    				_cache[38] || (_cache[38] = createBaseVNode(
-    					"p",
-    					{ class: "acu-v2-data-mgmt-page__meta" },
-    					" 楼层范围同时作用于两个删除按钮。「删除所有本地数据」在范围覆盖全部 AI 楼层时执行硬清空，范围为局部时只删除对应楼层的填表数据。 ",
-    					-1
-    					/* CACHED */
-    				)),
-    				createBaseVNode("div", _hoisted_34, [
-    					$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createBlock($setup["AcuButton"], {
-    						key: 0,
-    						block: "",
-    						disabled: $setup.runtimeDiagnostic.busy.value,
-    						loading: $setup.flow.busyAction.value === "delete-current-local",
-    						onClick: _cache[9] || (_cache[9] = ($event) => $setup.onDeleteLocalData("current"))
-    					}, {
-    						default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
-    							" 删除当前标识本地数据 ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true),
-    					createVNode($setup["AcuButton"], {
-    						block: "",
-    						variant: "danger",
-    						disabled: $setup.runtimeDiagnostic.busy.value,
-    						loading: $setup.flow.busyAction.value === "purge-all-local" || $setup.flow.busyAction.value === "delete-all-local",
-    						onClick: _cache[10] || (_cache[10] = ($event) => $setup.onDeleteLocalData("all"))
-    					}, {
-    						default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
-    							" 删除所有本地数据 ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					}, 8, ["disabled", "loading"]),
-    					createVNode($setup["AcuButton"], {
-    						block: "",
-    						disabled: $setup.runtimeDiagnostic.busy.value,
-    						loading: $setup.flow.busyAction.value === "reset-defaults",
-    						onClick: $setup.onResetAllDefaults
-    					}, {
-    						default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
-    							" 恢复默认配置 ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					}, 8, ["disabled", "loading"])
-    				])
-    			]),
-    			_: 1
-    		}, 8, ["title", "description"])])]),
-    		_: 1
-    	})]);
+	return openBlock(), createElementBlock("section", _hoisted_1$g, [$setup.flow.message.value ? (openBlock(), createBlock($setup["AcuMessage"], {
+		key: 0,
+		kind: $setup.flow.message.value.kind
+	}, {
+		default: withCtx(() => [createTextVNode(
+			toDisplayString($setup.flow.message.value.text),
+			1
+			/* TEXT */
+		)]),
+		_: 1
+	}, 8, ["kind"])) : createCommentVNode("v-if", true), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-data-mgmt-page__layout" }, {
+		default: withCtx(() => [createBaseVNode("div", _hoisted_2$f, [$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createBlock($setup["AcuPanel"], {
+			key: 0,
+			title: $setup.dataMgmtCopy.panels.isolation.title,
+			description: $setup.dataMgmtCopy.panels.isolation.description
+		}, {
+			default: withCtx(() => [createBaseVNode("div", _hoisted_3$e, [createVNode($setup["AcuFormRow"], {
+				label: "标识代码",
+				hint: $setup.isolationCodeHint
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					"model-value": $setup.flow.isolationCode.value,
+					type: "text",
+					placeholder: "输入标识代码",
+					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.flow.isolationCode.value = String($event))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			}, 8, ["hint"]), createVNode($setup["AcuDisclosureGroup"], {
+				class: "acu-v2-data-mgmt-page__history",
+				label: "历史标识",
+				meta: $setup.historyMetaLabel,
+				expanded: $setup.historyExpanded,
+				"body-id": "acu-data-isolation-history",
+				"body-mode": "if",
+				onToggle: _cache[1] || (_cache[1] = ($event) => $setup.historyExpanded = !$setup.historyExpanded)
+			}, {
+				default: withCtx(() => [$setup.flow.isolationHistory.value.length ? (openBlock(), createElementBlock("div", _hoisted_4$b, [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.flow.isolationHistory.value, (code) => {
+						return openBlock(), createElementBlock("div", {
+							key: code,
+							class: "acu-v2-data-mgmt-page__history-item"
+						}, [createVNode($setup["AcuButton"], {
+							class: "acu-v2-data-mgmt-page__history-fill",
+							size: "sm",
+							title: `填入历史标识：${code}`,
+							disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
+							onClick: ($event) => $setup.selectHistory(code)
+						}, {
+							default: withCtx(() => [createBaseVNode(
+								"span",
+								_hoisted_5$a,
+								toDisplayString(code),
+								1
+								/* TEXT */
+							), code === $setup.flow.currentIsolationLabel.value ? (openBlock(), createElementBlock("span", _hoisted_6$9, " 当前 ")) : createCommentVNode("v-if", true)]),
+							_: 2
+						}, 1032, [
+							"title",
+							"disabled",
+							"onClick"
+						]), createVNode($setup["AcuIconButton"], {
+							icon: "fa-solid fa-trash-can",
+							variant: "danger",
+							title: `删除历史标识：${code}`,
+							"aria-label": `删除历史标识：${code}`,
+							disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
+							onClick: ($event) => $setup.onRemoveHistory(code)
+						}, null, 8, [
+							"title",
+							"aria-label",
+							"disabled",
+							"onClick"
+						])]);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])) : (openBlock(), createElementBlock("p", _hoisted_7$7, " 暂无历史标识。 "))]),
+				_: 1
+			}, 8, ["meta", "expanded"])]), createBaseVNode("div", _hoisted_8$7, [createVNode($setup["AcuButton"], {
+				disabled: $setup.runtimeDiagnostic.busy.value,
+				loading: $setup.flow.busyAction.value === "delete-isolation-entries",
+				onClick: $setup.onDeleteCurrentIsolationEntries
+			}, {
+				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
+					" 删除当前标识注入条目 ",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["disabled", "loading"]), createVNode($setup["AcuButton"], {
+				variant: "primary",
+				disabled: $setup.runtimeDiagnostic.busy.value,
+				loading: $setup.flow.busyAction.value === "apply-isolation",
+				onClick: $setup.onApplyIsolation
+			}, {
+				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
+					" 保存并应用 ",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["disabled", "loading"])])]),
+			_: 1
+		}, 8, ["title", "description"])) : createCommentVNode("v-if", true), createVNode($setup["AcuPanel"], {
+			title: $setup.dataMgmtCopy.panels.backup.title,
+			description: $setup.dataMgmtCopy.panels.backup.description
+		}, {
+			default: withCtx(() => [
+				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("div", _hoisted_9$6, [
+					createVNode($setup["AcuFileButton"], {
+						variant: "primary",
+						block: "",
+						accept: ".json,application/json",
+						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
+						onFile: $setup.flow.importCombinedSettings
+					}, {
+						default: withCtx(() => [..._cache[13] || (_cache[13] = [createBaseVNode(
+							"i",
+							{ class: "fa-solid fa-download" },
+							null,
+							-1
+							/* CACHED */
+						), createTextVNode(
+							" 合并导入（模板+指令） ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled", "onFile"]),
+					createVNode($setup["AcuButton"], {
+						block: "",
+						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
+						onClick: $setup.flow.exportCombinedSettings
+					}, {
+						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
+							"i",
+							{ class: "fa-solid fa-upload" },
+							null,
+							-1
+							/* CACHED */
+						), createTextVNode(
+							" 合并导出（模板+指令） ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled", "onClick"]),
+					createVNode($setup["AcuButton"], {
+						block: "",
+						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
+						onClick: $setup.flow.exportJsonData
+					}, {
+						default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
+							"i",
+							{ class: "fa-solid fa-upload" },
+							null,
+							-1
+							/* CACHED */
+						), createTextVNode(
+							" 特殊导出 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled", "onClick"]),
+					createVNode($setup["AcuButton"], {
+						block: "",
+						disabled: $setup.runtimeDiagnostic.busy.value,
+						loading: $setup.flow.busyAction.value === "override-latest",
+						onClick: $setup.onOverrideLatestLayer
+					}, {
+						default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
+							" 模板覆盖最新层数据 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled", "loading"])
+				])) : createCommentVNode("v-if", true),
+				createBaseVNode("section", _hoisted_10$6, [
+					_cache[19] || (_cache[19] = createBaseVNode(
+						"h3",
+						{
+							id: "acu-checkpoint-title",
+							class: "acu-v2-data-mgmt-page__section-title"
+						},
+						"当前聊天 Checkpoint",
+						-1
+						/* CACHED */
+					)),
+					_cache[20] || (_cache[20] = createBaseVNode(
+						"p",
+						{ class: "acu-v2-data-mgmt-page__section-description" },
+						" 导出当前隔离标识的表格、聊天模板和指导表。导入会清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据， 仅在当前激活隔离键的最新 AI 楼层重建数据；当前聊天表格模板会切换为文件模板，后续更新将使用该模板。 全局模板和聊天正文不变。 ",
+						-1
+						/* CACHED */
+					)),
+					createBaseVNode("div", _hoisted_11$6, [createVNode($setup["AcuButton"], {
+						block: "",
+						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
+						onClick: $setup.flow.exportTableCheckpoint
+					}, {
+						default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
+							" 导出 Checkpoint ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled", "onClick"]), createVNode($setup["AcuFileButton"], {
+						block: "",
+						accept: ".json,application/json",
+						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
+						onFile: $setup.onImportTableCheckpoint
+					}, {
+						default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
+							" 导入 Checkpoint ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled"])])
+				]),
+				$setup.flow.mixedStorageDecision.value ? (openBlock(), createElementBlock("section", _hoisted_12$6, [
+					_cache[25] || (_cache[25] = createBaseVNode(
+						"h3",
+						{
+							id: "acu-mixed-storage-title",
+							class: "acu-v2-data-mgmt-page__section-title"
+						},
+						"混合存储决议",
+						-1
+						/* CACHED */
+					)),
+					createBaseVNode("p", _hoisted_13$5, [
+						createTextVNode(
+							" 当前聊天同时检测到 legacy-v1 与 V2 数据。决议：" + toDisplayString($setup.flow.mixedStorageDecision.value.kind) + "。 ",
+							1
+							/* TEXT */
+						),
+						$setup.flow.mixedStorageDecision.value.diagnosticCodes.length ? (openBlock(), createElementBlock(
+							Fragment,
+							{ key: 0 },
+							[createTextVNode(
+								" 诊断：" + toDisplayString($setup.flow.mixedStorageDecision.value.diagnosticCodes.join("、")) + "。 ",
+								1
+								/* TEXT */
+							)],
+							64
+							/* STABLE_FRAGMENT */
+						)) : createCommentVNode("v-if", true),
+						$setup.flow.mixedStorageDecision.value.anchorStatus || $setup.flow.mixedStorageDecision.value.replayStatus ? (openBlock(), createElementBlock(
+							Fragment,
+							{ key: 1 },
+							[createTextVNode(
+								" 锚点：" + toDisplayString($setup.flow.mixedStorageDecision.value.anchorStatus) + "；回放：" + toDisplayString($setup.flow.mixedStorageDecision.value.replayStatus) + "； 静态表数：" + toDisplayString($setup.flow.mixedStorageDecision.value.staticSheetKeyCount) + "。 ",
+								1
+								/* TEXT */
+							)],
+							64
+							/* STABLE_FRAGMENT */
+						)) : createCommentVNode("v-if", true),
+						_cache[21] || (_cache[21] = createTextVNode(
+							" 可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。 ",
+							-1
+							/* CACHED */
+						))
+					]),
+					createBaseVNode("div", _hoisted_14$5, [
+						createVNode($setup["AcuButton"], {
+							block: "",
+							disabled: $setup.runtimeDiagnostic.busy.value,
+							loading: $setup.flow.busyAction.value === "export-mixed-storage-snapshots",
+							onClick: $setup.flow.exportMixedStorageSnapshots
+						}, {
+							default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
+								" 导出 legacy/V2 快照 ",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}, 8, [
+							"disabled",
+							"loading",
+							"onClick"
+						]),
+						$setup.flow.mixedStorageDecision.value.allowedActions.includes("keep_v2") ? (openBlock(), createBlock($setup["AcuButton"], {
+							key: 0,
+							block: "",
+							disabled: $setup.runtimeDiagnostic.busy.value,
+							loading: $setup.flow.busyAction.value === "commit-mixed-storage-keep_v2",
+							onClick: _cache[2] || (_cache[2] = ($event) => $setup.onCommitMixedStorageDecision("keep_v2"))
+						}, {
+							default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+								" 保留 V2 并清理 legacy ",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true),
+						$setup.flow.mixedStorageDecision.value.allowedActions.includes("commit_merge_candidate") ? (openBlock(), createBlock($setup["AcuButton"], {
+							key: 1,
+							block: "",
+							disabled: $setup.runtimeDiagnostic.busy.value,
+							loading: $setup.flow.busyAction.value === "commit-mixed-storage-commit_merge_candidate",
+							onClick: _cache[3] || (_cache[3] = ($event) => $setup.onCommitMixedStorageDecision("commit_merge_candidate"))
+						}, {
+							default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
+								" 提交受限合并候选 ",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true)
+					])
+				])) : createCommentVNode("v-if", true),
+				$setup.flow.v2RecoverySummary.value ? (openBlock(), createElementBlock("section", _hoisted_15$5, [
+					_cache[29] || (_cache[29] = createBaseVNode(
+						"h3",
+						{
+							id: "acu-v2-recovery-title",
+							class: "acu-v2-data-mgmt-page__section-title"
+						},
+						"V2 数据恢复诊断",
+						-1
+						/* CACHED */
+					)),
+					createBaseVNode(
+						"p",
+						_hoisted_16$5,
+						toDisplayString($setup.flow.v2RecoverySummary.value.message) + " 恢复仅使用服务端冻结候选，不会从页面读取或提交可编辑表格数据。 ",
+						1
+						/* TEXT */
+					),
+					createBaseVNode("div", _hoisted_17$4, [
+						createVNode($setup["AcuButton"], {
+							block: "",
+							disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
+							onClick: $setup.flow.exportV2RecoveryBackups
+						}, {
+							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
+								" 导出已保存的原始 frame 备份 ",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}, 8, ["disabled", "onClick"]),
+						$setup.flow.v2RecoverySummary.value.status === "recoverable_repaired_checkpoint" || $setup.flow.v2RecoverySummary.value.status === "recoverable_temporary_sheet_anchor" || $setup.flow.v2RecoverySummary.value.status === "recoverable_redundant_full_checkpoint" || $setup.flow.v2RecoverySummary.value.status === "recoverable_from_recovery_backup" ? (openBlock(), createBlock($setup["AcuButton"], {
+							key: 0,
+							block: "",
+							variant: "danger",
+							disabled: $setup.runtimeDiagnostic.busy.value,
+							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
+							onClick: _cache[4] || (_cache[4] = ($event) => $setup.onCommitV2Recovery(false))
+						}, {
+							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
+								" 应用 Checkpoint 修复/收敛 ",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true),
+						$setup.flow.v2RecoverySummary.value.status === "recoverable_orphan_data_replace" ? (openBlock(), createBlock($setup["AcuButton"], {
+							key: 1,
+							block: "",
+							variant: "danger",
+							disabled: $setup.runtimeDiagnostic.busy.value,
+							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
+							onClick: _cache[5] || (_cache[5] = ($event) => $setup.onCommitV2Recovery(true))
+						}, {
+							default: withCtx(() => [..._cache[28] || (_cache[28] = [createTextVNode(
+								" 确认无锚点 data_replace 恢复 ",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true)
+					])
+				])) : createCommentVNode("v-if", true),
+				$setup.flow.v2IsolationDiagnostics.value.length ? (openBlock(), createElementBlock("section", _hoisted_18$4, [_cache[30] || (_cache[30] = createBaseVNode(
+					"h3",
+					{
+						id: "acu-v2-isolation-diagnostics-title",
+						class: "acu-v2-data-mgmt-page__section-title"
+					},
+					"V2 隔离域恢复诊断",
+					-1
+					/* CACHED */
+				)), createBaseVNode("div", _hoisted_19$4, [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.flow.v2IsolationDiagnostics.value, (diagnostic) => {
+						return openBlock(), createElementBlock("div", {
+							key: diagnostic.isolationKey,
+							class: "acu-v2-data-mgmt-page__history-item"
+						}, [
+							createBaseVNode(
+								"strong",
+								null,
+								toDisplayString(diagnostic.isolationKey || "默认隔离域"),
+								1
+								/* TEXT */
+							),
+							createBaseVNode(
+								"p",
+								null,
+								toDisplayString(diagnostic.message),
+								1
+								/* TEXT */
+							),
+							!diagnostic.isCurrentIsolation ? (openBlock(), createElementBlock("p", _hoisted_20$3, "请切换到该隔离域后重新诊断；当前恢复提交不会跨隔离域执行。")) : diagnostic.status.startsWith("recoverable_") ? (openBlock(), createElementBlock("p", _hoisted_21$3, "当前隔离域存在可恢复候选，请使用下方“诊断 V2 数据恢复”生成可提交计划。")) : createCommentVNode("v-if", true)
+						]);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])])) : createCommentVNode("v-if", true),
+				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("section", _hoisted_22$2, [
+					createBaseVNode(
+						"h3",
+						_hoisted_23$2,
+						toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.title),
+						1
+						/* TEXT */
+					),
+					createBaseVNode(
+						"p",
+						_hoisted_24$2,
+						toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.description),
+						1
+						/* TEXT */
+					),
+					createBaseVNode("dl", _hoisted_25$2, [
+						createBaseVNode("div", null, [createBaseVNode(
+							"dt",
+							null,
+							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.status),
+							1
+							/* TEXT */
+						), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtimeDiagnostic.health.value.status),
+							1
+							/* TEXT */
+						)]),
+						createBaseVNode("div", null, [createBaseVNode(
+							"dt",
+							null,
+							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.expectedMode),
+							1
+							/* TEXT */
+						), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtimeDiagnostic.health.value.expectedMode),
+							1
+							/* TEXT */
+						)]),
+						createBaseVNode("div", null, [createBaseVNode(
+							"dt",
+							null,
+							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.activeMode),
+							1
+							/* TEXT */
+						), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtimeDiagnostic.health.value.activeMode || $setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.unavailable),
+							1
+							/* TEXT */
+						)]),
+						createBaseVNode("div", null, [createBaseVNode(
+							"dt",
+							null,
+							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.source),
+							1
+							/* TEXT */
+						), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtimeDiagnostic.health.value.source || $setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.unavailable),
+							1
+							/* TEXT */
+						)]),
+						createBaseVNode("div", null, [createBaseVNode(
+							"dt",
+							null,
+							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.loadToken),
+							1
+							/* TEXT */
+						), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtimeDiagnostic.health.value.loadToken),
+							1
+							/* TEXT */
+						)]),
+						createBaseVNode("div", null, [createBaseVNode(
+							"dt",
+							null,
+							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.failureCode),
+							1
+							/* TEXT */
+						), createBaseVNode(
+							"dd",
+							null,
+							toDisplayString($setup.runtimeDiagnostic.health.value.failureCode || $setup.dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.unavailable),
+							1
+							/* TEXT */
+						)])
+					]),
+					$setup.runtimeDiagnostic.isVisible.value ? (openBlock(), createElementBlock("div", _hoisted_26$2, [createVNode($setup["AcuButton"], {
+						block: "",
+						variant: "primary",
+						disabled: !!$setup.flow.busyAction.value,
+						loading: $setup.runtimeDiagnostic.busy.value,
+						onClick: $setup.onReloadSqliteRuntime
+					}, {
+						default: withCtx(() => [createTextVNode(
+							toDisplayString($setup.dataMgmtCopy.panels.backup.sqliteRuntime.reloadLabel),
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					}, 8, ["disabled", "loading"])])) : createCommentVNode("v-if", true)
+				])) : createCommentVNode("v-if", true),
+				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("div", _hoisted_27$2, [createVNode($setup["AcuButton"], {
+					block: "",
+					disabled: $setup.runtimeDiagnostic.busy.value,
+					loading: $setup.flow.busyAction.value === "scan-v2-isolation-diagnostics",
+					onClick: $setup.flow.scanV2IsolationDiagnostics
+				}, {
+					default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
+						" 扫描全部 V2 隔离域 ",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, [
+					"disabled",
+					"loading",
+					"onClick"
+				]), createVNode($setup["AcuButton"], {
+					block: "",
+					disabled: $setup.runtimeDiagnostic.busy.value,
+					loading: $setup.flow.busyAction.value === "prepare-v2-recovery",
+					onClick: $setup.flow.prepareV2Recovery
+				}, {
+					default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
+						" 诊断 V2 数据恢复 ",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}, 8, [
+					"disabled",
+					"loading",
+					"onClick"
+				])])) : createCommentVNode("v-if", true)
+			]),
+			_: 1
+		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_28$1, [createVNode($setup["DormantDataPanel"]), createVNode($setup["AcuPanel"], {
+			title: $setup.dataMgmtCopy.panels.cleanup.title,
+			description: $setup.dataMgmtCopy.panels.cleanup.description
+		}, {
+			default: withCtx(() => [
+				createBaseVNode("section", _hoisted_29$1, [_cache[33] || (_cache[33] = createBaseVNode(
+					"h3",
+					{
+						id: "acu-cleanup-auto-title",
+						class: "acu-v2-data-mgmt-page__section-title"
+					},
+					" 自动清理 ",
+					-1
+					/* CACHED */
+				)), createBaseVNode("div", _hoisted_30, [createVNode($setup["AcuFormRow"], {
+					label: "保留数据层数",
+					hint: "自动更新结束后，超过保留范围的旧楼层插件数据会被清理；不影响聊天正文。"
+				}, {
+					default: withCtx(() => [createVNode($setup["AcuInput"], {
+						type: "number",
+						min: 0,
+						step: 1,
+						disabled: $setup.runtimeDiagnostic.busy.value,
+						"model-value": $setup.flow.retainRecentLayers.value,
+						onChange: _cache[6] || (_cache[6] = ($event) => $setup.flow.setRetainRecentLayers($event))
+					}, null, 8, ["disabled", "model-value"])]),
+					_: 1
+				})])]),
+				createBaseVNode("section", _hoisted_31, [
+					_cache[34] || (_cache[34] = createBaseVNode(
+						"h3",
+						{
+							id: "acu-cleanup-manual-title",
+							class: "acu-v2-data-mgmt-page__section-title"
+						},
+						" 手动删除 ",
+						-1
+						/* CACHED */
+					)),
+					createBaseVNode(
+						"p",
+						_hoisted_32,
+						" 当前聊天 " + toDisplayString($setup.flow.aiMessageCount.value) + " 个 AI 楼层 · 将处理：" + toDisplayString($setup.flow.rangeLabel.value),
+						1
+						/* TEXT */
+					),
+					createBaseVNode("div", _hoisted_33, [createVNode($setup["AcuFormRow"], {
+						label: "起始楼层",
+						hint: "从第N个楼层 AI 回复开始，留空为第 1 层。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							"model-value": $setup.flow.deleteRange.startFloor,
+							type: "number",
+							min: 1,
+							step: 1,
+							"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.flow.deleteRange.startFloor = $event)
+						}, null, 8, ["model-value"])]),
+						_: 1
+					}), createVNode($setup["AcuFormRow"], {
+						label: "终止楼层",
+						hint: "留空为最新楼层。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							"model-value": $setup.flow.deleteRange.endFloor,
+							type: "number",
+							min: 1,
+							step: 1,
+							placeholder: "到最后",
+							"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.flow.deleteRange.endFloor = $event)
+						}, null, 8, ["model-value"])]),
+						_: 1
+					})])
+				]),
+				_cache[38] || (_cache[38] = createBaseVNode(
+					"p",
+					{ class: "acu-v2-data-mgmt-page__meta" },
+					" 楼层范围同时作用于两个删除按钮。「删除所有本地数据」在范围覆盖全部 AI 楼层时执行硬清空，范围为局部时只删除对应楼层的填表数据。 ",
+					-1
+					/* CACHED */
+				)),
+				createBaseVNode("div", _hoisted_34, [
+					$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createBlock($setup["AcuButton"], {
+						key: 0,
+						block: "",
+						disabled: $setup.runtimeDiagnostic.busy.value,
+						loading: $setup.flow.busyAction.value === "delete-current-local",
+						onClick: _cache[9] || (_cache[9] = ($event) => $setup.onDeleteLocalData("current"))
+					}, {
+						default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
+							" 删除当前标识本地数据 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true),
+					createVNode($setup["AcuButton"], {
+						block: "",
+						variant: "danger",
+						disabled: $setup.runtimeDiagnostic.busy.value,
+						loading: $setup.flow.busyAction.value === "purge-all-local" || $setup.flow.busyAction.value === "delete-all-local",
+						onClick: _cache[10] || (_cache[10] = ($event) => $setup.onDeleteLocalData("all"))
+					}, {
+						default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
+							" 删除所有本地数据 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled", "loading"]),
+					createVNode($setup["AcuButton"], {
+						block: "",
+						disabled: $setup.runtimeDiagnostic.busy.value,
+						loading: $setup.flow.busyAction.value === "reset-defaults",
+						onClick: $setup.onResetAllDefaults
+					}, {
+						default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
+							" 恢复默认配置 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled", "loading"])
+				])
+			]),
+			_: 1
+		}, 8, ["title", "description"])])]),
+		_: 1
+	})]);
     }
     var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-db75247f"]]);
 
@@ -165138,122 +172840,122 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$f = { class: "acu-content-replace-preset-drawer__top-actions" };
     const _hoisted_2$e = {
-    	key: 1,
-    	class: "acu-v2-manage-list"
+	key: 1,
+	class: "acu-v2-manage-list"
     };
     const _hoisted_3$d = { class: "acu-v2-manage-item__info" };
     const _hoisted_4$a = { class: "acu-v2-manage-item__actions" };
     function _sfc_render$f(_ctx, _cache, $props, $setup, $data, $options) {
-    	return openBlock(), createBlock($setup["AcuDrawer"], {
-    		"is-open": $props.isOpen,
-    		title: "管理正文替换预设",
-    		width: "560px",
-    		onClose: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("close"))
-    	}, {
-    		default: withCtx(() => [
-    			$props.message ? (openBlock(), createBlock($setup["AcuMessage"], {
-    				key: 0,
-    				kind: $props.message.kind
-    			}, {
-    				default: withCtx(() => [createTextVNode(
-    					toDisplayString($props.message.text),
-    					1
-    					/* TEXT */
-    				)]),
-    				_: 1
-    			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-    			createBaseVNode("div", _hoisted_1$f, [createVNode($setup["AcuButton"], {
-    				variant: "primary",
-    				class: "acu-content-replace-preset-drawer__create-btn",
-    				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("create-from-default"))
-    			}, {
-    				default: withCtx(() => [..._cache[2] || (_cache[2] = [createBaseVNode(
-    					"i",
-    					{ class: "fa-solid fa-plus" },
-    					null,
-    					-1
-    					/* CACHED */
-    				), createTextVNode(
-    					" 从默认新建 ",
-    					-1
-    					/* CACHED */
-    				)])]),
-    				_: 1
-    			})]),
-    			$props.presets.length ? (openBlock(), createElementBlock("ul", _hoisted_2$e, [(openBlock(true), createElementBlock(
-    				Fragment,
-    				null,
-    				renderList($props.presets, (preset) => {
-    					return openBlock(), createElementBlock("li", {
-    						key: preset.name,
-    						class: "acu-v2-manage-item"
-    					}, [createBaseVNode("div", _hoisted_3$d, [createVNode(
-    						$setup["AcuText"],
-    						{
-    							as: "span",
-    							variant: "list-title",
-    							class: "acu-v2-manage-item__name"
-    						},
-    						{
-    							default: withCtx(() => [createTextVNode(
-    								toDisplayString(preset.name),
-    								1
-    								/* TEXT */
-    							)]),
-    							_: 2
-    						},
-    						1024
-    						/* DYNAMIC_SLOTS */
-    					), createVNode(
-    						$setup["AcuText"],
-    						{
-    							as: "span",
-    							variant: "caption",
-    							class: "acu-v2-manage-item__meta"
-    						},
-    						{
-    							default: withCtx(() => [createTextVNode(
-    								toDisplayString(preset.promptGroup.length) + " 段提示词",
-    								1
-    								/* TEXT */
-    							)]),
-    							_: 2
-    						},
-    						1024
-    						/* DYNAMIC_SLOTS */
-    					)]), createBaseVNode("div", _hoisted_4$a, [
-    						createVNode($setup["AcuIconButton"], {
-    							icon: "fa-solid fa-upload",
-    							title: "导出 JSON",
-    							onClick: ($event) => _ctx.$emit("export", preset.name)
-    						}, null, 8, ["onClick"]),
-    						createVNode($setup["AcuIconButton"], {
-    							icon: "fa-solid fa-i-cursor",
-    							title: "重命名",
-    							onClick: ($event) => _ctx.$emit("rename", preset.name)
-    						}, null, 8, ["onClick"]),
-    						createVNode($setup["AcuIconButton"], {
-    							icon: "fa-solid fa-pen",
-    							title: "编辑提示词",
-    							onClick: ($event) => _ctx.$emit("edit", preset.name)
-    						}, null, 8, ["onClick"]),
-    						createVNode($setup["AcuIconButton"], {
-    							icon: "fa-solid fa-trash-can",
-    							variant: "danger",
-    							title: "删除",
-    							onClick: ($event) => _ctx.$emit("delete", preset.name)
-    						}, null, 8, ["onClick"])
-    					])]);
-    				}),
-    				128
-    				/* KEYED_FRAGMENT */
-    			))])) : (openBlock(), createBlock($setup["AcuText"], {
-    				key: 2,
-    				variant: "empty",
-    				class: "acu-content-replace-preset-drawer__empty"
-    			}, {
-    				default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
-    					"暂无预设。点击上方\"从默认新建\"，或使用面板下拉栏右侧的导入按钮创建。",
+	return openBlock(), createBlock($setup["AcuDrawer"], {
+		"is-open": $props.isOpen,
+		title: "管理正文替换预设",
+		width: "560px",
+		onClose: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("close"))
+	}, {
+		default: withCtx(() => [
+			$props.message ? (openBlock(), createBlock($setup["AcuMessage"], {
+				key: 0,
+				kind: $props.message.kind
+			}, {
+				default: withCtx(() => [createTextVNode(
+					toDisplayString($props.message.text),
+					1
+					/* TEXT */
+				)]),
+				_: 1
+			}, 8, ["kind"])) : createCommentVNode("v-if", true),
+			createBaseVNode("div", _hoisted_1$f, [createVNode($setup["AcuButton"], {
+				variant: "primary",
+				class: "acu-content-replace-preset-drawer__create-btn",
+				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("create-from-default"))
+			}, {
+				default: withCtx(() => [..._cache[2] || (_cache[2] = [createBaseVNode(
+					"i",
+					{ class: "fa-solid fa-plus" },
+					null,
+					-1
+					/* CACHED */
+				), createTextVNode(
+					" 从默认新建 ",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			})]),
+			$props.presets.length ? (openBlock(), createElementBlock("ul", _hoisted_2$e, [(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($props.presets, (preset) => {
+					return openBlock(), createElementBlock("li", {
+						key: preset.name,
+						class: "acu-v2-manage-item"
+					}, [createBaseVNode("div", _hoisted_3$d, [createVNode(
+						$setup["AcuText"],
+						{
+							as: "span",
+							variant: "list-title",
+							class: "acu-v2-manage-item__name"
+						},
+						{
+							default: withCtx(() => [createTextVNode(
+								toDisplayString(preset.name),
+								1
+								/* TEXT */
+							)]),
+							_: 2
+						},
+						1024
+						/* DYNAMIC_SLOTS */
+					), createVNode(
+						$setup["AcuText"],
+						{
+							as: "span",
+							variant: "caption",
+							class: "acu-v2-manage-item__meta"
+						},
+						{
+							default: withCtx(() => [createTextVNode(
+								toDisplayString(preset.promptGroup.length) + " 段提示词",
+								1
+								/* TEXT */
+							)]),
+							_: 2
+						},
+						1024
+						/* DYNAMIC_SLOTS */
+					)]), createBaseVNode("div", _hoisted_4$a, [
+						createVNode($setup["AcuIconButton"], {
+							icon: "fa-solid fa-upload",
+							title: "导出 JSON",
+							onClick: ($event) => _ctx.$emit("export", preset.name)
+						}, null, 8, ["onClick"]),
+						createVNode($setup["AcuIconButton"], {
+							icon: "fa-solid fa-i-cursor",
+							title: "重命名",
+							onClick: ($event) => _ctx.$emit("rename", preset.name)
+						}, null, 8, ["onClick"]),
+						createVNode($setup["AcuIconButton"], {
+							icon: "fa-solid fa-pen",
+							title: "编辑提示词",
+							onClick: ($event) => _ctx.$emit("edit", preset.name)
+						}, null, 8, ["onClick"]),
+						createVNode($setup["AcuIconButton"], {
+							icon: "fa-solid fa-trash-can",
+							variant: "danger",
+							title: "删除",
+							onClick: ($event) => _ctx.$emit("delete", preset.name)
+						}, null, 8, ["onClick"])
+					])]);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))])) : (openBlock(), createBlock($setup["AcuText"], {
+				key: 2,
+				variant: "empty",
+				class: "acu-content-replace-preset-drawer__empty"
+			}, {
+				default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
+					"暂无预设。点击上方\"从默认新建\"，或使用面板下拉栏右侧的导入按钮创建。",
 					-1
 					/* CACHED */
 				)])]),
@@ -177463,216 +185165,216 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_3 = { class: "acu-v2-app__body" };
     const _hoisted_4 = { class: "acu-v2-app__content" };
     const _hoisted_5 = {
-    	key: 0,
-    	class: "acu-v2-app__header"
+	key: 0,
+	class: "acu-v2-app__header"
     };
     const _hoisted_6 = { class: "acu-v2-app__header-left" };
     const _hoisted_7 = { class: "acu-v2-app__page-title" };
     const _hoisted_8 = { class: "acu-v2-app__header-right" };
     const _hoisted_9 = { class: "acu-v2-app__theme-switcher" };
     const _hoisted_10 = {
-    	class: "acu-v2-app__appearance-section",
-    	"aria-labelledby": "acu-v2-theme-section-title"
+	class: "acu-v2-app__appearance-section",
+	"aria-labelledby": "acu-v2-theme-section-title"
     };
     const _hoisted_11 = {
-    	class: "acu-v2-app__theme-list",
-    	role: "listbox",
-    	"aria-label": "选择主题"
+	class: "acu-v2-app__theme-list",
+	role: "listbox",
+	"aria-label": "选择主题"
     };
     const _hoisted_12 = ["aria-selected", "onClick"];
     const _hoisted_13 = { class: "acu-v2-app__theme-option-main" };
     const _hoisted_14 = { class: "acu-v2-app__theme-name" };
     const _hoisted_15 = {
-    	key: 0,
-    	class: "acu-v2-app__theme-tag"
+	key: 0,
+	class: "acu-v2-app__theme-tag"
     };
     const _hoisted_16 = { class: "acu-v2-app__theme-menu-footer" };
     const _hoisted_17 = {
-    	class: "acu-v2-app__appearance-section",
-    	"aria-labelledby": "acu-v2-scale-section-title"
+	class: "acu-v2-app__appearance-section",
+	"aria-labelledby": "acu-v2-scale-section-title"
     };
     const _hoisted_18 = { class: "acu-v2-app__scale-heading" };
     const _hoisted_19 = { class: "acu-v2-app__scale-current" };
     function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
-    	return openBlock(), createElementBlock("div", _hoisted_1, [withDirectives(createBaseVNode(
-    		"div",
-    		_hoisted_2,
-    		[
-    			createBaseVNode("div", _hoisted_3, [!$setup.visualizer.isActive ? (openBlock(), createBlock($setup["Sidebar"], {
-    				key: 0,
-    				class: "acu-v2-app__desktop-sidebar"
-    			})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_4, [!$setup.visualizer.isActive ? (openBlock(), createElementBlock("header", _hoisted_5, [createBaseVNode("div", _hoisted_6, [!$setup.visualizer.isActive ? (openBlock(), createBlock($setup["AcuIconButton"], {
-    				key: 0,
-    				class: "acu-v2-app__menu",
-    				icon: "fa-solid fa-bars",
-    				title: "打开导航",
-    				"aria-expanded": $setup.isMobileNavOpen,
-    				onClick: $setup.openMobileNav
-    			}, null, 8, ["aria-expanded"])) : createCommentVNode("v-if", true), createBaseVNode(
-    				"h1",
-    				_hoisted_7,
-    				toDisplayString($setup.shellTitle),
-    				1
-    				/* TEXT */
-    			)]), createBaseVNode("div", _hoisted_8, [createBaseVNode("div", _hoisted_9, [createVNode($setup["AcuIconButton"], {
-    				class: "acu-v2-app__theme-btn",
-    				icon: "fa-solid fa-gear",
-    				title: "外观：" + $setup.themeStore.activeTheme.name + "，界面缩放 " + $setup.appearanceStore.uiScaleLabel,
-    				"aria-label": "打开外观菜单",
-    				"aria-expanded": $setup.isThemeMenuOpen,
-    				onClick: $setup.toggleThemeMenu
-    			}, null, 8, ["title", "aria-expanded"]), $setup.isThemeMenuRendered ? (openBlock(), createElementBlock(
-    				"div",
-    				{
-    					key: 0,
-    					class: normalizeClass(["acu-v2-app__theme-menu", { "is-closing": $setup.isThemeMenuClosing }]),
-    					role: "dialog",
-    					"aria-label": "外观设置"
-    				},
-    				[createBaseVNode("section", _hoisted_10, [
-    					_cache[3] || (_cache[3] = createBaseVNode(
-    						"div",
-    						{
-    							id: "acu-v2-theme-section-title",
-    							class: "acu-v2-app__appearance-section-title"
-    						},
-    						"主题",
-    						-1
-    						/* CACHED */
-    					)),
-    					createBaseVNode("ul", _hoisted_11, [(openBlock(true), createElementBlock(
-    						Fragment,
-    						null,
-    						renderList($setup.themeStore.themes, (t) => {
-    							return openBlock(), createElementBlock("li", {
-    								key: t.id,
-    								role: "option",
-    								"aria-selected": t.id === $setup.themeStore.activeId,
-    								class: normalizeClass(["acu-v2-app__theme-option", { "is-active": t.id === $setup.themeStore.activeId }]),
-    								onClick: ($event) => $setup.selectTheme(t.id)
-    							}, [createBaseVNode("span", _hoisted_13, [
-    								createBaseVNode(
-    									"span",
-    									{
-    										class: "acu-v2-app__theme-swatch",
-    										style: normalizeStyle({
-    											"--acu-theme-swatch-bg": t.tokens.bg0,
-    											"--acu-theme-swatch-accent": t.tokens.accent
-    										})
-    									},
-    									null,
-    									4
-    									/* STYLE */
-    								),
-    								createBaseVNode(
-    									"span",
-    									_hoisted_14,
-    									toDisplayString(t.name),
-    									1
-    									/* TEXT */
-    								),
-    								$setup.isCustomThemeId(t.id) ? (openBlock(), createElementBlock("span", _hoisted_15, "自定义")) : createCommentVNode("v-if", true)
-    							]), createBaseVNode("span", {
-    								class: "acu-v2-app__theme-tools",
-    								onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
-    							}, [createVNode($setup["AcuIconButton"], {
-    								icon: "fa-solid fa-upload",
-    								size: "sm",
-    								title: "导出主题：" + t.name,
-    								onClick: ($event) => $setup.exportTheme(t.id)
-    							}, null, 8, ["title", "onClick"]), $setup.isCustomThemeId(t.id) ? (openBlock(), createBlock($setup["AcuIconButton"], {
-    								key: 0,
-    								icon: "fa-solid fa-trash",
-    								size: "sm",
-    								variant: "danger",
-    								title: "删除自定义主题：" + t.name,
-    								onClick: ($event) => $setup.deleteTheme(t.id)
-    							}, null, 8, ["title", "onClick"])) : createCommentVNode("v-if", true)])], 10, _hoisted_12);
-    						}),
-    						128
-    						/* KEYED_FRAGMENT */
-    					))]),
-    					createBaseVNode("div", _hoisted_16, [createVNode($setup["AcuFileButton"], {
-    						size: "sm",
-    						accept: "application/json,.json",
-    						onFile: $setup.importThemeFile
-    					}, {
-    						default: withCtx(() => [..._cache[2] || (_cache[2] = [createBaseVNode(
-    							"i",
-    							{ class: "fa-solid fa-download" },
-    							null,
-    							-1
-    							/* CACHED */
-    						), createTextVNode(
-    							" 导入主题 ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					})])
-    				]), createBaseVNode("section", _hoisted_17, [createBaseVNode("div", _hoisted_18, [_cache[4] || (_cache[4] = createBaseVNode(
-    					"span",
-    					{
-    						id: "acu-v2-scale-section-title",
-    						class: "acu-v2-app__appearance-section-title"
-    					},
-    					"界面缩放",
-    					-1
-    					/* CACHED */
-    				)), createBaseVNode(
-    					"span",
-    					_hoisted_19,
-    					toDisplayString($setup.appearanceStore.uiScaleLabel),
-    					1
-    					/* TEXT */
-    				)]), createVNode($setup["AcuSegmentedControl"], {
-    					class: "acu-v2-app__scale-control",
-    					options: $setup.uiScaleOptions,
-    					"model-value": $setup.appearanceStore.uiScale,
-    					size: "sm",
-    					"aria-label": "界面缩放",
-    					"onUpdate:modelValue": $setup.setUiScale
-    				}, null, 8, ["options", "model-value"])])],
-    				2
-    				/* CLASS */
-    			)) : createCommentVNode("v-if", true)]), createVNode($setup["AcuIconButton"], {
-    				class: "acu-v2-app__close",
-    				icon: "fa-solid fa-xmark",
-    				title: $setup.visualizer.isActive ? "关闭数据库编辑器" : "关闭新 UI",
-    				"aria-label": $setup.visualizer.isActive ? "关闭数据库编辑器" : "关闭新 UI",
-    				onClick: $setup.closeApp
-    			}, null, 8, ["title", "aria-label"])])])) : createCommentVNode("v-if", true), $setup.visualizer.isActive ? (openBlock(), createBlock($setup["VisualizerSurface"], {
-    				key: 1,
-    				onClose: $setup.closeApp
-    			})) : (openBlock(), createBlock($setup["MainArea"], { key: 2 }))])]),
-    			$setup.isMobileNavRendered ? (openBlock(), createElementBlock(
-    				"div",
-    				{
-    					key: 0,
-    					class: normalizeClass(["acu-v2-app__mobile-nav-layer", { "is-closing": $setup.isMobileNavClosing }]),
-    					onClick: withModifiers($setup.closeMobileNav, ["self"])
-    				},
-    				[createBaseVNode("aside", {
-    					class: "acu-v2-app__mobile-nav",
-    					style: $setup.mobileNavDrawerStyle,
-    					role: "dialog",
-    					"aria-modal": "true",
-    					"aria-label": "一级页导航",
-    					"data-acu-mobile-nav-width": "var(--acu-mobile-nav-width)",
-    					onClick: _cache[1] || (_cache[1] = withModifiers(() => {}, ["stop"]))
-    				}, [createVNode($setup["Sidebar"], {
-    					variant: "drawer",
-    					onNavigate: $setup.closeMobileNav
-    				})])],
-    				2
-    				/* CLASS */
-    			)) : createCommentVNode("v-if", true),
-    			createVNode($setup["AcuDialogHost"]),
-    			createVNode($setup["AcuToastViewport"])
-    		],
-    		512
-    		/* NEED_PATCH */
-    	), [[vShow, $setup.rootShell.isOpen]])]);
+	return openBlock(), createElementBlock("div", _hoisted_1, [withDirectives(createBaseVNode(
+		"div",
+		_hoisted_2,
+		[
+			createBaseVNode("div", _hoisted_3, [!$setup.visualizer.isActive ? (openBlock(), createBlock($setup["Sidebar"], {
+				key: 0,
+				class: "acu-v2-app__desktop-sidebar"
+			})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_4, [!$setup.visualizer.isActive ? (openBlock(), createElementBlock("header", _hoisted_5, [createBaseVNode("div", _hoisted_6, [!$setup.visualizer.isActive ? (openBlock(), createBlock($setup["AcuIconButton"], {
+				key: 0,
+				class: "acu-v2-app__menu",
+				icon: "fa-solid fa-bars",
+				title: "打开导航",
+				"aria-expanded": $setup.isMobileNavOpen,
+				onClick: $setup.openMobileNav
+			}, null, 8, ["aria-expanded"])) : createCommentVNode("v-if", true), createBaseVNode(
+				"h1",
+				_hoisted_7,
+				toDisplayString($setup.shellTitle),
+				1
+				/* TEXT */
+			)]), createBaseVNode("div", _hoisted_8, [createBaseVNode("div", _hoisted_9, [createVNode($setup["AcuIconButton"], {
+				class: "acu-v2-app__theme-btn",
+				icon: "fa-solid fa-gear",
+				title: "外观：" + $setup.themeStore.activeTheme.name + "，界面缩放 " + $setup.appearanceStore.uiScaleLabel,
+				"aria-label": "打开外观菜单",
+				"aria-expanded": $setup.isThemeMenuOpen,
+				onClick: $setup.toggleThemeMenu
+			}, null, 8, ["title", "aria-expanded"]), $setup.isThemeMenuRendered ? (openBlock(), createElementBlock(
+				"div",
+				{
+					key: 0,
+					class: normalizeClass(["acu-v2-app__theme-menu", { "is-closing": $setup.isThemeMenuClosing }]),
+					role: "dialog",
+					"aria-label": "外观设置"
+				},
+				[createBaseVNode("section", _hoisted_10, [
+					_cache[3] || (_cache[3] = createBaseVNode(
+						"div",
+						{
+							id: "acu-v2-theme-section-title",
+							class: "acu-v2-app__appearance-section-title"
+						},
+						"主题",
+						-1
+						/* CACHED */
+					)),
+					createBaseVNode("ul", _hoisted_11, [(openBlock(true), createElementBlock(
+						Fragment,
+						null,
+						renderList($setup.themeStore.themes, (t) => {
+							return openBlock(), createElementBlock("li", {
+								key: t.id,
+								role: "option",
+								"aria-selected": t.id === $setup.themeStore.activeId,
+								class: normalizeClass(["acu-v2-app__theme-option", { "is-active": t.id === $setup.themeStore.activeId }]),
+								onClick: ($event) => $setup.selectTheme(t.id)
+							}, [createBaseVNode("span", _hoisted_13, [
+								createBaseVNode(
+									"span",
+									{
+										class: "acu-v2-app__theme-swatch",
+										style: normalizeStyle({
+											"--acu-theme-swatch-bg": t.tokens.bg0,
+											"--acu-theme-swatch-accent": t.tokens.accent
+										})
+									},
+									null,
+									4
+									/* STYLE */
+								),
+								createBaseVNode(
+									"span",
+									_hoisted_14,
+									toDisplayString(t.name),
+									1
+									/* TEXT */
+								),
+								$setup.isCustomThemeId(t.id) ? (openBlock(), createElementBlock("span", _hoisted_15, "自定义")) : createCommentVNode("v-if", true)
+							]), createBaseVNode("span", {
+								class: "acu-v2-app__theme-tools",
+								onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
+							}, [createVNode($setup["AcuIconButton"], {
+								icon: "fa-solid fa-upload",
+								size: "sm",
+								title: "导出主题：" + t.name,
+								onClick: ($event) => $setup.exportTheme(t.id)
+							}, null, 8, ["title", "onClick"]), $setup.isCustomThemeId(t.id) ? (openBlock(), createBlock($setup["AcuIconButton"], {
+								key: 0,
+								icon: "fa-solid fa-trash",
+								size: "sm",
+								variant: "danger",
+								title: "删除自定义主题：" + t.name,
+								onClick: ($event) => $setup.deleteTheme(t.id)
+							}, null, 8, ["title", "onClick"])) : createCommentVNode("v-if", true)])], 10, _hoisted_12);
+						}),
+						128
+						/* KEYED_FRAGMENT */
+					))]),
+					createBaseVNode("div", _hoisted_16, [createVNode($setup["AcuFileButton"], {
+						size: "sm",
+						accept: "application/json,.json",
+						onFile: $setup.importThemeFile
+					}, {
+						default: withCtx(() => [..._cache[2] || (_cache[2] = [createBaseVNode(
+							"i",
+							{ class: "fa-solid fa-download" },
+							null,
+							-1
+							/* CACHED */
+						), createTextVNode(
+							" 导入主题 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					})])
+				]), createBaseVNode("section", _hoisted_17, [createBaseVNode("div", _hoisted_18, [_cache[4] || (_cache[4] = createBaseVNode(
+					"span",
+					{
+						id: "acu-v2-scale-section-title",
+						class: "acu-v2-app__appearance-section-title"
+					},
+					"界面缩放",
+					-1
+					/* CACHED */
+				)), createBaseVNode(
+					"span",
+					_hoisted_19,
+					toDisplayString($setup.appearanceStore.uiScaleLabel),
+					1
+					/* TEXT */
+				)]), createVNode($setup["AcuSegmentedControl"], {
+					class: "acu-v2-app__scale-control",
+					options: $setup.uiScaleOptions,
+					"model-value": $setup.appearanceStore.uiScale,
+					size: "sm",
+					"aria-label": "界面缩放",
+					"onUpdate:modelValue": $setup.setUiScale
+				}, null, 8, ["options", "model-value"])])],
+				2
+				/* CLASS */
+			)) : createCommentVNode("v-if", true)]), createVNode($setup["AcuIconButton"], {
+				class: "acu-v2-app__close",
+				icon: "fa-solid fa-xmark",
+				title: $setup.visualizer.isActive ? "关闭数据库编辑器" : "关闭新 UI",
+				"aria-label": $setup.visualizer.isActive ? "关闭数据库编辑器" : "关闭新 UI",
+				onClick: $setup.closeApp
+			}, null, 8, ["title", "aria-label"])])])) : createCommentVNode("v-if", true), $setup.visualizer.isActive ? (openBlock(), createBlock($setup["VisualizerSurface"], {
+				key: 1,
+				onClose: $setup.closeApp
+			})) : (openBlock(), createBlock($setup["MainArea"], { key: 2 }))])]),
+			$setup.isMobileNavRendered ? (openBlock(), createElementBlock(
+				"div",
+				{
+					key: 0,
+					class: normalizeClass(["acu-v2-app__mobile-nav-layer", { "is-closing": $setup.isMobileNavClosing }]),
+					onClick: withModifiers($setup.closeMobileNav, ["self"])
+				},
+				[createBaseVNode("aside", {
+					class: "acu-v2-app__mobile-nav",
+					style: $setup.mobileNavDrawerStyle,
+					role: "dialog",
+					"aria-modal": "true",
+					"aria-label": "一级页导航",
+					"data-acu-mobile-nav-width": "var(--acu-mobile-nav-width)",
+					onClick: _cache[1] || (_cache[1] = withModifiers(() => {}, ["stop"]))
+				}, [createVNode($setup["Sidebar"], {
+					variant: "drawer",
+					onNavigate: $setup.closeMobileNav
+				})])],
+				2
+				/* CLASS */
+			)) : createCommentVNode("v-if", true),
+			createVNode($setup["AcuDialogHost"]),
+			createVNode($setup["AcuToastViewport"])
+		],
+		512
+		/* NEED_PATCH */
+	), [[vShow, $setup.rootShell.isOpen]])]);
     }
     var App = /*#__PURE__*/ _export_sfc(_sfc_main, [["render", _sfc_render], ["__scopeId", "data-v-d9f7df92"]]);
 
