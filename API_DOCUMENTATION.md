@@ -883,9 +883,11 @@ Agent 世界书 API 通过世界书状态条目作为单事实源，提供控制
 | options.runTakeover | boolean | 否 | Skill 化后是否同步接管，默认执行。 |
 | options.presetName | string | 否 | 使用的 API 预设名称。 |
 | options.maxConcurrency | number | 否 | 并发处理数量。 |
+| options.maxEntries | number | 否 | 本批最多处理的候选条目数。 |
+| options.cursor | `{ bookName:string; uid:number\|string }` | 否 | 从上一次返回的 `skillify.nextCursor` 继续处理；游标条目必须仍在当前待处理范围内。 |
 | options.overwriteManual | boolean | 否 | 是否覆盖人工维护的 Skill 元数据。 |
 
-**返回值**: `Promise<Object>` - 成功时至少包含 `{ success:true, skillify }`；同步接管时还可能包含 `takeover` 与 `snapshot`。
+**返回值**: `Promise<Object>` - 成功时至少包含 `{ success:true, skillify }`。`skillify` 包含本批实际处理数 `totalCandidates`、待处理匹配总数 `totalMatched`、本批选择数 `selectedForRun`、剩余数 `remaining`、是否截断 `truncated` 和可用于下一批的 `nextCursor`；同步接管时还可能包含 `takeover` 与 `snapshot`。
 
 ---
 
@@ -903,9 +905,10 @@ Agent 世界书 API 通过世界书状态条目作为单事实源，提供控制
 | options.maxConcurrency | number | 否 | 并发处理数量。 |
 | options.maxAiRetries | number | 否 | 单条目 AI 最大重试次数。 |
 | options.maxEntries | number | 否 | 本次最多处理候选条目数。 |
+| options.cursor | `{ bookName:string; uid:number\|string }` | 否 | 从上一次 `skillify.nextCursor` 继续处理当前稳定候选序列。 |
 | options.overwriteManual | boolean | 否 | 是否覆盖人工维护的 Skill 元数据。 |
 
-**返回值**: `Promise<Object>` - 成功时至少包含 `{ success:true, skillify }`；同步接管时还可能包含 `takeover` 与 `snapshot`。
+**返回值**: `Promise<Object>` - 成功时至少包含 `{ success:true, skillify }`。`skillify` 返回 `totalCandidates`、`totalMatched`、`selectedForRun`、`remaining`、`truncated`、`nextCursor`、`updated`、`skipped`、`failed` 与逐条 `results`；同步接管时还可能包含 `takeover` 与 `snapshot`。
 
 **示例**:
 ```javascript

@@ -55,8 +55,10 @@ import {
   callAIWithResolvedPreset_ACU,
   getApiConfigByPreset_ACU,
   callAIWithPreset_ACU,
+  AgentApiHttpError_ACU,
   callCustomOpenAI_ACU_Direct,
   buildCustomApiRequestBody_ACU,
+  isRetryableAiRequestError_ACU,
 } from '../../../src/service/ai/api-call';
 
 beforeEach(() => {
@@ -183,6 +185,18 @@ describe('callAIWithPreset_ACU', () => {
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     const result = await callAIWithPreset_ACU([{ role: 'user', content: '你好' }]);
     expect(result).toBe('AI 回复');
+  });
+
+  it('custom API non-success response preserves HTTP status for retry owners', async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 429, text: () => Promise.resolve('rate limited') });
+
+    const error = await callAIWithPreset_ACU([{ role: 'user', content: '你好' }]).catch(error => error);
+
+    expect(error).toBeInstanceOf(AgentApiHttpError_ACU);
+    expect(error).toMatchObject({ name: 'AgentApiHttpError_ACU', status: 429 });
+    expect(error.message).toBe('API请求失败: 429 rate limited');
+    expect(isRetryableAiRequestError_ACU(new AgentApiHttpError_ACU(429, 'rate limited'))).toBe(true);
+    expect(isRetryableAiRequestError_ACU(new AgentApiHttpError_ACU(401, 'unauthorized'))).toBe(false);
   });
 
   it('指定预设名使用对应预设', async () => {

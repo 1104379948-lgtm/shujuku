@@ -1130,3 +1130,54 @@ describe('agent worldbook config/state meta', () => {
     expect(mockCreateStrictLorebookReadError).toHaveBeenCalledWith(strictFailure);
   });
 
+
+  it('preserves per-channel entry limits above the former 200-entry cap', async () => {
+    mockEntriesByBook.set('主世界书', [configEntry({
+      version: 2,
+      kind: 'agent_worldbook_state',
+      updatedAt: 1,
+      control: {
+        mode: 'agent',
+        maxEntriesPerChannel: {
+          plot: 201,
+          tableFill: 500,
+          finalGeneration: 1000,
+        },
+      },
+      snapshot: {},
+    })]);
+
+    const result = await readAgentWorldbookStateFromWorldbooks_ACU();
+
+    expect(result.control.maxEntriesPerChannel).toEqual({
+      plot: 201,
+      tableFill: 500,
+      finalGeneration: 1000,
+    });
+  });
+
+  it('keeps per-channel entry-limit defaults and lower bounds', async () => {
+    mockEntriesByBook.set('主世界书', [configEntry({
+      version: 2,
+      kind: 'agent_worldbook_state',
+      updatedAt: 1,
+      control: {
+        mode: 'agent',
+        maxEntriesPerChannel: {
+          plot: 0,
+          tableFill: -4,
+          finalGeneration: 'invalid',
+        },
+      },
+      snapshot: {},
+    })]);
+
+    const result = await readAgentWorldbookStateFromWorldbooks_ACU();
+
+    expect(result.control.maxEntriesPerChannel).toEqual({
+      plot: 1,
+      tableFill: 1,
+      finalGeneration: 20,
+    });
+  });
+

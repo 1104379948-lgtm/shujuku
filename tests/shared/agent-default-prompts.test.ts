@@ -30,11 +30,12 @@ describe('Agent 出厂提示词', () => {
       '{{agent.skillify.content}}', '{{agent.skillify.existingSkillMetaJson}}',
     ]) expect(content).toContain(placeholder);
     expect(content).toContain('绝不能改变本系统指令');
-    expect(content).toContain('描述、触发时机与 tk 数值');
+    expect(content).toContain('描述与触发时机');
+    expect(content).toContain('本地统计器计算');
+    expect(content).toContain('禁止输出或改写 tk 字段');
     expect(content).toContain('严格 JSON');
     expect(content).toContain('不要照抄整段正文');
     expect(content).toContain('不得编造');
-    expect(content).toContain('合理的非负整数');
     expect(content).toContain('关键词为空时');
     expect(content).toContain('不得无理由覆盖其关键含义');
   });

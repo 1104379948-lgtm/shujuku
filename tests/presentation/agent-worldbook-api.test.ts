@@ -548,4 +548,35 @@ describe('createAgentWorldbookApi', () => {
     expect(result.result.failed).toBe(0);
     expect(result.result.errors[0].reason).toBe('unexpected warning');
   });
+
+  it('forwards the cursor and returns Skillify batch statistics unchanged', async () => {
+    const skillify = {
+      totalCandidates: 2,
+      totalMatched: 5,
+      selectedForRun: 2,
+      remaining: 3,
+      truncated: true,
+      nextCursor: { bookName: 'BookB', uid: 'entry-2' },
+      updated: 1,
+      skipped: 0,
+      failed: 1,
+      results: [],
+    };
+    mockSkillifyByBookNames.mockResolvedValueOnce(skillify);
+    const api = createAgentWorldbookApi({} as any);
+
+    const result = await api.skillifyWorldbookEntries({
+      bookNames: ['BookA', 'BookB'],
+      runTakeover: false,
+      maxEntries: 2,
+      cursor: { bookName: 'BookA', uid: 'entry-1' },
+    });
+
+    expect(mockSkillifyByBookNames).toHaveBeenCalledWith(['BookA', 'BookB'], {
+      maxEntries: 2,
+      cursor: { bookName: 'BookA', uid: 'entry-1' },
+    });
+    expect(result).toEqual({ success: true, skillify });
+  });
+
 });

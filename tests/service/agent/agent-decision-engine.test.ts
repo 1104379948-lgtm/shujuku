@@ -14,6 +14,12 @@ const {
 
 vi.mock('../../../src/service/ai/api-call', () => ({
   callAIWithPreset_ACU: mockCallAIWithPreset,
+  isRetryableAiRequestError_ACU: (error: any) => {
+    const status = Number(error?.status);
+    if (String(error?.name || '') === 'AbortError') return false;
+    if (Number.isFinite(status)) return status === 429 || (status >= 500 && status <= 599);
+    return error instanceof TypeError || /network|timeout/i.test(String(error?.message || ''));
+  },
 }));
 
 vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
@@ -175,9 +181,9 @@ describe('runAgentDecisionForPlot_ACU', () => {
     expect(messages[0].content).toContain('"bookName": "剧情书"');
     expect(messages[0].content).toContain('"uid": 12');
     expect(messages[0].content).toContain('"index": 1');
-    expect(messages[0].content).toContain('"tk": 157');
-    expect(messages[0].content).toContain('"tokenEstimate": 157');
-    expect(messages[0].content).toContain('预计消耗 157 Token');
+    expect(messages[0].content).toContain('"tk": 167');
+    expect(messages[0].content).toContain('"tokenEstimate": 167');
+    expect(messages[0].content).toContain('预计消耗 167 Token');
     expect(messages[0].content).toContain('"description": "陈默人物 Skill 描述"');
     expect(messages[0].content).toContain('"triggerWhen": "陈默触发条件"');
     expect(messages[0].content).toContain('"unit": "Token"');

@@ -16,6 +16,31 @@ export interface CustomIncludeBodyDiagnostic_ACU {
   rootType: CustomIncludeBodyRootType_ACU;
 }
 
+/** HTTP failure from the host chat-completions bridge. Keeps status available to retry owners. */
+export class AgentApiHttpError_ACU extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'AgentApiHttpError_ACU';
+    this.status = status;
+  }
+}
+
+/** Only transient request failures are safe to retry. Response-content validation stays with callers. */
+export function isRetryableAiRequestError_ACU(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { name?: unknown; message?: unknown; status?: unknown };
+  const name = String(candidate.name || '');
+  const message = String(candidate.message || '');
+  const status = Number(candidate.status);
+  if (name === 'AbortError') return false;
+  if (Number.isFinite(status)) return status === 429 || (status >= 500 && status <= 599);
+  if (name === 'TimeoutError') return true;
+  if (error instanceof TypeError) return true;
+  return /(?:timeout|timed out|network(?:\s+error)?|connection reset|socket hang up)/i.test(message);
+}
+
 function isRecord_ACU(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -248,7 +273,7 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName: str
 
       if (!response.ok) {
         const errTxt = await response.text();
-        throw new Error(`API请求失败: ${response.status} ${errTxt}`);
+        throw new AgentApiHttpError_ACU(response.status, `API请求失败: ${response.status} ${errTxt}`);
       }
 
       const content = await handleApiResponse_ACU(response, abortSignal);
@@ -301,7 +326,7 @@ export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal
 
       if (!response.ok) {
         const errTxt = await response.text();
-        throw new Error(`API请求失败: ${response.status} ${errTxt}`);
+        throw new AgentApiHttpError_ACU(response.status, `API请求失败: ${response.status} ${errTxt}`);
       }
 
       // 根据streamingEnabled设置选择响应处理方式
@@ -419,7 +444,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
 
     if (!res.ok) {
         const errTxt = await res.text();
-        throw new Error(`API请求失败: ${res.status} ${errTxt}`);
+        throw new AgentApiHttpError_ACU(res.status, `API请求失败: ${res.status} ${errTxt}`);
     }
 
     const content = await handleApiResponse_ACU(res, signal);
@@ -541,7 +566,7 @@ export async function callAIWithResolvedPreset_ACU(
         })),
         signal: signal || undefined,
     });
-    if (!response.ok) throw new Error(`API 请求失败: ${response.status}`);
+    if (!response.ok) throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
     const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage);
     return typeof content === 'string' && content.trim() ? content.trim() : null;
 }
