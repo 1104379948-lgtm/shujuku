@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SP·数据库 IX
 // @namespace    http://tampermonkey.net/
-// @version      9.0
+// @version      9.1
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
@@ -4291,7 +4291,8 @@ $CONTENT
     /**
      * 数据隔离（Isolation）相关函数
      *
-     * 管理数据隔离标识的历史记录、Profile 创建和切换。
+     * 标签隔离已退役（见 shared/isolation-policy.ts）。本文件只兼容存量标识码的
+     * Profile 读写，新功能禁止再按 isolationKey 真值做门禁。
      */
     const MAX_DATA_ISOLATION_HISTORY = 20;
     function normalizeDataIsolationHistory_ACU(list) {
@@ -6307,6 +6308,21 @@ $CONTENT
     }
 
     /**
+     * 标签隔离（dataIsolationEnabled / dataIsolationCode）已退役。
+     *
+     * 未开启隔离时，聊天槽位键固定为 ''。这是合法的默认槽，不是“没有隔离键”。
+     * 新功能禁止再用 `if (!isolationKey)` / `if (!key)` 当读写门禁——空串会被当成 falsy，
+     * 导致交火索引指针写不进、删不掉（9.0 回归）。
+     *
+     * 只拒绝 null / undefined；空字符串必须放行。
+     * 存量 IsolatedData[''] 与历史隔离码槽位仍按原键读写，本文件不删除旧数据路径。
+     */
+    const TAG_ISOLATION_FEATURE_RETIRED_ACU = true;
+    function isUsableIsolationSlotKey_ACU(key) {
+        return typeof key === 'string';
+    }
+
+    /**
      * data/repositories/chat-message-data-repo.ts — 消息级表格数据 CRUD
      *
      * 封装所有对 message.TavernDB_ACU_* 字段的底层读写操作。
@@ -7795,13 +7811,13 @@ $CONTENT
      * - 不调用宿主保存（保存由上层事务负责）。
      *
      * @param msg 聊天消息对象
-     * @param isolationKey 隔离标签键名
+     * @param isolationKey 隔离标签键名。标签隔离已退役，未开启时为 ''，空串是合法默认槽。
      * @param patch 批准字段的增量修改（仅白名单 key）
      * @param options.expectedIndexId 可选 CAS 条件：当前槽必须存在该 indexId
      * @returns { changed: boolean; tagData: IsolationTagData_ACU | null }
      */
     function patchIsolatedTagMetadata_ACU(msg, isolationKey, patch, options) {
-        if (!msg || !isolationKey)
+        if (!msg || !isUsableIsolationSlotKey_ACU(isolationKey))
             return { changed: false, tagData: null };
         if (!isObjectRecord_ACU$4(patch)) {
             const error = new Error(`[metadata-patch] patch 必须是对象：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} isolationKey=${String(isolationKey)}`);
@@ -60555,22 +60571,21 @@ $CONTENT
      * - 非逻辑：!战斗
      * - 组合逻辑：(战斗&主角),感情
      * @param expression - 关键词表达式
-     * @param content - 待检测的内容（最新一层的AI回复正文）
+     * @param content - 待检测的内容（最新用户输入 + 最新 AI 回复）
      * @param plotContent - 最新一层的推进数据（$6），可选
      * @returns 是否匹配
      */
     function evaluateSeedExpression_ACU(expression, content, plotContent = '') {
         if (!expression || typeof expression !== 'string')
             return false;
-        if (!content || typeof content !== 'string')
+        const contentText = typeof content === 'string' ? content : '';
+        const plotText = typeof plotContent === 'string' ? plotContent : '';
+        if (!contentText && !plotText)
             return false;
-        if (!plotContent || typeof plotContent !== 'string') {
-            plotContent = '';
-        }
         const expr = expression.trim();
         if (!expr)
             return false;
-        const combinedContent = content + '\n' + plotContent;
+        const combinedContent = contentText + '\n' + plotText;
         const lowerContent = combinedContent.toLowerCase();
         const checkKeyword = (keyword) => {
             const kw = keyword.trim();
@@ -61192,7 +61207,7 @@ $CONTENT
 
     /**
      * service/runtime/template-vars/if-block-parser.ts
-     * if 块递归解析器 + 辅助函数（getLatestAIMessageContent）
+     * if 块递归解析器 + 辅助函数（getLatestAIMessageContent / getLatestUserMessageContent / composeSeedMatchContent）
      * 从 helpers-template-vars.ts 拆出
      */
     /**
@@ -61288,10 +61303,10 @@ $CONTENT
                     const ifBody = content.slice(ifStartTagEnd, nearest.index);
                     const endIndex = nearest.index + nearest.length;
                     let ifContent, elseContent;
-                    const elsePos = ifBody.indexOf('<else>');
-                    if (elsePos !== -1) {
-                        ifContent = ifBody.slice(0, elsePos);
-                        elseContent = ifBody.slice(elsePos + 6);
+                    const elseTagMatch = ifBody.match(/<else>/i);
+                    if (elseTagMatch && elseTagMatch.index !== undefined) {
+                        ifContent = ifBody.slice(0, elseTagMatch.index);
+                        elseContent = ifBody.slice(elseTagMatch.index + elseTagMatch[0].length);
                     }
                     else {
                         ifContent = ifBody;
@@ -61345,6 +61360,30 @@ $CONTENT
             }
         }
         return '';
+    }
+    /**
+     * 获取最新一条用户消息的正文。seed 必须能匹配上轮用户输入里的关键词。
+     */
+    function getLatestUserMessageContent_ACU() {
+        const chat = getChatArray_ACU();
+        if (!chat || chat.length === 0) {
+            return '';
+        }
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const message = chat[i];
+            if (message && message.is_user) {
+                return typeof message.mes === 'string' ? message.mes : '';
+            }
+        }
+        return '';
+    }
+    /**
+     * seed 检索文本：最新用户输入 + 最新 AI 回复。plotContent（$6）由求值函数另行拼接。
+     */
+    function composeSeedMatchContent_ACU(userContent, aiContent) {
+        const parts = [userContent, aiContent]
+            .filter((part) => typeof part === 'string' && part);
+        return parts.join('\n');
     }
 
     /**
@@ -72836,9 +72875,12 @@ $CONTENT
         if (!sqlMode) {
             return options?.tableData || currentJsonTableData_ACU;
         }
-        // [统一 schema 权威] 显式 sqlApplyScope 携带请求前冻结的 live SQLite runtime 数据时，
-        // Prompt 必须使用该冻结视图，而不是再次读取 live provider：AI 等待期间模板切换、
-        // 运行时重载或并发提交不得改变本轮 Prompt 的 schema/行数据契约（test31 双权威修复）。
+        // schema 权威仍冻结在 sqlApplyScope（templateData / 列绑定走请求前快照）。
+        // 行数据必须用本批次 tableData（baseSnapshot）：手动 SQL 重填会先清空再一次性捕获
+        // runtimeData，若这里优先返回冻结行，第二桶起 AI 会一直看到空表。
+        if (options?.tableData) {
+            return options.tableData;
+        }
         if (options?.sqlApplyScope?.runtimeData) {
             return options.sqlApplyScope.runtimeData;
         }
@@ -73065,7 +73107,7 @@ $CONTENT
                 if (!msg.is_user && (extractTags || extractRules.length > 0 || excludeTags || excludeRules.length > 0)) {
                     content = applyContextTagFilters_ACU(content, { extractTags, extractRules, excludeTags, excludeRules });
                 }
-                if (!msg.is_user && typeof content === 'string' && content) {
+                if (typeof content === 'string' && content) {
                     conditionalSeedParts.push(content);
                 }
                 return `${prefix}: ${content}`;
@@ -75097,7 +75139,7 @@ $CONTENT
                 // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
                 item.content = replaceDbSqlVariables(item.content);
                 // 9. 解析条件模板
-                const latestAiContentForConditional = getLatestAIMessageContent_ACU();
+                const latestAiContentForConditional = composeSeedMatchContent_ACU(getLatestUserMessageContent_ACU(), getLatestAIMessageContent_ACU());
                 const latestPlotContentForConditional = getPlotFromHistory_ACU();
                 const contextForIf = {
                     seedContent: latestAiContentForConditional,
@@ -78710,7 +78752,7 @@ $CONTENT
         }
         let seedContentForConditional = '';
         try {
-            seedContentForConditional = getLatestAIMessageContent_ACU();
+            seedContentForConditional = composeSeedMatchContent_ACU(getLatestUserMessageContent_ACU(), getLatestAIMessageContent_ACU());
             logDebug_ACU('[剧情推进] 条件模板检测内容长度:', seedContentForConditional.length);
         }
         catch (e) {
@@ -79674,7 +79716,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.0" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "9.1" || 'unknown';
     /**
      * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
      * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
@@ -80003,7 +80045,7 @@ $CONTENT
         const lastPlotContent = getPlotFromHistory_ACU();
         logDebug_ACU('[提示词模板] $6 最新一层推进数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
         const context = {
-            seedContent: getLatestAIMessageContent_ACU(),
+            seedContent: composeSeedMatchContent_ACU(getLatestUserMessageContent_ACU(), getLatestAIMessageContent_ACU()),
             allTablesJson: getTableDataForPrompt_ACU(),
             plotContent: lastPlotContent
         };
@@ -94215,6 +94257,12 @@ $CONTENT
         },
         characterSettings: {},
     };
+    /**
+     * 当前聊天的隔离槽位键。
+     *
+     * 标签隔离已退役：未开启时固定返回 ''。空串是默认槽，禁止 `if (!getCurrentIsolationKey_ACU())`
+     * 当作“当前没有隔离键 / 跳过写入”。
+     */
     function getCurrentIsolationKey_ACU() {
         return settings_ACU.dataIsolationEnabled ? (settings_ACU.dataIsolationCode || '') : '';
     }
@@ -103085,7 +103133,8 @@ $CONTENT
                 restored += 1;
                 continue;
             }
-            if (!task.isolationKey || task.scopeKey !== activeScopeKey) {
+            // isolationKey==='' 是未开隔离的合法默认槽；不能用真值判断当 legacy 清掉。
+            if (typeof task.isolationKey !== 'string' || task.scopeKey !== activeScopeKey) {
                 clearFlushTimer_ACU(task.scopeKey);
                 await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
                 logSummaryVectorIndexIdentityEvent_ACU('debug', 'flush', 'legacy_scope_purged', {
@@ -108409,6 +108458,8 @@ $CONTENT
             return;
         }
         autoUpdateTriggerInFlight_ACU = true;
+        // 新一轮自动填表开跑前清掉上一轮「终止」残留，避免 isStopped() 立刻把新任务掐死。
+        _set_wasStoppedByUser_ACU(false);
         const performanceSpan = startRuntimePerformanceSpan_ACU('auto-update-trigger', {
             ...performanceContext,
             settings: settings_ACU,
@@ -109851,6 +109902,8 @@ $CONTENT
             });
             const performanceContext = { runId: performanceSpan.id, parentSpanId: performanceSpan.id };
             try {
+                // 新一轮消息评估：清掉上一轮填表「终止」残留，避免永久 user_aborted。
+                _set_wasStoppedByUser_ACU(false);
                 // [健全性] 如果用户已经开始对话，则解除"开场白阶段世界书注入抑制"
                 try {
                     maybeLiftWorldbookSuppression_ACU();
@@ -113678,9 +113731,10 @@ $CONTENT
     }
     async function tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU() {
         const chatKey = String(currentChatFileIdentifier_ACU || '').trim();
-        const isolationKey = String(getCurrentIsolationKey_ACU() || '').trim();
+        // 标签隔离已退役：未开启时 isolationKey 为 ''，空串是合法默认槽，不能当缺失。
+        const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
         const sourceTableKey = getUniqueSummaryVectorIndexSourceTableKeyForRecovery_ACU();
-        if (!chatKey || !isolationKey || !sourceTableKey)
+        if (!chatKey || !sourceTableKey)
             return false;
         const chatName = getCurrentCharacterCardName_ACU();
         const registeredFiles = await loadVectorIndexRegistry_ACU()
@@ -124991,6 +125045,8 @@ $CONTENT
                 if (SillyTavern_API_ACU.eventTypes.GENERATION_STARTED) {
                     SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STARTED, (type, params, dryRun) => {
                         try {
+                            // 终止只作用于当次填表。新一轮宿主生成必须清掉残留，否则评估闸永久 user_aborted。
+                            _set_wasStoppedByUser_ACU(false);
                             const context = recordGenerationContext_ACU(type, params, dryRun);
                             bindContinuationInternalAiGenerationStarted_ACU(context.seq);
                             // 宿主的 GENERATION_STARTED 通常在发送点击返回后的微任务里才送达，同步配对必然错过；
@@ -165320,8 +165376,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\r\n/* 纵向列表必须用 flex 列而不是 grid：容器带 max-height 时 grid 会把行压缩到最小贡献，\r\n   而卡片（overflow: hidden）的最小贡献是 0——条目会被纵向压扁成一条条细线。\r\n   flex 列 + 子项 flex: none 保证每个条目始终保持内容高度，超出部分滚动。 */\n.acu-v2-session-feed[data-v-bd74315f] { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed[data-v-bd74315f] > * { flex: 0 0 auto;\n}\n.acu-v2-session-feed__empty[data-v-bd74315f] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 折叠横幅：置于列表顶部，提示还有多少更早消息被折叠 */\n.acu-v2-session-feed__fold[data-v-bd74315f] { padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--acu-text-3) 40%, transparent); border-radius: 8px; background: transparent; color: var(--acu-text-3); font: inherit; font-size: var(--acu-font-size-caption, 11px); cursor: pointer; text-align: center;\n}\n.acu-v2-session-feed__fold[data-v-bd74315f]:hover { color: var(--acu-text-2); border-color: color-mix(in srgb, var(--acu-text-3) 60%, transparent);\n}\r\n\r\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-bd74315f] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-bd74315f]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-bd74315f] { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-bd74315f] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-bd74315f] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-bd74315f] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-bd74315f] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-bd74315f] { display: block; margin: 3px 0 0; text-align: right;\n}\r\n\r\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-bd74315f] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-bd74315f] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-bd74315f] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\r\n\r\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-bd74315f] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-bd74315f 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-bd74315f], .acu-v2-session-feed__card--outline_op[data-v-bd74315f], .acu-v2-session-feed__card--protocol_retry[data-v-bd74315f] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-bd74315f], .acu-v2-session-feed__card--run_completed[data-v-bd74315f] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-bd74315f] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-bd74315f] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\r\n/* 交接报告：琥珀色标出「AI 可见性边界」，与成功/失败/进行中的语义色区分 */\n.acu-v2-session-feed__card--handoff[data-v-bd74315f] { border-left: 3px solid color-mix(in srgb, #c9963e 75%, transparent); background: color-mix(in srgb, #c9963e 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card-head[data-v-bd74315f] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-bd74315f] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-bd74315f] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-bd74315f] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-bd74315f] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-bd74315f] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-bd74315f 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-bd74315f] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-bd74315f] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-bd74315f] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-bd74315f] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-bd74315f] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-bd74315f] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-bd74315f] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-bd74315f] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-bd74315f] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-bd74315f 1.1s ease-in-out infinite;\n}\r\n/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，\r\n   横向空间留给正文；用户气泡放宽到近整行。 */\n@media (max-width: 640px) {\n.acu-v2-session-feed[data-v-bd74315f] { max-height: 62vh; padding: 8px;\n}\n.acu-v2-session-feed__card--delegation[data-v-bd74315f], .acu-v2-session-feed__card--outline_op[data-v-bd74315f], .acu-v2-session-feed__card--protocol_retry[data-v-bd74315f] { margin-left: 8px;\n}\n.acu-v2-session-feed__card-head[data-v-bd74315f] { padding: 7px 8px; gap: 6px;\n}\n.acu-v2-session-feed__preview[data-v-bd74315f] { padding: 0 8px 7px 12px;\n}\n.acu-v2-session-feed__detail[data-v-bd74315f] { padding: 0 8px 8px 12px;\n}\n.acu-v2-session-feed__user-bubble[data-v-bd74315f] { max-width: 94%;\n}\n}\n@keyframes acu-v2-session-feed-in-bd74315f {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-bd74315f {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-bd74315f {\nto { transform: rotate(360deg);\n}\n}\r\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-bd74315f");
-    var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_bd74315f_lang = null;
+    injectSfcStyle("\n/* 纵向列表必须用 flex 列而不是 grid：容器带 max-height 时 grid 会把行压缩到最小贡献，\n   而卡片（overflow: hidden）的最小贡献是 0——条目会被纵向压扁成一条条细线。\n   flex 列 + 子项 flex: none 保证每个条目始终保持内容高度，超出部分滚动。 */\n.acu-v2-session-feed[data-v-6e321bbe] { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed[data-v-6e321bbe] > * { flex: 0 0 auto;\n}\n.acu-v2-session-feed__empty[data-v-6e321bbe] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\n\n/* 折叠横幅：置于列表顶部，提示还有多少更早消息被折叠 */\n.acu-v2-session-feed__fold[data-v-6e321bbe] { padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--acu-text-3) 40%, transparent); border-radius: 8px; background: transparent; color: var(--acu-text-3); font: inherit; font-size: var(--acu-font-size-caption, 11px); cursor: pointer; text-align: center;\n}\n.acu-v2-session-feed__fold[data-v-6e321bbe]:hover { color: var(--acu-text-2); border-color: color-mix(in srgb, var(--acu-text-3) 60%, transparent);\n}\n\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-6e321bbe] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-6e321bbe]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-6e321bbe] { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-6e321bbe] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-6e321bbe] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-6e321bbe] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-6e321bbe] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-6e321bbe] { display: block; margin: 3px 0 0; text-align: right;\n}\n\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-6e321bbe] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-6e321bbe] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-6e321bbe] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\n\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-6e321bbe] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-6e321bbe 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-6e321bbe], .acu-v2-session-feed__card--outline_op[data-v-6e321bbe], .acu-v2-session-feed__card--protocol_retry[data-v-6e321bbe] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-6e321bbe], .acu-v2-session-feed__card--run_completed[data-v-6e321bbe] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-6e321bbe] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-6e321bbe] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n/* 交接报告：琥珀色标出「AI 可见性边界」，与成功/失败/进行中的语义色区分 */\n.acu-v2-session-feed__card--handoff[data-v-6e321bbe] { border-left: 3px solid color-mix(in srgb, #c9963e 75%, transparent); background: color-mix(in srgb, #c9963e 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card-head[data-v-6e321bbe] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-6e321bbe] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-6e321bbe] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-6e321bbe] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-6e321bbe] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-6e321bbe] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-6e321bbe 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-6e321bbe] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-6e321bbe] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-6e321bbe] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-6e321bbe] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-6e321bbe] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-6e321bbe] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-6e321bbe] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-6e321bbe] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-6e321bbe] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-6e321bbe 1.1s ease-in-out infinite;\n}\n/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，\n   横向空间留给正文；用户气泡放宽到近整行。 */\n@media (max-width: 640px) {\n.acu-v2-session-feed[data-v-6e321bbe] { max-height: 62vh; padding: 8px;\n}\n.acu-v2-session-feed__card--delegation[data-v-6e321bbe], .acu-v2-session-feed__card--outline_op[data-v-6e321bbe], .acu-v2-session-feed__card--protocol_retry[data-v-6e321bbe] { margin-left: 8px;\n}\n.acu-v2-session-feed__card-head[data-v-6e321bbe] { padding: 7px 8px; gap: 6px;\n}\n.acu-v2-session-feed__preview[data-v-6e321bbe] { padding: 0 8px 7px 12px;\n}\n.acu-v2-session-feed__detail[data-v-6e321bbe] { padding: 0 8px 8px 12px;\n}\n.acu-v2-session-feed__user-bubble[data-v-6e321bbe] { max-width: 94%;\n}\n}\n@keyframes acu-v2-session-feed-in-6e321bbe {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-6e321bbe {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-6e321bbe {\nto { transform: rotate(360deg);\n}\n}\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-6e321bbe");
+    var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_6e321bbe_lang = null;
 
     const _hoisted_1$p = {
 	ref: "feedElement",
@@ -165553,7 +165609,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_PATCH */
 	);
     }
-    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$p, [["render", _sfc_render$p], ["__scopeId", "data-v-bd74315f"]]);
+    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$p, [["render", _sfc_render$p], ["__scopeId", "data-v-6e321bbe"]]);
 
     var _sfc_main$o = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationChat',
@@ -166919,6 +166975,11 @@ Expected function or array of functions, received type ${typeof value}.`
                 .then(action)
                 .then(async (result) => {
                 if ('retryHostGeneration' in result && result.retryHostGeneration) {
+                    // 上一轮正文中断/失败后的恢复走酒馆自己的重发，不经过 Agent。此分支只由用户
+                    // 动作到达（自动重试链走桥内部，不经 run_ACU），必须留痕并解释消息去向——
+                    // 否则用户看到的是「在 Agent 输入框发消息却直接触发了主对话生成」。
+                    logAgentSession_ACU({ kind: 'protocol_retry', title: '重发上一轮正文', detail: '上一轮酒馆正文未正常完成，先让酒馆直接重新生成；本次发送的消息会在正文完成后的下一轮由主 Agent 读取。' });
+                    toast.info('上一轮正文未完成，已让酒馆直接重新生成；你的消息会在下一轮被主 Agent 读取。');
                     const sent = await runtime.bridge.retryHostGeneration();
                     if (!sent)
                         toast.error('宿主重新生成不可用，智能续写已暂停。', { muteable: false });
@@ -170893,8 +170954,8 @@ Expected function or array of functions, received type ${typeof value}.`
     const dataMgmtCopy = {
         panels: {
             isolation: {
-                title: "数据隔离",
-                description: "按标识分开设置、模板及数据。留空为默认。输入新标识并应用后切换。内容不对时，请回到原标识重选。",
+                title: "数据隔离（已退役）",
+                description: "标签隔离已停用。留空即默认数据槽（空串仍是合法槽位键）。请勿再为新功能依赖隔离码或用空标识当“无数据”。存量标识码仅作兼容读取。",
             },
             backup: {
                 title: "备份与恢复",

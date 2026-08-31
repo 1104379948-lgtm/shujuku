@@ -118,10 +118,15 @@ export interface MessageTableFields_ACU {
 
 // ── 隔离配置（作为参数传入 repository，不引用 service 层） ──
 
-/** 隔离配置，由 service 层从 settings_ACU 中提取后传入 */
+/**
+ * 隔离配置，由 service 层从 settings_ACU 中提取后传入。
+ *
+ * 标签隔离已退役（见 shared/isolation-policy.ts）。enabled=false 时槽位键是 ''，
+ * 调用方必须把空串当默认槽，不能当缺失键。
+ */
 export interface IsolationConfig_ACU {
-    /** 是否启用数据隔离 */
+    /** 是否启用数据隔离（已退役；仅兼容存量标识码） */
     enabled: boolean;
-    /** 隔离标识代码 */
+    /** 隔离标识代码（未启用时为空串，仍是合法槽位键） */
     code: string;
 }

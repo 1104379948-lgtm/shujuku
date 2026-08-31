@@ -6,7 +6,7 @@ import { callAIWithPreset_ACU } from '../ai/api-call';
 import { applyOptimizations_ACU } from '../../shared/text-optimization';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { saveOptimizationBaseToCache_ACU, loadOptimizationBaseFromCache_ACU } from '../../data/storage/optimization-cache-storage';
-import { formatOutlineTableForPlot_ACU, formatSummaryIndexForPlot_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU, getWorldbookContentForPlot_ACU, parseCalcTags_ACU, parseIfBlockRecursive_ACU, parseMaxTags_ACU, parseMinTags_ACU, parseRandomTags_ACU, replaceCalcVariables_ACU, replaceMaxVariables_ACU, replaceMinVariables_ACU, replaceRandomVariables_ACU } from '../runtime/helpers-remaining';
+import { formatOutlineTableForPlot_ACU, formatSummaryIndexForPlot_ACU, getLatestAIMessageContent_ACU, getLatestUserMessageContent_ACU, composeSeedMatchContent_ACU, getPlotFromHistory_ACU, getWorldbookContentForPlot_ACU, parseCalcTags_ACU, parseIfBlockRecursive_ACU, parseMaxTags_ACU, parseMinTags_ACU, parseRandomTags_ACU, replaceCalcVariables_ACU, replaceMaxVariables_ACU, replaceMinVariables_ACU, replaceRandomVariables_ACU } from '../runtime/helpers-remaining';
 import { getSummaryIndexContentForPlot_ACU } from '../runtime/plot-runtime/plot-data-format';
 import { replaceDbSqlVariables } from '../runtime/template-vars/sql-query-var';
 /**
@@ -169,7 +169,10 @@ import { replaceDbSqlVariables } from '../runtime/template-vars/sql-query-var';
          // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
          item.content = replaceDbSqlVariables(item.content);
          // 9. 解析条件模板
-         const latestAiContentForConditional = getLatestAIMessageContent_ACU();
+         const latestAiContentForConditional = composeSeedMatchContent_ACU(
+           getLatestUserMessageContent_ACU(),
+           getLatestAIMessageContent_ACU(),
+         );
          const latestPlotContentForConditional = getPlotFromHistory_ACU();
          const contextForIf = {
            seedContent: latestAiContentForConditional,

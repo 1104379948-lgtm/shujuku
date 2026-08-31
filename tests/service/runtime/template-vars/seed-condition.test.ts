@@ -91,6 +91,9 @@ describe('evaluateSeedExpression_ACU', () => {
   it('空内容返回 false', () => {
     expect(evaluateSeedExpression_ACU('战斗', '')).toBe(false);
   });
+  it('AI 正文为空时仍匹配 plotContent', () => {
+    expect(evaluateSeedExpression_ACU('剧情推进', '', '剧情推进数据')).toBe(true);
+  });
   it('null 表达式返回 false', () => {
     expect(evaluateSeedExpression_ACU(null as any, content)).toBe(false);
   });

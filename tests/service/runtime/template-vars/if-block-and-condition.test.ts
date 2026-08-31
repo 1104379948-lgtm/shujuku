@@ -98,6 +98,13 @@ describe('parseIfBlockRecursive_ACU — db/sql 条件类型', () => {
     expect(result).toBe('没有物品');
   });
 
+  it('<ELSE> 大小写不影响分支切分', () => {
+    mockEvaluateDbCondition.mockReturnValue(false);
+    const content = '<if db="inventory.count > 0">有物品<ELSE>没有物品</if>';
+    const result = parseIfBlockRecursive_ACU(content, context);
+    expect(result).toBe('没有物品');
+  });
+
   it('<if sql="..."> 条件为 true 时输出 if 分支', () => {
     mockEvaluateSqlCondition.mockReturnValue(true);
     const content = '<if sql="SELECT COUNT(*) FROM inventory WHERE quantity > 0">有库存</if>';

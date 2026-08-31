@@ -12,6 +12,7 @@
  */
 
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
+import { isUsableIsolationSlotKey_ACU } from '../../shared/isolation-policy';
 import type { Sheet_ACU } from '../../shared/models/table-data';
 import type {
     IsolationTagData_ACU,
@@ -1512,7 +1513,7 @@ function hasEquivalentTableProjection_ACU(
  * - 不调用宿主保存（保存由上层事务负责）。
  *
  * @param msg 聊天消息对象
- * @param isolationKey 隔离标签键名
+ * @param isolationKey 隔离标签键名。标签隔离已退役，未开启时为 ''，空串是合法默认槽。
  * @param patch 批准字段的增量修改（仅白名单 key）
  * @param options.expectedIndexId 可选 CAS 条件：当前槽必须存在该 indexId
  * @returns { changed: boolean; tagData: IsolationTagData_ACU | null }
@@ -1523,7 +1524,7 @@ export function patchIsolatedTagMetadata_ACU(
     patch: Partial<Pick<IsolationTagData_ACU, 'summaryVectorIndexState' | 'summaryVectorIndexManifest'>>,
     options?: { expectedIndexId?: string },
 ): { changed: boolean; tagData: IsolationTagData_ACU | null } {
-    if (!msg || !isolationKey) return { changed: false, tagData: null };
+    if (!msg || !isUsableIsolationSlotKey_ACU(isolationKey)) return { changed: false, tagData: null };
     if (!isObjectRecord_ACU(patch)) {
         const error = new Error(
             `[metadata-patch] patch 必须是对象：${ISOLATED_TAG_METADATA_PATCH_FORBIDDEN_ACU} isolationKey=${String(isolationKey)}`,

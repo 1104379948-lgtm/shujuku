@@ -76,6 +76,8 @@ vi.mock('../../../src/service/runtime/template-vars', () => ({
   parseIfBlockRecursive_ACU: mockParseIfBlockRecursive,
   parseIfBlocksInContent_ACU: vi.fn(),
   getLatestAIMessageContent_ACU: mockGetLatestAIMessageContent,
+  getLatestUserMessageContent_ACU: vi.fn(() => ''),
+  composeSeedMatchContent_ACU: (userContent: string, aiContent: string) => [userContent, aiContent].filter(Boolean).join('\n'),
   replaceDbSqlVariables: vi.fn((s: string) => s),
 }));
 

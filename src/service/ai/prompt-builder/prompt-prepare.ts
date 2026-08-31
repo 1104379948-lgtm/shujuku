@@ -110,9 +110,12 @@ function resolvePromptRowWindow_ACU(
         return options?.tableData || currentJsonTableData_ACU;
     }
 
-    // [统一 schema 权威] 显式 sqlApplyScope 携带请求前冻结的 live SQLite runtime 数据时，
-    // Prompt 必须使用该冻结视图，而不是再次读取 live provider：AI 等待期间模板切换、
-    // 运行时重载或并发提交不得改变本轮 Prompt 的 schema/行数据契约（test31 双权威修复）。
+    // schema 权威仍冻结在 sqlApplyScope（templateData / 列绑定走请求前快照）。
+    // 行数据必须用本批次 tableData（baseSnapshot）：手动 SQL 重填会先清空再一次性捕获
+    // runtimeData，若这里优先返回冻结行，第二桶起 AI 会一直看到空表。
+    if (options?.tableData) {
+        return options.tableData;
+    }
     if (options?.sqlApplyScope?.runtimeData) {
         return options.sqlApplyScope.runtimeData;
     }
@@ -348,7 +351,7 @@ function resolvePromptRowWindow_ACU(
             if (!msg.is_user && (extractTags || extractRules.length > 0 || excludeTags || excludeRules.length > 0)) {
                 content = applyContextTagFilters_ACU(content, { extractTags, extractRules, excludeTags, excludeRules });
             }
-            if (!msg.is_user && typeof content === 'string' && content) {
+            if (typeof content === 'string' && content) {
                 conditionalSeedParts.push(content);
             }
 

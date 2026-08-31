@@ -1,7 +1,8 @@
 /**
  * 数据隔离（Isolation）相关函数
  *
- * 管理数据隔离标识的历史记录、Profile 创建和切换。
+ * 标签隔离已退役（见 shared/isolation-policy.ts）。本文件只兼容存量标识码的
+ * Profile 读写，新功能禁止再按 isolationKey 真值做门禁。
  */
 
 import { logWarn_ACU } from '../../shared/utils';

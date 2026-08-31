@@ -4,7 +4,7 @@
 import { DEFAULT_CHAR_CARD_PROMPT_ACU } from '../../../shared/defaults-json.js';
 import { AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU } from '../../../shared/defaults';
 import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-status-display';
-import { autoFillDebounceTimer_ACU, getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, manualExtraHint_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU, _set_autoFillDebounceTimer_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU } from '../../components/plot-editors';
+import { autoFillDebounceTimer_ACU, getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, manualExtraHint_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU, _set_autoFillDebounceTimer_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { ACU_TOAST_CATEGORY_ACU } from '../../../shared/constants';
 import { SillyTavern_API_ACU, TavernHelper_API_ACU, toastr_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU } from '../../../shared/host-api';
@@ -228,6 +228,8 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
       });
       const performanceContext = { runId: performanceSpan.id, parentSpanId: performanceSpan.id };
       try {
+      // 新一轮消息评估：清掉上一轮填表「终止」残留，避免永久 user_aborted。
+      _set_wasStoppedByUser_ACU(false);
       // [健全性] 如果用户已经开始对话，则解除"开场白阶段世界书注入抑制"
       try { maybeLiftWorldbookSuppression_ACU(); } catch (e) {}
 

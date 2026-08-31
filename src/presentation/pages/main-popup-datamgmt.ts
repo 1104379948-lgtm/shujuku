@@ -11,10 +11,10 @@ import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 export function generateDataMgmtTabHTML(): string {
     return `
                 <div id="acu-tab-datamgmt" class="acu-tab-content">
-                    <!-- A. 数据隔离 -->
+                    <!-- A. 数据隔离（已退役：留空即默认槽 ''，新功能禁止再按 isolationKey 真值做门禁） -->
                     <div class="acu-card">
-                        <h3>数据隔离</h3>
-                        <p class="notes">在此处输入特定的标识代码，插件将只读取和保存带有该标识的数据。若留空则使用默认数据。</p>
+                        <h3>数据隔离 <span style="font-size: 0.75em; font-weight: 400; color: var(--acu-text-3);">（已退役）</span></h3>
+                        <p class="notes">标签隔离已停用。留空使用默认数据槽。请勿再为新功能依赖隔离码；空标识是合法默认槽，不是“没有数据”。</p>
                         <div class="setting-item" style="margin-bottom: 15px; border-bottom: 1px dashed var(--acu-border-2); padding-bottom: 15px;">
                             <div id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-input-area" style="margin-top: 10px;">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-data-isolation-code">标识代码:</label>

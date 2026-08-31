@@ -57,9 +57,10 @@ function getUniqueSummaryVectorIndexSourceTableKeyForRecovery_ACU(): string {
 
 export async function tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU(): Promise<boolean> {
     const chatKey = String(currentChatFileIdentifier_ACU || '').trim();
-    const isolationKey = String(getCurrentIsolationKey_ACU() || '').trim();
+    // 标签隔离已退役：未开启时 isolationKey 为 ''，空串是合法默认槽，不能当缺失。
+    const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
     const sourceTableKey = getUniqueSummaryVectorIndexSourceTableKeyForRecovery_ACU();
-    if (!chatKey || !isolationKey || !sourceTableKey) return false;
+    if (!chatKey || !sourceTableKey) return false;
 
     const chatName = getCurrentCharacterCardName_ACU();
     const registeredFiles = await loadVectorIndexRegistry_ACU()

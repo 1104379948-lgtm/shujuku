@@ -16,7 +16,7 @@ import { isDatabaseGeneratedLorebookEntry_ACU, resolveGeneratedEntriesForTable_A
 import { PlotStageError_ACU } from './plot-runtime-phase';
 import { escapeRegExp_ACU, hashUserInput_ACU, isEntryBlocked_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU } from '../../../shared/utils';
 import { ensurePlotTasksCompat_ACU, getPlotPromptContentByIdFromSettings_ACU, normalizePlotTask_ACU, normalizePlotTasks_ACU } from '../../plot/plot-logic';
-import { parseRandomTags_ACU, replaceRandomVariables_ACU, getLatestAIMessageContent_ACU, replaceDbSqlVariables } from '../template-vars';
+import { parseRandomTags_ACU, replaceRandomVariables_ACU, getLatestAIMessageContent_ACU, getLatestUserMessageContent_ACU, composeSeedMatchContent_ACU, replaceDbSqlVariables } from '../template-vars';
 import { applyContextTagFilters_ACU, applyExcludeRulesToText_ACU } from '../helpers-context-tags';
 import { mergeAllIndependentTables_ACU } from '../helpers-data-merge';
 import { formatTableDataForLLM_ACU, formatOutlineTableForPlot_ACU, formatSummaryIndexForPlot_ACU, getSummaryIndexContentForPlot_ACU } from './plot-data-format';
@@ -420,7 +420,10 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
 
     let seedContentForConditional = '';
     try {
-      seedContentForConditional = getLatestAIMessageContent_ACU();
+      seedContentForConditional = composeSeedMatchContent_ACU(
+        getLatestUserMessageContent_ACU(),
+        getLatestAIMessageContent_ACU(),
+      );
       logDebug_ACU('[剧情推进] 条件模板检测内容长度:', seedContentForConditional.length);
     } catch (e) {
       logWarn_ACU('[剧情推进] 准备条件模板检测内容时出错:', e);

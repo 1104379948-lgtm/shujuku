@@ -287,6 +287,12 @@ export let settings_ACU: any = {
     characterSettings: {},
 };
 
+/**
+ * 当前聊天的隔离槽位键。
+ *
+ * 标签隔离已退役：未开启时固定返回 ''。空串是默认槽，禁止 `if (!getCurrentIsolationKey_ACU())`
+ * 当作“当前没有隔离键 / 跳过写入”。
+ */
 export function getCurrentIsolationKey_ACU() {
     return settings_ACU.dataIsolationEnabled ? (settings_ACU.dataIsolationCode || '') : '';
 }
