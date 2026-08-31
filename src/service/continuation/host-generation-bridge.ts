@@ -51,8 +51,21 @@ type StartedHostGeneration_ACU = { identity: TurnAttemptIdentity_ACU; sequence: 
 export class ContinuationHostGenerationBridge_ACU {
   private sendingIdentity: TurnAttemptIdentity_ACU | null = null;
   private readonly startedByChat = new Map<string, StartedHostGeneration_ACU>();
+  private readonly stateListeners = new Set<() => void>();
 
   constructor(private readonly dependencies: ContinuationHostGenerationBridgeDependencies_ACU) {}
+
+  /** 订阅桥驱动的持久化状态变更；页面无需猜测宿主事件何时完成。 */
+  subscribeStateChanges(listener: () => void): () => void {
+    this.stateListeners.add(listener);
+    return () => this.stateListeners.delete(listener);
+  }
+
+  private notifyStateChanges_ACU(): void {
+    for (const listener of this.stateListeners) {
+      try { listener(); } catch { /* 观察者失败不能影响正文确认链 */ }
+    }
+  }
 
   /** 打断酒馆正在进行的正文生成。用户点停止时必须先走这里，否则正文写完仍会确认并自动续写。 */
   stopHostGeneration(): void {
@@ -77,6 +90,7 @@ export class ContinuationHostGenerationBridge_ACU {
     };
     await runtime.recordHostTurn({ identity: prepared.identity, capture });
     this.sendingIdentity = prepared.identity;
+    this.notifyStateChanges_ACU();
     try {
       if (!this.dependencies.hostInput.send(prepared.instruction.instruction)) {
         await runtime.pauseForHostInputFailure(prepared.identity);
@@ -190,6 +204,8 @@ export class ContinuationHostGenerationBridge_ACU {
         // No safe write remains after a stale or persistence failure.
       }
       return;
+    } finally {
+      this.notifyStateChanges_ACU();
     }
     await this.autoContinueAfterTurn_ACU();
   }
@@ -215,6 +231,7 @@ export class ContinuationHostGenerationBridge_ACU {
     } catch {
       // 状态已变化（轮次已被其他路径推进/暂停）时无需补写。
     }
+    this.notifyStateChanges_ACU();
   }
 
   /**
@@ -237,6 +254,8 @@ export class ContinuationHostGenerationBridge_ACU {
       // 但必须在会话流留痕——静默吞掉会让用户以为自动续写根本没触发。
       const message = error instanceof Error ? error.message : String(error);
       logAgentSession_ACU({ kind: 'run_failed', title: '自动续写已暂停', detail: `${message}\n进度已保留，输入新指令后发送即可继续。`, ok: false });
+    } finally {
+      this.notifyStateChanges_ACU();
     }
   }
 
@@ -289,6 +308,7 @@ export class ContinuationHostGenerationBridge_ACU {
     };
     await runtime.recordHostTurn({ identity: snapshot.pending.identity, capture });
     this.sendingIdentity = snapshot.pending.identity;
+    this.notifyStateChanges_ACU();
     try {
       if (!this.dependencies.hostInput.retryGeneration(lastIsAi ? 'regenerate' : 'generate')) {
         await runtime.pauseForHostInputFailure(snapshot.pending.identity);

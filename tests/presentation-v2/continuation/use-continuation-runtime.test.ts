@@ -6,6 +6,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const harness = vi.hoisted(() => ({
   bridgeSend: vi.fn(async () => true),
   bridgeRetryHostGeneration: vi.fn(async () => true),
+  bridgeSubscribe: vi.fn((listener: () => void) => { harness.bridgeStateListener = listener; return vi.fn(); }),
+  bridgeStateListener: undefined as (() => void) | undefined,
   continueTask: vi.fn(),
   retryCurrentTurn: vi.fn(),
   createTask: vi.fn(),
@@ -29,7 +31,7 @@ vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
   // 展示兜底设置：composable 初始化即调用，mock 里给最小骨架即可（测试不断言其内容）。
   buildInitialContinuationSettings_ACU: () => ({}) as any,
   getContinuationRuntime_ACU: () => ({
-    bridge: { send: harness.bridgeSend, retryHostGeneration: harness.bridgeRetryHostGeneration, stopHostGeneration: harness.stopHostGeneration },
+    bridge: { send: harness.bridgeSend, retryHostGeneration: harness.bridgeRetryHostGeneration, stopHostGeneration: harness.stopHostGeneration, subscribeStateChanges: harness.bridgeSubscribe },
     orchestrator: {
       continueTask: harness.continueTask,
       retryCurrentTurn: harness.retryCurrentTurn,
@@ -60,6 +62,7 @@ const preparedTurn = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  harness.bridgeStateListener = undefined;
   harness.read.mockReturnValue(envelope);
   harness.initialize.mockResolvedValue(null);
   harness.bridgeSend.mockResolvedValue(true);
@@ -103,6 +106,22 @@ describe('useContinuationRuntime', () => {
     await continuation.continueTask();
 
     expect(harness.bridgeSend).not.toHaveBeenCalled();
+  });
+
+  it('refreshes the authoritative envelope when the host bridge confirms a result', async () => {
+    const awaiting = { schemaVersion: 1, settings: {}, activeTask: { status: 'running', pendingHostTurn: { status: 'awaiting_generation' } } } as any;
+    const confirmed = { schemaVersion: 1, settings: {}, activeTask: { status: 'paused', pendingHostTurn: null } } as any;
+    harness.read.mockReturnValue(awaiting);
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+    continuation.refresh();
+    harness.read.mockClear();
+    harness.read.mockReturnValue(confirmed);
+
+    harness.bridgeStateListener!();
+
+    expect(harness.read).toHaveBeenCalledOnce();
+    expect(continuation.task.value).toEqual(confirmed.activeTask);
   });
 
   it('初始化完成后刷新首楼权威状态', async () => {

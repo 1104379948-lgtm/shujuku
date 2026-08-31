@@ -135,6 +135,14 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU = 'spv2.7-continu
  * gateways see a strict prefix extension between iterations.
  */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU = 'spv2.8-continuation-runtime-snapshot-v20';
+/**
+ * Long-form story-arc version: arc-architect now distributes the main conflict
+ * across 6-10 causally linked volumes with distinct escalation layers,
+ * expectation payoffs, supporting subplots, and protected endgame reserves.
+ */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU = 'spv2.9-continuation-longform-story-arc-v21';
+/** Story-arc volume plan version: migrated default prompts follow the persisted volume-count setting. */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU = 'spv3.0-continuation-story-arc-volume-plan-v22';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -167,6 +175,8 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     stageSize: 'standard',
     customTurnMin: null,
     customTurnMax: null,
+    storyArcVolumePlan: 'medium',
+    customStoryArcVolumeCount: null,
     outlinePreview: false,
     autoNextStage: true,
     maxAutomaticStages: 6,
@@ -193,7 +203,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU,
   };
 }
 

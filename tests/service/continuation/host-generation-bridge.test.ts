@@ -59,6 +59,21 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
   });
 
+  it('notifies state observers after confirming a claimed host reply', async () => {
+    const h = createHarness();
+    const listener = vi.fn();
+    h.bridge.subscribeStateChanges(listener);
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+
+    await h.bridge.send(prepared);
+    listener.mockClear();
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
+    await h.bridge.onGenerationEnded(9, 7);
+
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity, 1);
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
   it('waits for a makeFirst-era AI floor to materialize before resolving the claimed host result', async () => {
     let setChat: (value: any[]) => void;
     const h = createHarness({ onWait: () => setChat([{ is_user: true }, { is_user: false, mes: '<ok>延迟物化', message_id: 9 }]) });

@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue';
+import { computed, getCurrentScope, onScopeDispose, ref } from 'vue';
 import { isAgentSessionRunning_ACU, logAgentSession_ACU } from '../../service/continuation/agent/agent-session-log';
 import { buildInitialContinuationSettings_ACU, getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
 import { CONTINUATION_AGENT_PROMPT_KEYS_ACU, CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, type ContinuationEnvelope_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationTask_ACU, type StageOutline_ACU } from '../../service/continuation/model';
@@ -52,6 +52,16 @@ export function useContinuationRuntime() {
   let activeAction: Promise<boolean> | null = null;
   // 用户点停止后递增：挡住「发送已落盘、continueTask 尚未启动」这一空档把停止吞掉再开跑。
   let stopEpoch = 0;
+
+  // 正文确认与自动续写由宿主事件异步触发，不会经过页面动作。订阅桥的状态提交通知，
+  // 使「等待宿主正文」在 confirmCurrentTurn 后立即从权威快照刷新。
+  const subscribeStateChanges = (runtime.bridge as { subscribeStateChanges?: (listener: () => void) => () => void }).subscribeStateChanges;
+  const unsubscribeStateChanges = typeof subscribeStateChanges === 'function'
+    ? subscribeStateChanges.call(runtime.bridge, () => refresh())
+    : null;
+  if (unsubscribeStateChanges && getCurrentScope()) {
+    onScopeDispose(unsubscribeStateChanges);
+  }
 
   function refresh(): void {
     try {
