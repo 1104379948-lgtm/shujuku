@@ -86,6 +86,11 @@ export function useContinuationRuntime() {
       .then(action)
       .then(async result => {
       if ('retryHostGeneration' in result && result.retryHostGeneration) {
+        // 上一轮正文中断/失败后的恢复走酒馆自己的重发，不经过 Agent。此分支只由用户
+        // 动作到达（自动重试链走桥内部，不经 run_ACU），必须留痕并解释消息去向——
+        // 否则用户看到的是「在 Agent 输入框发消息却直接触发了主对话生成」。
+        logAgentSession_ACU({ kind: 'protocol_retry', title: '重发上一轮正文', detail: '上一轮酒馆正文未正常完成，先让酒馆直接重新生成；本次发送的消息会在正文完成后的下一轮由主 Agent 读取。' });
+        toast.info('上一轮正文未完成，已让酒馆直接重新生成；你的消息会在下一轮被主 Agent 读取。');
         const sent = await runtime.bridge.retryHostGeneration();
         if (!sent) toast.error('宿主重新生成不可用，智能续写已暂停。', { muteable: false });
       } else if ('preparedTurn' in result && result.preparedTurn) {

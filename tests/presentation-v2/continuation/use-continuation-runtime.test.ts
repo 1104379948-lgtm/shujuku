@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const harness = vi.hoisted(() => ({
   bridgeSend: vi.fn(async () => true),
+  bridgeRetryHostGeneration: vi.fn(async () => true),
   continueTask: vi.fn(),
   retryCurrentTurn: vi.fn(),
   createTask: vi.fn(),
@@ -28,7 +29,7 @@ vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
   // 展示兜底设置：composable 初始化即调用，mock 里给最小骨架即可（测试不断言其内容）。
   buildInitialContinuationSettings_ACU: () => ({}) as any,
   getContinuationRuntime_ACU: () => ({
-    bridge: { send: harness.bridgeSend, stopHostGeneration: harness.stopHostGeneration },
+    bridge: { send: harness.bridgeSend, retryHostGeneration: harness.bridgeRetryHostGeneration, stopHostGeneration: harness.stopHostGeneration },
     orchestrator: {
       continueTask: harness.continueTask,
       retryCurrentTurn: harness.retryCurrentTurn,
@@ -197,6 +198,24 @@ describe('useContinuationRuntime', () => {
     release(result);
     await inflight;
     expect(continuation.busy.value).toBe(false);
+  });
+
+  it('宿主直接重发通道：留会话痕迹并弹提示说明消息将在下一轮被读取', async () => {
+    harness.sendAgentMessage.mockResolvedValue({ ...result, disposition: 'continue_now', shouldContinue: true });
+    harness.continueTask.mockResolvedValue({ ...result, retryHostGeneration: true });
+    const sessionLog = await import('../../../src/service/continuation/agent/agent-session-log');
+    sessionLog.resetAgentSessionLogForTests_ACU();
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const continuation = useContinuationRuntime();
+
+    expect(await continuation.sendAgentMessage('继续吧')).toBe(true);
+
+    expect(harness.bridgeRetryHostGeneration).toHaveBeenCalledOnce();
+    expect(harness.bridgeSend).not.toHaveBeenCalled();
+    expect(harness.toastInfo).toHaveBeenCalledWith('上一轮正文未完成，已让酒馆直接重新生成；你的消息会在下一轮被主 Agent 读取。');
+    const entries = sessionLog.readAgentSessionLog_ACU();
+    expect(entries.some(entry => entry.kind === 'protocol_retry' && entry.title === '重发上一轮正文')).toBe(true);
+    sessionLog.resetAgentSessionLogForTests_ACU();
   });
 
   it('发送落盘后、续跑前点停止：不再调用 continueTask', async () => {
