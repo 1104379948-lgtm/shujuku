@@ -146,64 +146,8 @@ describe('getLorebookEntries_ACU', () => {
     );
   });
 
-  it('名称仅有 Unicode 或不可见字符差异时使用宿主真实名称重试', async () => {
-    const entries = [{ uid: 1, content: '条目1' }];
-    mockTavernHelper.getLorebookEntries = vi.fn()
-      .mockRejectedValueOnce(new Error('Worldbook "ABC" not found'))
-      .mockResolvedValueOnce(entries);
-    mockTavernHelper.getLorebooks = vi.fn().mockResolvedValue(['ＡＢ\u200BＣ']);
-
-    expect(await getLorebookEntries_ACU('ABC')).toEqual(entries);
-    expect(mockTavernHelper.getLorebookEntries).toHaveBeenNthCalledWith(1, 'ABC');
-    expect(mockTavernHelper.getLorebookEntries).toHaveBeenNthCalledWith(2, 'ＡＢ\u200BＣ');
-  });
-
-  it('名称恢复重试路径同样归一化条目文本字段', async () => {
-    mockTavernHelper.getLorebookEntries = vi.fn()
-      .mockRejectedValueOnce(new Error('Worldbook "ABC" not found'))
-      .mockResolvedValueOnce([{ uid: 1, comment: true }]);
-    mockTavernHelper.getLorebooks = vi.fn().mockResolvedValue(['ＡＢ\u200BＣ']);
-
-    await expect(getLorebookEntries_ACU('ABC')).resolves.toEqual([{ uid: 1, comment: '' }]);
-  });
-
-  it('真实名称重试失败时保留首次 not-found 错误并附加重试诊断', async () => {
-    const originalError = new Error('Worldbook "ABC" not found');
-    const retryError = new Error('network unavailable');
-    mockTavernHelper.getLorebookEntries = vi.fn()
-      .mockRejectedValueOnce(originalError)
-      .mockRejectedValueOnce(retryError);
-    mockTavernHelper.getLorebooks = vi.fn().mockResolvedValue(['ＡＢ\u200BＣ']);
-
-    await expect(getLorebookEntries_ACU('ABC')).rejects.toBe(originalError);
-    expect((originalError as any).lorebookResolvedName).toBe('ＡＢ\u200BＣ');
-    expect((originalError as any).lorebookRetryError).toBe(retryError);
-  });
-
-  it('原始错误不可扩展时仍保留错误对象并输出脱敏重试诊断', async () => {
-    const sensitiveText = '不得泄露的宿主错误正文';
-    const originalError = Object.preventExtensions(new Error('Worldbook "ABC" not found'));
-    const retryError = new Error(sensitiveText);
-    mockTavernHelper.getLorebookEntries = vi.fn()
-      .mockRejectedValueOnce(originalError)
-      .mockRejectedValueOnce(retryError);
-    mockTavernHelper.getLorebooks = vi.fn().mockResolvedValue(['ＡＢ\u200BＣ']);
-
-    await expect(getLorebookEntries_ACU('ABC')).rejects.toBe(originalError);
-    expect(mockLogWarn).toHaveBeenCalledWith(
-      '[WorldbookGateway] 世界书真实名称重试失败，原始错误对象不可扩展。',
-      {
-        phase: 'retry_resolved_lorebook_name',
-        requestedName: 'ABC',
-        resolvedName: 'ＡＢ\u200BＣ',
-        error: { category: 'read_failed' },
-      },
-    );
-    expect(JSON.stringify(mockLogWarn.mock.calls)).not.toContain(sensitiveText);
-  });
-
-  it('非 not-found 错误不枚举列表也不重试', async () => {
-    const error = new Error('permission denied');
+  it('not-found 时只读取一次，不枚举列表、不替换名称也不重试', async () => {
+    const error = new Error('Worldbook "ABC" not found');
     mockTavernHelper.getLorebookEntries = vi.fn().mockRejectedValue(error);
     mockTavernHelper.getLorebooks = vi.fn();
 
@@ -261,11 +205,13 @@ describe('listLorebooks_ACU', () => {
     mockTavernHelper.getLorebooks = vi.fn().mockResolvedValue(['book1', 'book2']);
     mockSillyTavern.getWorldBooks = vi.fn().mockResolvedValue(['book3']);
     expect(await listLorebooks_ACU()).toEqual(['book1', 'book2']);
+    expect(mockSillyTavern.getWorldBooks).not.toHaveBeenCalled();
   });
 
-  it('TavernHelper 不可用时降级到 SillyTavern', async () => {
+  it('统一兼容 API 缺失时不调用 SillyTavern', async () => {
     mockSillyTavern.getWorldBooks = vi.fn().mockResolvedValue(['book3']);
-    expect(await listLorebooks_ACU()).toEqual(['book3']);
+    expect(await listLorebooks_ACU()).toEqual([]);
+    expect(mockSillyTavern.getWorldBooks).not.toHaveBeenCalled();
   });
 });
 
@@ -274,9 +220,10 @@ describe('getWorldBooks_ACU', () => {
     expect(await getWorldBooks_ACU()).toEqual([]);
   });
 
-  it('API 可用返回列表', async () => {
-    mockSillyTavern.getWorldBooks = vi.fn().mockResolvedValue(['book1']);
+  it('复用统一兼容 API 的列表入口', async () => {
+    mockTavernHelper.getLorebooks = vi.fn().mockResolvedValue(['book1']);
     expect(await getWorldBooks_ACU()).toEqual(['book1']);
+    expect(mockTavernHelper.getLorebooks).toHaveBeenCalledTimes(1);
   });
 });
 

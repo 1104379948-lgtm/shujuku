@@ -54,7 +54,10 @@ describe('passthrough（旧版酒馆助手全量 API）', () => {
       getCharWorldbookNames: vi.fn(),
     };
     const { api, capabilities } = buildTavernHelperCompat_ACU(rawTH, () => null);
-    expect(Object.values(capabilities).every(backend => backend === 'passthrough')).toBe(true);
+    expect(capabilities.getLorebookEntries).toBe('passthrough');
+    expect(capabilities.getCharWorldbookNames).toBe('passthrough');
+    expect(capabilities.getCurrentCharPrimaryLorebook).toBe('mapped');
+    expect(capabilities.getCharLorebooks).toBe('mapped');
     expect(await api.getLorebookEntries('书')).toEqual([{ uid: 1 }]);
     expect(rawTH.getLorebookEntries).toHaveBeenCalledWith('书');
   });
@@ -168,6 +171,35 @@ describe('mapped（新版改名 API）', () => {
     expect(capabilities.getCharWorldbookNames).toBe('mapped');
     expect(await api.getCharWorldbookNames('current')).toEqual({ primary: '主', additional: ['附'] });
     expect(rawTH.getCharLorebooks).toHaveBeenCalledWith({ type: 'all' });
+  });
+});
+
+describe('世界书后端组', () => {
+  it('raw TavernHelper 存在但缺少条目读取时保持缺失，不调用 native 后端', async () => {
+    const stApi = makeUsableStApi({
+      loadWorldInfo: vi.fn().mockResolvedValue({ entries: { 1: { uid: 1 } } }),
+    });
+    const rawTH = {
+      getCharWorldbookNames: vi.fn().mockResolvedValue({ primary: '主书', additional: [] }),
+    };
+
+    const { api, capabilities } = buildTavernHelperCompat_ACU(rawTH, () => stApi);
+
+    expect(capabilities.getCharWorldbookNames).toBe('passthrough');
+    expect(capabilities.getLorebookEntries).toBe('missing');
+    expect(api.getLorebookEntries).toBeUndefined();
+    expect(await api.getCharWorldbookNames('current')).toEqual({ primary: '主书', additional: [] });
+    expect(stApi.loadWorldInfo).not.toHaveBeenCalled();
+  });
+
+  it('派生绑定视图复用同一个 getCharWorldbookNames 来源', async () => {
+    const rawTH = {
+      getCharWorldbookNames: vi.fn().mockResolvedValue({ primary: '主书', additional: ['附书'] }),
+    };
+    const { api } = buildTavernHelperCompat_ACU(rawTH, () => null);
+    await expect(api.getCurrentCharPrimaryLorebook()).resolves.toBe('主书');
+    await expect(api.getCharLorebooks({ type: 'additional' })).resolves.toEqual({ primary: null, additional: ['附书'] });
+    expect(rawTH.getCharWorldbookNames).toHaveBeenCalledTimes(2);
   });
 });
 

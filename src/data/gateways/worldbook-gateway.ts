@@ -7,7 +7,7 @@
  * 所有方法内置存在性检查，宿主 API 不可用时返回安全默认值。
  */
 
-import { TavernHelper_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
+import { TavernHelper_API_ACU } from '../../shared/host-api';
 import { getCharLorebooks_ACU, getCurrentCharacterWorldbookBinding_ACU } from './character-gateway';
 import { logWarn_ACU } from '../../shared/utils';
 import { classifyLorebookReadError_ACU } from '../../shared/lorebook-read-error';
@@ -124,44 +124,7 @@ export async function getLorebookEntries_ACU(bookName: string): Promise<any[]> {
         logWarn_ACU('[WorldbookGateway] getLorebookEntries 不可用，返回空数组');
         return [];
     }
-    try {
-        return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(bookName), bookName);
-    } catch (error) {
-        if (!isLorebookNotFoundError_ACU(error)) throw error;
-        let resolvedName: string | null = null;
-        try {
-            resolvedName = resolveLorebookNameFromList_ACU(bookName, await listLorebooks_ACU());
-        } catch {
-            // 名称恢复是补救路径；列表读取失败时必须保留原始宿主错误。
-        }
-        if (!resolvedName || resolvedName === bookName) throw error;
-        logWarn_ACU('[WorldbookGateway] 世界书名称存在 Unicode 或不可见字符差异，使用宿主真实名称重试读取。', {
-            phase: 'resolve_lorebook_name',
-            requestedName: bookName,
-            resolvedName,
-        });
-        try {
-            return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(resolvedName), resolvedName);
-        } catch (retryError) {
-            // 保留第一次宿主 not-found 错误的分类与堆栈，同时附带恢复失败证据。
-            // 直接抛 retryError 会让调用方误以为首次故障就是网络/权限问题。
-            try {
-                Object.defineProperties(error as object, {
-                    lorebookResolvedName: { value: resolvedName, configurable: true },
-                    lorebookRetryError: { value: retryError, configurable: true },
-                });
-            } catch {
-                // 极少数不可扩展错误对象无法附加诊断；输出脱敏结构化日志并保留原始错误。
-                logWarn_ACU('[WorldbookGateway] 世界书真实名称重试失败，原始错误对象不可扩展。', {
-                    phase: 'retry_resolved_lorebook_name',
-                    requestedName: bookName,
-                    resolvedName,
-                    error: { category: 'read_failed' },
-                });
-            }
-            throw error;
-        }
-    }
+    return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(bookName), bookName);
 }
 
 export function isLorebookNotFoundError_ACU(error: unknown): boolean {
@@ -188,40 +151,11 @@ function requireTavernHelperApi_ACU(operation: 'get_entries' | 'set_entries' | '
 }
 
 /**
- * required read：宿主 API 缺失抛命名错误；仍复用 Unicode/不可见字符真实名称恢复逻辑。
+ * required read：宿主 API 缺失抛命名错误，宿主读取错误原样传播。
  */
 export async function getLorebookEntriesRequired_ACU(bookName: string): Promise<any[]> {
     requireTavernHelperApi_ACU('get_entries', 'getLorebookEntries');
-    try {
-        return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(bookName), bookName);
-    } catch (error) {
-        if (!isLorebookNotFoundError_ACU(error)) throw error;
-        let resolvedName: string | null = null;
-        try {
-            resolvedName = resolveLorebookNameFromList_ACU(bookName, await listLorebooks_ACU());
-        } catch {
-            // 名称恢复是补救路径；列表读取失败时必须保留原始宿主错误。
-        }
-        if (!resolvedName || resolvedName === bookName) throw error;
-        try {
-            return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(resolvedName), resolvedName);
-        } catch (retryError) {
-            try {
-                Object.defineProperties(error as object, {
-                    lorebookResolvedName: { value: resolvedName, configurable: true },
-                    lorebookRetryError: { value: retryError, configurable: true },
-                });
-            } catch {
-                logWarn_ACU('[WorldbookGateway] required 世界书真实名称重试失败，原始错误对象不可扩展。', {
-                    phase: 'retry_resolved_lorebook_name',
-                    requestedName: bookName,
-                    resolvedName,
-                    error: { category: 'read_failed' },
-                });
-            }
-            throw error;
-        }
-    }
+    return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(bookName), bookName);
 }
 
 /**
@@ -280,34 +214,22 @@ export async function deleteLorebookEntries_ACU(bookName: string, uids: any[]): 
 
 /**
  * 获取所有可用的世界书列表
- * 优先使用 TavernHelper_API_ACU.getLorebooks()，
- * 降级使用 SillyTavern_API_ACU.getWorldBooks()
+ * 兼容层在初始化时已锁定世界书后端来源。
  * @returns 世界书名称数组，不可用时返回 []
  */
 export async function listLorebooks_ACU(): Promise<string[]> {
-    // 优先尝试 TavernHelper
     if (TavernHelper_API_ACU && typeof TavernHelper_API_ACU.getLorebooks === 'function') {
         return await TavernHelper_API_ACU.getLorebooks();
-    }
-    // 降级到 SillyTavern_API
-    if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.getWorldBooks === 'function') {
-        return await SillyTavern_API_ACU.getWorldBooks();
     }
     logWarn_ACU('[WorldbookGateway] listLorebooks 不可用，返回空数组');
     return [];
 }
 
 /**
- * 获取所有可用的世界书列表（SillyTavern_API_ACU.getWorldBooks 的直接封装）
- * 用于需要明确调用 SillyTavern 侧 API 的场景
- * @returns 世界书名称数组，不可用时返回 []
+ * 获取所有可用的世界书列表。
  */
 export async function getWorldBooks_ACU(): Promise<string[]> {
-    if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.getWorldBooks === 'function') {
-        return await SillyTavern_API_ACU.getWorldBooks();
-    }
-    logWarn_ACU('[WorldbookGateway] getWorldBooks 不可用，返回空数组');
-    return [];
+    return listLorebooks_ACU();
 }
 
 // ═══ 角色绑定世界书 ═══
