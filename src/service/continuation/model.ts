@@ -64,6 +64,7 @@ export type ContinuationErrorCode_ACU =
   | 'CONTINUATION_HOST_INPUT_UNAVAILABLE'
   | 'CONTINUATION_GENERATION_TAGS_MISSING'
   | 'CONTINUATION_GENERATION_FAILED'
+  | 'CONTINUATION_GENERATION_TOO_SHORT'
   | 'CONTINUATION_AGENT_PROTOCOL_INVALID'
   | 'CONTINUATION_AGENT_ITERATIONS_EXHAUSTED'
   | 'CONTINUATION_AGENT_BLOCKED'
@@ -221,6 +222,10 @@ export interface ContinuationSettings_ACU {
   generationRetryLimit: number;
   internalAiRetryLimit: number;
   /**
+   * 酒馆正文低于该 token 数视为截断/出错并自动重试。0 表示关闭该校验。
+   */
+  minGenerationTokens: number;
+  /**
    * 连续高压轮（pressure + turn）的上限，跨阶段累计，0 表示关闭该校验。
    * 它只兜底「长时间没有任何喘息」这种病态，不规定张弛的周期——周期由阶段形态决定。
    * 高压型（surge）阶段豁免这条，其攒下的连续高压会带进下一阶段强制清偿。
@@ -243,10 +248,8 @@ export interface ContinuationSettings_ACU {
   apiPresetMode: 'current' | 'fixed';
   fixedApiPresetName: string;
   /**
-   * 为内部 AI 请求（主 Agent / 子代理 / 大纲）注入 prompt_cache_key 并解析响应里的缓存
-   * usage 统计。key 使用版本化命名空间，并绑定聊天身份、调用方 scope 与
-   * apiMode/model/url 路由哈希；不随请求、迭代或轮次变化，也不写入这些原始文本。
-   * 个别网关会拒收未知请求体字段，此时关掉该开关即可回到原始请求体。
+   * 已退役。曾经为内部 AI 请求注入 prompt_cache_key；该字段会让部分 Codex 兼容
+   * 渠道把请求划进独立缓存命名空间，打断前缀命中。读入与写出恒为 false。
    */
   promptCacheEnabled: boolean;
   agentApiPresets: ContinuationAgentApiPresets_ACU;

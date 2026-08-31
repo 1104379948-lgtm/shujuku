@@ -74,7 +74,7 @@ describe('ContinuationOutlinePlanner_ACU', () => {
       expect.any(Object),
       expect.objectContaining({ source: 'outline', requestId: 'outline-0' }),
       undefined,
-      expect.objectContaining({ cacheScope: 'outline', promptCacheEnabled: true }),
+      expect.objectContaining({ cacheScope: 'outline', promptCacheEnabled: false }),
     );
     expect(resolveApiPreset).toHaveBeenCalledTimes(1);
   });

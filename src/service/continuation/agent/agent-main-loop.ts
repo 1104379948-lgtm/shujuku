@@ -514,13 +514,13 @@ export class ContinuationAgentTurnPlanner_ACU {
       );
     } catch (error) {
       // 中断即存档（block 除外，其缓存已清）：迭代中途的失败保留已完成的派工结论，
-      // 「继续当前轮次」据此从当前迭代恢复而不是从头重跑。
+      // 用户再发送时据此从当前迭代恢复而不是从头重跑。
       if (!(error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_BLOCKED')) {
         persistRunState(Math.min(currentIteration, budget.maxIterations));
       }
       if (!terminalLogged) {
         const message = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
-        logAgentSession_ACU({ kind: 'run_failed', title: '本轮已终止', detail: `${message}\n（进度已保留，点击「继续当前轮次」将从中断处恢复）`, ok: false });
+        logAgentSession_ACU({ kind: 'run_failed', title: '本轮已终止', detail: `${message}\n（进度已保留，输入新指令后发送即可继续）`, ok: false });
       }
       throw error;
     }
@@ -621,7 +621,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     // 每次调用的用量由回调覆盖写入：协议重试时展示的是最终被采纳那次调用的用量。
     let callUsage: AiUsageMetadata_ACU | null = null;
     const callOptions: ContinuationInternalAiCallOptions_ACU = {
-      promptCacheEnabled: request.settings.promptCacheEnabled,
+      promptCacheEnabled: false,
       cacheScope: 'agent-main',
       onUsage: usage => { callUsage = usage; },
     };

@@ -9,6 +9,9 @@ import {
   DEFAULT_AGENT_RUN_BUDGET_ACU,
 } from './agent/agent-model';
 
+/** 酒馆正文短于该 token 数视为截断或出错，触发与报错同构的自动重试。0 表示关闭。 */
+export const CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU = 1000;
+
 export const CONTINUATION_TURN_RANGES_ACU: Readonly<Record<Exclude<ContinuationStageSize_ACU, 'custom'>, ContinuationTurnRange_ACU>> = {
   short: { min: 3, max: 5 },
   standard: { min: 6, max: 10 },
@@ -173,6 +176,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     retryDelaySeconds: 3,
     generationRetryLimit: 3,
     internalAiRetryLimit: 3,
+    minGenerationTokens: CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU,
     maxConsecutivePressureTurns: CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU,
     storyWindowFloors: AGENT_STORY_WINDOW_DEFAULT_ACU,
     agentHistoryTokenBudget: AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
@@ -184,7 +188,8 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentRunBudget: { ...DEFAULT_AGENT_RUN_BUDGET_ACU },
     apiPresetMode: 'current',
     fixedApiPresetName: '',
-    promptCacheEnabled: true,
+    // prompt_cache_key 会让部分 Codex 兼容渠道把请求划进独立缓存命名空间，反而打不中前缀缓存。
+    promptCacheEnabled: false,
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),

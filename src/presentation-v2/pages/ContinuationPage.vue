@@ -7,7 +7,6 @@
         :running="session.running.value"
         :draft="messageDraft"
         :sending="messageSending"
-        :busy="runtime.busy.value"
         :status-text="runtime.statusText.value"
         :stage-text="stageText"
         :completed-turns="runtime.activeStage.value?.completedTurns ?? 0"
@@ -15,13 +14,9 @@
         :revision-text="runtime.activeStage.value ? `revision ${runtime.activeStage.value.activeRevision}` : ''"
         :deadline-text="deadlineText"
         :awaiting-host="runtime.isAwaitingHostResult.value"
-        :can-continue="runtime.canContinue.value"
-        :can-retry="runtime.task.value?.pendingHostTurn?.status === 'retry_ready'"
         @send="sendMessage"
         @update:draft="messageDraft = $event"
         @stop="runtime.stopTask"
-        @continue="runtime.continueTask"
-        @retry="runtime.retryCurrentTurn"
       />
     </AcuPanel>
 
@@ -71,6 +66,9 @@
           </AcuFormRow>
           <AcuFormRow label="正文重试次数">
             <AcuInput v-model="settingsDraft.generationRetryLimit" type="number" :min="0" />
+          </AcuFormRow>
+          <AcuFormRow label="正文最低 token 数：酒馆生成低于该值视为截断或出错并自动重试，0 为不检查">
+            <AcuInput v-model="settingsDraft.minGenerationTokens" type="number" :min="0" />
           </AcuFormRow>
           <AcuFormRow label="内部 AI 重试次数">
             <AcuInput v-model="settingsDraft.internalAiRetryLimit" type="number" :min="0" />
@@ -138,7 +136,6 @@
         </div>
         <div class="acu-v2-continuation-page__toggles">
           <AcuCheckbox v-model="settingsDraft.outlinePreview" label="大纲产出后先预览再执行" />
-          <AcuCheckbox v-model="settingsDraft.promptCacheEnabled" label="缓存优化：为内部 AI 请求注入 prompt_cache_key 并统计缓存命中（个别网关不支持时可关闭）" />
         </div>
         <AcuRulePairList v-model="settingsDraft.contextExtractRules" label="上下文提取规则" />
         <AcuRulePairList v-model="settingsDraft.contextExcludeRules" label="上下文排除规则" />
@@ -455,6 +452,7 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     customTurnMax,
     maxAutomaticStages: requiredInteger(source.maxAutomaticStages, '自动阶段上限'),
     generationRetryLimit: requiredInteger(source.generationRetryLimit, '正文重试次数'),
+    minGenerationTokens: requiredInteger(source.minGenerationTokens, '正文最低 token 数'),
     internalAiRetryLimit: requiredInteger(source.internalAiRetryLimit, '内部 AI 重试次数'),
     loopDelaySeconds: requiredInteger(source.loopDelaySeconds, '轮次延迟'),
     retryDelaySeconds: requiredInteger(source.retryDelaySeconds, '重试延迟'),
@@ -474,7 +472,7 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
       maxExtraReads: requiredRangeInteger(source.agentRunBudget.maxExtraReads, '子代理工具轮上限', 0, 10),
     },
   };
-  if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.storyWindowFloors < 0 || normalized.storyTailFloors < 0 || normalized.agentHistoryTokenBudget < 0 || normalized.agentReadFallbackTokens < 1) {
+  if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.minGenerationTokens < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.storyWindowFloors < 0 || normalized.storyTailFloors < 0 || normalized.agentHistoryTokenBudget < 0 || normalized.agentReadFallbackTokens < 1) {
     throw new Error('续写设置中的数值不能低于允许范围');
   }
   if (normalized.apiPresetMode === 'fixed') {

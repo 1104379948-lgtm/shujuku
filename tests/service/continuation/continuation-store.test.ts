@@ -366,6 +366,27 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(loaded.settings.agentPrompts.main[0].content).not.toBe('用户改过的旧提示词');
   });
 
+  it('存量或缺失的 promptCacheEnabled 读出后强制为 false', () => {
+    const enabled = buildEnvelope_ACU() as any;
+    enabled.settings.promptCacheEnabled = true;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: enabled }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().read()!.settings.promptCacheEnabled).toBe(false);
+
+    const missing = buildEnvelope_ACU() as any;
+    delete missing.settings.promptCacheEnabled;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: missing }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().read()!.settings.promptCacheEnabled).toBe(false);
+    expect(buildDefaultContinuationSettings_ACU().promptCacheEnabled).toBe(false);
+  });
+
+  it('存量信封缺 minGenerationTokens 时补默认 1000', () => {
+    const missing = buildEnvelope_ACU() as any;
+    delete missing.settings.minGenerationTokens;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: missing }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().read()!.settings.minGenerationTokens).toBe(1000);
+    expect(buildDefaultContinuationSettings_ACU().minGenerationTokens).toBe(1000);
+  });
+
   it('fails closed on a persisted per-role channel with an illegal mode', () => {
     const invalid = buildEnvelope_ACU() as any;
     invalid.settings.agentApiPresets.reviewer = { mode: 'random', presetName: '' };

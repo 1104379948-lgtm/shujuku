@@ -276,7 +276,7 @@ export class AgentSubagentRuntime_ACU {
       current !== undefined && incoming !== undefined ? current + incoming : undefined
     );
     const callOptions: ContinuationInternalAiCallOptions_ACU = {
-      promptCacheEnabled: input.settings.promptCacheEnabled,
+      promptCacheEnabled: false,
       // 每个子代理的提示词前缀不同，独立缓存命名空间避免互相挤占路由。
       cacheScope: `sub-${definition.name}`,
       onUsage: usage => {

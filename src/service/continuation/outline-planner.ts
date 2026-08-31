@@ -174,7 +174,7 @@ export class ContinuationOutlinePlanner_ACU {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
         }
         const raw = await this.dependencies.callInternalAi([...rendered.messages, ...transcript], preset, identity, undefined, {
-          promptCacheEnabled: request.settings.promptCacheEnabled,
+          promptCacheEnabled: false,
           cacheScope: 'outline',
         });
         lastRaw = String(raw ?? '');
