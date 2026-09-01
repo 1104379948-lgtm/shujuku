@@ -145,7 +145,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
   function getEnabledPlotTasks_ACU(plotSettings: Record<string, any>) {
     return sortPlotTasksForRuntime_ACU(
       normalizePlotTasks_ACU(plotSettings)
-        .filter((task: any) => task && task.enabled !== false),
+        .filter((task: any) => task && task.enabled === true),
     );
   }
 

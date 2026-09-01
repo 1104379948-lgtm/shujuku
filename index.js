@@ -67876,7 +67876,7 @@ $CONTENT
     }
     function getEnabledPlotTasks_ACU(plotSettings) {
         return sortPlotTasksForRuntime_ACU(normalizePlotTasks_ACU(plotSettings)
-            .filter((task) => task && task.enabled !== false));
+            .filter((task) => task && task.enabled === true));
     }
     async function buildPlotSharedContext_ACU(plotSettings, userMessage, runtimeOptions = {}) {
         const readContext = runtimeOptions.readContext;
@@ -101253,11 +101253,23 @@ $CONTENT
             .filter((item) => item.length > 0)
             .slice(0, 24)));
     }
-    async function generateKeywords_ACU(_config, _userInput) {
-        // Token/API 优化：
-        // 禁止为了向量记忆检索额外调用一次聊天 AI。
-        // 后续 queryText 仍直接使用 userInput 创建 embedding，
-        // 因此向量召回、最近固定记忆注入等功能继续保留。
+    async function generateKeywords_ACU(config, userInput) {
+        const recentContext = buildRecentContext_ACU(config.keywordContextPairCount || 1);
+        const messages = renderKeywordPromptMessages_ACU(config.keywordPromptGroup || [], { recentContext, userInput });
+        if (messages.length === 0)
+            return [];
+        const attempts = Math.max(1, Number(config.keywordGenerationMaxAttempts) || 1);
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            try {
+                const response = await callAIWithPreset_ACU(messages, config.keywordApiPreset || '');
+                const keywords = parseKeywords_ACU(response || '');
+                if (keywords.length > 0)
+                    return keywords;
+            }
+            catch (error) {
+                logWarn_ACU(`[交火模式纪要索引] 关键词生成失败 ${attempt}/${attempts}:`, error);
+            }
+        }
         return [];
     }
     // T10：query 向量模长预计算。与 cosineSimilarity_ACU 内部的 leftNorm 算法逐位一致，

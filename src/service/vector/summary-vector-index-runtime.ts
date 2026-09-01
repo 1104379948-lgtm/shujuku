@@ -155,11 +155,20 @@ function parseKeywords_ACU(text: string): string[] {
         .slice(0, 24)));
 }
 
-async function generateKeywords_ACU(_config: any, _userInput: string): Promise<string[]> {
-    // Token/API 优化：
-    // 禁止为了向量记忆检索额外调用一次聊天 AI。
-    // 后续 queryText 仍直接使用 userInput 创建 embedding，
-    // 因此向量召回、最近固定记忆注入等功能继续保留。
+async function generateKeywords_ACU(config: any, userInput: string): Promise<string[]> {
+    const recentContext = buildRecentContext_ACU(config.keywordContextPairCount || 1);
+    const messages = renderKeywordPromptMessages_ACU(config.keywordPromptGroup || [], { recentContext, userInput });
+    if (messages.length === 0) return [];
+    const attempts = Math.max(1, Number(config.keywordGenerationMaxAttempts) || 1);
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+            const response = await callAIWithPreset_ACU(messages, config.keywordApiPreset || '');
+            const keywords = parseKeywords_ACU(response || '');
+            if (keywords.length > 0) return keywords;
+        } catch (error) {
+            logWarn_ACU(`[交火模式纪要索引] 关键词生成失败 ${attempt}/${attempts}:`, error);
+        }
+    }
     return [];
 }
 
