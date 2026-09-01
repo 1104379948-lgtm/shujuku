@@ -163,22 +163,40 @@ export function buildAutoUpdatePlan_ACU(
     // 普通表走常规提交，两者不能混在一次统一提交中。
     const updateGroups: Record<string, UpdateGroup> = {};
 
-    tablesToUpdate.forEach(item => {
-        const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize + '|' + (item.requiresBoundaryStaging ? 'staging' : 'normal');
-        if (!updateGroups[key]) {
-            updateGroups[key] = {
-                indices: item.indices,
-                batchSize: item.batchSize,
-                groupId: item.groupId,
-                scheduleSignature: item.scheduleSignature,
-                requiresBoundaryStaging: item.requiresBoundaryStaging,
-                sheetKeys: [],
-                sheetNames: []
-            };
-        }
-        updateGroups[key].sheetKeys.push(item.sheetKey);
-        updateGroups[key].sheetNames.push(item.sheetName);
-    });
+// 防止历史欠账过多时，一次把几十/上百个楼层塞进同一个 AI 请求。
+// 每个更新组最多处理 10 个待更新楼层。
+const HISTORY_CHUNK_SIZE = 10;
+
+tablesToUpdate.forEach(item => {
+    for (let start = 0; start < item.indices.length; start += HISTORY_CHUNK_SIZE) {
+        const chunkIndices = item.indices.slice(start, start + HISTORY_CHUNK_SIZE);
+
+        // 加入 sheetKey，使每张表独立更新；
+        // 加入 start，使同一张表的不同历史批次也独立成组。
+        const key =
+            item.scheduleSignature +
+            '|' +
+            chunkIndices.join(',') +
+            '|' +
+            item.batchSize +
+            '|' +
+            (item.requiresBoundaryStaging ? 'staging' : 'normal') +
+            '|' +
+            item.sheetKey +
+            '|' +
+            start;
+
+        updateGroups[key] = {
+            indices: chunkIndices,
+            batchSize: item.batchSize,
+            groupId: item.groupId,
+            scheduleSignature: item.scheduleSignature,
+            requiresBoundaryStaging: item.requiresBoundaryStaging,
+            sheetKeys: [item.sheetKey],
+            sheetNames: [item.sheetName]
+        };
+    }
+});
 
     performanceSpan.end({
         groupCount: Object.keys(updateGroups).length,
