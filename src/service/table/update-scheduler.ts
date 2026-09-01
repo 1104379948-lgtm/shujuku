@@ -311,9 +311,29 @@ export async function executeAutoUpdatePlan_ACU(
     ops: AutoUpdateOperations,
     performanceContext?: { runId?: string; parentSpanId?: string },
 ): Promise<AutoUpdateResult> {
-    const { tablesToUpdate, updateGroups } = plan;
-    const groupKeys = Object.keys(updateGroups);
-    if (groupKeys.length === 0) return { success: true, failedGroups: 0, totalGroups: 0 };
+   const { tablesToUpdate, updateGroups } = plan;
+
+const allGroupKeys = Object.keys(updateGroups);
+
+if (allGroupKeys.length === 0) {
+    return { success: true, failedGroups: 0, totalGroups: 0 };
+}
+
+// 每一轮对话最多只执行 1 个数据库更新组。
+// 优先处理当前最落后的楼层，避免某一张表一直霸占更新。
+const selectedGroupKey = allGroupKeys.reduce((bestKey, currentKey) => {
+    const bestFirstIndex =
+        updateGroups[bestKey]?.indices?.[0] ?? Number.POSITIVE_INFINITY;
+
+    const currentFirstIndex =
+        updateGroups[currentKey]?.indices?.[0] ?? Number.POSITIVE_INFINITY;
+
+    return currentFirstIndex < bestFirstIndex
+        ? currentKey
+        : bestKey;
+}, allGroupKeys[0]);
+
+const groupKeys = [selectedGroupKey];
     const performanceSpan = startRuntimePerformanceSpan_ACU('auto-update-execute', {
         ...performanceContext,
         settings,
