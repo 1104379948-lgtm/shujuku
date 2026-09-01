@@ -89846,7 +89846,7 @@ $CONTENT
         const updateGroups = {};
         // 防止历史欠账过多时，一次把几十/上百个楼层塞进同一个 AI 请求。
         // 每个更新组最多处理 10 个待更新楼层。
-        const HISTORY_CHUNK_SIZE = 10;
+        const HISTORY_CHUNK_SIZE = 1;
         tablesToUpdate.forEach(item => {
             for (let start = 0; start < item.indices.length; start += HISTORY_CHUNK_SIZE) {
                 const chunkIndices = item.indices.slice(start, start + HISTORY_CHUNK_SIZE);
