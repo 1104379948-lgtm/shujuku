@@ -89817,11 +89817,20 @@ $CONTENT
                 if (startIndexInAiArray < effectiveAiIndices.length) {
                     const unupdatedAiIndices = effectiveAiIndices.slice(startIndexInAiArray);
                     const contextScopeIndices = effectiveAiIndices.slice(-threshold);
-                    logDebug_ACU(`[Trigger Check] Unupdated: ${unupdatedAiIndices.length}, ContextScope: ${contextScopeIndices.length}`);
-                    // 历史补填范围 = 完整待更新缺口（不再与 contextDepth 求交）。
-                    // 计划 §5.6：新增表历史前沿为 0 时必须能从第 1 楼补到当前楼，
-                    // 不能把 contextDepth（AI prompt 上下文窗口）当作历史补填范围。
-                    const indicesToUpdate = unupdatedAiIndices;
+                    // 历史欠账快进。
+                    // 当单张表积压超过 20 个 AI 楼层时，放弃逐层补旧历史，
+                    // 只处理最近 2 个 AI 楼层，使数据库重新接轨当前剧情。
+                    // 不删除现有表格内容。
+                    const BACKLOG_FAST_FORWARD_THRESHOLD = 20;
+                    const BACKLOG_BASELINE_SIZE = 2;
+                    const shouldFastForward = unupdatedAiIndices.length > BACKLOG_FAST_FORWARD_THRESHOLD;
+                    const indicesToUpdate = shouldFastForward
+                        ? unupdatedAiIndices.slice(-BACKLOG_BASELINE_SIZE)
+                        : unupdatedAiIndices;
+                    logDebug_ACU(`[Trigger Check] Unupdated: ${unupdatedAiIndices.length}, ` +
+                        `Scheduled: ${indicesToUpdate.length}, ` +
+                        `ContextScope: ${contextScopeIndices.length}, ` +
+                        `FastForward: ${shouldFastForward}`);
                     const requiresBoundaryStaging = originalFullIndex >= 0
                         && indicesToUpdate.length > 0
                         && indicesToUpdate[0] < originalFullIndex;
