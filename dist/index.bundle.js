@@ -92989,7 +92989,9 @@ $CONTENT
                     performanceParentSpanId: performanceSpan.id,
                 }
                 : {};
+            logWarn_ACU(`[TURNTRACE] executeGroupChunk runner START groups=${chunkKeys.join(',')}`);
             const groupedResult = await runner(groupedChunk, 'auto_independent', groupedOptions);
+            logWarn_ACU(`[TURNTRACE] executeGroupChunk runner END groups=${chunkKeys.join(',')} success=${groupedResult?.success}`);
             if (!groupedResult.success) {
                 failedGroupKeys.push(...groupedResult.failedGroups);
                 const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
@@ -93003,7 +93005,9 @@ $CONTENT
             for (let start = 0; start < normalGroupKeys.length; start += maxConcurrentGroups) {
                 const chunkKeys = normalGroupKeys.slice(start, start + maxConcurrentGroups);
                 if (ops.processGroupedUpdates) {
+                    logWarn_ACU(`[TURNTRACE] normal executeGroupChunk START groups=${chunkKeys.join(',')}`);
                     await executeGroupChunk(chunkKeys, ops.processGroupedUpdates);
+                    logWarn_ACU(`[TURNTRACE] normal executeGroupChunk END groups=${chunkKeys.join(',')}`);
                 }
                 else {
                     const groupPromises = chunkKeys.map(key => (async () => {
@@ -93016,7 +93020,9 @@ $CONTENT
                         });
                         return { key, success, sheetNames: group.sheetNames };
                     })());
+                    logWarn_ACU(`[TURNTRACE] legacy Promise.allSettled START groups=${chunkKeys.join(',')}`);
                     const results = await Promise.allSettled(groupPromises);
+                    logWarn_ACU(`[TURNTRACE] legacy Promise.allSettled END groups=${chunkKeys.join(',')}`);
                     results.forEach((result, idx) => {
                         if (result.status === 'rejected') {
                             failedGroupKeys.push(chunkKeys[idx]);
@@ -93047,7 +93053,9 @@ $CONTENT
                 const chunkKeys = stagingGroupKeys.slice(start, start + maxConcurrentGroups);
                 const stagingRunner = ops.processStagingGroupedUpdates || ops.processGroupedUpdates;
                 if (stagingRunner) {
+                    logWarn_ACU(`[TURNTRACE] staging executeGroupChunk START groups=${chunkKeys.join(',')}`);
                     await executeGroupChunk(chunkKeys, stagingRunner);
+                    logWarn_ACU(`[TURNTRACE] staging executeGroupChunk END groups=${chunkKeys.join(',')}`);
                 }
                 else {
                     // 无 staging/grouped runner：结构化失败，绝不用 legacy processUpdates 兜底。
@@ -93063,11 +93071,19 @@ $CONTENT
             }
             // 并发更新完成后统一刷新数据链条
             logDebug_ACU(`All group updates completed. Forcing data refresh...`);
+            logWarn_ACU('[TURNTRACE] loadAllChatMessages START');
             await ops.loadAllChatMessages();
+            logWarn_ACU('[TURNTRACE] loadAllChatMessages END');
+            logWarn_ACU('[TURNTRACE] refreshData#1 START');
             await ops.refreshData();
+            logWarn_ACU('[TURNTRACE] refreshData#1 END');
             await new Promise(resolve => setTimeout(resolve, 500));
+            logWarn_ACU('[TURNTRACE] normal setAutoUpdating(false) BEFORE');
             setAutoUpdating(false);
+            logWarn_ACU('[TURNTRACE] normal setAutoUpdating(false) AFTER');
+            logWarn_ACU('[TURNTRACE] refreshData#2 START');
             await ops.refreshData();
+            logWarn_ACU('[TURNTRACE] refreshData#2 END');
             // 【已封存】自动合并纪要功能已遗弃：checkAutoMergeTrigger_ACU 恒返回不触发，
             // 本块永不进入合并流程，保留为存档（原因见 service/summary/merge-logic.ts 文件头）。
             let autoMergeTriggered = false;
@@ -93124,7 +93140,9 @@ $CONTENT
         }
         catch (error) {
             performanceSpan.end({ success: false });
+            logWarn_ACU('[TURNTRACE] CATCH setAutoUpdating(false) BEFORE');
             setAutoUpdating(false);
+            logWarn_ACU('[TURNTRACE] CATCH setAutoUpdating(false) AFTER');
             throw error;
         }
     }
@@ -150129,8 +150147,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-table-template-panel__status-line[data-v-ba7e883c] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-table-template-panel__preset-row[data-v-ba7e883c] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  min-width: 0;\n}\n.acu-table-template-panel__action-area[data-v-ba7e883c] {\r\n  margin-top: 10px;\n}\n.acu-table-template-panel__visualizer-button[data-v-ba7e883c] {\r\n  width: 100%;\n}\r\n\r\n", "src/presentation-v2/components/TableTemplatePresetPanel.vue#style-0-ba7e883c");
-    var TableTemplatePresetPanel_vue_vue_type_style_index_0_scoped_ba7e883c_lang = null;
+    injectSfcStyle("\n.acu-table-template-panel__status-line[data-v-032d40d9] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-table-template-panel__preset-row[data-v-032d40d9] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);\n  gap: 6px;\n  align-items: stretch;\n  min-width: 0;\n}\n.acu-table-template-panel__action-area[data-v-032d40d9] {\n  margin-top: 10px;\n}\n.acu-table-template-panel__visualizer-button[data-v-032d40d9] {\n  width: 100%;\n}\n\n", "src/presentation-v2/components/TableTemplatePresetPanel.vue#style-0-032d40d9");
+    var TableTemplatePresetPanel_vue_vue_type_style_index_0_scoped_032d40d9_lang = null;
 
     const _hoisted_1$I = { class: "acu-text__value" };
     const _hoisted_2$B = { class: "acu-text__value" };
@@ -150352,7 +150370,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-ba7e883c"]]);
+    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-032d40d9"]]);
 
     const basicConfigCopy = {
         nav: {
@@ -162446,8 +162464,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-dormant-panel__integrity-title[data-v-8197ee49] {\r\n  margin: 0 0 4px;\n}\n.acu-v2-dormant-panel__integrity-list[data-v-8197ee49] {\r\n  margin: 0;\r\n  padding-left: 18px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\n}\n.acu-v2-dormant-panel__empty[data-v-8197ee49] {\r\n  margin: 0;\r\n  color: var(--acu-color-text-secondary, #8a8f98);\r\n  font-size: 0.9em;\n}\n.acu-v2-dormant-panel__section[data-v-8197ee49] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  margin-bottom: 12px;\n}\n.acu-v2-dormant-panel__section-title[data-v-8197ee49] {\r\n  margin: 0;\r\n  font-size: 0.95em;\n}\n.acu-v2-dormant-panel__item[data-v-8197ee49] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\r\n  padding: 8px 10px;\r\n  border: 1px solid var(--acu-color-border, rgba(128, 128, 128, 0.3));\r\n  border-radius: 6px;\n}\n.acu-v2-dormant-panel__item-main[data-v-8197ee49] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 2px;\r\n  min-width: 0;\n}\n.acu-v2-dormant-panel__item-name[data-v-8197ee49] {\r\n  font-size: 0.95em;\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-dormant-panel__item-meta[data-v-8197ee49] {\r\n  font-size: 0.82em;\r\n  color: var(--acu-color-text-secondary, #8a8f98);\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-dormant-panel__item-blocked[data-v-8197ee49] {\r\n  font-size: 0.82em;\r\n  color: var(--acu-color-warning, #c98a2b);\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-dormant-panel__actions[data-v-8197ee49] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  margin-top: 4px;\n}\r\n", "src/presentation-v2/components/DormantDataPanel.vue#style-0-8197ee49");
-    var DormantDataPanel_vue_vue_type_style_index_0_scoped_8197ee49_lang = null;
+    injectSfcStyle("\n.acu-v2-dormant-panel__integrity-title[data-v-fdea6137] {\n  margin: 0 0 4px;\n}\n.acu-v2-dormant-panel__integrity-list[data-v-fdea6137] {\n  margin: 0;\n  padding-left: 18px;\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n}\n.acu-v2-dormant-panel__empty[data-v-fdea6137] {\n  margin: 0;\n  color: var(--acu-color-text-secondary, #8a8f98);\n  font-size: 0.9em;\n}\n.acu-v2-dormant-panel__section[data-v-fdea6137] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  margin-bottom: 12px;\n}\n.acu-v2-dormant-panel__section-title[data-v-fdea6137] {\n  margin: 0;\n  font-size: 0.95em;\n}\n.acu-v2-dormant-panel__item[data-v-fdea6137] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 8px 10px;\n  border: 1px solid var(--acu-color-border, rgba(128, 128, 128, 0.3));\n  border-radius: 6px;\n}\n.acu-v2-dormant-panel__item-main[data-v-fdea6137] {\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n  min-width: 0;\n}\n.acu-v2-dormant-panel__item-name[data-v-fdea6137] {\n  font-size: 0.95em;\n  overflow-wrap: anywhere;\n}\n.acu-v2-dormant-panel__item-meta[data-v-fdea6137] {\n  font-size: 0.82em;\n  color: var(--acu-color-text-secondary, #8a8f98);\n  overflow-wrap: anywhere;\n}\n.acu-v2-dormant-panel__item-blocked[data-v-fdea6137] {\n  font-size: 0.82em;\n  color: var(--acu-color-warning, #c98a2b);\n  overflow-wrap: anywhere;\n}\n.acu-v2-dormant-panel__actions[data-v-fdea6137] {\n  display: flex;\n  justify-content: flex-end;\n  margin-top: 4px;\n}\n", "src/presentation-v2/components/DormantDataPanel.vue#style-0-fdea6137");
+    var DormantDataPanel_vue_vue_type_style_index_0_scoped_fdea6137_lang = null;
 
     const _hoisted_1$h = { class: "acu-v2-dormant-panel__integrity-title" };
     const _hoisted_2$g = { class: "acu-v2-dormant-panel__integrity-list" };
@@ -162648,7 +162666,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	});
     }
-    var DormantDataPanel = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-8197ee49"]]);
+    var DormantDataPanel = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-fdea6137"]]);
 
     const dataMgmtCopy = {
         panels: {

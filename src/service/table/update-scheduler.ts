@@ -341,7 +341,9 @@ export async function executeAutoUpdatePlan_ACU(
                 performanceParentSpanId: performanceSpan.id,
             }
             : {};
+        logWarn_ACU(`[TURNTRACE] executeGroupChunk runner START groups=${chunkKeys.join(',')}`);
         const groupedResult = await runner(groupedChunk, 'auto_independent', groupedOptions);
+        logWarn_ACU(`[TURNTRACE] executeGroupChunk runner END groups=${chunkKeys.join(',')} success=${groupedResult?.success}`);
         if (!groupedResult.success) {
             failedGroupKeys.push(...groupedResult.failedGroups);
             const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
@@ -357,7 +359,9 @@ export async function executeAutoUpdatePlan_ACU(
     for (let start = 0; start < normalGroupKeys.length; start += maxConcurrentGroups) {
         const chunkKeys = normalGroupKeys.slice(start, start + maxConcurrentGroups);
         if (ops.processGroupedUpdates) {
+            logWarn_ACU(`[TURNTRACE] normal executeGroupChunk START groups=${chunkKeys.join(',')}`);
             await executeGroupChunk(chunkKeys, ops.processGroupedUpdates);
+            logWarn_ACU(`[TURNTRACE] normal executeGroupChunk END groups=${chunkKeys.join(',')}`);
         } else {
             const groupPromises = chunkKeys.map(key => (async () => {
                 const group = updateGroups[key];
@@ -372,7 +376,9 @@ export async function executeAutoUpdatePlan_ACU(
                 return { key, success, sheetNames: group.sheetNames };
             })());
 
+            logWarn_ACU(`[TURNTRACE] legacy Promise.allSettled START groups=${chunkKeys.join(',')}`);
             const results = await Promise.allSettled(groupPromises);
+            logWarn_ACU(`[TURNTRACE] legacy Promise.allSettled END groups=${chunkKeys.join(',')}`);
             results.forEach((result, idx) =>{
                 if (result.status === 'rejected') {
                     failedGroupKeys.push(chunkKeys[idx]);
@@ -404,7 +410,9 @@ export async function executeAutoUpdatePlan_ACU(
         const chunkKeys = stagingGroupKeys.slice(start, start + maxConcurrentGroups);
         const stagingRunner = ops.processStagingGroupedUpdates || ops.processGroupedUpdates;
         if (stagingRunner) {
+            logWarn_ACU(`[TURNTRACE] staging executeGroupChunk START groups=${chunkKeys.join(',')}`);
             await executeGroupChunk(chunkKeys, stagingRunner);
+            logWarn_ACU(`[TURNTRACE] staging executeGroupChunk END groups=${chunkKeys.join(',')}`);
         } else {
             // 无 staging/grouped runner：结构化失败，绝不用 legacy processUpdates 兜底。
             chunkKeys.forEach(key => {
@@ -421,12 +429,20 @@ export async function executeAutoUpdatePlan_ACU(
 
     // 并发更新完成后统一刷新数据链条
     logDebug_ACU(`All group updates completed. Forcing data refresh...`);
+    logWarn_ACU('[TURNTRACE] loadAllChatMessages START');
     await ops.loadAllChatMessages();
+    logWarn_ACU('[TURNTRACE] loadAllChatMessages END');
+    logWarn_ACU('[TURNTRACE] refreshData#1 START');
     await ops.refreshData();
+    logWarn_ACU('[TURNTRACE] refreshData#1 END');
     await new Promise(resolve => setTimeout(resolve, 500));
 
+    logWarn_ACU('[TURNTRACE] normal setAutoUpdating(false) BEFORE');
     setAutoUpdating(false);
+    logWarn_ACU('[TURNTRACE] normal setAutoUpdating(false) AFTER');
+    logWarn_ACU('[TURNTRACE] refreshData#2 START');
     await ops.refreshData();
+    logWarn_ACU('[TURNTRACE] refreshData#2 END');
 
     // 【已封存】自动合并纪要功能已遗弃：checkAutoMergeTrigger_ACU 恒返回不触发，
     // 本块永不进入合并流程，保留为存档（原因见 service/summary/merge-logic.ts 文件头）。
@@ -483,7 +499,9 @@ export async function executeAutoUpdatePlan_ACU(
     return result;
     } catch (error) {
       performanceSpan.end({ success: false });
+      logWarn_ACU('[TURNTRACE] CATCH setAutoUpdating(false) BEFORE');
       setAutoUpdating(false);
+      logWarn_ACU('[TURNTRACE] CATCH setAutoUpdating(false) AFTER');
       throw error;
     }
 }
